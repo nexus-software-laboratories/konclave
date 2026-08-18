@@ -1,0 +1,782 @@
+{
+  "templateName": "secure-agent-communications-workspace",
+  "apps": [
+    {
+      "from": "react-vite-ts",
+      "name": "AdminConsole",
+      "resourceName": "admin-console",
+      "kind": "react-spa-hostless",
+      "guidanceComponents": [
+        "guidance-web-ux",
+        "impeccable-design"
+      ],
+      "adapter": "hostless-app",
+      "symbols": {},
+      "effectiveContract": {
+        "requested_symbols": {},
+        "effective_symbols": {
+          "IncludeMutationTesting": false,
+          "IncludeImpeccable": true,
+          "IncludeImpeccableHook": false,
+          "IncludeImpeccableAudit": false,
+          "IncludeWebQualityGate": false,
+          "IncludeIssueTriage": false,
+          "IncludeDeliveryDrift": false,
+          "IncludeStackedPullRequests": false,
+          "CiValidationEvents": "PullRequestOnly",
+          "IncludeResearchNeeded": false,
+          "IncludeRefineWork": false,
+          "IncludeRepositoryRadars": false,
+          "CiRunnerMode": "hosted",
+          "IncludeOpenTelemetry": true,
+          "IncludeI18n": false,
+          "IncludeFeaturePlugins": false,
+          "IncludeHttpClient": false,
+          "IncludeShadcn": false,
+          "DeploymentProvider": "none",
+          "DeployBuildLocation": "ci",
+          "VercelInsightsMode": "none"
+        },
+        "components": [],
+        "cargo_contributions": [],
+        "post_scaffold": [],
+        "documentation": [],
+        "workflows": [],
+        "required_checks": []
+      }
+    },
+    {
+      "from": "rust-cli",
+      "name": "CommandLine",
+      "resourceName": "command-line",
+      "kind": "rust-cli",
+      "guidanceComponents": [],
+      "symbols": {},
+      "effectiveContract": {
+        "requested_symbols": {},
+        "effective_symbols": {
+          "IncludeIssueTriage": false,
+          "IncludeDeliveryDrift": false,
+          "IncludeStackedPullRequests": false,
+          "CiValidationEvents": "PullRequestOnly",
+          "IncludeResearchNeeded": false,
+          "IncludeRefineWork": false,
+          "IncludeRepositoryRadars": false,
+          "CiRunnerMode": "hosted",
+          "IncludeConfig": true,
+          "IncludeRelease": false,
+          "IncludeDockerfile": false
+        },
+        "components": [
+          {
+            "id": "rust-cli-config",
+            "version": "0.1.0"
+          }
+        ],
+        "cargo_contributions": [
+          {
+            "source": "guest:rust-cli",
+            "kind": "workspace",
+            "contribution": {
+              "memberPath": "apps/Konclave.CommandLine",
+              "workspacePackage": {},
+              "workspaceDependencies": {},
+              "lints": {
+                "rust": {},
+                "clippy": {}
+              },
+              "features": {},
+              "profiles": {
+                "dev": {},
+                "release": {}
+              }
+            }
+          },
+          {
+            "source": "component:rust-cli-config",
+            "kind": "package",
+            "contribution": {
+              "dependencies": {
+                "serde": {
+                  "version": "1.0.229",
+                  "features": [
+                    "derive"
+                  ]
+                },
+                "toml": "1.1.3"
+              }
+            }
+          }
+        ],
+        "post_scaffold": [],
+        "documentation": [],
+        "workflows": [],
+        "required_checks": []
+      }
+    },
+    {
+      "from": "rust-service",
+      "name": "CommunityRelay",
+      "resourceName": "community-relay",
+      "kind": "rust-service",
+      "guidanceComponents": [],
+      "symbols": {
+        "IncludeAxum": true,
+        "IncludeOci": true,
+        "IncludeOpenTelemetry": true,
+        "IncludeWebSocket": true,
+        "PersistenceProvider": "sqlite"
+      },
+      "effectiveContract": {
+        "requested_symbols": {
+          "IncludeAxum": true,
+          "IncludeOci": true,
+          "IncludeOpenTelemetry": true,
+          "IncludeWebSocket": true,
+          "PersistenceProvider": "sqlite"
+        },
+        "effective_symbols": {
+          "IncludeAxum": true,
+          "IncludeWebSocket": true,
+          "PersistenceProvider": "sqlite",
+          "IncludeMcpServer": false,
+          "IncludeOpenTelemetry": true,
+          "IncludeDaemonPackaging": false,
+          "IncludeOci": true,
+          "PublishContainerToGhcr": false,
+          "IncludeIssueTriage": false,
+          "IncludeDeliveryDrift": false,
+          "IncludeStackedPullRequests": false,
+          "CiValidationEvents": "PullRequestOnly",
+          "IncludeResearchNeeded": false,
+          "IncludeRefineWork": false,
+          "IncludeRepositoryRadars": false,
+          "CiRunnerMode": "hosted"
+        },
+        "components": [
+          {
+            "id": "rust-service-capability-dependencies",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-service-runtime",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-service-axum",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-service-websocket",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-sqlx-sqlite",
+            "version": "0.1.0"
+          },
+          {
+            "id": "observability-otel-rust",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-service-oci",
+            "version": "0.1.0"
+          }
+        ],
+        "cargo_contributions": [
+          {
+            "source": "guest:rust-service",
+            "kind": "workspace",
+            "contribution": {
+              "memberPath": "apps/Konclave.CommunityRelay",
+              "workspacePackage": {},
+              "workspaceDependencies": {},
+              "lints": {
+                "rust": {},
+                "clippy": {}
+              },
+              "features": {},
+              "profiles": {
+                "dev": {},
+                "release": {}
+              }
+            }
+          },
+          {
+            "source": "component:rust-service-capability-dependencies",
+            "kind": "package",
+            "contribution": {
+              "dependencies": {
+                "axum": {
+                  "version": "0.8.9",
+                  "features": [
+                    "http1",
+                    "json",
+                    "matched-path",
+                    "tokio",
+                    "ws"
+                  ],
+                  "optional": true
+                },
+                "axum-server": {
+                  "version": "0.8.0",
+                  "optional": true
+                },
+                "futures-util": {
+                  "version": "0.3.34",
+                  "features": [
+                    "sink"
+                  ],
+                  "optional": true
+                },
+                "libc": {
+                  "version": "0.2.189",
+                  "optional": true
+                },
+                "opentelemetry": {
+                  "version": "0.32.0",
+                  "defaultFeatures": false,
+                  "features": [
+                    "trace"
+                  ],
+                  "optional": true
+                },
+                "opentelemetry_sdk": {
+                  "version": "0.32.1",
+                  "defaultFeatures": false,
+                  "features": [
+                    "trace",
+                    "rt-tokio"
+                  ],
+                  "optional": true
+                },
+                "opentelemetry-otlp": {
+                  "version": "0.32.0",
+                  "defaultFeatures": false,
+                  "features": [
+                    "grpc-tonic",
+                    "trace"
+                  ],
+                  "optional": true
+                },
+                "rmcp": {
+                  "version": "3.1.2",
+                  "features": [
+                    "client",
+                    "server",
+                    "transport-io"
+                  ],
+                  "optional": true
+                },
+                "serde": {
+                  "version": "1.0.229",
+                  "features": [
+                    "derive"
+                  ],
+                  "optional": true
+                },
+                "serde_json": {
+                  "version": "1.0.151",
+                  "optional": true
+                },
+                "sqlx": {
+                  "version": "0.8.6",
+                  "defaultFeatures": false,
+                  "features": [
+                    "macros",
+                    "migrate",
+                    "postgres",
+                    "runtime-tokio-rustls",
+                    "sqlite"
+                  ],
+                  "optional": true
+                },
+                "tracing": {
+                  "version": "0.1.44",
+                  "optional": true
+                },
+                "tracing-opentelemetry": {
+                  "version": "0.33.0",
+                  "optional": true
+                },
+                "tracing-subscriber": {
+                  "version": "0.3.23",
+                  "features": [
+                    "env-filter",
+                    "fmt",
+                    "json"
+                  ],
+                  "optional": true
+                },
+                "windows-service": {
+                  "version": "0.8.1",
+                  "optional": true
+                },
+                "windows-sys": {
+                  "version": "0.61.2",
+                  "features": [
+                    "Win32_Foundation",
+                    "Win32_System_Console"
+                  ],
+                  "optional": true
+                }
+              },
+              "devDependencies": {
+                "tempfile": "3.27.0",
+                "tokio-tungstenite": "0.30.0",
+                "tower": {
+                  "version": "0.5.3",
+                  "features": [
+                    "util"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "source": "component:rust-service-axum",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-http"
+                ],
+                "rust-service-http": [
+                  "dep:axum",
+                  "dep:axum-server",
+                  "dep:serde",
+                  "dep:serde_json"
+                ]
+              }
+            }
+          },
+          {
+            "source": "component:rust-service-websocket",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-websocket"
+                ],
+                "rust-service-websocket": [
+                  "dep:futures-util"
+                ]
+              }
+            }
+          },
+          {
+            "source": "component:rust-sqlx-sqlite",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-sqlite"
+                ],
+                "rust-service-sqlite": [
+                  "dep:sqlx"
+                ]
+              }
+            }
+          },
+          {
+            "source": "component:observability-otel-rust",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-observability"
+                ],
+                "rust-service-observability": [
+                  "dep:opentelemetry",
+                  "dep:opentelemetry-otlp",
+                  "dep:opentelemetry_sdk",
+                  "dep:tracing",
+                  "dep:tracing-opentelemetry",
+                  "dep:tracing-subscriber"
+                ]
+              }
+            }
+          }
+        ],
+        "post_scaffold": [],
+        "documentation": [
+          {
+            "owner": "rust-service-oci",
+            "source_path": "docs/container/rust-service.md",
+            "target_path": "apps/Konclave.CommunityRelay/docs/container/rust-service.md",
+            "title": "Rust service container",
+            "section": "Delivery",
+            "order": 120
+          }
+        ],
+        "workflows": [
+          {
+            "source_component": "rust-service-oci",
+            "source_path": ".github/workflows/container-ci.yml",
+            "source_sha256": "sha256:69d33eba1105e5667af788ab4832e66938e3b29009c25cd57e1c3058f90dd164",
+            "roles": [
+              "merge-gate"
+            ],
+            "draft_behavior": "ready-only",
+            "source_required_checks": [
+              "Container CI"
+            ],
+            "disposition": "host-root-ci",
+            "adapter": "rust-container-ci-v1",
+            "host_path": ".github/workflows/ci.yml",
+            "required_checks": [
+              "Container CI (community-relay)"
+            ]
+          }
+        ],
+        "required_checks": [
+          "Container CI (community-relay)"
+        ]
+      }
+    },
+    {
+      "from": "copilot-cli-extension",
+      "name": "HostExtension",
+      "resourceName": "host-extension",
+      "kind": "copilot-cli-extension",
+      "guidanceComponents": [],
+      "symbols": {},
+      "effectiveContract": {
+        "requested_symbols": {},
+        "effective_symbols": {
+          "IncludeMutationTesting": false,
+          "IncludeIssueTriage": false,
+          "IncludeDeliveryDrift": false,
+          "IncludeStackedPullRequests": false,
+          "CiValidationEvents": "PullRequestOnly",
+          "IncludeResearchNeeded": false,
+          "IncludeRefineWork": false,
+          "IncludeRepositoryRadars": false,
+          "CiRunnerMode": "hosted"
+        },
+        "components": [],
+        "cargo_contributions": [],
+        "post_scaffold": [
+          {
+            "id": "host-extension-plugin-name",
+            "prompt": "host-extension: What is the stable plugin name? (kebab-case letters, numbers, and hyphens; must match plugin.json name and package.json name before release)",
+            "placeholder": "change-me-copilot-cli-extension",
+            "files": [
+              "extensions/Konclave.HostExtension/package.json",
+              "extensions/Konclave.HostExtension/plugin.json"
+            ],
+            "required": false,
+            "skip_message": "Update plugin.json name and package.json name later; use the same kebab-case plugin name in both files."
+          }
+        ],
+        "documentation": [],
+        "workflows": [],
+        "required_checks": []
+      }
+    },
+    {
+      "from": "rust-service",
+      "name": "LocalDaemon",
+      "resourceName": "local-daemon",
+      "kind": "rust-service",
+      "guidanceComponents": [],
+      "symbols": {
+        "IncludeDaemonPackaging": true,
+        "IncludeMcpServer": true,
+        "IncludeOpenTelemetry": true,
+        "PersistenceProvider": "sqlite"
+      },
+      "effectiveContract": {
+        "requested_symbols": {
+          "IncludeDaemonPackaging": true,
+          "IncludeMcpServer": true,
+          "IncludeOpenTelemetry": true,
+          "PersistenceProvider": "sqlite"
+        },
+        "effective_symbols": {
+          "IncludeAxum": false,
+          "IncludeWebSocket": false,
+          "PersistenceProvider": "sqlite",
+          "IncludeMcpServer": true,
+          "IncludeOpenTelemetry": true,
+          "IncludeDaemonPackaging": true,
+          "IncludeOci": false,
+          "PublishContainerToGhcr": false,
+          "IncludeIssueTriage": false,
+          "IncludeDeliveryDrift": false,
+          "IncludeStackedPullRequests": false,
+          "CiValidationEvents": "PullRequestOnly",
+          "IncludeResearchNeeded": false,
+          "IncludeRefineWork": false,
+          "IncludeRepositoryRadars": false,
+          "CiRunnerMode": "hosted"
+        },
+        "components": [
+          {
+            "id": "rust-service-capability-dependencies",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-sqlx-sqlite",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-service-runtime",
+            "version": "0.1.0"
+          },
+          {
+            "id": "mcp-server-rust",
+            "version": "0.1.0"
+          },
+          {
+            "id": "observability-otel-rust",
+            "version": "0.1.0"
+          },
+          {
+            "id": "rust-daemon-packaging",
+            "version": "0.1.0"
+          }
+        ],
+        "cargo_contributions": [
+          {
+            "source": "guest:rust-service",
+            "kind": "workspace",
+            "contribution": {
+              "memberPath": "apps/Konclave.LocalDaemon",
+              "workspacePackage": {},
+              "workspaceDependencies": {},
+              "lints": {
+                "rust": {},
+                "clippy": {}
+              },
+              "features": {},
+              "profiles": {
+                "dev": {},
+                "release": {}
+              }
+            }
+          },
+          {
+            "source": "component:rust-service-capability-dependencies",
+            "kind": "package",
+            "contribution": {
+              "dependencies": {
+                "axum": {
+                  "version": "0.8.9",
+                  "features": [
+                    "http1",
+                    "json",
+                    "matched-path",
+                    "tokio",
+                    "ws"
+                  ],
+                  "optional": true
+                },
+                "axum-server": {
+                  "version": "0.8.0",
+                  "optional": true
+                },
+                "futures-util": {
+                  "version": "0.3.34",
+                  "features": [
+                    "sink"
+                  ],
+                  "optional": true
+                },
+                "libc": {
+                  "version": "0.2.189",
+                  "optional": true
+                },
+                "opentelemetry": {
+                  "version": "0.32.0",
+                  "defaultFeatures": false,
+                  "features": [
+                    "trace"
+                  ],
+                  "optional": true
+                },
+                "opentelemetry_sdk": {
+                  "version": "0.32.1",
+                  "defaultFeatures": false,
+                  "features": [
+                    "trace",
+                    "rt-tokio"
+                  ],
+                  "optional": true
+                },
+                "opentelemetry-otlp": {
+                  "version": "0.32.0",
+                  "defaultFeatures": false,
+                  "features": [
+                    "grpc-tonic",
+                    "trace"
+                  ],
+                  "optional": true
+                },
+                "rmcp": {
+                  "version": "3.1.2",
+                  "features": [
+                    "client",
+                    "server",
+                    "transport-io"
+                  ],
+                  "optional": true
+                },
+                "serde": {
+                  "version": "1.0.229",
+                  "features": [
+                    "derive"
+                  ],
+                  "optional": true
+                },
+                "serde_json": {
+                  "version": "1.0.151",
+                  "optional": true
+                },
+                "sqlx": {
+                  "version": "0.8.6",
+                  "defaultFeatures": false,
+                  "features": [
+                    "macros",
+                    "migrate",
+                    "postgres",
+                    "runtime-tokio-rustls",
+                    "sqlite"
+                  ],
+                  "optional": true
+                },
+                "tracing": {
+                  "version": "0.1.44",
+                  "optional": true
+                },
+                "tracing-opentelemetry": {
+                  "version": "0.33.0",
+                  "optional": true
+                },
+                "tracing-subscriber": {
+                  "version": "0.3.23",
+                  "features": [
+                    "env-filter",
+                    "fmt",
+                    "json"
+                  ],
+                  "optional": true
+                },
+                "windows-service": {
+                  "version": "0.8.1",
+                  "optional": true
+                },
+                "windows-sys": {
+                  "version": "0.61.2",
+                  "features": [
+                    "Win32_Foundation",
+                    "Win32_System_Console"
+                  ],
+                  "optional": true
+                }
+              },
+              "devDependencies": {
+                "tempfile": "3.27.0",
+                "tokio-tungstenite": "0.30.0",
+                "tower": {
+                  "version": "0.5.3",
+                  "features": [
+                    "util"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "source": "component:rust-sqlx-sqlite",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-sqlite"
+                ],
+                "rust-service-sqlite": [
+                  "dep:sqlx"
+                ]
+              }
+            }
+          },
+          {
+            "source": "component:mcp-server-rust",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-mcp"
+                ],
+                "rust-service-mcp": [
+                  "dep:libc",
+                  "dep:rmcp",
+                  "dep:windows-sys"
+                ]
+              }
+            }
+          },
+          {
+            "source": "component:observability-otel-rust",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-observability"
+                ],
+                "rust-service-observability": [
+                  "dep:opentelemetry",
+                  "dep:opentelemetry-otlp",
+                  "dep:opentelemetry_sdk",
+                  "dep:tracing",
+                  "dep:tracing-opentelemetry",
+                  "dep:tracing-subscriber"
+                ]
+              }
+            }
+          },
+          {
+            "source": "component:rust-daemon-packaging",
+            "kind": "package",
+            "contribution": {
+              "features": {
+                "default": [
+                  "rust-service-windows-service"
+                ],
+                "rust-service-windows-service": [
+                  "dep:windows-service"
+                ]
+              }
+            }
+          }
+        ],
+        "post_scaffold": [],
+        "documentation": [],
+        "workflows": [
+          {
+            "source_component": "rust-daemon-packaging",
+            "source_path": ".github/workflows/daemon-packaging.yml",
+            "source_sha256": "sha256:c055bff2c3383eceeceab854729a2ba451dd40db6d45285536e0e15dbbe06b69",
+            "roles": [
+              "merge-gate"
+            ],
+            "draft_behavior": "ready-only",
+            "source_required_checks": [
+              "Daemon packaging"
+            ],
+            "disposition": "host-root-ci",
+            "adapter": "rust-daemon-packaging-v1",
+            "host_path": ".github/workflows/ci.yml",
+            "required_checks": [
+              "Daemon packaging (local-daemon)"
+            ]
+          }
+        ],
+        "required_checks": [
+          "Daemon packaging (local-daemon)"
+        ]
+      }
+    }
+  ]
+}

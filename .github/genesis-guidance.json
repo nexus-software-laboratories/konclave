@@ -1,0 +1,86 @@
+{
+  "$schema": "./genesis-guidance.schema.json",
+  "schemaVersion": 1,
+  "docs": {
+    "mapPath": "docs/README.md",
+    "pages": [
+      {
+        "path": "docs/architecture/decisions.md",
+        "title": "Architecture decisions",
+        "section": "Architecture",
+        "order": 10,
+        "owner": "seed:common"
+      },
+      {
+        "path": "docs/development/rust-engineering.md",
+        "title": "Rust engineering conventions",
+        "section": "Development",
+        "order": 10,
+        "owner": "tag:rust"
+      },
+      {
+        "path": "docs/development/node-dependencies.md",
+        "title": "Node dependency installation",
+        "section": "Development",
+        "order": 15,
+        "owner": "tag:node"
+      },
+      {
+        "path": "docs/development/rust-services.md",
+        "title": "Rust service composition",
+        "section": "Development",
+        "order": 20,
+        "owner": "tag:rust"
+      },
+      {
+        "path": "docs/development/repository-controls.md",
+        "title": "Repository controls",
+        "section": "Development",
+        "order": 30,
+        "owner": "seed:common"
+      },
+      {
+        "path": "docs/ux-design.md",
+        "title": "UX and design resilience",
+        "section": "Guides",
+        "order": 20,
+        "owner": "component:guidance-web-ux"
+      },
+      {
+        "path": "docs/impeccable-design.md",
+        "title": "Impeccable design workflow",
+        "section": "Guides",
+        "order": 25,
+        "owner": "component:impeccable-design"
+      }
+    ]
+  },
+  "agents": {
+    "path": "AGENTS.md",
+    "maxLines": 60,
+    "maxBytes": 3072,
+    "redirects": {
+      "claude": "CLAUDE.md",
+      "copilot": ".github/copilot-instructions.md"
+    }
+  },
+  "instructions": {
+    "managedRoot": ".github/instructions/genesis",
+    "individualReviewThreshold": {
+      "lines": 100,
+      "bytes": 8192
+    },
+    "matchedContext": {
+      "targetLines": 300,
+      "targetBytes": 16384,
+      "maxLines": 600,
+      "maxBytes": 32768
+    }
+  },
+  "review": {
+    "skillPath": ".github/skills/review-changes/SKILL.md",
+    "instructionResolver": "scripts/guidance/Get-ApplicableInstructions.ps1",
+    "validationInventory": "scripts/guidance/Get-ValidationInventory.ps1"
+  },
+  "contextExceptions": []
+}

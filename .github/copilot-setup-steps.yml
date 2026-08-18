@@ -1,0 +1,7 @@
+name: "Copilot Setup Steps"
+
+steps:
+  - name: "Build Rust workspace"
+    run: cargo build --workspace
+  - name: "Build and test Node guests"
+    run: pwsh ./scripts/Invoke-NodeWorkspaceChecks.ps1

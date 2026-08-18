@@ -1,0 +1,15 @@
+[Unit]
+Description=KonclaveLocalDaemon service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/KonclaveLocalDaemon/KonclaveLocalDaemon
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=KonclaveLocalDaemon
+WorkingDirectory=/opt/KonclaveLocalDaemon
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "plan_fingerprint": "sha256:dd5bc0b450490fea29aab27ff43743a420ff47c4ba7361599c4ee2a383458f2b",
+  "catalog_sha256": "sha256:9340d0872361523cc2c242fe4b40802701f8df91eb51fabd1af5e3382449306c",
+  "scaffolder_sha256": "sha256:1eec0e81511b471969e0179ed18714f0895b36548b21ed542ecf71f50c991163",
+  "selection": {
+    "kind": "template",
+    "id": "secure-agent-communications-workspace",
+    "template": "secure-agent-communications-workspace"
+  },
+  "symbols": {}
+}

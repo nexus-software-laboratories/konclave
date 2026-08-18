@@ -1,0 +1,15 @@
+# Composition island. This embedded web app is mounted inside a host whose
+# root .editorconfig may target a different convention (a .NET host enforces
+# end_of_line = crlf + charset = utf-8-bom). `root = true` stops EditorConfig
+# resolution here so this app keeps the LF/UTF-8 conventions its own
+# prettier/eslint/format gate expects — exactly as it is standalone.
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false

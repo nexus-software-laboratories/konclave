@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts"]

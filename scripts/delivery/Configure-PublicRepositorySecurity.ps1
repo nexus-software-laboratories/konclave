@@ -146,11 +146,49 @@ Invoke-GitHubJsonRequest `
     -Description 'enable private vulnerability reporting' `
     -Body @{}
 
+$defaultBranch = [string]$repositoryState.default_branch
+$contractJson = & $gh api `
+    -H 'Accept: application/vnd.github.raw+json' `
+    "repos/$Repository/contents/.github/genesis-delivery.json?ref=$defaultBranch"
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not read the delivery contract from '$defaultBranch'."
+}
+$contract = $contractJson | ConvertFrom-Json
+$requiredChecks = @(
+    @($contract.requiredChecks)
+    'PR base'
+) | Sort-Object -CaseSensitive -Unique
+
+Invoke-GitHubJsonRequest `
+    -Method PUT `
+    -Path "repos/$Repository/branches/$defaultBranch/protection" `
+    -Description "protect the '$defaultBranch' branch" `
+    -Body @{
+        required_status_checks = @{
+            strict = $true
+            contexts = @($requiredChecks)
+        }
+        enforce_admins = $true
+        required_pull_request_reviews = @{
+            dismiss_stale_reviews = $true
+            require_code_owner_reviews = $false
+            required_approving_review_count = 0
+            require_last_push_approval = $false
+        }
+        restrictions = $null
+        required_linear_history = $true
+        allow_force_pushes = $false
+        allow_deletions = $false
+        block_creations = $false
+        required_conversation_resolution = $true
+    }
+
 [PSCustomObject]@{
     Repository = $Repository
     ForkApproval = 'all_external_contributors'
     WorkflowPermissions = 'read'
     AllowedActions = 'selected'
+    DefaultBranchProtection       = $defaultBranch
     PrivateVulnerabilityReporting = $true
     ShaPinningRequired = $true
 }
