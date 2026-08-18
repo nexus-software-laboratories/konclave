@@ -12,6 +12,27 @@
         "owner": "seed:common"
       },
       {
+        "path": "docs/adr/adr-0001-protocol-trust-and-e2ee.md",
+        "title": "ADR 0001: Protocol trust and E2EE",
+        "section": "Architecture",
+        "order": 20,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/protocol/compatibility.md",
+        "title": "Protocol compatibility contract",
+        "section": "Protocol",
+        "order": 10,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/security/threat-model.md",
+        "title": "Threat model",
+        "section": "Security",
+        "order": 10,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/rust-engineering.md",
         "title": "Rust engineering conventions",
         "section": "Development",
@@ -33,11 +54,25 @@
         "owner": "tag:rust"
       },
       {
+        "path": "docs/development/conformance.md",
+        "title": "Conformance and security evidence",
+        "section": "Development",
+        "order": 25,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",
         "order": 30,
         "owner": "seed:common"
+      },
+      {
+        "path": "docs/development/pitcrew-ci.md",
+        "title": "PitCrew CI",
+        "section": "Development",
+        "order": 35,
+        "owner": "project:konclave"
       },
       {
         "path": "docs/ux-design.md",
