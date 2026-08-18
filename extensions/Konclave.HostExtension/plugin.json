@@ -1,0 +1,8 @@
+{
+  "name": "konclave",
+  "description": "Konclave GitHub Copilot CLI extension plugin",
+  "version": "0.1.0",
+  "keywords": ["copilot", "plugin", "extension", "typescript"],
+  "extensions": "extensions/Konclave.Extension/",
+  "skills": "skills/"
+}

@@ -1,0 +1,13 @@
+{
+  "templateName": "secure-agent-communications-workspace",
+  "components": [
+    {
+      "id": "guidance-web-ux",
+      "version": "0.1.0"
+    },
+    {
+      "id": "impeccable-design",
+      "version": "0.1.0"
+    }
+  ]
+}

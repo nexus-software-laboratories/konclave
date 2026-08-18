@@ -1,0 +1,39 @@
+{
+  "name": "konclave",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Konclave GitHub Copilot CLI extension plugin",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "npm run typecheck && npm run compile && npm run package && npm run verify:package",
+    "compile": "node scripts/build-extension.mjs",
+    "lint": "eslint .",
+    "format": "prettier --write . --ignore-path .gitignore --ignore-path .prettierignore",
+    "format:check": "prettier --check . --ignore-path .gitignore --ignore-path .prettierignore",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "package": "node scripts/package-plugin.mjs",
+    "test": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run compile && npm run package && npm run verify:package",
+    "version": "node scripts/sync-version.mjs && git add plugin.json",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "devDependencies": {
+    "@eslint/config-helpers": "^0.7.0",
+    "@eslint/js": "^10.0.1",
+    "@github/copilot-sdk": "^1.0.11",
+    "@types/node": "^26.2.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "esbuild": "0.28.2",
+    "eslint": "^10.8.1",
+    "fflate": "^0.8.3",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10"
+  }
+}

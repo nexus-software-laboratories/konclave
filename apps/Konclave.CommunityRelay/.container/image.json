@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "imageName": "KonclaveCommunityRelay",
+  "dockerfile": "Dockerfile",
+  "requireImageHealthCheck": true,
+  "smoke": {
+    "kind": "process",
+    "startupSeconds": 5
+  }
+}
