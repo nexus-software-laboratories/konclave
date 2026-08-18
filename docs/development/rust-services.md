@@ -39,9 +39,9 @@ package MSRV to Rust 1.88, matching its newest locked transitive requirements.
   only when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured; local diagnostics stay on
   stderr.
 - **Daemon packaging** adds systemd, launchd, and Windows Service definitions.
-  PitCrew validates the package metadata on Linux and cross-checks the dedicated
-  Windows Service binary against the Windows target. Runtime validation on native
-  macOS and Windows hosts remains outside the current runner contract.
+  PitCrew validates the package metadata, PowerShell syntax, Rust syntax, and
+  non-Windows guard on Linux. Type checking and runtime validation of the native
+  Windows Service host remain outside the current runner contract.
 - **OCI packaging** adds a non-root image and health check without assuming a
   repository-private publisher. Pull-request validation builds one AMD64 archive
   from the locked root workspace through the socketless PitCrew image-builder
