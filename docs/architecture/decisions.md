@@ -3,6 +3,10 @@
 Architecture Decision Records preserve significant decisions that future contributors
 must understand without reconstructing issue, pull-request, or conversation history.
 
+## Accepted records
+
+- [ADR 0001: Adopt MLS 1.0 with separate Konclave identity, delivery, and wire contracts](../adr/adr-0001-protocol-trust-and-e2ee.md)
+
 ## When to write one
 
 Use an ADR when a choice changes system structure, technology, integration boundaries,
