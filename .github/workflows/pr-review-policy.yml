@@ -1,0 +1,109 @@
+name: Review policy evaluator
+run-name: 'Review policy for #${{ github.event.pull_request.number }} at ${{ github.event.pull_request.head.sha }}'
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: review-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    name: Review policy
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        github.event_name != 'pull_request_review' ||
+        github.event.review.author_association == 'OWNER' ||
+        github.event.review.author_association == 'MEMBER' ||
+        github.event.review.author_association == 'COLLABORATOR'
+      )
+    runs-on: [linux, x64, automation-control]
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REVIEW_POLICY: ${{ vars.GENESIS_REVIEW_POLICY || 'none' }}
+    steps:
+      - name: Evaluate review policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pull_request="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER")"
+          head_sha="$(jq -r '.head.sha' <<<"$pull_request")"
+          author_login="$(jq -r '.user.login' <<<"$pull_request")"
+          author_type="$(jq -r '.user.type' <<<"$pull_request")"
+          is_draft="$(jq -r '.draft' <<<"$pull_request")"
+          conclusion=success
+          summary='No author-specific review is required.'
+
+          case "$REVIEW_POLICY" in
+            none)
+              ;;
+            copilot-one-approval)
+              if [ "$author_login" = 'Copilot' ] && [ "$author_type" = 'Bot' ]; then
+                if [ "$is_draft" = 'true' ]; then
+                  summary='Copilot review is enforced when this pull request becomes ready.'
+                else
+                  reviews="$(
+                    gh api \
+                      --paginate \
+                      --slurp \
+                      "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" |
+                      jq '[.[][]]'
+                  )"
+                  approval_count="$(
+                    jq \
+                      --arg sha "$head_sha" '
+                        sort_by(.submitted_at // "")
+                        | reduce .[] as $review (
+                            {};
+                            .[$review.user.login] = $review
+                          )
+                        | [
+                            .[]
+                            | select(
+                                .state == "APPROVED"
+                                and .commit_id == $sha
+                                and .user.type == "User"
+                                and (
+                                  .author_association == "OWNER"
+                                  or .author_association == "MEMBER"
+                                  or .author_association == "COLLABORATOR"
+                                )
+                              )
+                          ]
+                        | length
+                      ' <<<"$reviews"
+                  )"
+                  if [ "$approval_count" -lt 1 ]; then
+                    conclusion=failure
+                    summary='Copilot-authored ready pull requests require an OWNER, MEMBER, or COLLABORATOR approval on the current head SHA.'
+                  else
+                    summary='A trusted human approved the current Copilot-authored head SHA.'
+                  fi
+                fi
+              fi
+              ;;
+            *)
+              conclusion=failure
+              summary="GENESIS_REVIEW_POLICY '$REVIEW_POLICY' is not supported."
+              ;;
+          esac
+
+          echo "$summary"
+          if [ "$conclusion" != 'success' ]; then
+            echo "::error::$summary"
+            exit 1
+          fi

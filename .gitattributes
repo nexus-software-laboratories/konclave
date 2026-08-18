@@ -1,0 +1,20 @@
+# Default: autodetect text vs binary, force LF in the working tree
+* text=auto eol=lf
+
+# Rust sources and manifests always use LF
+*.rs text eol=lf
+*.toml text eol=lf
+
+# Windows-only scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+
+.github/workflows/*.lock.yml linguist-generated=true

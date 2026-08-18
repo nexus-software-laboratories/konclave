@@ -1,0 +1,66 @@
+name: PR base
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  base:
+    name: PR base
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [linux, x64, automation-control]
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Verify the pull request targets the default branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # This is the only pull request trigger with no branch filter. Every
+          # other one is scoped to the default branch, so a pull request based
+          # elsewhere receives no checks at all rather than failing ones, and a
+          # reviewer sees no red. This job exists to make that absence visible.
+          #
+          # The base is re-read from the API because the event payload freezes
+          # it at run creation. Retargeting fires `edited` without creating a
+          # commit, so a queued run judging a stale base could otherwise report
+          # success for a pull request that no longer targets the default
+          # branch, and win as the last completed check run on that SHA.
+          pull_request=''
+          for attempt in 1 2 3; do
+            if pull_request="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER")"; then
+              break
+            fi
+            pull_request=''
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$(( attempt * 5 ))"
+            fi
+          done
+
+          if [ -z "$pull_request" ]; then
+            echo "::error::Could not read pull request #$PR_NUMBER after 3 attempts; the base branch was not verified."
+            exit 1
+          fi
+
+          base_ref="$(jq -r '.base.ref // empty' <<<"$pull_request")"
+          default_branch="$(jq -r '.base.repo.default_branch // empty' <<<"$pull_request")"
+
+          if [ -z "$base_ref" ] || [ -z "$default_branch" ]; then
+            echo "::error::Pull request #$PR_NUMBER reported no base branch; the base branch was not verified."
+            exit 1
+          fi
+
+          if [ "$base_ref" != "$default_branch" ]; then
+            echo "::error::This pull request targets '$base_ref' instead of the default branch '$default_branch'. A non-default base, including a stacked pull request, is not supported: every validation workflow is scoped to '$default_branch', so no CI, PR title, or Review policy check runs here, and auto-merge will never consider it. Retarget the pull request at '$default_branch'. The repository's Genesis delivery contract owns this rule."
+            exit 1
+          fi
+
+          echo "Pull request targets the default branch '$default_branch'."

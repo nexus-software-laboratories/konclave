@@ -1,0 +1,72 @@
+name: Verified Node.js setup
+description: Installs Node.js, retries setup-node's sporadic silent download failure, and verifies npm.
+
+inputs:
+  node-version:
+    description: Node.js version passed to actions/setup-node.
+    required: true
+  npm-cache-scope:
+    description: Stable workload scope for an optional npm download cache.
+    required: false
+    default: ''
+  npm-cache-dependency-hash:
+    description: Hash of the manifests and component contributions that affect the workload.
+    required: false
+    default: ''
+
+outputs:
+  node-version:
+    description: Installed Node.js version.
+    value: ${{ steps.versions.outputs.node-version }}
+  npm-version:
+    description: Installed npm version.
+    value: ${{ steps.versions.outputs.npm-version }}
+  npm-cache-hit:
+    description: Whether the exact npm download cache key was restored.
+    value: ${{ steps.npm-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Verify Node.js setup
+      id: verify
+      continue-on-error: true
+      shell: pwsh
+      run: |
+        Get-Command node -ErrorAction Stop | Out-Null
+        Get-Command npm -ErrorAction Stop | Out-Null
+        node --version
+        npm --version
+
+    - name: Retry Node.js setup after silent download failure
+      if: steps.verify.outcome != 'success'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Require Node.js and npm
+      id: versions
+      shell: pwsh
+      run: |
+        Get-Command node -ErrorAction Stop | Out-Null
+        Get-Command npm -ErrorAction Stop | Out-Null
+        $nodeVersion = node --version
+        $npmVersion = npm --version
+        Write-Host $nodeVersion
+        Write-Host $npmVersion
+        "node-version=$nodeVersion" | Out-File $env:GITHUB_OUTPUT -Append
+        "npm-version=$npmVersion" | Out-File $env:GITHUB_OUTPUT -Append
+
+    - name: Restore npm download cache
+      id: npm-cache
+      if: inputs.npm-cache-scope != '' && inputs.npm-cache-dependency-hash != ''
+      continue-on-error: true
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ~/.npm
+        key: npm-download-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.node-version }}-${{ steps.versions.outputs.npm-version }}-${{ inputs.npm-cache-scope }}-${{ inputs.npm-cache-dependency-hash }}
