@@ -30,6 +30,7 @@ const PROFILE_SCHEMA_VERSION: u32 = 2;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
+pub(crate) const MAX_CONVERSATION_PAGE_SIZE: usize = 100;
 const MAX_PENDING_OUTBOX: usize = 32;
 const MAX_MESSAGE_PAGE_SIZE: usize = 100;
 const LOCAL_RECORD_VERSION: u8 = 1;
@@ -482,6 +483,72 @@ impl ProfileStore {
             sender_counter: from_sql_integer(sender_counter)?,
             replay_cursor: from_sql_integer(replay_cursor)?,
         })
+    }
+
+    /// Lists one bounded page of local conversation identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounds, malformed-row, or storage error.
+    pub(crate) fn conversation_ids(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<ConversationId>, ProfileStoreError> {
+        if !(1..=MAX_CONVERSATION_PAGE_SIZE).contains(&limit) {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        let limit = i64::try_from(limit).map_err(|_| ProfileStoreError::SequenceExhausted)?;
+        let identifiers = {
+            let connection = self.lock()?;
+            match after {
+                Some(after) => {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT
+                                CASE WHEN length(conversation_id) = 32
+                                    THEN conversation_id
+                                END
+                             FROM daemon_conversation
+                             WHERE conversation_id > ?1
+                             ORDER BY conversation_id
+                             LIMIT ?2",
+                        )
+                        .map_err(|_| ProfileStoreError::Storage)?;
+                    statement
+                        .query_map(params![after.as_bytes().as_slice(), limit], |row| {
+                            row.get::<_, Vec<u8>>(0)
+                        })
+                        .map_err(|_| ProfileStoreError::Storage)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| ProfileStoreError::Storage)?
+                }
+                None => {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT
+                                CASE WHEN length(conversation_id) = 32
+                                    THEN conversation_id
+                                END
+                             FROM daemon_conversation
+                             ORDER BY conversation_id
+                             LIMIT ?1",
+                        )
+                        .map_err(|_| ProfileStoreError::Storage)?;
+                    statement
+                        .query_map(params![limit], |row| row.get::<_, Vec<u8>>(0))
+                        .map_err(|_| ProfileStoreError::Storage)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| ProfileStoreError::Storage)?
+                }
+            }
+        };
+        identifiers
+            .into_iter()
+            .map(|identifier| {
+                ConversationId::from_slice(&identifier).map_err(|_| ProfileStoreError::CorruptData)
+            })
+            .collect()
     }
 
     /// Atomically reserves one sender counter and idempotency identifiers.
@@ -3984,6 +4051,10 @@ mod tests {
         store
             .insert_conversation(routing_id, &material, &state, &[binding])
             .unwrap();
+        assert_eq!(
+            store.conversation_ids(None, 10).unwrap(),
+            vec![conversation_id]
+        );
         let encoded_state = encode_conversation_state(&state).unwrap();
         let encoded_binding = encode_device_credential_binding(material.binding()).unwrap();
         let (sealed_state, sealed_binding): (Vec<u8>, Vec<u8>) = store

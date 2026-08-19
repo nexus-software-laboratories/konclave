@@ -84,7 +84,21 @@ and therefore cannot advance the durable replay cursor.
    key without duplicating or reloading it.
 5. Open `profile.sqlite` and `mls.sqlite` with those handles.
 6. Reopen or create the device identity.
-7. Reconcile journals before starting relay watches or accepting MCP operations.
+7. Convert every unsealed outbound reservation into a permanent counter-gap
+   tombstone.
+8. Open every stored conversation. A missing MLS group is reconstructed only from an
+   authenticated epoch-zero profile record; missing state after any epoch advance
+   fails startup.
 
 Any failure stops startup. There is no replacement key, plaintext database, anonymous
 relay, or unlocked fallback.
+
+## Conversation lifecycle
+
+Conversation creation generates the conversation and routing identifiers through the
+configured cryptographic provider, creates a distinct conversation signing identity,
+and persists the authenticated initial administrator policy before creating the MLS
+group. The profile-first order makes an interrupted initial group creation
+recoverable: the next startup recreates only the missing epoch-zero group with the
+same sealed signing material and verifies the resulting state. It never fabricates
+missing MLS state for an advanced conversation.

@@ -2,14 +2,14 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveSecretStorage::{
     ExternalWrappingKeyProvider, NativeWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
 };
 use anyhow::{Context, bail};
 use tokio::sync::watch;
 
-use crate::persistence::{LockedProfile, ProfileId, ProfileStore};
+use crate::conversation::ConversationCoordinator;
+use crate::persistence::{LockedProfile, ProfileId};
 use crate::service::Service;
 
 pub async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
@@ -61,9 +61,7 @@ where
 }
 
 struct RuntimeProfile {
-    _store: ProfileStore,
-    _mls_storage: SealedSqliteMlsStorage,
-    _device: DeviceIdentity,
+    _conversations: ConversationCoordinator,
 }
 
 struct ProfileConfig {
@@ -110,10 +108,12 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
     let device = store
         .load_or_create_device()
         .context("loading daemon device identity")?;
+    let conversations = ConversationCoordinator::new(store, mls_storage, device);
+    conversations
+        .recover()
+        .context("recovering daemon conversations")?;
     Ok(RuntimeProfile {
-        _store: store,
-        _mls_storage: mls_storage,
-        _device: device,
+        _conversations: conversations,
     })
 }
 
@@ -198,11 +198,11 @@ mod tests {
             wrapping_key_file: Some(key_path.clone()),
         };
         let first = initialize_profile(config()).unwrap();
-        let first_device = first._device.device_id();
+        let first_device = first._conversations.device_id().unwrap();
         assert!(root.join("runtime-test").join("profile.sqlite").is_file());
         assert!(root.join("runtime-test").join("mls.sqlite").is_file());
         drop(first);
         let reopened = initialize_profile(config()).unwrap();
-        assert_eq!(reopened._device.device_id(), first_device);
+        assert_eq!(reopened._conversations.device_id().unwrap(), first_device);
     }
 }
