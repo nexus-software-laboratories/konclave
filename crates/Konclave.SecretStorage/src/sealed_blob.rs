@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use zeroize::Zeroizing;
@@ -114,7 +116,7 @@ impl SealedBlob {
 
 /// AES-256-GCM sealer initialized from one explicit custody provider.
 pub struct SecretSealer {
-    key: WrappingKey,
+    key: Arc<WrappingKey>,
     random: SystemRandom,
 }
 
@@ -126,9 +128,21 @@ impl SecretSealer {
     /// Returns the provider error without attempting any fallback.
     pub fn from_provider(provider: impl WrappingKeyProvider) -> Result<Self, SecretStorageError> {
         Ok(Self {
-            key: provider.load_or_create()?,
+            key: Arc::new(provider.load_or_create()?),
             random: SystemRandom::new(),
         })
+    }
+
+    /// Creates another sealer that shares the same in-memory wrapping key.
+    ///
+    /// This does not reload key custody or duplicate key bytes. Each handle uses an
+    /// independent operating-system random source for nonces.
+    #[must_use]
+    pub fn share(&self) -> Self {
+        Self {
+            key: Arc::clone(&self.key),
+            random: SystemRandom::new(),
+        }
     }
 
     /// Seals plaintext under a fresh nonce and bound record context.
@@ -171,7 +185,7 @@ impl SecretSealer {
             .try_into()
             .map_err(|_| SecretStorageError::InvalidSealedBlob)?;
         let aad = associated_data(context, header);
-        let key = less_safe_key(&self.key)?;
+        let key = less_safe_key(self.key.as_ref())?;
         let mut plaintext = Zeroizing::new(blob.as_bytes()[HEADER_BYTES..].to_vec());
         let length = key
             .open_in_place(
@@ -193,7 +207,7 @@ impl SecretSealer {
     ) -> Result<SealedBlob, SecretStorageError> {
         let header = header(nonce);
         let aad = associated_data(context, &header);
-        let key = less_safe_key(&self.key)?;
+        let key = less_safe_key(self.key.as_ref())?;
         let mut ciphertext = Zeroizing::new(plaintext.to_vec());
         key.seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce),
@@ -293,6 +307,17 @@ mod tests {
         assert_ne!(first.as_bytes(), second.as_bytes());
         assert_eq!(sealer.open(&context, &first).unwrap().as_slice(), b"same");
         assert_eq!(sealer.open(&context, &second).unwrap().as_slice(), b"same");
+    }
+
+    #[test]
+    fn shared_sealers_use_the_same_key_without_reloading_custody() {
+        let sealer =
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([4; 32])).unwrap();
+        let shared = sealer.share();
+        let context =
+            SecretRecordContext::new(SecretRecordKind::MlsGroupState, b"shared".to_vec()).unwrap();
+        let blob = sealer.seal(&context, b"state").unwrap();
+        assert_eq!(shared.open(&context, &blob).unwrap().as_slice(), b"state");
     }
 
     #[test]

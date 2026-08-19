@@ -4,8 +4,10 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn closing_mcp_stdin_stops_the_process() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_KonclaveLocalDaemon"))
-        .env("SERVICE_HTTP_ADDRESS", "127.0.0.1:0")
+    let profile = support::TestProfile::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_KonclaveLocalDaemon"));
+    profile.configure(&mut command);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -26,3 +28,4 @@ fn closing_mcp_stdin_stops_the_process() {
         thread::sleep(Duration::from_millis(25));
     }
 }
+mod support;
