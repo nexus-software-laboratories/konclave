@@ -10,6 +10,7 @@ This map lists the documentation contributed by the selected project shape.
 ## Protocol
 
 - [Protocol compatibility contract](protocol/compatibility.md)
+- [Identity signature encodings](protocol/identity-signatures.md)
 
 ## Security
 

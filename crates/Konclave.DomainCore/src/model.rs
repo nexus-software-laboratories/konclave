@@ -458,6 +458,104 @@ impl ConversationState {
     pub fn consumed_invitation_ids(&self) -> &[InvitationId] {
         &self.consumed_invitation_ids
     }
+
+    /// Returns the current member record for `device_id`, when present.
+    #[must_use]
+    pub fn member(&self, device_id: DeviceId) -> Option<Member> {
+        self.members
+            .iter()
+            .copied()
+            .find(|member| member.device_id == device_id)
+    }
+
+    /// Applies one authenticated membership authorization to the next MLS epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the sender is not a current administrator,
+    /// the authorization targets another version, conversation, or parent epoch,
+    /// the next epoch is not exactly one greater, or the requested member or
+    /// invitation transition contradicts current state.
+    pub fn apply_membership_authorization(
+        &self,
+        authenticated_sender: DeviceId,
+        authorization: &MembershipAuthorization,
+        new_epoch: u64,
+    ) -> Result<Self, KonclaveDomainError> {
+        if authorization.version != self.version {
+            return Err(KonclaveDomainError::MembershipVersionMismatch);
+        }
+        if authorization.conversation_id != self.conversation_id {
+            return Err(KonclaveDomainError::MembershipConversationMismatch);
+        }
+        if authorization.parent_epoch != self.epoch {
+            return Err(KonclaveDomainError::StaleMembershipEpoch);
+        }
+        if self.epoch.checked_add(1) != Some(new_epoch) {
+            return Err(KonclaveDomainError::InvalidMembershipEpochAdvance);
+        }
+        if self.member(authenticated_sender).map(Member::role)
+            != Some(ConversationRole::Administrator)
+        {
+            return Err(KonclaveDomainError::UnauthorizedMembershipChange);
+        }
+
+        let mut members = self.members.clone();
+        let mut consumed_invitation_ids = self.consumed_invitation_ids.clone();
+        match authorization.change() {
+            MembershipChange::Add(add) => {
+                if self.member(add.device_id()).is_some() {
+                    return Err(KonclaveDomainError::MemberAlreadyExists);
+                }
+                if consumed_invitation_ids.contains(&add.invitation_id()) {
+                    return Err(KonclaveDomainError::InvitationAlreadyConsumed);
+                }
+                members.push(Member::new(add.device_id(), add.role(), new_epoch));
+                consumed_invitation_ids.push(add.invitation_id());
+            }
+            MembershipChange::Remove(remove) => {
+                let index = members
+                    .iter()
+                    .position(|member| member.device_id == remove.device_id())
+                    .ok_or(KonclaveDomainError::MemberNotFound)?;
+                if members[index].role == ConversationRole::Administrator
+                    && members
+                        .iter()
+                        .filter(|member| member.role == ConversationRole::Administrator)
+                        .count()
+                        == 1
+                {
+                    return Err(KonclaveDomainError::MissingAdministrator);
+                }
+                members.remove(index);
+            }
+            MembershipChange::ChangeRole(change) => {
+                let administrator_count = members
+                    .iter()
+                    .filter(|member| member.role == ConversationRole::Administrator)
+                    .count();
+                let member = members
+                    .iter_mut()
+                    .find(|member| member.device_id == change.device_id())
+                    .ok_or(KonclaveDomainError::MemberNotFound)?;
+                if member.role == ConversationRole::Administrator
+                    && change.role() != ConversationRole::Administrator
+                    && administrator_count == 1
+                {
+                    return Err(KonclaveDomainError::MissingAdministrator);
+                }
+                member.role = change.role();
+            }
+        }
+
+        Self::new(
+            self.version,
+            self.conversation_id,
+            new_epoch,
+            members,
+            consumed_invitation_ids,
+        )
+    }
 }
 
 /// Application-authorized membership operation.
@@ -1141,6 +1239,202 @@ mod tests {
                 joined_epoch: 2,
                 state_epoch: 1,
             }
+        );
+    }
+
+    #[test]
+    fn administrator_can_add_an_invited_member() {
+        let administrator = DeviceId::from_bytes(bytes(1));
+        let added = DeviceId::from_bytes(bytes(2));
+        let invitation_id = InvitationId::from_bytes(bytes(3));
+        let state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            ConversationId::from_bytes(bytes(4)),
+            1,
+            vec![Member::new(
+                administrator,
+                ConversationRole::Administrator,
+                0,
+            )],
+            vec![],
+        )
+        .unwrap();
+        let authorization = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            state.conversation_id(),
+            state.epoch(),
+            MembershipOperationId::from_bytes(bytes(5)),
+            MembershipChange::Add(AddMember::new(
+                added,
+                ConversationRole::Member,
+                invitation_id,
+                CredentialBindingHash::from_bytes(bytes(6)),
+            )),
+        );
+
+        let next = state
+            .apply_membership_authorization(administrator, &authorization, 2)
+            .unwrap();
+
+        assert_eq!(
+            next.member(added).map(Member::role),
+            Some(ConversationRole::Member)
+        );
+        assert_eq!(next.consumed_invitation_ids(), &[invitation_id]);
+
+        let replay = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            next.conversation_id(),
+            next.epoch(),
+            MembershipOperationId::from_bytes(bytes(7)),
+            MembershipChange::Add(AddMember::new(
+                DeviceId::from_bytes(bytes(8)),
+                ConversationRole::Member,
+                invitation_id,
+                CredentialBindingHash::from_bytes(bytes(9)),
+            )),
+        );
+        assert_eq!(
+            next.apply_membership_authorization(administrator, &replay, 3)
+                .unwrap_err(),
+            KonclaveDomainError::InvitationAlreadyConsumed
+        );
+    }
+
+    #[test]
+    fn membership_transition_requires_current_administrator_and_epoch() {
+        let administrator = DeviceId::from_bytes(bytes(1));
+        let member = DeviceId::from_bytes(bytes(2));
+        let state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            ConversationId::from_bytes(bytes(3)),
+            1,
+            vec![
+                Member::new(administrator, ConversationRole::Administrator, 0),
+                Member::new(member, ConversationRole::Member, 1),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let authorization = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            state.conversation_id(),
+            0,
+            MembershipOperationId::from_bytes(bytes(4)),
+            MembershipChange::Remove(RemoveMember::new(member)),
+        );
+
+        assert_eq!(
+            state
+                .apply_membership_authorization(member, &authorization, 2)
+                .unwrap_err(),
+            KonclaveDomainError::StaleMembershipEpoch
+        );
+
+        let current = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            state.conversation_id(),
+            state.epoch(),
+            MembershipOperationId::from_bytes(bytes(4)),
+            MembershipChange::Remove(RemoveMember::new(member)),
+        );
+        assert_eq!(
+            state
+                .apply_membership_authorization(member, &current, 2)
+                .unwrap_err(),
+            KonclaveDomainError::UnauthorizedMembershipChange
+        );
+    }
+
+    #[test]
+    fn membership_transition_preserves_an_administrator() {
+        let administrator = DeviceId::from_bytes(bytes(1));
+        let state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            ConversationId::from_bytes(bytes(2)),
+            1,
+            vec![Member::new(
+                administrator,
+                ConversationRole::Administrator,
+                0,
+            )],
+            vec![],
+        )
+        .unwrap();
+        let authorization = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            state.conversation_id(),
+            state.epoch(),
+            MembershipOperationId::from_bytes(bytes(3)),
+            MembershipChange::Remove(RemoveMember::new(administrator)),
+        );
+
+        assert_eq!(
+            state
+                .apply_membership_authorization(administrator, &authorization, 2)
+                .unwrap_err(),
+            KonclaveDomainError::MissingAdministrator
+        );
+    }
+
+    #[test]
+    fn membership_transition_is_bound_to_version_conversation_and_next_epoch() {
+        let administrator = DeviceId::from_bytes(bytes(1));
+        let member = DeviceId::from_bytes(bytes(2));
+        let conversation_id = ConversationId::from_bytes(bytes(3));
+        let state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            conversation_id,
+            1,
+            vec![
+                Member::new(administrator, ConversationRole::Administrator, 0),
+                Member::new(member, ConversationRole::Member, 1),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let change = MembershipChange::Remove(RemoveMember::new(member));
+
+        let wrong_version = MembershipAuthorization::new(
+            ProtocolVersion::new(1, 1).unwrap(),
+            conversation_id,
+            1,
+            MembershipOperationId::from_bytes(bytes(4)),
+            change.clone(),
+        );
+        assert_eq!(
+            state
+                .apply_membership_authorization(administrator, &wrong_version, 2)
+                .unwrap_err(),
+            KonclaveDomainError::MembershipVersionMismatch
+        );
+
+        let wrong_conversation = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            ConversationId::from_bytes(bytes(5)),
+            1,
+            MembershipOperationId::from_bytes(bytes(4)),
+            change.clone(),
+        );
+        assert_eq!(
+            state
+                .apply_membership_authorization(administrator, &wrong_conversation, 2)
+                .unwrap_err(),
+            KonclaveDomainError::MembershipConversationMismatch
+        );
+
+        let wrong_next_epoch = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            conversation_id,
+            1,
+            MembershipOperationId::from_bytes(bytes(4)),
+            change,
+        );
+        assert_eq!(
+            state
+                .apply_membership_authorization(administrator, &wrong_next_epoch, 3)
+                .unwrap_err(),
+            KonclaveDomainError::InvalidMembershipEpochAdvance
         );
     }
 

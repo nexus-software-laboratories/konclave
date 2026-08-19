@@ -1,5 +1,6 @@
 #![no_main]
 
+use KonclaveCryptographicCore::{MlsApplicationMessage, MlsCommit, MlsWelcome};
 use KonclaveProtocolContracts::v1::{
     decode_acknowledge_request, decode_application_message, decode_conversation_state,
     decode_device_credential_binding, decode_invitation, decode_join_proof,
@@ -20,4 +21,7 @@ fuzz_target!(|bytes: &[u8]| {
     let _ = decode_replay_request(bytes);
     let _ = decode_replay_page(bytes);
     let _ = decode_acknowledge_request(bytes);
+    let _ = MlsApplicationMessage::from_bytes(bytes);
+    let _ = MlsCommit::from_bytes(bytes);
+    let _ = MlsWelcome::from_bytes(bytes);
 });

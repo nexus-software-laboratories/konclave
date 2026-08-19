@@ -1,0 +1,3 @@
+[env]
+# AWS-LC publishes verified prebuilt Windows assembly objects for non-FIPS builds.
+AWS_LC_SYS_PREBUILT_NASM = "1"

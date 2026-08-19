@@ -3,6 +3,9 @@ resolver = "3"
 members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts"]
 
 [workspace.dependencies]
+mls-rs = { version = "=0.55.3", default-features = false, features = ["std", "rfc_compliant", "tree_index", "fast_serialize"] }
+mls-rs-core = { version = "=0.27.0", default-features = false, features = ["std", "rfc_compliant", "fast_serialize"] }
+mls-rs-crypto-awslc = "=0.25.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"

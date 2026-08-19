@@ -61,6 +61,38 @@ pub enum KonclaveDomainError {
     #[error("conversation membership must contain at least one administrator")]
     MissingAdministrator,
 
+    /// An operation targets a different protocol version than the current state.
+    #[error("membership authorization version does not match conversation state")]
+    MembershipVersionMismatch,
+
+    /// An operation targets a different conversation than the current state.
+    #[error("membership authorization targets a different conversation")]
+    MembershipConversationMismatch,
+
+    /// An operation does not build on the current conversation epoch.
+    #[error("membership authorization parent epoch is stale")]
+    StaleMembershipEpoch,
+
+    /// A membership transition does not advance the epoch by exactly one.
+    #[error("membership transition must advance the epoch by exactly one")]
+    InvalidMembershipEpochAdvance,
+
+    /// The authenticated sender is not a current conversation administrator.
+    #[error("authenticated sender is not authorized to change membership")]
+    UnauthorizedMembershipChange,
+
+    /// An add operation targets a device that is already a member.
+    #[error("device is already a conversation member")]
+    MemberAlreadyExists,
+
+    /// A remove or role-change operation targets a device that is not a member.
+    #[error("device is not a conversation member")]
+    MemberNotFound,
+
+    /// An add operation reuses an invitation already consumed by this conversation.
+    #[error("invitation has already been consumed")]
+    InvitationAlreadyConsumed,
+
     /// A relay envelope has an epoch field that contradicts its delivery class.
     #[error("expected_parent_epoch is invalid for delivery class {delivery_class}")]
     InvalidExpectedParentEpoch { delivery_class: &'static str },
@@ -86,6 +118,14 @@ impl KonclaveDomainError {
             Self::MismatchedInvitedConversation => "mismatched_invited_conversation",
             Self::MemberJoinedAfterStateEpoch { .. } => "member_joined_after_state_epoch",
             Self::MissingAdministrator => "missing_administrator",
+            Self::MembershipVersionMismatch => "membership_version_mismatch",
+            Self::MembershipConversationMismatch => "membership_conversation_mismatch",
+            Self::StaleMembershipEpoch => "stale_membership_epoch",
+            Self::InvalidMembershipEpochAdvance => "invalid_membership_epoch_advance",
+            Self::UnauthorizedMembershipChange => "unauthorized_membership_change",
+            Self::MemberAlreadyExists => "member_already_exists",
+            Self::MemberNotFound => "member_not_found",
+            Self::InvitationAlreadyConsumed => "invitation_already_consumed",
             Self::InvalidExpectedParentEpoch { .. } => "invalid_expected_parent_epoch",
             Self::InvalidReplayOrder => "invalid_replay_order",
         }

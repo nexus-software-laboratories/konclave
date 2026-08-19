@@ -17,6 +17,14 @@ verification tool.
 - Validate and bound untrusted data before allocation, persistence, or side effects.
 - Keep diagnostics structured and keep secrets and protocol payloads out of logs.
 
+## Native cryptographic builds
+
+Non-FIPS Windows builds use the AWS-LC system crate's lockfile-pinned prebuilt NASM
+objects, configured in `.cargo/config.toml`, so contributors do not need a separate
+assembler installation. Linux CI builds AWS-LC from source. Updating the provider,
+system crate, or prebuilt-object setting requires supply-chain and cryptographic
+review.
+
 Context-specific tools remain evidence-driven:
 
 - Miri is appropriate for unsafe and undefined-behavior-sensitive code.
