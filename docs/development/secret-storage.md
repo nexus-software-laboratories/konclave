@@ -6,6 +6,11 @@ ADR 0002 separates key custody, authenticated sealing, and persistence:
 2. `SecretSealer` creates context-bound AES-256-GCM blobs;
 3. an MLS storage wrapper seals private bytes before delegating to a backend.
 
+`SecretSealer::share` creates another handle to the same in-memory wrapping key
+without reloading custody or duplicating key bytes. Each handle owns a fresh
+operating-system random source for nonces. Daemon startup uses this to open its
+application and MLS databases under one key load and one profile lock.
+
 ## Provider selection
 
 `NativeWrappingKeyProvider` uses the daemon account's operating-system credential

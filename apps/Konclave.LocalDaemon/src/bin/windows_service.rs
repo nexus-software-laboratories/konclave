@@ -1,9 +1,15 @@
+#[allow(dead_code)]
 #[cfg(windows)]
 #[path = "../mcp.rs"]
 mod mcp;
+#[allow(dead_code)]
 #[cfg(windows)]
 #[path = "../observability.rs"]
 mod observability;
+#[allow(dead_code)]
+#[cfg(windows)]
+#[path = "../persistence.rs"]
+mod persistence;
 #[cfg(windows)]
 #[path = "../runtime.rs"]
 mod runtime;

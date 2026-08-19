@@ -55,8 +55,9 @@ tools are enabled in the runtime.
 1. Validate the profile identifier and root path.
 2. Create the profile directory and acquire `profile.lock`.
 3. Load or create the native wrapping key.
-4. Open `profile.sqlite` with one sealer.
-5. Open `mls.sqlite` with another sealer loaded from the same custody slot.
+4. Load the wrapping key once and create two sealer handles that share that in-memory
+   key without duplicating or reloading it.
+5. Open `profile.sqlite` and `mls.sqlite` with those handles.
 6. Reopen or create the device identity.
 7. Reconcile journals before starting relay watches or accepting MCP operations.
 
