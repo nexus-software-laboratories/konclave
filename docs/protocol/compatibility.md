@@ -166,6 +166,12 @@ A reused identifier with different authenticated content is a protocol violation
 Attribution, deduplication, and authorization always key from the authenticated MLS
 sender, not a field asserted by the encrypted application payload.
 
+In protocol v1, `expires_at_unix_seconds` is the deadline for accepting a first
+submission. An identical envelope retry returns its original cursor after that
+deadline. An accepted envelope remains replayable because v1 has no authenticated
+gap record that could preserve cursor continuity after deletion; retention and
+authenticated expiration gaps require a future compatible protocol extension.
+
 ## Errors and retries
 
 Wire errors use stable machine-readable codes plus bounded diagnostic metadata.
