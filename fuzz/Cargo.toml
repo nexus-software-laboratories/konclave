@@ -12,6 +12,7 @@ cargo-fuzz = true
 [dependencies]
 KonclaveCryptographicCore = { path = "../crates/Konclave.CryptographicCore" }
 KonclaveProtocolContracts = { path = "../crates/Konclave.ProtocolContracts" }
+KonclaveSecretStorage = { path = "../crates/Konclave.SecretStorage", default-features = false }
 libfuzzer-sys = "0.4.13"
 
 [[bin]]

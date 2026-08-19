@@ -3,6 +3,7 @@
 paths:
   - "crates/Konclave.ProtocolContracts/**/*.rs"
   - "crates/Konclave.CryptographicCore/**/*.rs"
+  - "crates/Konclave.SecretStorage/**/*.rs"
   - "crates/Konclave.DomainCore/**/*.rs"
   - "crates/Konclave.ClientLibrary/**/*.rs"
   - "apps/Konclave.LocalDaemon/**/*.rs"

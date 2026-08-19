@@ -7,6 +7,9 @@ use KonclaveProtocolContracts::v1::{
     decode_membership_change, decode_relay_envelope, decode_replay_page, decode_replay_request,
     decode_stored_relay_envelope,
 };
+use KonclaveSecretStorage::{
+    ExternalWrappingKeyProvider, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
@@ -24,4 +27,12 @@ fuzz_target!(|bytes: &[u8]| {
     let _ = MlsApplicationMessage::from_bytes(bytes);
     let _ = MlsCommit::from_bytes(bytes);
     let _ = MlsWelcome::from_bytes(bytes);
+    if let Ok(blob) = SealedBlob::from_slice(bytes) {
+        if let (Ok(sealer), Ok(context)) = (
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([0x5a; 32])),
+            SecretRecordContext::new(SecretRecordKind::MlsGroupState, b"fuzz".to_vec()),
+        ) {
+            let _ = sealer.open(&context, &blob);
+        }
+    }
 });
