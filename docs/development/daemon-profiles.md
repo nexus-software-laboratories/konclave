@@ -102,3 +102,10 @@ group. The profile-first order makes an interrupted initial group creation
 recoverable: the next startup recreates only the missing epoch-zero group with the
 same sealed signing material and verifies the resulting state. It never fabricates
 missing MLS state for an advanced conversation.
+
+Outbound application operations serialize sender-counter reservation, MLS
+sender-ratchet persistence, sealed-envelope journaling, relay submission, and exact
+cursor acceptance. Ready envelopes are retried before a newer message may reserve a
+counter, so concurrent callers cannot reorder one sender's relay sequence. Blocking
+cryptographic and SQLite work runs outside Tokio executor threads; the ordered relay
+submission gate is the only lock intentionally held across network I/O.

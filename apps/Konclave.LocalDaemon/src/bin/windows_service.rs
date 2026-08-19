@@ -1,5 +1,9 @@
 #[allow(dead_code)]
 #[cfg(windows)]
+#[path = "../application.rs"]
+mod application;
+#[allow(dead_code)]
+#[cfg(windows)]
 #[path = "../conversation.rs"]
 mod conversation;
 #[allow(dead_code)]

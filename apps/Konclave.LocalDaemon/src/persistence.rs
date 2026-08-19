@@ -862,6 +862,62 @@ impl ProfileStore {
             .map_err(|_| ProfileStoreError::Storage)
     }
 
+    /// Converts one exact unsealed reservation into a durable counter-gap tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a mismatch, invalid transition, sequence, or storage error.
+    pub(crate) fn abandon_outbound_application(
+        &self,
+        reservation: OutboundReservation,
+    ) -> Result<(), ProfileStoreError> {
+        let changed = self
+            .lock()?
+            .execute(
+                "UPDATE daemon_outbox SET status = 4
+                 WHERE envelope_id = ?1
+                   AND conversation_id = ?2
+                   AND message_id = ?3
+                   AND sender_counter = ?4
+                   AND status = 1",
+                params![
+                    reservation.envelope_id.as_bytes().as_slice(),
+                    reservation.conversation_id.as_bytes().as_slice(),
+                    reservation.message_id.as_bytes().as_slice(),
+                    to_sql_integer(reservation.sender_counter)?
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let state: Option<(Vec<u8>, Vec<u8>, i64, i64)> = self
+            .lock()?
+            .query_row(
+                "SELECT
+                    CASE WHEN length(conversation_id) = 32 THEN conversation_id END,
+                    CASE WHEN length(message_id) = 16 THEN message_id END,
+                    sender_counter,
+                    status
+                 FROM daemon_outbox
+                 WHERE envelope_id = ?1",
+                params![reservation.envelope_id.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if state.is_some_and(|(conversation_id, message_id, sender_counter, status)| {
+            ConversationId::from_slice(&conversation_id).ok() == Some(reservation.conversation_id)
+                && MessageId::from_slice(&message_id).ok() == Some(reservation.message_id)
+                && from_sql_integer(sender_counter).ok() == Some(reservation.sender_counter)
+                && status == 4
+        }) {
+            Ok(())
+        } else {
+            Err(ProfileStoreError::InvalidTransition)
+        }
+    }
+
     /// Marks a ready outbox operation accepted at one durable relay cursor.
     ///
     /// # Errors
@@ -2869,6 +2925,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(second.sender_counter, 2);
+        reopened.abandon_outbound_application(second).unwrap();
+        reopened.abandon_outbound_application(second).unwrap();
+        assert_eq!(
+            reopened.reserve_outbound_application(
+                conversation_id,
+                second.message_id,
+                second.envelope_id,
+            ),
+            Err(ProfileStoreError::InvalidTransition)
+        );
         assert_eq!(
             reopened.reserve_outbound_application(
                 conversation_id,

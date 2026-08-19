@@ -2,13 +2,18 @@ use std::sync::{Arc, Mutex};
 
 use KonclaveCryptographicCore::{DeviceIdentity, MlsConversation, MlsConversationClient};
 use KonclaveDomainCore::{
-    ConversationId, ConversationRole, ConversationState, DeviceId, Member, ProtocolVersion,
-    RoutingId,
+    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
+    DeliveryClass, DeviceId, Member, MessageId, ProtocolVersion, RelayEnvelope, RoutingId,
+    StoredRelayEnvelope,
 };
+use KonclaveProtocolContracts::v1::encode_application_message;
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
-use crate::persistence::{MAX_CONVERSATION_PAGE_SIZE, ProfileStore, ProfileStoreError};
+use crate::persistence::{
+    MAX_CONVERSATION_PAGE_SIZE, OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
+};
 
 /// Durable conversation composition over one locked daemon profile.
 #[derive(Clone)]
@@ -16,6 +21,7 @@ pub(crate) struct ConversationCoordinator {
     store: Arc<ProfileStore>,
     mls_storage: SealedSqliteMlsStorage,
     device: Arc<Mutex<DeviceIdentity>>,
+    operations: Arc<Mutex<()>>,
 }
 
 impl ConversationCoordinator {
@@ -29,6 +35,7 @@ impl ConversationCoordinator {
             store: Arc::new(store),
             mls_storage,
             device: Arc::new(Mutex::new(device)),
+            operations: Arc::new(Mutex::new(())),
         }
     }
 
@@ -54,6 +61,10 @@ impl ConversationCoordinator {
     ///
     /// Returns a typed randomness, cryptographic, profile, or state error.
     pub(crate) fn create(&self) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
         let (conversation_id, routing_id, signing_material, device_id) = {
             let device = self
                 .device
@@ -79,7 +90,7 @@ impl ConversationCoordinator {
         let binding = signing_material.binding().clone();
         self.store
             .insert_conversation(routing_id, &signing_material, &state, &[binding])?;
-        let conversation = self.open(conversation_id)?;
+        let conversation = self.open_unlocked(conversation_id)?;
         Ok(conversation.summary())
     }
 
@@ -92,6 +103,17 @@ impl ConversationCoordinator {
     ///
     /// Returns a typed profile, storage, cryptographic, or missing-state error.
     pub(crate) fn open(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<OpenConversation, ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.open_unlocked(conversation_id)
+    }
+
+    fn open_unlocked(
         &self,
         conversation_id: ConversationId,
     ) -> Result<OpenConversation, ConversationCoordinatorError> {
@@ -136,6 +158,10 @@ impl ConversationCoordinator {
     ///
     /// Returns the first profile, storage, or cryptographic reconciliation error.
     pub(crate) fn recover(&self) -> Result<(), ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
         self.store.abandon_unsealed_outbox()?;
         let mut after = None;
         loop {
@@ -145,7 +171,7 @@ impl ConversationCoordinator {
             let page_length = page.len();
             after = page.last().copied();
             for conversation_id in page {
-                self.open(conversation_id)?;
+                self.open_unlocked(conversation_id)?;
             }
             if page_length < MAX_CONVERSATION_PAGE_SIZE {
                 break;
@@ -168,6 +194,135 @@ impl ConversationCoordinator {
             .conversation_ids(after, limit)
             .map_err(Into::into)
     }
+
+    /// Encrypts and journals one outbound application message before transmission.
+    ///
+    /// MLS sender state is persisted before the ciphertext is returned. Any failure
+    /// before the sealed envelope becomes ready permanently abandons the reservation
+    /// without rolling its counter back.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed profile, protocol, cryptographic, or state error.
+    pub(crate) fn prepare_application(
+        &self,
+        conversation_id: ConversationId,
+        content: ApplicationContent,
+        reply_to: Option<MessageId>,
+        sent_at_unix_milliseconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<PreparedApplication, ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let (message_id, envelope_id) = {
+            let device = self
+                .device
+                .lock()
+                .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+            (
+                device
+                    .generate_message_id()
+                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
+                device
+                    .generate_envelope_id()
+                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
+            )
+        };
+        let reservation =
+            self.store
+                .reserve_outbound_application(conversation_id, message_id, envelope_id)?;
+        match self.prepare_reserved_application(
+            reservation,
+            content,
+            reply_to,
+            sent_at_unix_milliseconds,
+            expires_at_unix_seconds,
+        ) {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => {
+                self.store.abandon_outbound_application(reservation)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn prepare_reserved_application(
+        &self,
+        reservation: OutboundReservation,
+        content: ApplicationContent,
+        reply_to: Option<MessageId>,
+        sent_at_unix_milliseconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<PreparedApplication, ConversationCoordinatorError> {
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            reservation.message_id,
+            reservation.sender_counter,
+            sent_at_unix_milliseconds,
+            reply_to,
+            content,
+        )
+        .map_err(|_| ConversationCoordinatorError::Protocol)?;
+        let plaintext = Zeroizing::new(
+            encode_application_message(&message)
+                .map_err(|_| ConversationCoordinatorError::Protocol)?,
+        );
+        let mut conversation = self.open_unlocked(reservation.conversation_id)?;
+        let ciphertext = conversation
+            .group
+            .encrypt_application_message(&plaintext)
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+        let envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            conversation.routing_id,
+            reservation.envelope_id,
+            DeliveryClass::GroupApplication,
+            None,
+            expires_at_unix_seconds,
+            ciphertext.into_bytes(),
+        )
+        .map_err(|_| ConversationCoordinatorError::Protocol)?;
+        self.store.store_outbound_envelope(reservation, &envelope)?;
+        Ok(PreparedApplication {
+            conversation_id: reservation.conversation_id,
+            message,
+            envelope,
+        })
+    }
+
+    /// Loads bounded ready envelopes for idempotent relay retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile bounds, authentication, protocol, or storage error.
+    pub(crate) fn ready_outbox(&self) -> Result<Vec<PendingOutbox>, ConversationCoordinatorError> {
+        self.store.ready_outbox().map_err(Into::into)
+    }
+
+    /// Records one exact relay submission response.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cursor conflict, profile transition, or storage error.
+    pub(crate) fn mark_outbox_accepted(
+        &self,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<(), ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.store.mark_outbox_accepted(stored).map_err(Into::into)
+    }
+}
+
+/// One sender-ratcheted application message and its sealed relay envelope.
+pub(crate) struct PreparedApplication {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) message: ApplicationMessage,
+    pub(crate) envelope: RelayEnvelope,
 }
 
 /// One opened MLS conversation and its opaque relay route.
@@ -210,6 +365,8 @@ pub(crate) enum ConversationCoordinatorError {
     MissingMlsState,
     #[error("profile and MLS conversation state disagree")]
     StateMismatch,
+    #[error("application protocol construction failed")]
+    Protocol,
 }
 
 fn initial_conversation_state(
