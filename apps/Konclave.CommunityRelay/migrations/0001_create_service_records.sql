@@ -1,4 +1,0 @@
-CREATE TABLE service_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    value TEXT NOT NULL
-);

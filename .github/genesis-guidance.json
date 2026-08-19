@@ -26,6 +26,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0003-relay-transport-authentication.md",
+        "title": "ADR 0003: Relay transport authentication",
+        "section": "Architecture",
+        "order": 40,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -37,6 +44,13 @@
         "title": "Identity signature encodings",
         "section": "Protocol",
         "order": 20,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/protocol/relay-authentication.md",
+        "title": "Relay transport authentication",
+        "section": "Protocol",
+        "order": 30,
         "owner": "project:konclave"
       },
       {

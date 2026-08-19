@@ -21,6 +21,11 @@ scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter bo
   state. CLI, UI, extensions, and relays never receive keys or provider state.
 - The relay stores and logs only allowlisted delivery metadata plus opaque MLS bytes.
   It never parses Konclave application plaintext.
+- Relay data-plane authentication stays outside protobuf. Never treat `RoutingId` as
+  a credential or use stable `DeviceId` as a cross-route relay principal.
+- Raw relay bearer tokens remain sealed at clients and never enter relay
+  configuration, persistence, logs, or telemetry. Non-loopback bearer transport
+  requires trusted TLS termination.
 - Treat relay non-equivocation as an explicit initial trust assumption. Compare-and-set
   does not defend isolated clients from a malicious split view; observed conflicts
   halt security-sensitive sending.

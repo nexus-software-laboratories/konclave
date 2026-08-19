@@ -21,5 +21,6 @@ pub use membership::{
 pub use relay::{
     decode_acknowledge_request, decode_relay_envelope, decode_replay_page, decode_replay_request,
     decode_stored_relay_envelope, encode_acknowledge_request, encode_relay_envelope,
-    encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
+    encode_replay_page, encode_replay_page_preserving, encode_replay_request,
+    encode_stored_relay_envelope, encode_stored_relay_envelope_preserving,
 };

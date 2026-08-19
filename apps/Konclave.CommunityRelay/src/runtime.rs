@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::service::Service;
 use tokio::sync::watch;
 
-pub async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
+pub(crate) async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
 where
     F: Future<Output = ()>,
 {

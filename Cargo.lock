@@ -25,9 +25,14 @@ dependencies = [
 name = "KonclaveCommunityRelay"
 version = "0.1.0"
 dependencies = [
+ "KonclaveDomainCore",
+ "KonclaveProtocolContracts",
+ "KonclaveRelayCore",
  "anyhow",
+ "async-trait",
  "axum",
  "axum-server",
+ "base64 0.22.1",
  "futures-util",
  "libc",
  "opentelemetry",
@@ -36,8 +41,8 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "sqlx",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tower",
@@ -46,6 +51,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-service",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -115,6 +121,7 @@ dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
  "async-trait",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",

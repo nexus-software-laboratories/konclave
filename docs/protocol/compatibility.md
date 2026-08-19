@@ -52,6 +52,12 @@ One binary WebSocket message carries one encoded relay operation or envelope. HT
 operations use an explicit protobuf media type. JSON is not a core relay wire format.
 Local MCP messages remain a separate adapter contract.
 
+Relay data-plane authentication is transport metadata, not a protobuf field. The
+community HTTP and WebSocket adapter follows the
+[relay transport authentication contract](relay-authentication.md). Other
+deployments may replace the authentication mechanism while producing the same opaque
+principal and route-authorization outcomes.
+
 ### Relay envelope
 
 The relay envelope contains only:
