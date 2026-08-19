@@ -2,8 +2,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use KonclaveDomainCore::{
-    AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES,
-    ProtocolVersion, RelayEnvelope, ReplayPage, ReplayRequest, RoutingId, StoredRelayEnvelope,
+    AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_RELAY_ENVELOPE_BYTES,
+    MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES, ProtocolVersion, RelayEnvelope, ReplayPage,
+    ReplayRequest, RoutingId, StoredRelayEnvelope,
+};
+use KonclaveProtocolContracts::v1::{
+    decode_relay_envelope, encode_relay_envelope, encode_replay_page_preserving,
 };
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -11,11 +15,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::{RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
 
-const SQLITE_SCHEMA_VERSION: u32 = 1;
+const SQLITE_SCHEMA_VERSION: u32 = 2;
 const REPLAY_PAGE_FIXED_WIRE_BUDGET: usize = 64;
-// This conservatively exceeds all v1 protobuf metadata and nested-message framing.
-// The maximum-payload replay test checks the budget against the canonical encoder.
-const STORED_ENVELOPE_WIRE_OVERHEAD_BUDGET: usize = 256;
+const STORED_ENVELOPE_WIRE_OVERHEAD_BUDGET: usize = 32;
 
 /// SQLite relay repository containing only allowlisted metadata and opaque payloads.
 #[derive(Clone)]
@@ -63,11 +65,15 @@ impl SqliteRelayRepository {
 
 #[async_trait]
 impl RelayRepository for SqliteRelayRepository {
-    async fn submit(
+    async fn submit_encoded(
         &self,
         envelope: &RelayEnvelope,
+        encoded_envelope: &[u8],
         now_unix_seconds: u64,
     ) -> Result<SubmitResult, RelayError> {
+        if decode_relay_envelope(encoded_envelope)? != *envelope {
+            return Err(RelayError::EnvelopeEncodingMismatch);
+        }
         let mut transaction = self
             .pool
             .begin()
@@ -83,7 +89,7 @@ impl RelayRepository for SqliteRelayRepository {
         .await
         .map_err(|_| storage_failure("route initialization"))?;
 
-        if let Some(existing) = find_existing(&mut transaction, envelope).await? {
+        if let Some(existing) = find_existing(&mut transaction, envelope, encoded_envelope).await? {
             if !existing.identical {
                 return Err(RelayError::IdempotencyConflict);
             }
@@ -99,7 +105,7 @@ impl RelayRepository for SqliteRelayRepository {
         }
 
         let cursor = allocate_cursor(&mut transaction, envelope).await?;
-        insert_envelope(&mut transaction, envelope, cursor).await?;
+        insert_envelope(&mut transaction, envelope, encoded_envelope, cursor).await?;
         transaction
             .commit()
             .await
@@ -108,72 +114,30 @@ impl RelayRepository for SqliteRelayRepository {
     }
 
     async fn replay(&self, request: ReplayRequest) -> Result<ReplayPage, RelayError> {
-        let limit = usize::try_from(request.limit()).map_err(|_| RelayError::InvalidStoredData)?;
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| storage_failure("replay transaction begin"))?;
-        let size_rows = sqlx::query(
-            "SELECT cursor, length(payload) AS payload_length
-             FROM relay_envelope
-             WHERE routing_id = ?1 AND cursor > ?2
-             ORDER BY cursor
-             LIMIT ?3",
-        )
-        .bind(request.routing_id().as_bytes().as_slice())
-        .bind(to_sql_integer(request.after_cursor())?)
-        .bind(i64::try_from(limit + 1).map_err(|_| RelayError::SequenceExhausted)?)
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(|_| storage_failure("replay sizing query"))?;
-        let replay_selection = select_replay_rows(&size_rows, limit)?;
-
-        let Some(last_cursor) = replay_selection.last_cursor else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| storage_failure("empty replay commit"))?;
-            return Ok(ReplayPage::new(Vec::new(), request.after_cursor(), false)?);
-        };
-        let rows = sqlx::query(
-            "SELECT
-                cursor,
-                envelope_id,
-                version_major,
-                version_minor,
-                delivery_class,
-                expected_parent_epoch,
-                expires_at_unix_seconds,
-                payload
-             FROM relay_envelope
-             WHERE routing_id = ?1 AND cursor > ?2 AND cursor <= ?3
-             ORDER BY cursor
-             LIMIT ?4",
-        )
-        .bind(request.routing_id().as_bytes().as_slice())
-        .bind(to_sql_integer(request.after_cursor())?)
-        .bind(to_sql_integer(last_cursor)?)
-        .bind(i64::try_from(replay_selection.count).map_err(|_| RelayError::SequenceExhausted)?)
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(|_| storage_failure("replay query"))?;
-        let envelopes = rows
+        let page = self.load_replay_entries(request).await?;
+        let envelopes = page
+            .entries
             .into_iter()
-            .map(|row| stored_envelope_from_row(request.routing_id(), row))
+            .map(|entry| -> Result<StoredRelayEnvelope, RelayError> {
+                let envelope = decode_relay_envelope(&entry.encoded_envelope)
+                    .map_err(|_| RelayError::InvalidStoredData)?;
+                Ok(StoredRelayEnvelope::new(envelope, entry.cursor)?)
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| storage_failure("replay transaction commit"))?;
-        let next_cursor = envelopes
-            .last()
-            .map(StoredRelayEnvelope::cursor)
-            .unwrap_or(request.after_cursor());
-        Ok(ReplayPage::new(
-            envelopes,
-            next_cursor,
-            replay_selection.has_more,
+        Ok(ReplayPage::new(envelopes, page.next_cursor, page.has_more)?)
+    }
+
+    async fn replay_encoded(&self, request: ReplayRequest) -> Result<Vec<u8>, RelayError> {
+        let page = self.load_replay_entries(request).await?;
+        let envelopes = page
+            .entries
+            .iter()
+            .map(|entry| (entry.encoded_envelope.as_slice(), entry.cursor))
+            .collect::<Vec<_>>();
+        Ok(encode_replay_page_preserving(
+            &envelopes,
+            page.next_cursor,
+            page.has_more,
         )?)
     }
 
@@ -209,6 +173,96 @@ impl RelayRepository for SqliteRelayRepository {
     }
 }
 
+impl SqliteRelayRepository {
+    async fn load_replay_entries(
+        &self,
+        request: ReplayRequest,
+    ) -> Result<ReplayEntries, RelayError> {
+        let limit = usize::try_from(request.limit()).map_err(|_| RelayError::InvalidStoredData)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("replay transaction begin"))?;
+        let size_rows = sqlx::query(
+            "SELECT cursor, length(encoded_envelope) AS envelope_length
+             FROM relay_envelope
+             WHERE routing_id = ?1 AND cursor > ?2
+             ORDER BY cursor
+             LIMIT ?3",
+        )
+        .bind(request.routing_id().as_bytes().as_slice())
+        .bind(to_sql_integer(request.after_cursor())?)
+        .bind(i64::try_from(limit + 1).map_err(|_| RelayError::SequenceExhausted)?)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| storage_failure("replay sizing query"))?;
+        let selection = select_replay_rows(&size_rows, limit)?;
+
+        let Some(last_cursor) = selection.last_cursor else {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| storage_failure("empty replay commit"))?;
+            return Ok(ReplayEntries {
+                entries: Vec::new(),
+                next_cursor: request.after_cursor(),
+                has_more: false,
+            });
+        };
+        let rows = sqlx::query(
+            "SELECT
+                cursor,
+                CASE WHEN length(routing_id) = 32 THEN routing_id END AS routing_id,
+                CASE WHEN length(envelope_id) = 16 THEN envelope_id END AS envelope_id,
+                version_major,
+                version_minor,
+                delivery_class,
+                expected_parent_epoch,
+                expires_at_unix_seconds,
+                encoded_envelope
+             FROM relay_envelope
+             WHERE routing_id = ?1 AND cursor > ?2 AND cursor <= ?3
+             ORDER BY cursor
+             LIMIT ?4",
+        )
+        .bind(request.routing_id().as_bytes().as_slice())
+        .bind(to_sql_integer(request.after_cursor())?)
+        .bind(to_sql_integer(last_cursor)?)
+        .bind(i64::try_from(selection.count).map_err(|_| RelayError::SequenceExhausted)?)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| storage_failure("replay query"))?;
+        let entries = rows
+            .into_iter()
+            .map(replay_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| storage_failure("replay transaction commit"))?;
+        let next_cursor = entries
+            .last()
+            .map_or(request.after_cursor(), |entry| entry.cursor);
+        Ok(ReplayEntries {
+            entries,
+            next_cursor,
+            has_more: selection.has_more,
+        })
+    }
+}
+
+struct ReplayEntries {
+    entries: Vec<ReplayEntry>,
+    next_cursor: u64,
+    has_more: bool,
+}
+
+struct ReplayEntry {
+    encoded_envelope: Vec<u8>,
+    cursor: u64,
+}
+
 struct ExistingSubmission {
     cursor: u64,
     identical: bool,
@@ -217,17 +271,19 @@ struct ExistingSubmission {
 async fn find_existing(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     envelope: &RelayEnvelope,
+    encoded_envelope: &[u8],
 ) -> Result<Option<ExistingSubmission>, RelayError> {
     let row = sqlx::query(
         "SELECT
             cursor,
-            routing_id,
+            CASE WHEN length(routing_id) = 32 THEN routing_id END AS routing_id,
+            CASE WHEN length(envelope_id) = 16 THEN envelope_id END AS envelope_id,
             version_major,
             version_minor,
             delivery_class,
             expected_parent_epoch,
             expires_at_unix_seconds,
-            length(payload) AS payload_length
+            length(encoded_envelope) AS envelope_length
          FROM relay_envelope
          WHERE envelope_id = ?1",
     )
@@ -238,49 +294,31 @@ async fn find_existing(
     let Some(row) = row else {
         return Ok(None);
     };
-    let expected_parent_epoch = optional_epoch_from_row(&row, "expected_parent_epoch")?;
-    let payload_length = usize::try_from(
-        row.try_get::<i64, _>("payload_length")
+    let envelope_length = usize::try_from(
+        row.try_get::<i64, _>("envelope_length")
             .map_err(invalid_row)?,
     )
     .map_err(|_| RelayError::InvalidStoredData)?;
-    if !(1..=MAX_RELAY_PAYLOAD_BYTES).contains(&payload_length) {
+    if !(1..=MAX_RELAY_ENVELOPE_BYTES).contains(&envelope_length) {
         return Err(RelayError::InvalidStoredData);
     }
-    let stored_routing_id = RoutingId::from_slice(
-        &row.try_get::<Vec<u8>, _>("routing_id")
-            .map_err(invalid_row)?,
-    )?;
-    let metadata_identical = stored_routing_id == envelope.routing_id()
-        && from_sql_u32(row.try_get("version_major").map_err(invalid_row)?)?
-            == envelope.version().major()
-        && from_sql_u32(row.try_get("version_minor").map_err(invalid_row)?)?
-            == envelope.version().minor()
-        && delivery_class_from_sql(row.try_get("delivery_class").map_err(invalid_row)?)?
-            == envelope.delivery_class()
-        && expected_parent_epoch == envelope.expected_parent_epoch()
-        && from_sql_integer(
-            row.try_get("expires_at_unix_seconds")
-                .map_err(invalid_row)?,
-        )? == envelope.expires_at_unix_seconds();
-    if !metadata_identical {
-        return Ok(Some(ExistingSubmission {
-            cursor: from_sql_integer(row.try_get("cursor").map_err(invalid_row)?)?,
-            identical: false,
-        }));
-    }
-    let payload: Vec<u8> =
-        sqlx::query_scalar("SELECT payload FROM relay_envelope WHERE envelope_id = ?1")
+    let stored_encoding: Vec<u8> =
+        sqlx::query_scalar("SELECT encoded_envelope FROM relay_envelope WHERE envelope_id = ?1")
             .bind(envelope.envelope_id().as_bytes().as_slice())
             .fetch_one(&mut **transaction)
             .await
-            .map_err(|_| storage_failure("idempotency payload query"))?;
-    if payload.len() != payload_length {
+            .map_err(|_| storage_failure("idempotency envelope query"))?;
+    if stored_encoding.len() != envelope_length {
+        return Err(RelayError::InvalidStoredData);
+    }
+    let stored_envelope =
+        decode_relay_envelope(&stored_encoding).map_err(|_| RelayError::InvalidStoredData)?;
+    if !row_metadata_matches(&row, &stored_envelope)? {
         return Err(RelayError::InvalidStoredData);
     }
     Ok(Some(ExistingSubmission {
         cursor: from_sql_integer(row.try_get("cursor").map_err(invalid_row)?)?,
-        identical: payload == envelope.payload(),
+        identical: stored_envelope == *envelope && stored_encoding == encoded_envelope,
     }))
 }
 
@@ -379,6 +417,7 @@ async fn classify_allocation_failure(
 async fn insert_envelope(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     envelope: &RelayEnvelope,
+    encoded_envelope: &[u8],
     cursor: u64,
 ) -> Result<(), RelayError> {
     sqlx::query(
@@ -391,7 +430,7 @@ async fn insert_envelope(
             delivery_class,
             expected_parent_epoch,
             expires_at_unix_seconds,
-            payload
+            encoded_envelope
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )
     .bind(envelope.routing_id().as_bytes().as_slice())
@@ -407,39 +446,53 @@ async fn insert_envelope(
             .transpose()?,
     )
     .bind(to_sql_integer(envelope.expires_at_unix_seconds())?)
-    .bind(envelope.payload())
+    .bind(encoded_envelope)
     .execute(&mut **transaction)
     .await
     .map(|_| ())
     .map_err(|_| storage_failure("envelope insert"))
 }
 
-fn stored_envelope_from_row(
-    routing_id: RoutingId,
-    row: sqlx::sqlite::SqliteRow,
-) -> Result<StoredRelayEnvelope, RelayError> {
-    let envelope = RelayEnvelope::new(
-        ProtocolVersion::new(
-            from_sql_u32(row.try_get("version_major").map_err(invalid_row)?)?,
-            from_sql_u32(row.try_get("version_minor").map_err(invalid_row)?)?,
-        )?,
-        routing_id,
-        EnvelopeId::from_slice(
+fn replay_entry_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReplayEntry, RelayError> {
+    let encoded_envelope: Vec<u8> = row.try_get("encoded_envelope").map_err(invalid_row)?;
+    if !(1..=MAX_RELAY_ENVELOPE_BYTES).contains(&encoded_envelope.len()) {
+        return Err(RelayError::InvalidStoredData);
+    }
+    let envelope =
+        decode_relay_envelope(&encoded_envelope).map_err(|_| RelayError::InvalidStoredData)?;
+    if !row_metadata_matches(&row, &envelope)? {
+        return Err(RelayError::InvalidStoredData);
+    }
+    Ok(ReplayEntry {
+        encoded_envelope,
+        cursor: from_sql_integer(row.try_get("cursor").map_err(invalid_row)?)?,
+    })
+}
+
+fn row_metadata_matches(
+    row: &sqlx::sqlite::SqliteRow,
+    envelope: &RelayEnvelope,
+) -> Result<bool, RelayError> {
+    Ok(RoutingId::from_slice(
+        &row.try_get::<Vec<u8>, _>("routing_id")
+            .map_err(invalid_row)?,
+    )? == envelope.routing_id()
+        && EnvelopeId::from_slice(
             &row.try_get::<Vec<u8>, _>("envelope_id")
                 .map_err(invalid_row)?,
-        )?,
-        delivery_class_from_sql(row.try_get("delivery_class").map_err(invalid_row)?)?,
-        optional_epoch_from_row(&row, "expected_parent_epoch")?,
-        from_sql_integer(
+        )? == envelope.envelope_id()
+        && from_sql_u32(row.try_get("version_major").map_err(invalid_row)?)?
+            == envelope.version().major()
+        && from_sql_u32(row.try_get("version_minor").map_err(invalid_row)?)?
+            == envelope.version().minor()
+        && delivery_class_from_sql(row.try_get("delivery_class").map_err(invalid_row)?)?
+            == envelope.delivery_class()
+        && optional_epoch_from_row(row, "expected_parent_epoch")?
+            == envelope.expected_parent_epoch()
+        && from_sql_integer(
             row.try_get("expires_at_unix_seconds")
                 .map_err(invalid_row)?,
-        )?,
-        row.try_get("payload").map_err(invalid_row)?,
-    )?;
-    Ok(StoredRelayEnvelope::new(
-        envelope,
-        from_sql_integer(row.try_get("cursor").map_err(invalid_row)?)?,
-    )?)
+        )? == envelope.expires_at_unix_seconds())
 }
 
 fn optional_epoch_from_row(
@@ -529,7 +582,8 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
             delivery_class INTEGER NOT NULL CHECK (delivery_class BETWEEN 1 AND 5),
             expected_parent_epoch INTEGER,
             expires_at_unix_seconds INTEGER NOT NULL CHECK (expires_at_unix_seconds >= 1),
-            payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 1047552),
+            encoded_envelope BLOB NOT NULL
+                CHECK (length(encoded_envelope) BETWEEN 1 AND 1048576),
             PRIMARY KEY (routing_id, cursor),
             UNIQUE (envelope_id),
             FOREIGN KEY (routing_id) REFERENCES relay_route(routing_id) ON DELETE CASCADE,
@@ -560,10 +614,12 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
         .execute(&mut *transaction)
         .await
         .map_err(|_| storage_failure("acknowledgment schema initialization"))?;
-        sqlx::query("PRAGMA user_version = 1")
+        sqlx::query("PRAGMA user_version = 2")
             .execute(&mut *transaction)
             .await
             .map_err(|_| storage_failure("schema version write"))?;
+    } else if version == 1 {
+        migrate_schema_v1_to_v2(&mut transaction).await?;
     }
     validate_schema(&mut transaction).await?;
     transaction
@@ -578,7 +634,8 @@ async fn validate_schema(
     for query in [
         "SELECT routing_id, next_cursor, current_epoch FROM relay_route LIMIT 0",
         "SELECT routing_id, cursor, envelope_id, version_major, version_minor,
-                delivery_class, expected_parent_epoch, expires_at_unix_seconds, payload
+                delivery_class, expected_parent_epoch, expires_at_unix_seconds,
+                encoded_envelope
          FROM relay_envelope LIMIT 0",
         "SELECT routing_id, principal_id, cursor FROM relay_acknowledgment LIMIT 0",
     ] {
@@ -588,6 +645,170 @@ async fn validate_schema(
             .map_err(|_| storage_failure("schema validation"))?;
     }
     Ok(())
+}
+
+async fn migrate_schema_v1_to_v2(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "CREATE TABLE relay_envelope_v2 (
+            routing_id BLOB NOT NULL,
+            cursor INTEGER NOT NULL CHECK (cursor >= 1),
+            envelope_id BLOB NOT NULL,
+            version_major INTEGER NOT NULL CHECK (version_major BETWEEN 1 AND 4294967295),
+            version_minor INTEGER NOT NULL CHECK (version_minor BETWEEN 0 AND 4294967295),
+            delivery_class INTEGER NOT NULL CHECK (delivery_class BETWEEN 1 AND 5),
+            expected_parent_epoch INTEGER,
+            expires_at_unix_seconds INTEGER NOT NULL CHECK (expires_at_unix_seconds >= 1),
+            encoded_envelope BLOB NOT NULL
+                CHECK (length(encoded_envelope) BETWEEN 1 AND 1048576),
+            PRIMARY KEY (routing_id, cursor),
+            UNIQUE (envelope_id),
+            FOREIGN KEY (routing_id) REFERENCES relay_route(routing_id) ON DELETE CASCADE,
+            CHECK (length(routing_id) = 32),
+            CHECK (length(envelope_id) = 16),
+            CHECK (
+                (delivery_class IN (3, 4) AND expected_parent_epoch IS NOT NULL
+                    AND expected_parent_epoch >= 0)
+                OR
+                (delivery_class NOT IN (3, 4) AND expected_parent_epoch IS NULL)
+            )
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("schema v2 envelope initialization"))?;
+
+    let mut last_envelope_id: Option<Vec<u8>> = None;
+    loop {
+        let row = sqlx::query(
+            "SELECT
+                CASE WHEN length(routing_id) = 32 THEN routing_id END AS routing_id,
+                cursor,
+                CASE WHEN length(envelope_id) = 16 THEN envelope_id END AS envelope_id,
+                version_major,
+                version_minor,
+                delivery_class,
+                expected_parent_epoch,
+                expires_at_unix_seconds,
+                length(payload) AS payload_length
+             FROM relay_envelope
+             WHERE ?1 IS NULL OR envelope_id > ?1
+             ORDER BY envelope_id
+             LIMIT 1",
+        )
+        .bind(last_envelope_id.as_deref())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v1 envelope read"))?;
+        let Some(row) = row else {
+            break;
+        };
+        let payload_length = usize::try_from(
+            row.try_get::<i64, _>("payload_length")
+                .map_err(invalid_row)?,
+        )
+        .map_err(|_| RelayError::InvalidStoredData)?;
+        if !(1..=MAX_RELAY_PAYLOAD_BYTES).contains(&payload_length) {
+            return Err(RelayError::InvalidStoredData);
+        }
+        let envelope_id: Vec<u8> = row.try_get("envelope_id").map_err(invalid_row)?;
+        let payload: Vec<u8> =
+            sqlx::query_scalar("SELECT payload FROM relay_envelope WHERE envelope_id = ?1")
+                .bind(&envelope_id)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|_| storage_failure("schema v1 payload read"))?;
+        if payload.len() != payload_length {
+            return Err(RelayError::InvalidStoredData);
+        }
+        let envelope = envelope_from_v1_row(&row, payload)?;
+        let encoded_envelope = encode_relay_envelope(&envelope)?;
+        let cursor = from_sql_integer(row.try_get("cursor").map_err(invalid_row)?)?;
+        sqlx::query(
+            "INSERT INTO relay_envelope_v2 (
+                routing_id,
+                cursor,
+                envelope_id,
+                version_major,
+                version_minor,
+                delivery_class,
+                expected_parent_epoch,
+                expires_at_unix_seconds,
+                encoded_envelope
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(envelope.routing_id().as_bytes().as_slice())
+        .bind(to_sql_integer(cursor)?)
+        .bind(envelope.envelope_id().as_bytes().as_slice())
+        .bind(i64::from(envelope.version().major()))
+        .bind(i64::from(envelope.version().minor()))
+        .bind(delivery_class_to_sql(envelope.delivery_class()))
+        .bind(
+            envelope
+                .expected_parent_epoch()
+                .map(to_sql_integer)
+                .transpose()?,
+        )
+        .bind(to_sql_integer(envelope.expires_at_unix_seconds())?)
+        .bind(encoded_envelope)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v2 envelope migration"))?;
+        last_envelope_id = Some(envelope.envelope_id().as_bytes().to_vec());
+    }
+
+    let old_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v1 envelope count"))?;
+    let new_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope_v2")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v2 envelope count"))?;
+    if old_count != new_count {
+        return Err(storage_failure("schema envelope migration count"));
+    }
+    sqlx::query("DROP TABLE relay_envelope")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v1 envelope removal"))?;
+    sqlx::query("ALTER TABLE relay_envelope_v2 RENAME TO relay_envelope")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v2 envelope activation"))?;
+    sqlx::query("PRAGMA user_version = 2")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v2 version write"))?;
+    Ok(())
+}
+
+fn envelope_from_v1_row(
+    row: &sqlx::sqlite::SqliteRow,
+    payload: Vec<u8>,
+) -> Result<RelayEnvelope, RelayError> {
+    Ok(RelayEnvelope::new(
+        ProtocolVersion::new(
+            from_sql_u32(row.try_get("version_major").map_err(invalid_row)?)?,
+            from_sql_u32(row.try_get("version_minor").map_err(invalid_row)?)?,
+        )?,
+        RoutingId::from_slice(
+            &row.try_get::<Vec<u8>, _>("routing_id")
+                .map_err(invalid_row)?,
+        )?,
+        EnvelopeId::from_slice(
+            &row.try_get::<Vec<u8>, _>("envelope_id")
+                .map_err(invalid_row)?,
+        )?,
+        delivery_class_from_sql(row.try_get("delivery_class").map_err(invalid_row)?)?,
+        optional_epoch_from_row(row, "expected_parent_epoch")?,
+        from_sql_integer(
+            row.try_get("expires_at_unix_seconds")
+                .map_err(invalid_row)?,
+        )?,
+        payload,
+    )?)
 }
 
 struct ReplaySelection {
@@ -605,15 +826,15 @@ fn select_replay_rows(
     let mut count = 0;
     let mut has_more = false;
     for row in rows {
-        let payload_length = usize::try_from(
-            row.try_get::<i64, _>("payload_length")
+        let envelope_length = usize::try_from(
+            row.try_get::<i64, _>("envelope_length")
                 .map_err(invalid_row)?,
         )
         .map_err(|_| RelayError::InvalidStoredData)?;
-        if !(1..=MAX_RELAY_PAYLOAD_BYTES).contains(&payload_length) {
+        if !(1..=MAX_RELAY_ENVELOPE_BYTES).contains(&envelope_length) {
             return Err(RelayError::InvalidStoredData);
         }
-        let row_budget = payload_length
+        let row_budget = envelope_length
             .checked_add(STORED_ENVELOPE_WIRE_OVERHEAD_BUDGET)
             .ok_or(RelayError::InvalidStoredData)?;
         let next_used_bytes = used_bytes
@@ -647,7 +868,9 @@ mod tests {
     use KonclaveDomainCore::{
         MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_SIZE,
     };
-    use KonclaveProtocolContracts::v1::encode_replay_page;
+    use KonclaveProtocolContracts::v1::{
+        decode_replay_page, encode_relay_envelope, encode_replay_page,
+    };
 
     use super::*;
     use crate::{RelayAuthorizer, RelayClock, RelayPermission, RelayService};
@@ -673,6 +896,105 @@ mod tests {
             vec![payload],
         )
         .unwrap()
+    }
+
+    async fn create_v1_pool(path: &Path) -> SqlitePool {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE relay_route (
+                routing_id BLOB PRIMARY KEY,
+                next_cursor INTEGER NOT NULL,
+                current_epoch INTEGER NOT NULL
+             ) WITHOUT ROWID",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE relay_envelope (
+                routing_id BLOB NOT NULL,
+                cursor INTEGER NOT NULL,
+                envelope_id BLOB NOT NULL,
+                version_major INTEGER NOT NULL,
+                version_minor INTEGER NOT NULL,
+                delivery_class INTEGER NOT NULL,
+                expected_parent_epoch INTEGER,
+                expires_at_unix_seconds INTEGER NOT NULL,
+                payload BLOB NOT NULL,
+                PRIMARY KEY (routing_id, cursor),
+                UNIQUE (envelope_id)
+             ) WITHOUT ROWID",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE relay_acknowledgment (
+                routing_id BLOB NOT NULL,
+                principal_id BLOB NOT NULL,
+                cursor INTEGER NOT NULL,
+                PRIMARY KEY (routing_id, principal_id)
+             ) WITHOUT ROWID",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA user_version = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn insert_v1_row(
+        pool: &SqlitePool,
+        envelope: &RelayEnvelope,
+        cursor: u64,
+        payload: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO relay_route (routing_id, next_cursor, current_epoch)
+             VALUES (?1, ?2, 0)
+             ON CONFLICT(routing_id)
+             DO UPDATE SET next_cursor = MAX(next_cursor, excluded.next_cursor)",
+        )
+        .bind(envelope.routing_id().as_bytes().as_slice())
+        .bind(to_sql_integer(cursor + 1).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO relay_envelope (
+                routing_id, cursor, envelope_id, version_major, version_minor,
+                delivery_class, expected_parent_epoch, expires_at_unix_seconds, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(envelope.routing_id().as_bytes().as_slice())
+        .bind(to_sql_integer(cursor).unwrap())
+        .bind(envelope.envelope_id().as_bytes().as_slice())
+        .bind(i64::from(envelope.version().major()))
+        .bind(i64::from(envelope.version().minor()))
+        .bind(delivery_class_to_sql(envelope.delivery_class()))
+        .bind(
+            envelope
+                .expected_parent_epoch()
+                .map(to_sql_integer)
+                .transpose()
+                .unwrap(),
+        )
+        .bind(to_sql_integer(envelope.expires_at_unix_seconds()).unwrap())
+        .bind(payload)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -894,6 +1216,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_preserves_unknown_envelope_fields_exactly() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let envelope = envelope(12, 13, DeliveryClass::GroupApplication, None, 14);
+        let mut encoded = encode_relay_envelope(&envelope).unwrap();
+        encoded.extend_from_slice(&[0xa0, 0x06, 0x07]);
+        repository
+            .submit_encoded(&envelope, &encoded, 1)
+            .await
+            .unwrap();
+
+        let replay = repository
+            .replay_encoded(ReplayRequest::new(envelope.routing_id(), 0, 100).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            replay
+                .windows(encoded.len())
+                .any(|window| window == encoded)
+        );
+        assert_eq!(decode_replay_page(&replay).unwrap().next_cursor(), 1);
+    }
+
+    #[tokio::test]
     async fn sequence_exhaustion_is_distinct_from_a_stale_epoch() {
         let repository = SqliteRelayRepository::connect_memory().await.unwrap();
         let route = RoutingId::from_bytes(bytes(10));
@@ -949,7 +1294,7 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::query("PRAGMA user_version = 2")
+        sqlx::query("PRAGMA user_version = 3")
             .execute(&pool)
             .await
             .unwrap();
@@ -957,8 +1302,76 @@ mod tests {
 
         assert_eq!(
             SqliteRelayRepository::connect(&path).await.err(),
-            Some(RelayError::UnsupportedSchemaVersion { actual: 2 })
+            Some(RelayError::UnsupportedSchemaVersion { actual: 3 })
         );
+    }
+
+    #[tokio::test]
+    async fn schema_v1_migrates_existing_payloads_to_exact_envelope_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let envelope = envelope(15, 16, DeliveryClass::GroupApplication, None, 17);
+        insert_v1_row(&pool, &envelope, 1, envelope.payload()).await;
+        pool.close().await;
+
+        let repository = SqliteRelayRepository::connect(&path).await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 2);
+        let replay = repository
+            .replay_encoded(ReplayRequest::new(envelope.routing_id(), 0, 100).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            replay
+                .windows(envelope.payload().len())
+                .any(|window| { window == envelope.payload() })
+        );
+        assert_eq!(decode_replay_page(&replay).unwrap().next_cursor(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_schema_v1_migration_rolls_back_every_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let valid = envelope(18, 1, DeliveryClass::GroupApplication, None, 19);
+        let invalid = envelope(18, 2, DeliveryClass::GroupApplication, None, 20);
+        insert_v1_row(&pool, &valid, 1, valid.payload()).await;
+        insert_v1_row(&pool, &invalid, 2, &[]).await;
+        pool.close().await;
+
+        assert!(SqliteRelayRepository::connect(&path).await.is_err());
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let old_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let v2_table_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'relay_envelope_v2'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(old_count, 2);
+        assert_eq!(v2_table_count, 0);
     }
 
     #[tokio::test]
@@ -979,10 +1392,10 @@ mod tests {
             [
                 "cursor",
                 "delivery_class",
+                "encoded_envelope",
                 "envelope_id",
                 "expected_parent_epoch",
                 "expires_at_unix_seconds",
-                "payload",
                 "routing_id",
                 "version_major",
                 "version_minor",
@@ -991,11 +1404,11 @@ mod tests {
             .map(str::to_string)
             .collect()
         );
-        let payload: Vec<u8> = sqlx::query_scalar("SELECT payload FROM relay_envelope")
+        let encoded: Vec<u8> = sqlx::query_scalar("SELECT encoded_envelope FROM relay_envelope")
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(payload, submission.payload());
+        assert!(decode_relay_envelope(&encoded).unwrap() == submission);
     }
 
     #[tokio::test]

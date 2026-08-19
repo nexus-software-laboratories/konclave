@@ -1,14 +1,6 @@
-mod http;
-#[allow(dead_code)]
-mod observability;
-#[allow(dead_code)]
-mod persistence;
-mod runtime;
-mod service;
-mod websocket;
-
 use std::process::ExitCode;
 
+use KonclaveCommunityRelay as relay;
 use anyhow::Context;
 
 #[tokio::main]
@@ -24,9 +16,9 @@ async fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     if std::env::args().any(|argument| argument == "--healthcheck") {
-        return http::check_health();
+        return relay::check_health();
     }
-    runtime::run_until(wait_for_process_shutdown()).await
+    relay::run_until(wait_for_process_shutdown()).await
 }
 
 async fn wait_for_process_shutdown() {

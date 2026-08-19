@@ -25,12 +25,12 @@ showing isolated clients different histories.
 
 ## SQLite schema
 
-Schema version 1 uses three tables:
+Schema version 2 uses three tables:
 
 - `relay_route` stores the opaque routing identifier, next cursor, and current epoch;
 - `relay_envelope` stores the cursor, globally unique envelope identifier, protocol
   version, delivery class, expected parent epoch, acceptance deadline, and opaque
-  payload;
+  exact encoded envelope;
 - `relay_acknowledgment` stores one monotonic cursor per opaque route and authenticated
   principal.
 
@@ -43,6 +43,10 @@ The database intentionally contains no application plaintext, membership copy,
 sender identity, key, token, or searchable field derived from encrypted content.
 Relay payloads are already end-to-end encrypted; this database is not part of local
 MLS secret custody.
+
+Schema version 2 migrates version 1 payload rows by reconstructing their canonical v1
+envelopes inside one transaction. New submissions retain their exact validated bytes
+so forwarding does not discard additive protobuf fields.
 
 ## Replay and acknowledgment
 

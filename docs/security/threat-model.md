@@ -11,6 +11,7 @@ evidence that implementations honor both.
 - device root private keys and per-conversation MLS private keys;
 - MLS epoch secrets, resumption secrets, and persisted group state;
 - invitation capabilities and local authorization credentials;
+- relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;
 - local daemon control and decrypted history.

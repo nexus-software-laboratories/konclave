@@ -7,6 +7,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 
 - [ADR 0001: Adopt MLS 1.0 with separate Konclave identity, delivery, and wire contracts](../adr/adr-0001-protocol-trust-and-e2ee.md)
 - [ADR 0002: Seal local secrets with explicit platform or operator key custody](../adr/adr-0002-sealed-local-secret-custody.md)
+- [ADR 0003: Keep relay authentication deployment-provided with a hashed bearer-token adapter](../adr/adr-0003-relay-transport-authentication.md)
 
 ## When to write one
 

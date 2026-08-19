@@ -1,19 +1,59 @@
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use KonclaveDomainCore::{
+    AcknowledgeRequest, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
+};
+use KonclaveProtocolContracts::KonclaveProtocolError;
+use KonclaveProtocolContracts::v1::{
+    decode_acknowledge_request, decode_replay_request, encode_acknowledge_request,
+    encode_stored_relay_envelope_preserving,
+};
+use KonclaveRelayCore::{RelayError, RelayPrincipalId};
 use anyhow::{Context, bail};
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::get;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::{Extension, State};
+use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
+use axum::http::{HeaderValue, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_server::Handle;
 use serde::Serialize;
 use tokio::sync::watch;
+use tokio::time::timeout;
+use tower::limit::ConcurrencyLimitLayer;
 
+use crate::access::StaticRelayAccess;
+use crate::application::RelayApplication;
+
+const PROTOBUF_MEDIA_TYPE: &str = "application/protobuf";
+const ERROR_CODE_HEADER: &str = "x-konclave-error-code";
+const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONCURRENT_REQUESTS: usize = 256;
+const ACCESS_FILE_ENV: &str = "KONCLAVE_RELAY_ACCESS_FILE";
+const DATABASE_PATH_ENV: &str = "KONCLAVE_RELAY_DATABASE_PATH";
+const TLS_TERMINATED_ENV: &str = "KONCLAVE_RELAY_TLS_TERMINATED";
+
+/// Immutable dependencies shared by relay HTTP handlers.
 #[derive(Clone)]
-struct HttpState {
+pub struct HttpState {
     service_name: String,
+    application: RelayApplication,
+}
+
+impl HttpState {
+    /// Creates handler state from a service label and initialized application.
+    #[must_use]
+    pub fn new(service_name: impl Into<String>, application: RelayApplication) -> Self {
+        Self {
+            service_name: service_name.into(),
+            application,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -22,16 +62,31 @@ struct HealthResponse {
     service: String,
 }
 
-pub fn router(service_name: impl Into<String>, _shutdown: watch::Receiver<bool>) -> Router {
-    let router = Router::new().route("/healthz", get(health));
-    let websocket_shutdown = _shutdown.clone();
-    let router = router.route(
-        "/ws",
-        get(move |upgrade| crate::websocket::upgrade(upgrade, websocket_shutdown.clone())),
-    );
-    router.with_state(HttpState {
-        service_name: service_name.into(),
-    })
+/// Builds the health, authenticated protobuf, and authenticated WebSocket routes.
+pub fn router(
+    state: HttpState,
+    access: StaticRelayAccess,
+    shutdown: watch::Receiver<bool>,
+) -> Router {
+    let websocket_shutdown = shutdown.clone();
+    let protected = Router::new()
+        .route("/v1/envelopes", post(submit))
+        .route("/v1/replay", post(replay))
+        .route("/v1/acknowledgments", post(acknowledge))
+        .route(
+            "/ws",
+            get(move |upgrade| crate::websocket::upgrade(upgrade, websocket_shutdown.clone())),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            access.clone(),
+            authenticate_request,
+        ));
+
+    Router::new()
+        .route("/healthz", get(health))
+        .merge(protected)
+        .with_state(state)
+        .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
 }
 
 #[allow(dead_code)]
@@ -83,6 +138,12 @@ fn check_health_at(address: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Loads fail-closed relay state and serves until shutdown.
+///
+/// # Errors
+///
+/// Returns an error when configuration, access policy, storage, binding security, or
+/// the HTTP server fails.
 #[allow(dead_code)]
 pub async fn serve_until(
     mut shutdown: watch::Receiver<bool>,
@@ -92,14 +153,26 @@ pub async fn serve_until(
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
         .parse::<SocketAddr>()
         .context("parsing SERVICE_HTTP_ADDRESS")?;
+    let tls_terminated = parse_tls_termination()?;
+    validate_binding(address.ip(), tls_terminated)?;
+
+    let access_path = required_path(ACCESS_FILE_ENV)?;
+    let database_path = required_path(DATABASE_PATH_ENV)?;
+    let access = tokio::task::spawn_blocking(move || StaticRelayAccess::load(&access_path))
+        .await
+        .context("joining relay access-file load")??;
+    let application = RelayApplication::connect(&database_path, access.clone())
+        .await
+        .context("opening relay application")?;
+    let state = HttpState::new(env!("CARGO_PKG_NAME"), application);
+
     let handle = Handle::new();
     let shutdown_handle = handle.clone();
     let router_shutdown = shutdown.clone();
-
     let server = async move {
         axum_server::bind(address)
             .handle(handle)
-            .serve(router(env!("CARGO_PKG_NAME"), router_shutdown).into_make_service())
+            .serve(router(state, access, router_shutdown).into_make_service())
             .await
             .context("serving HTTP requests")
     };
@@ -120,6 +193,137 @@ pub async fn serve_until(
     Ok(())
 }
 
+async fn authenticate_request(
+    State(access): State<StaticRelayAccess>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    match access.authenticate(request.headers()) {
+        Ok(principal) => {
+            request.extensions_mut().insert(principal);
+            next.run(request).await
+        }
+        Err(_) => authentication_error_response(),
+    }
+}
+
+async fn submit(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_RELAY_ENVELOPE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let outcome = match state.application.submit_encoded(principal, &bytes).await {
+        Ok(outcome) => outcome,
+        Err(error) => return relay_error_response(&error),
+    };
+    let bytes = match encode_stored_relay_envelope_preserving(&bytes, outcome.cursor()) {
+        Ok(bytes) => bytes,
+        Err(_) => return internal_error_response(),
+    };
+    protobuf_response(
+        if outcome.duplicate() {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        bytes,
+    )
+}
+
+async fn replay(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_RELAY_CONTROL_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let request = match decode_replay_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let page = match state.application.replay_encoded(principal, request).await {
+        Ok(page) => page,
+        Err(error) => return relay_error_response(&error),
+    };
+    protobuf_response(StatusCode::OK, page)
+}
+
+async fn acknowledge(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_RELAY_CONTROL_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let request = match decode_acknowledge_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let route = request.routing_id();
+    let cursor = match state.application.acknowledge(principal, request).await {
+        Ok(cursor) => cursor,
+        Err(error) => return relay_error_response(&error),
+    };
+    let response = match AcknowledgeRequest::new(route, cursor) {
+        Ok(response) => response,
+        Err(_) => return internal_error_response(),
+    };
+    match encode_acknowledge_request(response) {
+        Ok(bytes) => protobuf_response(StatusCode::OK, bytes),
+        Err(_) => internal_error_response(),
+    }
+}
+
+async fn read_protobuf(request: Request<Body>, maximum: usize) -> Result<Bytes, Response> {
+    read_protobuf_with_timeout(request, maximum, REQUEST_BODY_TIMEOUT).await
+}
+
+async fn read_protobuf_with_timeout(
+    request: Request<Body>,
+    maximum: usize,
+    body_timeout: Duration,
+) -> Result<Bytes, Response> {
+    if request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some(PROTOBUF_MEDIA_TYPE)
+    {
+        return Err(error_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        ));
+    }
+    let body = timeout(
+        body_timeout,
+        to_bytes(request.into_body(), maximum.saturating_add(1)),
+    )
+    .await;
+    match body {
+        Err(_) => Err(error_response(
+            StatusCode::REQUEST_TIMEOUT,
+            "relay_request_timeout",
+        )),
+        Ok(Err(_)) => Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "relay_request_body_invalid",
+        )),
+        Ok(Ok(bytes)) if bytes.len() > maximum => Err(error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "encoded_message_too_large",
+        )),
+        Ok(Ok(bytes)) => Ok(bytes),
+    }
+}
+
 async fn health(State(state): State<HttpState>) -> (StatusCode, Json<HealthResponse>) {
     (
         StatusCode::OK,
@@ -130,10 +334,104 @@ async fn health(State(state): State<HttpState>) -> (StatusCode, Json<HealthRespo
     )
 }
 
+fn protobuf_response(status: StatusCode, bytes: Vec<u8>) -> Response {
+    let mut response = (status, bytes).into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(PROTOBUF_MEDIA_TYPE));
+    response
+}
+
+fn authentication_error_response() -> Response {
+    let mut response = error_response(StatusCode::UNAUTHORIZED, "relay_authentication_failed");
+    response.headers_mut().insert(
+        WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"konclave-relay\""),
+    );
+    response
+}
+
+fn protocol_error_response(error: &KonclaveProtocolError) -> Response {
+    let status = match error {
+        KonclaveProtocolError::EncodedMessageTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        KonclaveProtocolError::UnsupportedMajor { .. } => StatusCode::UPGRADE_REQUIRED,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    error_response(status, error.code())
+}
+
+fn relay_error_response(error: &RelayError) -> Response {
+    let status = match error {
+        RelayError::Unauthorized => StatusCode::FORBIDDEN,
+        RelayError::ExpiredEnvelope => StatusCode::GONE,
+        RelayError::IdempotencyConflict | RelayError::StaleEpoch => StatusCode::CONFLICT,
+        RelayError::InvalidAcknowledgment => StatusCode::UNPROCESSABLE_ENTITY,
+        RelayError::SequenceExhausted
+        | RelayError::ClockUnavailable
+        | RelayError::StorageFailure { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        RelayError::UnsupportedSchemaVersion { .. } | RelayError::InvalidStoredData => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        RelayError::Protocol(error) => {
+            return protocol_error_response(error);
+        }
+        RelayError::EnvelopeEncodingMismatch => StatusCode::BAD_REQUEST,
+        RelayError::Domain(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_response(status, error.code())
+}
+
+fn internal_error_response() -> Response {
+    error_response(StatusCode::INTERNAL_SERVER_ERROR, "relay_internal_error")
+}
+
+fn error_response(status: StatusCode, code: &'static str) -> Response {
+    let mut response = status.into_response();
+    response
+        .headers_mut()
+        .insert(ERROR_CODE_HEADER, HeaderValue::from_static(code));
+    response
+}
+
+fn required_path(name: &'static str) -> anyhow::Result<PathBuf> {
+    let value = std::env::var_os(name).context(format!("{name} is required"))?;
+    if value.is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn parse_tls_termination() -> anyhow::Result<bool> {
+    match std::env::var(TLS_TERMINATED_ENV) {
+        Ok(value) if value == "true" => Ok(true),
+        Ok(_) => bail!("{TLS_TERMINATED_ENV} must be exactly 'true' when set"),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{TLS_TERMINATED_ENV} is not valid Unicode")
+        }
+    }
+}
+
+fn validate_binding(address: IpAddr, tls_terminated: bool) -> anyhow::Result<()> {
+    if address.is_loopback() || tls_terminated {
+        Ok(())
+    } else {
+        bail!(
+            "non-loopback relay binding requires explicit TLS termination through \
+             {TLS_TERMINATED_ENV}=true"
+        )
+    }
+}
+
 #[cfg(test)]
-mod healthcheck_tests {
+mod tests {
+    use std::convert::Infallible;
     use std::net::TcpListener;
     use std::thread;
+
+    use axum::http::header::AUTHORIZATION;
+    use futures_util::stream;
 
     use super::*;
 
@@ -166,5 +464,36 @@ mod healthcheck_tests {
         let error = check_health_at(address).unwrap_err();
         server.join().unwrap();
         assert!(error.to_string().contains("non-success"));
+    }
+
+    #[test]
+    fn remote_bindings_require_explicit_tls_termination() {
+        assert!(validate_binding(IpAddr::from([127, 0, 0, 1]), false).is_ok());
+        assert!(validate_binding(IpAddr::from([0, 0, 0, 0]), true).is_ok());
+        assert!(validate_binding(IpAddr::from([0, 0, 0, 0]), false).is_err());
+    }
+
+    #[test]
+    fn authorization_headers_are_never_response_metadata() {
+        let response = error_response(StatusCode::BAD_REQUEST, "malformed");
+        assert!(!response.headers().contains_key(AUTHORIZATION));
+    }
+
+    #[tokio::test]
+    async fn request_body_read_timeout_returns_a_stable_error() {
+        let request = Request::builder()
+            .header(CONTENT_TYPE, PROTOBUF_MEDIA_TYPE)
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, Infallible>,
+            >()))
+            .unwrap();
+        let response = read_protobuf_with_timeout(request, 1, Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(
+            response.headers().get(ERROR_CODE_HEADER).unwrap(),
+            "relay_request_timeout"
+        );
     }
 }

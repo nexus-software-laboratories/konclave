@@ -55,6 +55,35 @@ pub fn encode_stored_relay_envelope(
     )
 }
 
+/// Encodes a stored envelope while retaining the exact validated envelope bytes.
+///
+/// This is the forwarding-safe form for relays that must preserve additive fields
+/// they do not interpret.
+///
+/// # Errors
+///
+/// Returns a typed protocol or domain error when the envelope bytes are invalid,
+/// the cursor is zero, or the encoded result exceeds the defensive limit.
+pub fn encode_stored_relay_envelope_preserving(
+    encoded_envelope: &[u8],
+    cursor: u64,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    let envelope = decode_relay_envelope(encoded_envelope)?;
+    StoredRelayEnvelope::new(envelope, cursor)?;
+    let encoded_length = stored_preserving_length(encoded_envelope.len(), cursor)?;
+    if encoded_length > STORED_RELAY_ENVELOPE_MAX_BYTES {
+        return Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "StoredRelayEnvelope",
+            maximum: STORED_RELAY_ENVELOPE_MAX_BYTES,
+            actual: encoded_length,
+        });
+    }
+    let mut output = Vec::with_capacity(encoded_length);
+    append_length_delimited(1, encoded_envelope, &mut output);
+    append_varint_field(2, cursor, &mut output);
+    Ok(output)
+}
+
 /// Decodes and validates a stored relay envelope.
 ///
 /// # Errors
@@ -112,6 +141,91 @@ pub fn encode_replay_page(value: &ReplayPage) -> Result<Vec<u8>, KonclaveProtoco
         has_more: value.has_more(),
     };
     encode_bounded(&wire, MAX_REPLAY_PAGE_BYTES, "ReplayPage")
+}
+
+/// Encodes a replay page while retaining every exact validated envelope encoding.
+///
+/// # Errors
+///
+/// Returns a typed protocol or domain error for malformed envelopes, invalid cursor
+/// ordering, excessive count, arithmetic overflow, or an oversized encoded page.
+pub fn encode_replay_page_preserving(
+    envelopes: &[(&[u8], u64)],
+    next_cursor: u64,
+    has_more: bool,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    if envelopes.len() > MAX_REPLAY_PAGE_SIZE {
+        return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+            field: "replay_envelopes",
+            minimum: 0,
+            maximum: MAX_REPLAY_PAGE_SIZE,
+            actual: envelopes.len(),
+        }
+        .into());
+    }
+    let mut previous_cursor = None;
+    let mut encoded_length = 0_usize;
+    let mut stored_lengths = Vec::with_capacity(envelopes.len());
+    for (encoded_envelope, cursor) in envelopes {
+        decode_relay_envelope(encoded_envelope)?;
+        if *cursor == 0 || previous_cursor.is_some_and(|previous| previous >= *cursor) {
+            return Err(KonclaveDomainCore::KonclaveDomainError::InvalidReplayOrder.into());
+        }
+        previous_cursor = Some(*cursor);
+        let stored_length = stored_preserving_length(encoded_envelope.len(), *cursor)?;
+        encoded_length = encoded_length
+            .checked_add(length_delimited_length(stored_length)?)
+            .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+                contract: "ReplayPage",
+                maximum: MAX_REPLAY_PAGE_BYTES,
+                actual: usize::MAX,
+            })?;
+        stored_lengths.push(stored_length);
+    }
+    if previous_cursor.is_some_and(|cursor| next_cursor < cursor) {
+        return Err(KonclaveDomainCore::KonclaveDomainError::InvalidReplayOrder.into());
+    }
+    if next_cursor != 0 {
+        encoded_length = encoded_length
+            .checked_add(varint_field_length(next_cursor))
+            .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+                contract: "ReplayPage",
+                maximum: MAX_REPLAY_PAGE_BYTES,
+                actual: usize::MAX,
+            })?;
+    }
+    if has_more {
+        encoded_length =
+            encoded_length
+                .checked_add(2)
+                .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+                    contract: "ReplayPage",
+                    maximum: MAX_REPLAY_PAGE_BYTES,
+                    actual: usize::MAX,
+                })?;
+    }
+    if encoded_length > MAX_REPLAY_PAGE_BYTES {
+        return Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "ReplayPage",
+            maximum: MAX_REPLAY_PAGE_BYTES,
+            actual: encoded_length,
+        });
+    }
+
+    let mut output = Vec::with_capacity(encoded_length);
+    for ((encoded_envelope, cursor), stored_length) in envelopes.iter().zip(stored_lengths) {
+        append_key(1, 2, &mut output);
+        append_varint(stored_length as u64, &mut output);
+        append_length_delimited(1, encoded_envelope, &mut output);
+        append_varint_field(2, *cursor, &mut output);
+    }
+    if next_cursor != 0 {
+        append_varint_field(2, next_cursor, &mut output);
+    }
+    if has_more {
+        append_varint_field(3, 1, &mut output);
+    }
+    Ok(output)
 }
 
 /// Decodes and validates a bounded replay page.
@@ -267,5 +381,108 @@ fn delivery_class_from_wire(value: i32) -> Result<DeliveryClass, KonclaveProtoco
             field: "delivery_class",
             value,
         }),
+    }
+}
+
+fn stored_preserving_length(
+    encoded_envelope_length: usize,
+    cursor: u64,
+) -> Result<usize, KonclaveProtocolError> {
+    length_delimited_length(encoded_envelope_length)?
+        .checked_add(varint_field_length(cursor))
+        .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "StoredRelayEnvelope",
+            maximum: STORED_RELAY_ENVELOPE_MAX_BYTES,
+            actual: usize::MAX,
+        })
+}
+
+fn length_delimited_length(payload_length: usize) -> Result<usize, KonclaveProtocolError> {
+    1_usize
+        .checked_add(varint_length(payload_length as u64))
+        .and_then(|length| length.checked_add(payload_length))
+        .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "ProtocolBuffers",
+            maximum: usize::MAX,
+            actual: usize::MAX,
+        })
+}
+
+fn varint_field_length(value: u64) -> usize {
+    1 + varint_length(value)
+}
+
+fn varint_length(mut value: u64) -> usize {
+    let mut length = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        length += 1;
+    }
+    length
+}
+
+fn append_length_delimited(field_number: u32, value: &[u8], output: &mut Vec<u8>) {
+    append_key(field_number, 2, output);
+    append_varint(value.len() as u64, output);
+    output.extend_from_slice(value);
+}
+
+fn append_varint_field(field_number: u32, value: u64, output: &mut Vec<u8>) {
+    append_key(field_number, 0, output);
+    append_varint(value, output);
+}
+
+fn append_key(field_number: u32, wire_type: u8, output: &mut Vec<u8>) {
+    append_varint(
+        (u64::from(field_number) << 3) | u64::from(wire_type),
+        output,
+    );
+}
+
+fn append_varint(mut value: u64, output: &mut Vec<u8>) {
+    while value >= 0x80 {
+        output.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+#[cfg(test)]
+mod preserving_tests {
+    use KonclaveDomainCore::{
+        DeliveryClass, EnvelopeId, ProtocolVersion, RelayEnvelope, RoutingId,
+    };
+
+    use super::*;
+
+    fn envelope() -> RelayEnvelope {
+        RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            RoutingId::from_bytes([1; RoutingId::LENGTH]),
+            EnvelopeId::from_bytes([2; EnvelopeId::LENGTH]),
+            DeliveryClass::GroupApplication,
+            None,
+            100,
+            vec![3],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn forwarding_encoders_retain_unknown_envelope_fields() {
+        let mut encoded = encode_relay_envelope(&envelope()).unwrap();
+        encoded.extend_from_slice(&[0xa0, 0x06, 0x07]);
+
+        let stored = encode_stored_relay_envelope_preserving(&encoded, 1).unwrap();
+        assert!(
+            stored
+                .windows(encoded.len())
+                .any(|window| window == encoded)
+        );
+        assert_eq!(decode_stored_relay_envelope(&stored).unwrap().cursor(), 1);
+
+        let page = encode_replay_page_preserving(&[(&encoded, 1)], 1, false).unwrap();
+        assert!(page.windows(encoded.len()).any(|window| window == encoded));
+        assert_eq!(decode_replay_page(&page).unwrap().next_cursor(), 1);
     }
 }

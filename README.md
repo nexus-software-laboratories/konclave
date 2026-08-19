@@ -34,6 +34,10 @@ cargo run -p KonclaveCommunityRelay
 cargo run -p KonclaveCommandLine -- --help
 ```
 
+`KonclaveCommunityRelay` requires the access-document and SQLite paths described in
+the [relay transport authentication contract](docs/protocol/relay-authentication.md).
+Non-loopback deployments also require trusted TLS termination.
+
 Run the administration console from its application directory:
 
 ```shell

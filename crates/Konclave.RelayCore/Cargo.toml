@@ -11,11 +11,12 @@ sqlite = ["dep:sqlx"]
 
 [dependencies]
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
 async-trait.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, features = ["sqlite"], optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
-KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRequest, RoutingId};
+use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use async_trait::async_trait;
 
 use crate::{RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
@@ -106,6 +107,28 @@ where
         self.repository.submit(envelope, now).await
     }
 
+    /// Decodes, authorizes, and durably submits exact envelope bytes without
+    /// discarding additive protobuf fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol, authorization, expiration, sequencing,
+    /// idempotency, or storage error.
+    pub async fn submit_encoded(
+        &self,
+        principal: RelayPrincipalId,
+        encoded_envelope: &[u8],
+    ) -> Result<SubmitResult, RelayError> {
+        let envelope = decode_relay_envelope(encoded_envelope)?;
+        self.authorizer
+            .authorize(principal, envelope.routing_id(), RelayPermission::Send)
+            .await?;
+        let now = self.clock.now_unix_seconds()?;
+        self.repository
+            .submit_encoded(&envelope, encoded_envelope, now)
+            .await
+    }
+
     /// Authorizes and returns one bounded replay page.
     ///
     /// # Errors
@@ -120,6 +143,23 @@ where
             .authorize(principal, request.routing_id(), RelayPermission::Replay)
             .await?;
         self.repository.replay(request).await
+    }
+
+    /// Authorizes and returns one bounded replay page that preserves exact envelope
+    /// encodings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed authorization, protocol, or storage error.
+    pub async fn replay_encoded(
+        &self,
+        principal: RelayPrincipalId,
+        request: ReplayRequest,
+    ) -> Result<Vec<u8>, RelayError> {
+        self.authorizer
+            .authorize(principal, request.routing_id(), RelayPermission::Replay)
+            .await?;
+        self.repository.replay_encoded(request).await
     }
 
     /// Authorizes and records one monotonic cursor acknowledgment.
