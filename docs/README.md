@@ -23,6 +23,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Node dependency installation](development/node-dependencies.md)
 - [Rust service composition](development/rust-services.md)
 - [Conformance and security evidence](development/conformance.md)
+- [Sealed secret storage](development/secret-storage.md)
 - [Repository controls](development/repository-controls.md)
 - [PitCrew CI](development/pitcrew-ci.md)
 

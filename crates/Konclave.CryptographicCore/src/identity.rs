@@ -3,9 +3,11 @@ use KonclaveDomainCore::{
     Ed25519PublicKey, Ed25519Signature, Invitation, InvitationId, InvitationNonce, ProtocolVersion,
     SignatureScheme,
 };
+use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer};
 use mls_rs::{CipherSuite, CipherSuiteProvider, CryptoProvider};
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
 use mls_rs_crypto_awslc::{AwsLcCipherSuite, AwsLcCryptoProvider};
+use zeroize::Zeroizing;
 
 use crate::KonclaveCryptographicError;
 
@@ -14,6 +16,7 @@ const DEVICE_ID_DOMAIN: &[u8] = b"konclave-device-id-v1\0";
 const CREDENTIAL_DOMAIN: &[u8] = b"konclave-device-credential-binding-v1\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] = b"konclave-device-credential-binding-hash-v1\0";
 const INVITATION_DOMAIN: &[u8] = b"konclave-invitation-v1\0";
+const DEVICE_IDENTITY_MAGIC: &[u8; 4] = b"KDI1";
 
 /// Device-scoped root identity whose secret key remains inside the trusted daemon.
 pub struct DeviceIdentity {
@@ -69,6 +72,87 @@ impl DeviceIdentity {
             &cipher_suite,
             ConversationId::LENGTH,
         )?)?)
+    }
+
+    /// Seals this device-root identity for one bounded local profile identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed storage error when context construction or authenticated
+    /// encryption fails.
+    pub fn seal(
+        &self,
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+    ) -> Result<SealedBlob, KonclaveCryptographicError> {
+        let secret = self.secret_key.as_bytes();
+        let length = u16::try_from(secret.len()).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity encoding",
+            }
+        })?;
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(
+            DEVICE_IDENTITY_MAGIC.len() + 2 + secret.len(),
+        ));
+        plaintext.extend_from_slice(DEVICE_IDENTITY_MAGIC);
+        plaintext.extend_from_slice(&length.to_be_bytes());
+        plaintext.extend_from_slice(secret);
+        let context = device_identity_context(profile_id)?;
+        sealer.seal(&context, &plaintext).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity sealing",
+            }
+        })
+    }
+
+    /// Reopens one sealed device-root identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when authentication, framing, key derivation, or
+    /// identifier reconstruction fails.
+    pub fn open(
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+        blob: &SealedBlob,
+    ) -> Result<Self, KonclaveCryptographicError> {
+        let context = device_identity_context(profile_id)?;
+        let plaintext = sealer.open(&context, blob).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity opening",
+            }
+        })?;
+        if plaintext.len() < DEVICE_IDENTITY_MAGIC.len() + 2
+            || &plaintext[..4] != DEVICE_IDENTITY_MAGIC
+        {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity decoding",
+            });
+        }
+        let length = u16::from_be_bytes(plaintext[4..6].try_into().map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity decoding",
+            }
+        })?) as usize;
+        if plaintext.len() != 6 + length {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity decoding",
+            });
+        }
+        let provider = configured_provider();
+        let cipher_suite = cipher_suite(&provider)?;
+        let secret_key = SignatureSecretKey::new(plaintext[6..].to_vec());
+        let public_key = cipher_suite
+            .signature_key_derive_public(&secret_key)
+            .map_err(|_| provider_failure("device root public key derivation"))?;
+        let public_key = Ed25519PublicKey::from_slice(public_key.as_bytes())?;
+        let device_id = derive_device_id_with_suite(&cipher_suite, public_key)?;
+        Ok(Self {
+            provider,
+            secret_key,
+            public_key,
+            device_id,
+        })
     }
 
     /// Generates and signs a distinct MLS signing identity for one conversation.
@@ -440,6 +524,16 @@ fn random_bytes(
     cipher_suite
         .random_bytes_vec(length)
         .map_err(|_| provider_failure("random byte generation"))
+}
+
+fn device_identity_context(
+    profile_id: &[u8],
+) -> Result<SecretRecordContext, KonclaveCryptographicError> {
+    SecretRecordContext::new(SecretRecordKind::DeviceRootIdentity, profile_id.to_vec()).map_err(
+        |_| KonclaveCryptographicError::SecretStorageFailure {
+            operation: "device identity context",
+        },
+    )
 }
 
 const fn provider_failure(operation: &'static str) -> KonclaveCryptographicError {

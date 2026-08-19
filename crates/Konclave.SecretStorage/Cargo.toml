@@ -6,11 +6,17 @@ license = "Apache-2.0"
 rust-version = "1.88"
 
 [features]
-default = ["native-keyring"]
+default = ["native-keyring", "sqlite"]
 native-keyring = ["dep:keyring"]
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 aws-lc-rs.workspace = true
 keyring = { workspace = true, optional = true }
+mls-rs-core.workspace = true
+rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

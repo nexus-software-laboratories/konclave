@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
+ "KonclaveSecretStorage",
  "mls-rs",
  "mls-rs-core",
  "mls-rs-crypto-awslc",
@@ -39,6 +40,7 @@ name = "KonclaveSecretStorage"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
+ "mls-rs-core",
  "thiserror",
  "zeroize",
 ]
