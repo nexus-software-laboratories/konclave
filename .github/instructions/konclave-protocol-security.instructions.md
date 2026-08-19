@@ -26,6 +26,9 @@ scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter bo
 - Raw relay bearer tokens remain sealed at clients and never enter relay
   configuration, persistence, logs, or telemetry. Non-loopback bearer transport
   requires trusted TLS termination.
+- Credential-bearing relay clients disable redirects and automatic proxy discovery.
+  Dependency logging that can format handshakes or frames is removed at compile time
+  unless the dependency proves credential and payload redaction.
 - Treat relay non-equivocation as an explicit initial trust assumption. Compare-and-set
   does not defend isolated clients from a malicious split view; observed conflicts
   halt security-sensitive sending.

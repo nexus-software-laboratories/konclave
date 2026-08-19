@@ -115,6 +115,12 @@ WebSocket protocol-error code 1002, route denial and heartbeat timeout use
 policy-violation code 1008, server failures use 1011, and coordinated shutdown uses
 1001.
 
+Endpoint clients do not follow HTTP redirects, bound chunked and length-declared
+responses before allocation, and reconnect WebSocket watches from the last durable
+cursor. They service Ping frames while awaiting replay pages and classify only stable
+bounded relay codes; response text, transport-library diagnostics, URLs, and bearer
+values do not become application errors.
+
 ## Runtime configuration
 
 The community relay requires:

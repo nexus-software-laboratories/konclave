@@ -27,6 +27,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Conformance and security evidence](development/conformance.md)
 - [Sealed secret storage](development/secret-storage.md)
 - [Opaque relay storage](development/relay-storage.md)
+- [Outbound relay client](development/relay-client.md)
 - [Repository controls](development/repository-controls.md)
 - [PitCrew CI](development/pitcrew-ci.md)
 

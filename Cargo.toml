@@ -6,7 +6,9 @@ members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Ko
 async-trait = "0.1.92"
 aws-lc-rs = { version = "=1.16.3", default-features = false, features = ["alloc", "aws-lc-sys"] }
 base64 = "0.22.1"
+futures-util = "0.3.34"
 keyring = "=4.1.6"
+log = { version = "0.4.33", features = ["max_level_debug", "release_max_level_info"] }
 mls-rs = { version = "=0.55.3", default-features = false, features = ["std", "rfc_compliant", "tree_index", "fast_serialize"] }
 mls-rs-core = { version = "=0.27.0", default-features = false, features = ["std", "rfc_compliant", "fast_serialize"] }
 mls-rs-crypto-awslc = "=0.25.0"
@@ -14,7 +16,11 @@ prost = "0.14.4"
 prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.10.9"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls"], default-features = false }
 thiserror = "2.0.20"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+url = "2.5.8"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }

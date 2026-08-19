@@ -76,6 +76,9 @@ crash or excessive-allocation case becomes a permanent regression input.
 - test cancellation, backpressure, bounded watches, reconnect, and daemon restart;
 - verify CLI and Copilot adapters produce the same domain outcomes through the public
   client contract.
+- verify the outbound relay client refuses insecure remote endpoints and redirects,
+  bounds length-declared and chunked responses, services watch heartbeats, and
+  reconnects from the last durable cursor.
 - verify sender attribution, authorization, counters, and replay state derive from
   the authenticated MLS sender even when application bytes attempt impersonation.
 

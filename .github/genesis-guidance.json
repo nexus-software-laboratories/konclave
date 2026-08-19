@@ -103,6 +103,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/relay-client.md",
+        "title": "Outbound relay client",
+        "section": "Development",
+        "order": 29,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",
