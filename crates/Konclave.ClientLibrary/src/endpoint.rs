@@ -59,6 +59,12 @@ impl RelayEndpoint {
             .map_err(|_| KonclaveClientError::InvalidEndpoint)?;
         Ok(url)
     }
+
+    /// Returns the normalized non-secret endpoint URL.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.base.as_str()
+    }
 }
 
 fn is_loopback(url: &Url) -> bool {
