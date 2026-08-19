@@ -43,6 +43,14 @@ jq -e '
     and .smoke.kind == "process"
 ' "$config_path" >/dev/null
 
+build_helper="$(
+    bash "$workspace_root/scripts/ci/Initialize-PitCrewBuildHelper.sh"
+)"
+if [ ! -x "$build_helper" ]; then
+    echo '::error::Pinned PitCrew build helper is not executable.'
+    exit 1
+fi
+
 declare -a buildctl_arguments=(
     --addr "$BUILDKIT_HOST"
     --tlsservername buildkitd
@@ -52,7 +60,7 @@ declare -a buildctl_arguments=(
 buildctl "${buildctl_arguments[@]}" debug workers >/dev/null
 
 archive="$CONTAINER_VALIDATION_ROOT/${image_name}-${architecture}.tar"
-pitcrew-build-image \
+"$build_helper" \
     --image-ref \
     "local/${image_name}:validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${architecture}" \
     --context "$workspace_root" \

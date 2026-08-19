@@ -34,6 +34,11 @@ The image-builder worker has no Docker socket. The workflow connects to
 `buildkitd:1234` with a job-scoped mTLS client and builds one
 `linux/amd64` OCI archive for the Community Relay.
 
+The job bootstraps the published PitCrew `v0.10.5` build helper from its
+immutable source commit and verifies the complete script SHA-256 before execution.
+This keeps the repository's cleanup contract reproducible even while worker images
+roll forward independently.
+
 The repository stores only client-side material:
 
 - `BUILDKIT_CLIENT_CA_PEM_B64`;
