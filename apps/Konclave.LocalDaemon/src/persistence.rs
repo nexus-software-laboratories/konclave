@@ -1018,6 +1018,7 @@ impl ProfileStore {
         &self,
         conversation_id: ConversationId,
     ) -> Result<Vec<PendingInbox>, ProfileStoreError> {
+        self.conversation_routing_id(conversation_id)?;
         let metadata = {
             let connection = self.lock()?;
             let mut statement = connection
@@ -1169,6 +1170,7 @@ impl ProfileStore {
         if !(1..=MAX_MESSAGE_PAGE_SIZE).contains(&limit) {
             return Err(ProfileStoreError::InvalidTransition);
         }
+        self.conversation_routing_id(conversation_id)?;
         let metadata = {
             let connection = self.lock()?;
             let mut statement = connection
@@ -2507,6 +2509,34 @@ mod tests {
                 && message.cursor == 2
                 && message.sender == device_id
         ));
+    }
+
+    #[test]
+    fn journal_reads_reject_unknown_conversations_and_invalid_page_bounds() {
+        let fixture = conversation_fixture("journal-read-validation-test");
+        let unknown = ConversationId::from_bytes([8; ConversationId::LENGTH]);
+        assert_eq!(
+            fixture.store.incomplete_inbox(unknown).err(),
+            Some(ProfileStoreError::ConversationNotFound)
+        );
+        assert_eq!(
+            fixture.store.load_messages(unknown, 0, 10).err(),
+            Some(ProfileStoreError::ConversationNotFound)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_messages(fixture.conversation_id, 0, 0)
+                .err(),
+            Some(ProfileStoreError::InvalidTransition)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_messages(fixture.conversation_id, 0, MAX_MESSAGE_PAGE_SIZE + 1)
+                .err(),
+            Some(ProfileStoreError::InvalidTransition)
+        );
     }
 
     #[test]
