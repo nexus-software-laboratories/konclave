@@ -109,3 +109,10 @@ cursor acceptance. Ready envelopes are retried before a newer message may reserv
 counter, so concurrent callers cannot reorder one sender's relay sequence. Blocking
 cryptographic and SQLite work runs outside Tokio executor threads; the ordered relay
 submission gate is the only lock intentionally held across network I/O.
+
+Inbound replay rejects pages that move behind the requested durable cursor. Each
+application envelope is journaled before decryption, the authenticated sender and MLS
+epoch are sealed before receiver-ratchet persistence, and the contiguous cursor is
+advanced before relay acknowledgment. Recovery distinguishes a ratchet that still
+needs persistence from the exact already-consumed MLS generation; completed replay
+returns the sealed message without repeating side effects.

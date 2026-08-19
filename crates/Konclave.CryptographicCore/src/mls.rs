@@ -11,6 +11,7 @@ use KonclaveProtocolContracts::v1::{
     decode_conversation_state, encode_conversation_state, encode_membership_change,
 };
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
+use mls_rs::client::MlsError;
 use mls_rs::client_builder::{
     BaseConfig, PaddingMode, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider,
     WithKeyPackageRepo, WithMlsRules,
@@ -1104,9 +1105,13 @@ impl MlsConversation {
             "application decryption",
         )?;
         let mut candidate = self.group.clone();
-        let received = candidate
-            .process_incoming_message(message)
-            .map_err(|_| mls_failure("application decryption"))?;
+        let received = match candidate.process_incoming_message(message) {
+            Ok(received) => received,
+            Err(MlsError::KeyMissing(_)) => {
+                return Err(KonclaveCryptographicError::ApplicationMessageAlreadyProcessed);
+            }
+            Err(_) => return Err(mls_failure("application decryption")),
+        };
         let ReceivedMessage::ApplicationMessage(description) = received else {
             return Err(KonclaveCryptographicError::UnexpectedMlsMessage {
                 operation: "application decryption",

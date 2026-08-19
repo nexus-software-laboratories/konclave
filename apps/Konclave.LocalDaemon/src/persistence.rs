@@ -1185,6 +1185,53 @@ impl ProfileStore {
         }
     }
 
+    /// Loads one exact inbox operation for recovery or idempotent replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, malformed, authentication, protocol, or storage error.
+    pub(crate) fn inbox_operation(
+        &self,
+        conversation_id: ConversationId,
+        cursor: u64,
+    ) -> Result<InboxOperation, ProfileStoreError> {
+        let metadata: Option<(Vec<u8>, i64)> = self
+            .lock()?
+            .query_row(
+                "SELECT
+                    CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
+                    status
+                 FROM daemon_inbox
+                 WHERE conversation_id = ?1 AND cursor = ?2",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    to_sql_integer(cursor)?
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let (envelope_id, status) = metadata.ok_or(ProfileStoreError::InvalidTransition)?;
+        let envelope_id =
+            EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
+        let stored = self.load_inbox_envelope(envelope_id)?;
+        if stored.cursor() != cursor {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        match status {
+            1 => Ok(InboxOperation::Received { stored }),
+            2 => Ok(InboxOperation::MessageSaved {
+                stored,
+                message: self.load_message_at(conversation_id, cursor)?,
+            }),
+            3 => Ok(InboxOperation::Complete {
+                stored,
+                message: self.load_message_at(conversation_id, cursor)?,
+            }),
+            _ => Err(ProfileStoreError::CorruptData),
+        }
+    }
+
     /// Loads bounded incomplete inbox operations in durable cursor order.
     ///
     /// # Errors
@@ -2152,6 +2199,20 @@ pub(crate) enum PendingInbox {
     },
     MessageSaved {
         conversation_id: ConversationId,
+        stored: StoredRelayEnvelope,
+        message: StoredApplicationMessage,
+    },
+}
+
+pub(crate) enum InboxOperation {
+    Received {
+        stored: StoredRelayEnvelope,
+    },
+    MessageSaved {
+        stored: StoredRelayEnvelope,
+        message: StoredApplicationMessage,
+    },
+    Complete {
         stored: StoredRelayEnvelope,
         message: StoredApplicationMessage,
     },

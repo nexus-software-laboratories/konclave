@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, MessageId, StoredRelayEnvelope,
+    AcknowledgeRequest, ApplicationContent, ApplicationMessage, ConversationId, MessageId,
+    ReplayRequest, StoredRelayEnvelope,
 };
 use thiserror::Error;
 
 use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, PreparedApplication,
+    ProcessedApplication,
 };
 
 /// Outbound application input with caller-supplied display and expiry times.
@@ -24,6 +26,12 @@ pub(crate) struct SentApplication {
     pub(crate) conversation_id: ConversationId,
     pub(crate) message: ApplicationMessage,
     pub(crate) cursor: u64,
+}
+
+/// One bounded replay result after durable local completion and acknowledgment.
+pub(crate) struct ReplayBatch {
+    pub(crate) messages: Vec<ProcessedApplication>,
+    pub(crate) has_more: bool,
 }
 
 /// Async relay composition over synchronous sealed conversation state.
@@ -93,6 +101,60 @@ where
         self.retry_ready_locked().await
     }
 
+    /// Replays, processes, and acknowledges one bounded page for a conversation.
+    ///
+    /// The relay acknowledgment is sent only after every returned cursor is durably
+    /// complete in the sealed local journal. A processing failure leaves the prior
+    /// contiguous cursor unchanged for exact replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a request, task, conversation, relay, or response-integrity error.
+    pub(crate) async fn replay_once(
+        &self,
+        conversation_id: ConversationId,
+        limit: u32,
+    ) -> Result<ReplayBatch, ApplicationServiceError> {
+        let conversations = self.conversations.clone();
+        let (routing_id, after_cursor) =
+            tokio::task::spawn_blocking(move || conversations.replay_position(conversation_id))
+                .await
+                .map_err(|_| ApplicationServiceError::Task)??;
+        let request = ReplayRequest::new(routing_id, after_cursor, limit)
+            .map_err(|_| ApplicationServiceError::Protocol)?;
+        let page = self.transport.replay(request).await?;
+        if page.next_cursor() < after_cursor
+            || page
+                .envelopes()
+                .iter()
+                .any(|stored| stored.cursor() <= after_cursor)
+        {
+            return Err(ApplicationServiceError::InvalidRelayResponse);
+        }
+        let has_more = page.has_more();
+        let envelopes = page.envelopes().to_vec();
+        let mut messages = Vec::with_capacity(envelopes.len());
+        for stored in envelopes {
+            let conversations = self.conversations.clone();
+            messages.push(
+                tokio::task::spawn_blocking(move || {
+                    conversations.process_inbound_application(conversation_id, &stored)
+                })
+                .await
+                .map_err(|_| ApplicationServiceError::Task)??,
+            );
+        }
+        if let Some(last) = messages.last() {
+            let acknowledgment = AcknowledgeRequest::new(routing_id, last.cursor)
+                .map_err(|_| ApplicationServiceError::Protocol)?;
+            let effective = self.transport.acknowledge(acknowledgment).await?;
+            if effective != acknowledgment {
+                return Err(ApplicationServiceError::InvalidRelayResponse);
+            }
+        }
+        Ok(ReplayBatch { messages, has_more })
+    }
+
     async fn retry_ready_locked(&self) -> Result<usize, ApplicationServiceError> {
         let conversations = self.conversations.clone();
         let pending = tokio::task::spawn_blocking(move || conversations.ready_outbox())
@@ -143,10 +205,15 @@ pub(crate) enum ApplicationServiceError {
     Relay(#[from] KonclaveClientError),
     #[error("blocking application task failed")]
     Task,
+    #[error("application request is invalid")]
+    Protocol,
+    #[error("relay response does not match the requested operation")]
+    InvalidRelayResponse,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -159,12 +226,16 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+    use crate::conversation::tests::paired_coordinators;
     use crate::persistence::{LockedProfile, ProfileId};
 
     struct RecordingRelay {
         cursor: AtomicU64,
         fail_submit: AtomicBool,
         envelopes: Mutex<Vec<StoredRelayEnvelope>>,
+        replay_pages: Mutex<VecDeque<ReplayPage>>,
+        replay_requests: Mutex<Vec<ReplayRequest>>,
+        acknowledgments: Mutex<Vec<AcknowledgeRequest>>,
     }
 
     impl RecordingRelay {
@@ -173,7 +244,14 @@ mod tests {
                 cursor: AtomicU64::new(0),
                 fail_submit: AtomicBool::new(fail_submit),
                 envelopes: Mutex::new(Vec::new()),
+                replay_pages: Mutex::new(VecDeque::new()),
+                replay_requests: Mutex::new(Vec::new()),
+                acknowledgments: Mutex::new(Vec::new()),
             }
+        }
+
+        fn push_replay_page(&self, page: ReplayPage) {
+            self.replay_pages.lock().unwrap().push_back(page);
         }
     }
 
@@ -193,15 +271,24 @@ mod tests {
             Ok(stored)
         }
 
-        async fn replay(&self, _request: ReplayRequest) -> Result<ReplayPage, KonclaveClientError> {
-            Err(KonclaveClientError::TransportUnavailable)
+        async fn replay(&self, request: ReplayRequest) -> Result<ReplayPage, KonclaveClientError> {
+            self.replay_requests.lock().unwrap().push(request);
+            Ok(self
+                .replay_pages
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    ReplayPage::new(Vec::new(), request.after_cursor(), false).unwrap()
+                }))
         }
 
         async fn acknowledge(
             &self,
-            _request: AcknowledgeRequest,
+            request: AcknowledgeRequest,
         ) -> Result<AcknowledgeRequest, KonclaveClientError> {
-            Err(KonclaveClientError::TransportUnavailable)
+            self.acknowledgments.lock().unwrap().push(request);
+            Ok(request)
         }
 
         async fn connect_watch(
@@ -300,5 +387,60 @@ mod tests {
         assert!(coordinator.ready_outbox().unwrap().is_empty());
         assert_eq!(service.retry_ready().await.unwrap(), 0);
         assert_eq!(service.transport.envelopes.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn replay_completes_before_acknowledging_and_resumes_from_durable_cursor() {
+        let (_root, alice, bob, conversation_id, alice_device_id) = paired_coordinators();
+        let prepared = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::text("replayed message").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let stored = StoredRelayEnvelope::new(prepared.envelope.clone(), 1).unwrap();
+        let service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
+
+        let first = service.replay_once(conversation_id, 100).await.unwrap();
+
+        assert!(!first.has_more);
+        assert_eq!(first.messages.len(), 1);
+        assert_eq!(first.messages[0].sender, alice_device_id);
+        assert!(!first.messages[0].duplicate);
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+        assert_eq!(
+            service.transport.acknowledgments.lock().unwrap().as_slice(),
+            &[AcknowledgeRequest::new(prepared.envelope.routing_id(), 1,).unwrap()]
+        );
+
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(Vec::new(), 1, false).unwrap());
+        let resumed = service.replay_once(conversation_id, 100).await.unwrap();
+        assert!(resumed.messages.is_empty());
+        {
+            let requests = service.transport.replay_requests.lock().unwrap();
+            assert_eq!(requests[0].after_cursor(), 0);
+            assert_eq!(requests[1].after_cursor(), 1);
+        }
+
+        service.transport.push_replay_page(
+            ReplayPage::new(
+                vec![StoredRelayEnvelope::new(prepared.envelope.clone(), 1).unwrap()],
+                1,
+                false,
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            service.replay_once(conversation_id, 100).await,
+            Err(ApplicationServiceError::InvalidRelayResponse)
+        ));
     }
 }
