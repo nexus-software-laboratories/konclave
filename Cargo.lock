@@ -81,6 +81,7 @@ dependencies = [
  "mls-rs",
  "mls-rs-core",
  "mls-rs-crypto-awslc",
+ "tempfile",
  "thiserror",
  "zeroize",
 ]

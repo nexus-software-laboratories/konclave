@@ -44,6 +44,8 @@ set hashes, conformance results, security-review disposition, and known limitati
 - prove key material and plaintext are absent from `Debug`, serialization, logs,
   telemetry, panic messages, and snapshots;
 - verify provider and persistence adapters fail closed.
+- restart from sealed conversation signing material and MLS state across pending join,
+  pending commit, application ratchet, and removed-device tombstone transitions;
 
 ### Property and fuzz testing
 

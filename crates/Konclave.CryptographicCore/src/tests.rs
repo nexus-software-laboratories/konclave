@@ -1,21 +1,324 @@
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole,
-    DeviceCredentialBinding, Ed25519PublicKey, MembershipAuthorization, MembershipChange,
+    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
+    DeviceCredentialBinding, Ed25519PublicKey, Member, MembershipAuthorization, MembershipChange,
     MembershipOperationId, MessageId, ProtocolVersion, RemoveMember, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
     encode_membership_change,
 };
-use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
+use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer};
 
 use crate::{
-    DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit, MlsWelcome,
-    verify_device_credential_binding, verify_invitation,
+    ConversationSigningMaterial, DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage,
+    MlsCommit, MlsConversationClient, MlsWelcome, verify_device_credential_binding,
+    verify_invitation,
 };
 
 fn conversation_id(value: u8) -> ConversationId {
     ConversationId::from_bytes([value; ConversationId::LENGTH])
+}
+
+fn sealer(value: u8) -> SecretSealer {
+    SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([value; 32])).unwrap()
+}
+
+#[test]
+fn sealed_mls_state_recovers_pending_join_commit_ratchets_and_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let conversation_id = conversation_id(9);
+    let alice_identity = DeviceIdentity::generate().unwrap();
+    let bob_identity = DeviceIdentity::generate().unwrap();
+
+    let alice_material = alice_identity
+        .create_conversation_signing_material(conversation_id)
+        .unwrap();
+    let alice_binding = alice_material.binding().clone();
+    let alice_material_blob = alice_material.seal(&sealer(1), b"alice-profile").unwrap();
+    let alice_storage_path = directory.path().join("alice.sqlite");
+    let alice_storage = SealedSqliteMlsStorage::open(&alice_storage_path, sealer(1)).unwrap();
+    let alice_client = MlsConversationClient::with_storage(alice_material, alice_storage).unwrap();
+    let mut alice_group = alice_client.create_group().unwrap();
+
+    let bob_material = bob_identity
+        .create_conversation_signing_material(conversation_id)
+        .unwrap();
+    let bob_binding = bob_material.binding().clone();
+    let bob_material_blob = bob_material.seal(&sealer(2), b"bob-profile").unwrap();
+    let bob_storage_path = directory.path().join("bob.sqlite");
+    let bob_storage = SealedSqliteMlsStorage::open(&bob_storage_path, sealer(2)).unwrap();
+    let mut bob_client = MlsConversationClient::with_storage(bob_material, bob_storage).unwrap();
+    bob_client
+        .register_verified_binding(verify_device_credential_binding(&alice_binding).unwrap())
+        .unwrap();
+    let invitation = alice_identity
+        .issue_invitation(
+            conversation_id,
+            bob_identity.device_id(),
+            ConversationRole::Member,
+            100,
+        )
+        .unwrap();
+    let proof = bob_client
+        .create_join_proof(&bob_identity, invitation, alice_identity.public_key(), 50)
+        .unwrap();
+    let proof_bytes = encode_join_proof(&proof).unwrap();
+    let proof_for_alice = decode_join_proof(&proof_bytes).unwrap();
+    drop(bob_client);
+
+    let bob_material = ConversationSigningMaterial::open(
+        &sealer(2),
+        b"bob-profile",
+        conversation_id,
+        &bob_material_blob,
+    )
+    .unwrap();
+    let bob_storage = SealedSqliteMlsStorage::open(&bob_storage_path, sealer(2)).unwrap();
+    let mut bob_client = MlsConversationClient::with_storage(bob_material, bob_storage).unwrap();
+    bob_client
+        .register_verified_binding(verify_device_credential_binding(&alice_binding).unwrap())
+        .unwrap();
+    bob_client
+        .restore_join_proof(&proof, alice_identity.public_key(), 50)
+        .unwrap();
+
+    let orphaned_add = alice_group.create_add_commit(proof_for_alice, 50).unwrap();
+    let alice_parent_state = alice_group.state().clone();
+    drop(alice_group);
+
+    let alice_material = ConversationSigningMaterial::open(
+        &sealer(1),
+        b"alice-profile",
+        conversation_id,
+        &alice_material_blob,
+    )
+    .unwrap();
+    let alice_storage = SealedSqliteMlsStorage::open(&alice_storage_path, sealer(1)).unwrap();
+    let alice_client = MlsConversationClient::with_storage(alice_material, alice_storage).unwrap();
+    let mut alice_group = alice_client
+        .restore_group(
+            alice_parent_state.clone(),
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+    alice_group.reject_pending_commit().unwrap();
+    let add = alice_group
+        .create_add_commit(decode_join_proof(&proof_bytes).unwrap(), 50)
+        .unwrap();
+    let alice_pending_state = add.next_state().clone();
+    drop(orphaned_add);
+    drop(alice_group);
+
+    let wrong_pending_state = ConversationState::new(
+        alice_pending_state.version(),
+        alice_pending_state.conversation_id(),
+        alice_pending_state.epoch(),
+        alice_pending_state
+            .members()
+            .iter()
+            .copied()
+            .map(|member| {
+                Member::new(
+                    member.device_id(),
+                    if member.device_id() == bob_identity.device_id() {
+                        ConversationRole::Administrator
+                    } else {
+                        member.role()
+                    },
+                    member.joined_epoch(),
+                )
+            })
+            .collect(),
+        alice_pending_state.consumed_invitation_ids().to_vec(),
+    )
+    .unwrap();
+    let alice_material = ConversationSigningMaterial::open(
+        &sealer(1),
+        b"alice-profile",
+        conversation_id,
+        &alice_material_blob,
+    )
+    .unwrap();
+    let alice_storage = SealedSqliteMlsStorage::open(&alice_storage_path, sealer(1)).unwrap();
+    let alice_client = MlsConversationClient::with_storage(alice_material, alice_storage).unwrap();
+    let mut mismatched_group = alice_client
+        .restore_group(
+            alice_parent_state.clone(),
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            Some(wrong_pending_state),
+        )
+        .unwrap();
+    assert_eq!(
+        mismatched_group.accept_pending_commit().unwrap_err(),
+        KonclaveCryptographicError::MembershipAuthorizationMismatch
+    );
+    drop(mismatched_group);
+
+    let alice_material = ConversationSigningMaterial::open(
+        &sealer(1),
+        b"alice-profile",
+        conversation_id,
+        &alice_material_blob,
+    )
+    .unwrap();
+    let alice_storage = SealedSqliteMlsStorage::open(&alice_storage_path, sealer(1)).unwrap();
+    let alice_client = MlsConversationClient::with_storage(alice_material, alice_storage).unwrap();
+    let mut alice_group = alice_client
+        .restore_group(
+            alice_parent_state,
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            Some(alice_pending_state),
+        )
+        .unwrap();
+    alice_group.accept_pending_commit().unwrap();
+    let bob_group = bob_client.join_group(add.welcome().unwrap()).unwrap();
+
+    let alice_state = alice_group.state().clone();
+    let bob_state = bob_group.state().clone();
+    drop(alice_group);
+    drop(bob_group);
+
+    let alice_material = ConversationSigningMaterial::open(
+        &sealer(1),
+        b"alice-profile",
+        conversation_id,
+        &alice_material_blob,
+    )
+    .unwrap();
+    let alice_client = MlsConversationClient::with_storage(
+        alice_material,
+        SealedSqliteMlsStorage::open(&alice_storage_path, sealer(1)).unwrap(),
+    )
+    .unwrap();
+    let mut alice_group = alice_client
+        .restore_group(
+            alice_state,
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+    let bob_material = ConversationSigningMaterial::open(
+        &sealer(2),
+        b"bob-profile",
+        conversation_id,
+        &bob_material_blob,
+    )
+    .unwrap();
+    let bob_client = MlsConversationClient::with_storage(
+        bob_material,
+        SealedSqliteMlsStorage::open(&bob_storage_path, sealer(2)).unwrap(),
+    )
+    .unwrap();
+    let mut bob_group = bob_client
+        .restore_group(
+            bob_state,
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+
+    let ciphertext = alice_group
+        .encrypt_application_message(b"durable message")
+        .unwrap();
+    let ciphertext_bytes = ciphertext.as_bytes().to_vec();
+    assert_eq!(
+        bob_group
+            .decrypt_application_message(&ciphertext)
+            .unwrap()
+            .plaintext(),
+        b"durable message"
+    );
+    bob_group.persist().unwrap();
+    let bob_state = bob_group.state().clone();
+    drop(bob_group);
+
+    let bob_material = ConversationSigningMaterial::open(
+        &sealer(2),
+        b"bob-profile",
+        conversation_id,
+        &bob_material_blob,
+    )
+    .unwrap();
+    let bob_client = MlsConversationClient::with_storage(
+        bob_material,
+        SealedSqliteMlsStorage::open(&bob_storage_path, sealer(2)).unwrap(),
+    )
+    .unwrap();
+    let mut bob_group = bob_client
+        .restore_group(
+            bob_state,
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+    assert!(
+        bob_group
+            .decrypt_application_message(
+                &MlsApplicationMessage::from_bytes(&ciphertext_bytes).unwrap(),
+            )
+            .is_err()
+    );
+
+    let removal = alice_group
+        .create_remove_commit(bob_identity.device_id())
+        .unwrap();
+    bob_group
+        .process_membership_commit(removal.commit(), removal.authorization().clone(), None, 60)
+        .unwrap();
+    alice_group.accept_pending_commit().unwrap();
+    let removed_state = bob_group.state().clone();
+    drop(bob_group);
+
+    let bob_material = ConversationSigningMaterial::open(
+        &sealer(2),
+        b"bob-profile",
+        conversation_id,
+        &bob_material_blob,
+    )
+    .unwrap();
+    let bob_client = MlsConversationClient::with_storage(
+        bob_material,
+        SealedSqliteMlsStorage::open(&bob_storage_path, sealer(2)).unwrap(),
+    )
+    .unwrap();
+    let mut removed_bob = bob_client
+        .restore_group(
+            removed_state,
+            vec![
+                verify_device_credential_binding(&alice_binding).unwrap(),
+                verify_device_credential_binding(&bob_binding).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+    let after_removal = alice_group
+        .encrypt_application_message(b"after removal")
+        .unwrap();
+    assert_eq!(
+        removed_bob
+            .decrypt_application_message(&after_removal)
+            .err(),
+        Some(KonclaveCryptographicError::RemovedFromConversation)
+    );
 }
 
 #[test]

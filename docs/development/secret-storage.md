@@ -35,10 +35,45 @@ by generating a replacement key for an existing profile.
 backend and commits one group-state update plus all epoch changes in a single SQLite
 transaction. SQLite rows never contain a wrapping key or private MLS byte.
 
-The adapter uses mls-rs's opaque storage values and does not enable its general `serde`
-feature. The local daemon has not yet enabled durable MLS profiles by default; profile
-locking, startup provider selection, and lifecycle wiring remain required before that
-switch is turned on.
+`ConversationSigningMaterial` seals the conversation-scoped signature key together
+with its authenticated device-root binding. Its associated data binds the local
+profile and conversation identifiers. Reopening verifies the binding signature,
+conversation identifier, and signing private/public key relationship before mls-rs
+receives the key.
+
+`MlsConversationClient::with_storage` configures the same sealed SQLite adapter as
+both the mls-rs KeyPackage repository and group-state storage. The cryptographic
+wrapper persists:
+
+- new and joined groups before returning them;
+- outbound pending commits before they can cross the relay boundary;
+- accepted or rejected pending commits transactionally;
+- incoming commits before exposing their application transition;
+- sender ratchets before returning ciphertext.
+
+Incoming application decryption is deliberately two-phase across the cryptographic
+and application boundaries. The daemon first durably records the decoded message and
+its idempotency identifier, then calls `MlsConversation::persist` to checkpoint the
+receiver ratchet. A crash between those writes replays against the prior MLS snapshot;
+the application deduplication record makes that recovery idempotent instead of losing
+plaintext.
+
+A persisted join proof can restore its KeyPackage expectation after restart. A
+persisted pending next-state can restore and accept an outbound pending commit. An
+orphaned pending commit may be restored without next-state metadata solely to reject
+and recreate it. A removed endpoint stores a sealed tombstone snapshot one epoch
+behind the authenticated removal state, because MLS correctly withholds the new epoch
+secrets from that device; restored operations still fail as removed.
+
+Active and pending restores compare the complete canonical conversation-state digest
+against the authenticated MLS GroupContext extension or applied Commit proposal.
+Matching only epoch and roster is insufficient because roles, joined epochs, protocol
+version, and consumed invitations are also authorization state.
+
+The adapter uses mls-rs's opaque storage values and does not enable its general
+`serde` feature. The daemon must still seal its policy snapshot, pending-operation
+metadata, relay credential, replay counters, and decrypted history, and must hold the
+profile lock before opening native custody.
 
 ## Validation surfaces
 
@@ -47,3 +82,7 @@ The default feature set tests native custody plus SQLite. CI also tests:
 - `--no-default-features` for the minimal external-provider sealing path;
 - `--no-default-features --features sqlite` for headless file-backed storage;
 - locked fuzz parsing/opening of untrusted sealed blobs.
+
+Cryptographic integration tests additionally reopen signing material, KeyPackages,
+groups, pending joins, pending commits, application ratchets, and removed-device
+tombstones across independent SQLite handles.
