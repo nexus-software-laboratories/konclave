@@ -61,10 +61,12 @@ The relay envelope contains only:
 - globally unique envelope identifier;
 - coarse delivery class needed to distinguish key-package, direct Welcome, group
   handshake, and group application delivery;
-- standard MLS framing fields required for routing and epoch serialization;
-- relay-assigned durable cursor;
-- expiry policy and encoded byte length;
+- expected parent epoch for Proposal and Commit serialization;
+- expiry policy;
 - opaque MLS or KeyPackage bytes.
+
+After acceptance, the relay associates the envelope with a durable cursor in a
+`StoredRelayEnvelope`; the submitted `RelayEnvelope` never self-asserts that cursor.
 
 The relay MUST NOT deserialize Konclave application messages, duplicate decrypted
 membership data, or derive searchable fields from encrypted content.
@@ -74,6 +76,15 @@ membership data, or derive searchable fields from encrypted content.
 MLS messages follow RFC 9420. Application and membership-sensitive handshake content
 uses PrivateMessage unless an accepted ADR documents why relay-visible handshake
 metadata is required.
+
+### Device credentials and invitations
+
+A device credential binding identifies the device and conversation, names the
+signature scheme, carries the device-root and conversation-scoped public keys, and
+carries the device-root signature over that canonical binding. A join proof combines
+the exact credential binding with an invitation for the same device and conversation
+and one bounded MLS KeyPackage. Signature, expiry, role, and invitation-consumption
+checks occur outside generic wire decoding.
 
 ### Konclave application message
 
@@ -95,11 +106,13 @@ self-asserted sender identifier.
 
 Parsing enforces limits before allocation or decompression. Initial hard limits are:
 
-- 1 MiB encoded relay envelope;
-- 256 KiB decoded application message;
+- 1 MiB encoded relay envelope, with up to 1,023 KiB of opaque payload;
+- 256 KiB encoded application message, with up to 255 KiB of UTF-8 text;
+- 16 MiB encoded replay page and 100 envelopes per page;
+- 1 KiB encoded replay requests and acknowledgments;
+- 4,096 top-level fields in any decoded Protobuf message;
 - 128 active devices per conversation;
 - 1,024 bytes per human-readable metadata field;
-- 100 envelopes per replay page;
 - 32 outstanding unacknowledged send operations per local client.
 
 Attachments and larger artifacts use a separately versioned chunking or object

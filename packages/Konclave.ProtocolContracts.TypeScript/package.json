@@ -1,0 +1,48 @@
+{
+  "name": "@konclave/protocol-contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "npm run generate:check && tsc -p tsconfig.build.json",
+    "generate": "buf generate --template buf.gen.yaml",
+    "generate:check": "pwsh ../../scripts/protocol/Test-ProtocolGeneration.ps1",
+    "lint": "eslint .",
+    "format": "prettier --write . --ignore-path .gitignore --ignore-path .prettierignore",
+    "format:check": "prettier --check . --ignore-path .gitignore --ignore-path .prettierignore",
+    "schema:format:check": "pwsh ../../scripts/protocol/Test-ProtocolFormat.ps1",
+    "schema:lint": "buf lint ../../proto",
+    "schema:breaking": "pwsh ../../scripts/protocol/Test-ProtocolBreaking.ps1",
+    "fixtures:immutable": "pwsh ../../scripts/protocol/Test-ProtocolFixtures.ps1",
+    "test": "npm run format:check && npm run lint && npm run typecheck && npm run schema:format:check && npm run schema:lint && npm run schema:breaking && npm run fixtures:immutable && npm run test:coverage",
+    "test:coverage": "vitest run --coverage",
+    "test:unit": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.14.0"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.14.0",
+    "@eslint/config-helpers": "^0.7.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.1",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10"
+  }
+}

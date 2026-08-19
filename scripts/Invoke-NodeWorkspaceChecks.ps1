@@ -9,6 +9,7 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $workspaceRoots = @(
+    'packages/Konclave.ProtocolContracts.TypeScript',
     'apps/Konclave.AdminConsole',
     'extensions/Konclave.HostExtension'
 )

@@ -6,4 +6,10 @@ license = "Apache-2.0"
 rust-version = "1.85"
 
 [dependencies]
-thiserror = "2.0.20"
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+prost.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true

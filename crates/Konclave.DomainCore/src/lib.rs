@@ -1,82 +1,22 @@
 #![forbid(unsafe_code)]
 #![allow(non_snake_case)]
 
-use thiserror::Error;
+mod error;
+mod identifiers;
+mod model;
 
-const MAX_NAME_LEN: usize = 64;
-
-/// Shared domain boundary scaffold. Replace the placeholder API with
-/// project-specific implementation when this host is selected.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PlaceholderName(String);
-
-impl PlaceholderName {
-    /// Parses a non-empty placeholder value for the shared domain boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns [KonclaveDomainCoreError] when the supplied value is blank or too long.
-    pub fn parse(value: impl Into<String>) -> Result<Self, KonclaveDomainCoreError> {
-        let candidate = value.into();
-        let trimmed = candidate.trim();
-
-        if trimmed.is_empty() {
-            return Err(KonclaveDomainCoreError::EmptyValue);
-        }
-
-        if trimmed.len() > MAX_NAME_LEN {
-            return Err(KonclaveDomainCoreError::ValueTooLong {
-                max: MAX_NAME_LEN,
-                actual: trimmed.len(),
-            });
-        }
-
-        Ok(Self(trimmed.to_string()))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-/// Stable typed errors for the shared domain boundary.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum KonclaveDomainCoreError {
-    #[error("Domain value cannot be empty")]
-    EmptyValue,
-
-    #[error("Domain value exceeds the maximum length of {max} characters (actual: {actual})")]
-    ValueTooLong { max: usize, actual: usize },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_a_valid_placeholder() {
-        let value = PlaceholderName::parse(" shared ").unwrap();
-        assert_eq!(value.as_str(), "shared");
-    }
-
-    #[test]
-    fn rejects_empty_placeholder() {
-        assert_eq!(
-            PlaceholderName::parse("   ").unwrap_err(),
-            KonclaveDomainCoreError::EmptyValue
-        );
-    }
-
-    #[test]
-    fn rejects_overlong_placeholder() {
-        let input = "x".repeat(MAX_NAME_LEN + 1);
-        assert_eq!(
-            PlaceholderName::parse(input).unwrap_err(),
-            KonclaveDomainCoreError::ValueTooLong {
-                max: MAX_NAME_LEN,
-                actual: MAX_NAME_LEN + 1,
-            }
-        );
-    }
-}
+pub use error::KonclaveDomainError;
+pub use identifiers::{
+    ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
+    EnvelopeId, InvitationId, InvitationNonce, MembershipOperationId, MessageId, RoutingId,
+};
+pub use model::{
+    APPLICATION_PROTOCOL_MAJOR, APPLICATION_PROTOCOL_MINOR, AcknowledgeRequest, AddMember,
+    ApplicationContent, ApplicationMessage, ChangeMemberRole, ConversationRole, ConversationState,
+    DeliveryClass, DeviceCredentialBinding, Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES,
+    MAX_CONSUMED_INVITATIONS, MAX_MEMBERS, MAX_MLS_KEY_PACKAGE_BYTES,
+    MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
+    MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_SIZE, MAX_TEXT_BODY_BYTES,
+    Member, MembershipAuthorization, MembershipChange, ProtocolVersion, RelayEnvelope,
+    RemoveMember, ReplayPage, ReplayRequest, SignatureScheme, StoredRelayEnvelope,
+};
