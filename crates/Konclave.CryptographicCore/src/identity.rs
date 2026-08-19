@@ -3,6 +3,9 @@ use KonclaveDomainCore::{
     Ed25519PublicKey, Ed25519Signature, Invitation, InvitationId, InvitationNonce, ProtocolVersion,
     SignatureScheme,
 };
+use KonclaveProtocolContracts::v1::{
+    decode_device_credential_binding, encode_device_credential_binding,
+};
 use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer};
 use mls_rs::{CipherSuite, CipherSuiteProvider, CryptoProvider};
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
@@ -17,6 +20,7 @@ const CREDENTIAL_DOMAIN: &[u8] = b"konclave-device-credential-binding-v1\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] = b"konclave-device-credential-binding-hash-v1\0";
 const INVITATION_DOMAIN: &[u8] = b"konclave-invitation-v1\0";
 const DEVICE_IDENTITY_MAGIC: &[u8; 4] = b"KDI1";
+const CONVERSATION_SIGNING_MAGIC: &[u8; 4] = b"KCS1";
 
 /// Device-scoped root identity whose secret key remains inside the trusted daemon.
 pub struct DeviceIdentity {
@@ -276,8 +280,160 @@ impl ConversationSigningMaterial {
         &self.binding
     }
 
+    /// Seals the signing key and authenticated public binding for one local profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed storage or protocol error when framing, context construction,
+    /// or authenticated sealing fails.
+    pub fn seal(
+        &self,
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+    ) -> Result<SealedBlob, KonclaveCryptographicError> {
+        let secret = self.secret_key.as_bytes();
+        let secret_length = u16::try_from(secret.len()).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material encoding",
+            }
+        })?;
+        let binding = encode_device_credential_binding(&self.binding)
+            .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?;
+        let binding_length = u32::try_from(binding.len()).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material encoding",
+            }
+        })?;
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(
+            CONVERSATION_SIGNING_MAGIC.len() + 2 + secret.len() + 4 + binding.len(),
+        ));
+        plaintext.extend_from_slice(CONVERSATION_SIGNING_MAGIC);
+        plaintext.extend_from_slice(&secret_length.to_be_bytes());
+        plaintext.extend_from_slice(secret);
+        plaintext.extend_from_slice(&binding_length.to_be_bytes());
+        plaintext.extend_from_slice(&binding);
+        let context =
+            Self::conversation_signing_context(profile_id, self.binding.conversation_id())?;
+        sealer.seal(&context, &plaintext).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material sealing",
+            }
+        })
+    }
+
+    /// Reopens one sealed conversation signing key and verifies its public binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when framing, authentication, credential verification,
+    /// or signing-key reconstruction fails.
+    pub fn open(
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+        conversation_id: ConversationId,
+        blob: &SealedBlob,
+    ) -> Result<Self, KonclaveCryptographicError> {
+        let context = Self::conversation_signing_context(profile_id, conversation_id)?;
+        let plaintext = sealer.open(&context, blob).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material opening",
+            }
+        })?;
+        if plaintext.len() < CONVERSATION_SIGNING_MAGIC.len() + 2 + 4
+            || &plaintext[..4] != CONVERSATION_SIGNING_MAGIC
+        {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            });
+        }
+        let secret_length = usize::from(u16::from_be_bytes(plaintext[4..6].try_into().map_err(
+            |_| KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            },
+        )?));
+        let binding_length_offset = 6_usize.checked_add(secret_length).ok_or(
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            },
+        )?;
+        let binding_offset = binding_length_offset.checked_add(4).ok_or(
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            },
+        )?;
+        if plaintext.len() < binding_offset {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            });
+        }
+        let binding_length = usize::try_from(u32::from_be_bytes(
+            plaintext[binding_length_offset..binding_offset]
+                .try_into()
+                .map_err(|_| KonclaveCryptographicError::SecretStorageFailure {
+                    operation: "conversation signing material decoding",
+                })?,
+        ))
+        .map_err(|_| KonclaveCryptographicError::SecretStorageFailure {
+            operation: "conversation signing material decoding",
+        })?;
+        let expected_length = binding_offset.checked_add(binding_length).ok_or(
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            },
+        )?;
+        if plaintext.len() != expected_length {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing material decoding",
+            });
+        }
+        let binding = decode_device_credential_binding(&plaintext[binding_offset..])
+            .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?;
+        if binding.conversation_id() != conversation_id {
+            return Err(KonclaveCryptographicError::MlsConversationMismatch);
+        }
+        verify_device_credential_binding(&binding)?;
+        let secret_key = SignatureSecretKey::new(plaintext[6..binding_length_offset].to_vec());
+        let provider = configured_provider();
+        let cipher_suite = cipher_suite(&provider)?;
+        let public_key = cipher_suite
+            .signature_key_derive_public(&secret_key)
+            .map_err(|_| provider_failure("conversation signing public key derivation"))?;
+        if public_key.as_bytes() != binding.conversation_signature_public_key().as_bytes() {
+            return Err(KonclaveCryptographicError::CredentialSigningKeyMismatch);
+        }
+        Ok(Self {
+            secret_key,
+            binding,
+        })
+    }
+
     pub(crate) fn into_parts(self) -> (SignatureSecretKey, DeviceCredentialBinding) {
         (self.secret_key, self.binding)
+    }
+
+    fn conversation_signing_context(
+        profile_id: &[u8],
+        conversation_id: ConversationId,
+    ) -> Result<SecretRecordContext, KonclaveCryptographicError> {
+        if profile_id.is_empty() {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing context",
+            });
+        }
+        let profile_length = u8::try_from(profile_id.len()).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing context",
+            }
+        })?;
+        let mut identifier = Vec::with_capacity(1 + profile_id.len() + ConversationId::LENGTH);
+        identifier.push(profile_length);
+        identifier.extend_from_slice(profile_id);
+        identifier.extend_from_slice(conversation_id.as_bytes());
+        SecretRecordContext::new(SecretRecordKind::ConversationSigningMaterial, identifier).map_err(
+            |_| KonclaveCryptographicError::SecretStorageFailure {
+                operation: "conversation signing context",
+            },
+        )
     }
 }
 
@@ -542,6 +698,8 @@ const fn provider_failure(operation: &'static str) -> KonclaveCryptographicError
 
 #[cfg(test)]
 mod tests {
+    use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
+
     use super::*;
 
     // RFC 8032 test vector 1 supplies an independently published Ed25519 key pair.
@@ -552,6 +710,43 @@ mod tests {
     const CREDENTIAL_HASH: &str =
         "ee10d5432136d42fc389d49eb1c2c70cca03da8ccdfbf58d687eb34f81a28a47";
     const INVITATION_SIGNATURE: &str = "c5a72e285813c1ed9c98f3f5dac6bec25945307be8b212806240cddeadc6bebf374d2087550a4954d18351cd9da7e2d00829dffc4e98c84e2fda030340f6d700";
+
+    fn sealer() -> SecretSealer {
+        SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([9; 32])).unwrap()
+    }
+
+    #[test]
+    fn conversation_signing_material_reopens_only_in_its_bound_context() {
+        let identity = DeviceIdentity::generate().unwrap();
+        let conversation_id = ConversationId::from_bytes([0x71; ConversationId::LENGTH]);
+        let material = identity
+            .create_conversation_signing_material(conversation_id)
+            .unwrap();
+        let binding = material.binding().clone();
+        let encoded_binding = encode_device_credential_binding(&binding).unwrap();
+        assert!(material.seal(&sealer(), b"").is_err());
+        let blob = material.seal(&sealer(), b"profile-a").unwrap();
+        assert!(
+            !blob
+                .as_bytes()
+                .windows(encoded_binding.len())
+                .any(|window| window == encoded_binding)
+        );
+
+        let reopened =
+            ConversationSigningMaterial::open(&sealer(), b"profile-a", conversation_id, &blob)
+                .unwrap();
+        assert_eq!(reopened.binding(), &binding);
+        assert!(
+            ConversationSigningMaterial::open(
+                &sealer(),
+                b"profile-a",
+                ConversationId::from_bytes([0x72; ConversationId::LENGTH]),
+                &blob,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn identity_signature_vectors_are_stable() {

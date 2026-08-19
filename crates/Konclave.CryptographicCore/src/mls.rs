@@ -10,22 +10,29 @@ use KonclaveDomainCore::{
 use KonclaveProtocolContracts::v1::{
     decode_conversation_state, encode_conversation_state, encode_membership_change,
 };
+use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use mls_rs::client_builder::{
-    BaseConfig, PaddingMode, WithCryptoProvider, WithIdentityProvider, WithMlsRules,
+    BaseConfig, PaddingMode, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider,
+    WithKeyPackageRepo, WithMlsRules,
 };
 use mls_rs::error::IntoAnyError;
-use mls_rs::group::{CommitEffect, ContentType, ReceivedMessage, Roster, proposal::AddProposal};
+use mls_rs::group::{
+    CommitEffect, ContentType, ReceivedMessage, Roster,
+    proposal::{AddProposal, Proposal},
+};
 use mls_rs::identity::{SigningIdentity, basic::BasicCredential};
 use mls_rs::mls_rules::{
     CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle,
 };
 use mls_rs::{
-    CipherSuiteProvider, Client, ExtensionList, Group, IdentityProvider, MlsMessage,
-    MlsMessageDescription, MlsRules,
+    CipherSuiteProvider, Client, ExtensionList, Group, GroupStateStorage, IdentityProvider,
+    KeyPackageStorage, MlsMessage, MlsMessageDescription, MlsRules,
 };
 use mls_rs_core::crypto::SignaturePublicKey;
 use mls_rs_core::extension::ExtensionType;
+use mls_rs_core::group::{EpochRecord, GroupState};
 use mls_rs_core::identity::MemberValidationContext;
+use mls_rs_core::key_package::KeyPackageData;
 use mls_rs_core::time::MlsTime;
 use mls_rs_crypto_awslc::AwsLcCryptoProvider;
 use thiserror::Error;
@@ -41,7 +48,13 @@ type KonclaveMlsConfig = WithMlsRules<
     KonclaveMlsRules,
     WithIdentityProvider<
         KonclaveIdentityProvider,
-        WithCryptoProvider<AwsLcCryptoProvider, BaseConfig>,
+        WithGroupStateStorage<
+            KonclaveStorage,
+            WithKeyPackageRepo<
+                KonclaveStorage,
+                WithCryptoProvider<AwsLcCryptoProvider, BaseConfig>,
+            >,
+        >,
     >,
 >;
 
@@ -51,6 +64,120 @@ const MEMBERSHIP_AUTH_DOMAIN: &[u8] = b"konclave-membership-authorization-v1\0";
 const CONVERSATION_STATE_DOMAIN: &[u8] = b"konclave-conversation-state-v1\0";
 const CONVERSATION_STATE_EXTENSION: ExtensionType = ExtensionType::new(0xff00);
 const CONVERSATION_STATE_DIGEST_EXTENSION: ExtensionType = ExtensionType::new(0xff01);
+
+#[derive(Clone)]
+enum KonclaveStorage {
+    Memory {
+        groups: mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage,
+        key_packages: mls_rs::storage_provider::in_memory::InMemoryKeyPackageStorage,
+    },
+    Persistent(SealedSqliteMlsStorage),
+}
+
+impl KonclaveStorage {
+    fn memory() -> Self {
+        Self::Memory {
+            groups: Default::default(),
+            key_packages: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("Konclave MLS storage failed")]
+struct KonclaveStorageError;
+
+impl IntoAnyError for KonclaveStorageError {
+    fn into_dyn_error(self) -> Result<Box<dyn std::error::Error + Send + Sync>, Self> {
+        Ok(Box::new(self))
+    }
+}
+
+impl GroupStateStorage for KonclaveStorage {
+    type Error = KonclaveStorageError;
+
+    fn state(&self, group_id: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
+        match self {
+            Self::Memory { groups, .. } => groups.state(group_id).map_err(|_| KonclaveStorageError),
+            Self::Persistent(storage) => storage.state(group_id).map_err(|_| KonclaveStorageError),
+        }
+    }
+
+    fn epoch(
+        &self,
+        group_id: &[u8],
+        epoch_id: u64,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
+        match self {
+            Self::Memory { groups, .. } => groups
+                .epoch(group_id, epoch_id)
+                .map_err(|_| KonclaveStorageError),
+            Self::Persistent(storage) => storage
+                .epoch(group_id, epoch_id)
+                .map_err(|_| KonclaveStorageError),
+        }
+    }
+
+    fn write(
+        &mut self,
+        state: GroupState,
+        epoch_inserts: Vec<EpochRecord>,
+        epoch_updates: Vec<EpochRecord>,
+    ) -> Result<(), Self::Error> {
+        match self {
+            Self::Memory { groups, .. } => groups
+                .write(state, epoch_inserts, epoch_updates)
+                .map_err(|_| KonclaveStorageError),
+            Self::Persistent(storage) => storage
+                .write(state, epoch_inserts, epoch_updates)
+                .map_err(|_| KonclaveStorageError),
+        }
+    }
+
+    fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
+        match self {
+            Self::Memory { groups, .. } => groups
+                .max_epoch_id(group_id)
+                .map_err(|_| KonclaveStorageError),
+            Self::Persistent(storage) => storage
+                .max_epoch_id(group_id)
+                .map_err(|_| KonclaveStorageError),
+        }
+    }
+}
+
+impl KeyPackageStorage for KonclaveStorage {
+    type Error = KonclaveStorageError;
+
+    fn delete(&mut self, id: &[u8]) -> Result<(), Self::Error> {
+        match self {
+            Self::Memory { key_packages, .. } => {
+                KeyPackageStorage::delete(key_packages, id).map_err(|_| KonclaveStorageError)
+            }
+            Self::Persistent(storage) => storage.delete(id).map_err(|_| KonclaveStorageError),
+        }
+    }
+
+    fn insert(&mut self, id: Vec<u8>, package: KeyPackageData) -> Result<(), Self::Error> {
+        match self {
+            Self::Memory { key_packages, .. } => key_packages
+                .insert(id, package)
+                .map_err(|_| KonclaveStorageError),
+            Self::Persistent(storage) => storage
+                .insert(id, package)
+                .map_err(|_| KonclaveStorageError),
+        }
+    }
+
+    fn get(&self, id: &[u8]) -> Result<Option<KeyPackageData>, Self::Error> {
+        match self {
+            Self::Memory { key_packages, .. } => {
+                KeyPackageStorage::get(key_packages, id).map_err(|_| KonclaveStorageError)
+            }
+            Self::Persistent(storage) => storage.get(id).map_err(|_| KonclaveStorageError),
+        }
+    }
+}
 
 /// MLS client configured for one device and conversation-scoped signing identity.
 pub struct MlsConversationClient {
@@ -83,6 +210,25 @@ impl MlsConversationClient {
     fn new(
         material: crate::ConversationSigningMaterial,
     ) -> Result<Self, KonclaveCryptographicError> {
+        Self::new_with_storage(material, KonclaveStorage::memory())
+    }
+
+    /// Creates an MLS client backed by sealed SQLite group and KeyPackage storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed cryptographic error when client configuration fails.
+    pub fn with_storage(
+        material: crate::ConversationSigningMaterial,
+        storage: SealedSqliteMlsStorage,
+    ) -> Result<Self, KonclaveCryptographicError> {
+        Self::new_with_storage(material, KonclaveStorage::Persistent(storage))
+    }
+
+    fn new_with_storage(
+        material: crate::ConversationSigningMaterial,
+        storage: KonclaveStorage,
+    ) -> Result<Self, KonclaveCryptographicError> {
         let (secret_key, binding) = material.into_parts();
         let hash = credential_binding_hash(&binding)?;
         let policy = PolicyHandle::new(binding.conversation_id());
@@ -103,6 +249,8 @@ impl MlsConversationClient {
         );
         let client = Client::builder()
             .crypto_provider(configured_provider())
+            .key_package_repo(storage.clone())
+            .group_state_storage(storage)
             .identity_provider(identity_provider)
             .mls_rules(rules)
             .extension_type(CONVERSATION_STATE_DIGEST_EXTENSION)
@@ -141,7 +289,46 @@ impl MlsConversationClient {
         })
     }
 
+    /// Restores a previously generated join proof before processing its Welcome.
+    ///
+    /// The matching KeyPackage private data must already exist in this client's
+    /// configured sealed storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the proof, invitation, credential, or KeyPackage
+    /// does not match this client.
+    pub fn restore_join_proof(
+        &mut self,
+        proof: &JoinProof,
+        issuer_public_key: KonclaveDomainCore::Ed25519PublicKey,
+        now_unix_seconds: u64,
+    ) -> Result<(), KonclaveCryptographicError> {
+        if self.join_expectation.is_some() {
+            return Err(KonclaveCryptographicError::PendingJoinExists);
+        }
+        verify_invitation(proof.invitation(), issuer_public_key, now_unix_seconds)?;
+        if proof.invitation().conversation_id() != self.binding.conversation_id()
+            || proof.invitation().expected_device_id() != self.binding.device_id()
+            || proof.credential() != &self.binding
+        {
+            return Err(KonclaveCryptographicError::MlsConversationMismatch);
+        }
+        verify_device_credential_binding(proof.credential())?;
+        validate_key_package(proof.mls_key_package(), proof.credential())?;
+        self.join_expectation = Some(JoinExpectation {
+            invitation_id: proof.invitation().invitation_id(),
+            issuer_device_id: proof.invitation().issuer_device_id(),
+            role: proof.invitation().role(),
+        });
+        Ok(())
+    }
+
     /// Creates a one-time KeyPackage and invitation-bound join proof.
+    ///
+    /// The caller durably records the returned proof before transmitting it. After
+    /// restart, [`Self::restore_join_proof`] reconnects that record to the sealed
+    /// KeyPackage private data.
     ///
     /// # Errors
     ///
@@ -199,7 +386,7 @@ impl MlsConversationClient {
         )?;
         self.policy.set_state(state.clone())?;
         let group_context_extensions = authenticated_state_digest_extensions(&state)?;
-        let group = self
+        let mut group = self
             .client
             .create_group_with_id(
                 self.binding.conversation_id().as_bytes().to_vec(),
@@ -209,6 +396,7 @@ impl MlsConversationClient {
             )
             .map_err(|_| mls_failure("group creation"))?;
         verify_group_state(&group, &state, &self.policy)?;
+        persist_group(&mut group, "group creation persistence")?;
         Ok(MlsConversation {
             group,
             policy: self.policy,
@@ -216,6 +404,59 @@ impl MlsConversationClient {
             self_device_id: self.binding.device_id(),
             pending_state: None,
             removed: false,
+        })
+    }
+
+    /// Restores a sealed MLS group after its policy state and verified bindings have
+    /// been loaded by the trusted daemon.
+    ///
+    /// Supply `pending_state` to later accept a stored outbound commit. It may be
+    /// omitted for an orphaned pending commit that the caller will reject and
+    /// recreate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when stored MLS state, membership policy, credential
+    /// bindings, or pending-commit state disagree.
+    pub fn restore_group(
+        self,
+        state: ConversationState,
+        bindings: Vec<VerifiedDeviceCredentialBinding>,
+        pending_state: Option<ConversationState>,
+    ) -> Result<MlsConversation, KonclaveCryptographicError> {
+        if state.conversation_id() != self.binding.conversation_id() {
+            return Err(KonclaveCryptographicError::MlsConversationMismatch);
+        }
+        for binding in bindings {
+            self.register_verified_binding(binding)?;
+        }
+        self.policy.set_state(state.clone())?;
+        let group = self
+            .client
+            .load_group(state.conversation_id().as_bytes())
+            .map_err(|_| mls_failure("group restoration"))?;
+        if pending_state.is_some() && !group.has_pending_commit() {
+            return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
+        }
+        if pending_state.as_ref().is_some_and(|pending| {
+            pending.conversation_id() != state.conversation_id()
+                || state.epoch().checked_add(1) != Some(pending.epoch())
+        }) {
+            return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
+        }
+        let removed = state.member(self.binding.device_id()).is_none();
+        if removed {
+            verify_removed_group_state(&group, &state, self.binding.device_id())?;
+        } else {
+            verify_group_state(&group, &state, &self.policy)?;
+        }
+        Ok(MlsConversation {
+            group,
+            policy: self.policy,
+            state,
+            self_device_id: self.binding.device_id(),
+            pending_state,
+            removed,
         })
     }
 
@@ -239,7 +480,7 @@ impl MlsConversationClient {
             .client
             .examine_welcome_message(&welcome_message)
             .map_err(|_| mls_failure("Welcome examination"))?;
-        let (group, member_info) = self
+        let (mut group, member_info) = self
             .client
             .join_group(None, &welcome_message, None)
             .map_err(|_| mls_failure("group join"))?;
@@ -275,6 +516,7 @@ impl MlsConversationClient {
         }
         self.policy.set_state(state.clone())?;
         verify_group_state(&group, &state, &self.policy)?;
+        persist_group(&mut group, "joined group persistence")?;
         Ok(MlsConversation {
             group,
             policy: self.policy,
@@ -328,7 +570,9 @@ impl MlsConversation {
     /// Creates an authorized add-member commit from a complete join proof.
     ///
     /// The commit remains pending until [`Self::accept_pending_commit`] confirms
-    /// relay compare-and-set acceptance.
+    /// relay compare-and-set acceptance. The caller durably records the returned
+    /// outbox value before transmission. An orphaned stored pending commit can be
+    /// restored without next-state metadata and rejected.
     ///
     /// # Errors
     ///
@@ -434,6 +678,10 @@ impl MlsConversation {
             }
         };
         self.pending_state = Some(next_state.clone());
+        if let Err(error) = persist_group(&mut self.group, "add-member pending persistence") {
+            self.abort_local_pending()?;
+            return Err(error);
+        }
         Ok(OutboundMembershipCommit {
             commit,
             welcome: Some(welcome),
@@ -444,6 +692,9 @@ impl MlsConversation {
     }
 
     /// Creates an authorized remove-member commit.
+    ///
+    /// The caller durably records the returned outbox value before transmission. An
+    /// orphaned stored pending commit can be restored and rejected.
     ///
     /// # Errors
     ///
@@ -517,6 +768,10 @@ impl MlsConversation {
             }
         };
         self.pending_state = Some(next_state.clone());
+        if let Err(error) = persist_group(&mut self.group, "remove-member pending persistence") {
+            self.abort_local_pending()?;
+            return Err(error);
+        }
         Ok(OutboundMembershipCommit {
             commit,
             welcome: None,
@@ -527,6 +782,9 @@ impl MlsConversation {
     }
 
     /// Creates an authenticated role-change commit that advances the MLS epoch.
+    ///
+    /// The caller durably records the returned outbox value before transmission. An
+    /// orphaned stored pending commit can be restored and rejected.
     ///
     /// # Errors
     ///
@@ -599,6 +857,10 @@ impl MlsConversation {
             }
         };
         self.pending_state = Some(next_state.clone());
+        if let Err(error) = persist_group(&mut self.group, "role-change pending persistence") {
+            self.abort_local_pending()?;
+            return Err(error);
+        }
         Ok(OutboundMembershipCommit {
             commit,
             welcome: None,
@@ -616,17 +878,37 @@ impl MlsConversation {
     pub fn accept_pending_commit(&mut self) -> Result<(), KonclaveCryptographicError> {
         let next_state = self
             .pending_state
-            .take()
+            .as_ref()
+            .cloned()
             .ok_or(KonclaveCryptographicError::PendingCommitNotFound)?;
         if !self.group.has_pending_commit() {
-            self.policy.clear_pending()?;
             return Err(KonclaveCryptographicError::PendingCommitNotFound);
         }
-        if self.group.apply_pending_commit().is_err() {
-            self.policy.clear_pending()?;
-            return Err(mls_failure("pending commit application"));
+        let mut candidate = self.group.clone();
+        let description = candidate
+            .apply_pending_commit()
+            .map_err(|_| mls_failure("pending commit application"))?;
+        let removed_self = next_state.member(self.self_device_id).is_none();
+        require_commit_effect_state_digest(&description.effect, &next_state)?;
+        if removed_self != matches!(&description.effect, CommitEffect::Removed { .. }) {
+            return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
         }
-        self.commit_state(next_state)
+        if removed_self {
+            verify_removed_group_state(&candidate, &next_state, self.self_device_id)?;
+        } else {
+            verify_group_state(&candidate, &next_state, &self.policy)?;
+        }
+        persist_group(&mut candidate, "accepted commit persistence")?;
+        self.group = candidate;
+        self.pending_state = None;
+        if removed_self {
+            self.policy.commit_state(next_state.clone())?;
+            self.state = next_state;
+            self.removed = true;
+            self.policy.clear_pending()
+        } else {
+            self.commit_state(next_state)
+        }
     }
 
     /// Discards a locally generated commit rejected by relay compare-and-set.
@@ -636,14 +918,23 @@ impl MlsConversation {
     /// Returns [`KonclaveCryptographicError::PendingCommitNotFound`] when no commit
     /// is pending.
     pub fn reject_pending_commit(&mut self) -> Result<(), KonclaveCryptographicError> {
-        if self.pending_state.is_none() || !self.group.has_pending_commit() {
+        if !self.group.has_pending_commit() {
             return Err(KonclaveCryptographicError::PendingCommitNotFound);
         }
-        self.abort_local_pending()
+        let mut candidate = self.group.clone();
+        candidate.clear_pending_commit();
+        persist_group(&mut candidate, "rejected commit persistence")?;
+        self.group = candidate;
+        self.pending_state = None;
+        self.policy.clear_pending()
     }
 
     /// Processes an incoming commit only when its exact application authorization
     /// and add-member proof have been supplied.
+    ///
+    /// The caller durably journals these exact inputs before invoking this method so
+    /// an interrupted application-policy checkpoint can reconcile with the sealed MLS
+    /// epoch after restart.
     ///
     /// # Errors
     ///
@@ -718,8 +1009,18 @@ impl MlsConversation {
             self.policy.clear_pending()?;
             return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
         }
-        let removed_self = matches!(description.effect, CommitEffect::Removed { .. });
+        let removed_self = matches!(&description.effect, CommitEffect::Removed { .. });
         let (sender, next_state) = self.policy.take_validated_transition()?;
+        require_commit_effect_state_digest(&description.effect, &next_state)?;
+        if removed_self {
+            verify_removed_group_state(&candidate, &next_state, self.self_device_id)?;
+        } else {
+            verify_group_state(&candidate, &next_state, &self.policy)?;
+        }
+        if let Err(error) = persist_group(&mut candidate, "incoming commit persistence") {
+            self.policy.clear_pending()?;
+            return Err(error);
+        }
         self.group = candidate;
         if removed_self {
             self.policy.commit_state(next_state.clone())?;
@@ -754,8 +1055,8 @@ impl MlsConversation {
                 actual: plaintext.len(),
             });
         }
-        let message = self
-            .group
+        let mut candidate = self.group.clone();
+        let message = candidate
             .encrypt_application_message(plaintext, Vec::new())
             .map_err(|_| mls_failure("application encryption"))?;
         require_conversation_message(
@@ -765,16 +1066,22 @@ impl MlsConversation {
             ContentType::Application,
             "application encryption",
         )?;
-        Ok(MlsApplicationMessage(serialize_mls_message(
+        let ciphertext = MlsApplicationMessage(serialize_mls_message(
             &message,
             "application_ciphertext",
             MAX_RELAY_PAYLOAD_BYTES,
-        )?))
+        )?);
+        persist_group(&mut candidate, "application encryption persistence")?;
+        self.group = candidate;
+        Ok(ciphertext)
     }
 
     /// Authenticates and decrypts one MLS application message.
     ///
     /// Sender attribution is derived from the authenticated MLS roster.
+    /// Decryption advances only the in-memory receiver ratchet. The caller durably
+    /// records the idempotent application side effect and then calls
+    /// [`Self::persist`].
     ///
     /// # Errors
     ///
@@ -814,11 +1121,26 @@ impl MlsConversation {
         if self.state.member(sender).is_none() {
             return Err(KonclaveCryptographicError::RosterMismatch);
         }
+        let plaintext = Zeroizing::new(description.data().to_vec());
         self.group = candidate;
         Ok(DecryptedApplicationMessage {
             authenticated_sender: sender,
-            plaintext: Zeroizing::new(description.data().to_vec()),
+            plaintext,
         })
+    }
+
+    /// Persists the current MLS state and ratchets.
+    ///
+    /// For incoming application messages, callers first durably record their
+    /// idempotent application side effect, then call this method. A crash between
+    /// those operations replays the ciphertext against the prior snapshot, allowing
+    /// application-message deduplication to complete recovery without losing content.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed MLS storage error.
+    pub fn persist(&mut self) -> Result<(), KonclaveCryptographicError> {
+        persist_group(&mut self.group, "explicit group persistence")
     }
 
     fn verify_join_proof(
@@ -1557,10 +1879,12 @@ fn verify_group_state(
     if group.current_epoch() != state.epoch() {
         return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
     }
+    require_authenticated_state_digest(&group.context().extensions, state)?;
     let members = group.roster().members();
     if members.len() != state.members().len() {
         return Err(KonclaveCryptographicError::RosterMismatch);
     }
+
     for member in members {
         let device_id = device_id_from_signing_identity(member.signing_identity())
             .map_err(|_| KonclaveCryptographicError::RosterMismatch)?;
@@ -1580,6 +1904,62 @@ fn verify_group_state(
         }
     }
     Ok(())
+}
+
+fn require_commit_effect_state_digest(
+    effect: &CommitEffect,
+    state: &ConversationState,
+) -> Result<(), KonclaveCryptographicError> {
+    let new_epoch = match effect {
+        CommitEffect::NewEpoch(new_epoch) => new_epoch,
+        CommitEffect::Removed { new_epoch, .. } => new_epoch,
+        _ => return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch),
+    };
+    if new_epoch.epoch() != state.epoch() {
+        return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
+    }
+    let mut extensions =
+        new_epoch
+            .applied_proposals()
+            .iter()
+            .filter_map(|proposal| match &proposal.proposal {
+                Proposal::GroupContextExtensions(extensions) => Some(extensions),
+                _ => None,
+            });
+    let extension = extensions
+        .next()
+        .ok_or(KonclaveCryptographicError::MembershipAuthorizationMismatch)?;
+    if extensions.next().is_some() {
+        return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
+    }
+    require_authenticated_state_digest(extension, state)
+}
+
+fn verify_removed_group_state(
+    group: &KonclaveMlsGroup,
+    state: &ConversationState,
+    removed_device_id: DeviceId,
+) -> Result<(), KonclaveCryptographicError> {
+    if group.group_id() != state.conversation_id().as_bytes() {
+        return Err(KonclaveCryptographicError::MlsConversationMismatch);
+    }
+    if group.cipher_suite() != CIPHER_SUITE {
+        return Err(KonclaveCryptographicError::MlsCipherSuiteMismatch);
+    }
+    if group.current_epoch().checked_add(1) != Some(state.epoch())
+        || state.member(removed_device_id).is_some()
+        || group.has_pending_commit()
+    {
+        return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
+    }
+    Ok(())
+}
+
+fn persist_group(
+    group: &mut KonclaveMlsGroup,
+    operation: &'static str,
+) -> Result<(), KonclaveCryptographicError> {
+    group.write_to_storage().map_err(|_| mls_failure(operation))
 }
 
 fn roster_index(roster: &Roster, device_id: DeviceId) -> Result<u32, KonclaveCryptographicError> {
