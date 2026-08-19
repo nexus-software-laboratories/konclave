@@ -32,6 +32,7 @@ Schema version 2 stores:
 - sealed, root-verified conversation credential bindings;
 - sender counter and replay cursor;
 - outbound application reservations, sealed envelopes, and relay acceptance state;
+- one sealed envelope observation for every accepted route cursor;
 - received application envelopes, sealed decoded messages, and completion state.
 
 Version 1 profiles migrate transactionally. A failed migration leaves the version 1
@@ -62,6 +63,14 @@ completion advances only the next contiguous replay cursor. Exact repeats are
 idempotent; conflicting identifiers, counters, cursors, routes, senders, or
 sealed-record scopes fail closed. Pending outbox and incomplete inbox work are bounded
 at persistence and recovery boundaries.
+
+Outbox acceptance and inbox receipt share the same cursor-observation ledger. Each
+entry authenticates the exact envelope, not only its identifier, so a relay that
+assigns conflicting envelopes or content to one observed cursor halts processing.
+Completed messages also retain the authenticated MLS epoch and sender counter. The
+first observed counter establishes that sender-and-epoch baseline; later counters must
+advance by exactly one. Regressions and forward gaps remain incomplete and therefore
+cannot advance the durable replay cursor.
 
 ## Startup sequence
 

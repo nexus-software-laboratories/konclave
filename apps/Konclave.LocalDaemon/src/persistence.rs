@@ -36,8 +36,9 @@ const LOCAL_RECORD_VERSION: u8 = 1;
 const OUTBOX_RECORD_SCOPE: u8 = 1;
 const INBOX_ENVELOPE_RECORD_SCOPE: u8 = 2;
 const INBOX_MESSAGE_RECORD_SCOPE: u8 = 3;
+const CURSOR_OBSERVATION_RECORD_SCOPE: u8 = 4;
 
-type InboxMessageMetadata = (Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>, i64);
+type InboxMessageMetadata = (Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, Vec<u8>, i64);
 
 /// Portable, filesystem-safe local profile identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -797,7 +798,7 @@ impl ProfileStore {
     ///
     /// # Errors
     ///
-    /// Returns an invalid transition, sequence, or storage error.
+    /// Returns a cursor conflict, invalid transition, sequence, or storage error.
     pub(crate) fn mark_outbox_accepted(
         &self,
         envelope_id: EnvelopeId,
@@ -806,33 +807,53 @@ impl ProfileStore {
         if cursor == 0 {
             return Err(ProfileStoreError::InvalidTransition);
         }
-        let changed = self
-            .lock()?
-            .execute(
-                "UPDATE daemon_outbox
-                 SET status = 3, accepted_cursor = ?1
-                 WHERE envelope_id = ?2 AND status = 2",
-                params![to_sql_integer(cursor)?, envelope_id.as_bytes().as_slice()],
-            )
+        let record = self.load_outbox_record(envelope_id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
-        if changed == 1 {
-            return Ok(());
-        }
-        let accepted: Option<i64> = self
-            .lock()?
+        let state: Option<(i64, Option<i64>)> = transaction
             .query_row(
-                "SELECT accepted_cursor FROM daemon_outbox
-                 WHERE envelope_id = ?1 AND status = 3",
+                "SELECT status, accepted_cursor FROM daemon_outbox
+                 WHERE envelope_id = ?1",
                 params![envelope_id.as_bytes().as_slice()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|_| ProfileStoreError::Storage)?;
-        if accepted.is_some_and(|accepted| from_sql_integer(accepted) == Ok(cursor)) {
-            Ok(())
-        } else {
-            Err(ProfileStoreError::InvalidTransition)
+        match state {
+            Some((2, None)) => {
+                self.insert_or_verify_cursor_observation(
+                    &transaction,
+                    record.reservation.conversation_id,
+                    record.envelope.routing_id(),
+                    cursor,
+                    &record.envelope,
+                )?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE daemon_outbox
+                         SET status = 3, accepted_cursor = ?1
+                         WHERE envelope_id = ?2 AND status = 2",
+                        params![to_sql_integer(cursor)?, envelope_id.as_bytes().as_slice()],
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                if changed != 1 {
+                    return Err(ProfileStoreError::InvalidTransition);
+                }
+            }
+            Some((3, Some(accepted))) if from_sql_integer(accepted)? == cursor => {
+                self.verify_cursor_observation(
+                    &transaction,
+                    record.reservation.conversation_id,
+                    record.envelope.routing_id(),
+                    cursor,
+                    &record.envelope,
+                )?;
+            }
+            _ => return Err(ProfileStoreError::InvalidTransition),
         }
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
 
     /// Journals one received relay envelope before cryptographic processing.
@@ -841,7 +862,8 @@ impl ProfileStore {
     ///
     /// # Errors
     ///
-    /// Returns a route, duplicate, sealing, protocol, or storage error.
+    /// Returns a route, cursor conflict, duplicate, sealing, protocol, or storage
+    /// error.
     pub(crate) fn record_inbox_envelope(
         &self,
         stored: &StoredRelayEnvelope,
@@ -875,6 +897,13 @@ impl ProfileStore {
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
+        let observation_inserted = self.insert_or_verify_cursor_observation(
+            &transaction,
+            conversation_id,
+            envelope.routing_id(),
+            stored.cursor(),
+            envelope,
+        )?;
         let insert = transaction.execute(
             "INSERT INTO daemon_inbox (
                 conversation_id, cursor, envelope_id, status, sealed_envelope
@@ -910,6 +939,9 @@ impl ProfileStore {
             Err(rusqlite::Error::SqliteFailure(ref details, _))
                 if details.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
+                if observation_inserted {
+                    return Err(ProfileStoreError::CorruptData);
+                }
                 drop(transaction);
                 drop(connection);
                 let existing = self.load_conflicting_inbox(
@@ -927,8 +959,8 @@ impl ProfileStore {
         }
     }
 
-    /// Stores a decoded application message and authenticated sender before ratchet
-    /// persistence.
+    /// Stores a decoded application message plus its authenticated MLS sender and
+    /// epoch before ratchet persistence.
     ///
     /// # Errors
     ///
@@ -938,6 +970,7 @@ impl ProfileStore {
         conversation_id: ConversationId,
         cursor: u64,
         sender: DeviceId,
+        sender_epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), ProfileStoreError> {
         let envelope_id: Option<Vec<u8>> = self
@@ -962,7 +995,8 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         let routing_id = stored_envelope.envelope().routing_id();
-        let plaintext = encode_inbox_message_record(cursor, envelope_id, sender, message)?;
+        let plaintext =
+            encode_inbox_message_record(cursor, envelope_id, sender, sender_epoch, message)?;
         let blob = self.seal_operation_record(
             SecretRecordKind::LocalApplicationMessage,
             conversation_id,
@@ -974,13 +1008,15 @@ impl ProfileStore {
         let update = self.lock()?.execute(
             "UPDATE daemon_inbox
              SET sender_device_id = ?1,
-                 message_id = ?2,
-                 sender_counter = ?3,
-                 sealed_message = ?4,
+                 sender_epoch = ?2,
+                 message_id = ?3,
+                 sender_counter = ?4,
+                 sealed_message = ?5,
                  status = 2
-             WHERE conversation_id = ?5 AND cursor = ?6 AND status = 1",
+             WHERE conversation_id = ?6 AND cursor = ?7 AND status = 1",
             params![
                 sender.as_bytes().as_slice(),
+                to_sql_integer(sender_epoch)?,
                 message.message_id().as_bytes().as_slice(),
                 to_sql_integer(message.sender_counter())?,
                 blob.as_bytes(),
@@ -993,6 +1029,7 @@ impl ProfileStore {
             Ok(_) => {
                 let existing = self.load_message_at(conversation_id, cursor)?;
                 if existing.sender == sender
+                    && existing.epoch == sender_epoch
                     && application_messages_equal(&existing.message, message)?
                 {
                     Ok(())
@@ -1085,12 +1122,14 @@ impl ProfileStore {
     ///
     /// # Errors
     ///
-    /// Returns a gap, transition, sequence, or storage error.
+    /// Returns a cursor or sender-counter gap, sender-counter regression,
+    /// transition, sequence, or storage error.
     pub(crate) fn complete_inbox(
         &self,
         conversation_id: ConversationId,
         cursor: u64,
     ) -> Result<u64, ProfileStoreError> {
+        let message = self.load_message_at(conversation_id, cursor)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
@@ -1126,6 +1165,32 @@ impl ProfileStore {
         }
         if current.checked_add(1) != Some(cursor) {
             return Err(ProfileStoreError::CursorGap);
+        }
+        let high_water: Option<i64> = transaction
+            .query_row(
+                "SELECT max(sender_counter)
+                 FROM daemon_inbox
+                 WHERE conversation_id = ?1
+                   AND sender_device_id = ?2
+                   AND sender_epoch = ?3
+                   AND status = 3",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    message.sender.as_bytes().as_slice(),
+                    to_sql_integer(message.epoch)?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if let Some(high_water) = high_water {
+            let high_water = from_sql_integer(high_water)?;
+            let sender_counter = message.message.sender_counter();
+            if sender_counter <= high_water {
+                return Err(ProfileStoreError::SenderCounterRegression);
+            }
+            if high_water.checked_add(1) != Some(sender_counter) {
+                return Err(ProfileStoreError::SenderCounterGap);
+            }
         }
         let changed = transaction
             .execute(
@@ -1200,6 +1265,134 @@ impl ProfileStore {
             messages.push(self.load_message_at(conversation_id, from_sql_integer(cursor)?)?);
         }
         Ok(messages)
+    }
+
+    fn insert_or_verify_cursor_observation(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        cursor: u64,
+        envelope: &RelayEnvelope,
+    ) -> Result<bool, ProfileStoreError> {
+        let envelope_id = envelope.envelope_id();
+        let plaintext = encode_cursor_observation(cursor, envelope)?;
+        let blob = self.seal_operation_record(
+            SecretRecordKind::LocalOperation,
+            conversation_id,
+            routing_id,
+            CURSOR_OBSERVATION_RECORD_SCOPE,
+            envelope_id.as_bytes(),
+            &plaintext,
+        )?;
+        match transaction.execute(
+            "INSERT INTO daemon_cursor_observation (
+                conversation_id, cursor, envelope_id, sealed_observation
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                conversation_id.as_bytes().as_slice(),
+                to_sql_integer(cursor)?,
+                envelope_id.as_bytes().as_slice(),
+                blob.as_bytes()
+            ],
+        ) {
+            Ok(1) => Ok(true),
+            Ok(_) => Err(ProfileStoreError::Storage),
+            Err(rusqlite::Error::SqliteFailure(ref details, _))
+                if details.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                self.verify_cursor_observation(
+                    transaction,
+                    conversation_id,
+                    routing_id,
+                    cursor,
+                    envelope,
+                )?;
+                Ok(false)
+            }
+            Err(_) => Err(ProfileStoreError::Storage),
+        }
+    }
+
+    fn verify_cursor_observation(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        cursor: u64,
+        envelope: &RelayEnvelope,
+    ) -> Result<(), ProfileStoreError> {
+        let envelope_id = envelope.envelope_id();
+        let metadata = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT
+                        CASE WHEN length(conversation_id) = 32 THEN conversation_id END,
+                        cursor,
+                        CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
+                        length(sealed_observation)
+                     FROM daemon_cursor_observation
+                     WHERE (conversation_id = ?1 AND cursor = ?2)
+                        OR envelope_id = ?3
+                     LIMIT 2",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(
+                    params![
+                        conversation_id.as_bytes().as_slice(),
+                        to_sql_integer(cursor)?,
+                        envelope_id.as_bytes().as_slice()
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        if metadata.len() != 1
+            || ConversationId::from_slice(&metadata[0].0).ok() != Some(conversation_id)
+            || from_sql_integer(metadata[0].1).ok() != Some(cursor)
+            || EnvelopeId::from_slice(&metadata[0].2).ok() != Some(envelope_id)
+        {
+            return Err(ProfileStoreError::CursorConflict);
+        }
+        validate_blob_length(metadata[0].3)?;
+        let bytes: Vec<u8> = transaction
+            .query_row(
+                "SELECT sealed_observation
+                 FROM daemon_cursor_observation
+                 WHERE conversation_id = ?1 AND cursor = ?2",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    to_sql_integer(cursor)?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if bytes.len() != usize::try_from(metadata[0].3).unwrap_or_default() {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let plaintext = self.open_operation_record(
+            SecretRecordKind::LocalOperation,
+            conversation_id,
+            routing_id,
+            CURSOR_OBSERVATION_RECORD_SCOPE,
+            envelope_id.as_bytes(),
+            bytes,
+        )?;
+        let observed = decode_cursor_observation(&plaintext)?;
+        if observed.cursor() != cursor || observed.envelope() != envelope {
+            return Err(ProfileStoreError::CursorConflict);
+        }
+        Ok(())
     }
 
     fn seal_operation_record(
@@ -1418,6 +1611,7 @@ impl ProfileStore {
                     CASE WHEN length(c.routing_id) = 32 THEN c.routing_id END,
                     CASE WHEN length(i.envelope_id) = 16 THEN i.envelope_id END,
                     CASE WHEN length(i.sender_device_id) = 32 THEN i.sender_device_id END,
+                    i.sender_epoch,
                     i.sender_counter,
                     CASE WHEN length(i.message_id) = 16 THEN i.message_id END,
                     length(i.sealed_message)
@@ -1437,12 +1631,13 @@ impl ProfileStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
             .optional()
             .map_err(|_| ProfileStoreError::Storage)?;
-        let (routing_id, envelope_id, sender, sender_counter, message_id, length) =
+        let (routing_id, envelope_id, sender, sender_epoch, sender_counter, message_id, length) =
             metadata.ok_or(ProfileStoreError::InvalidTransition)?;
         validate_blob_length(length)?;
         let bytes: Vec<u8> = self
@@ -1479,6 +1674,7 @@ impl ProfileStore {
         if stored.cursor != cursor
             || stored.envelope_id != envelope_id
             || stored.sender != sender
+            || stored.epoch != from_sql_integer(sender_epoch)?
             || stored.message.message_id() != message_id
             || stored.message.sender_counter() != from_sql_integer(sender_counter)?
         {
@@ -1674,6 +1870,7 @@ pub(crate) struct StoredApplicationMessage {
     pub cursor: u64,
     pub envelope_id: EnvelopeId,
     pub sender: DeviceId,
+    pub epoch: u64,
     pub message: ApplicationMessage,
 }
 
@@ -1727,6 +1924,12 @@ pub(crate) enum ProfileStoreError {
     InvalidTransition,
     #[error("local cursor sequence contains a gap")]
     CursorGap,
+    #[error("relay cursor maps to a conflicting envelope")]
+    CursorConflict,
+    #[error("authenticated sender counter regressed")]
+    SenderCounterRegression,
+    #[error("authenticated sender counter contains a gap")]
+    SenderCounterGap,
     #[error("local sequence exhausted its supported range")]
     SequenceExhausted,
     #[error("local outbox reached its pending-operation limit")]
@@ -1818,6 +2021,16 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
              ) WITHOUT ROWID;
              CREATE INDEX daemon_outbox_status_idx
                 ON daemon_outbox(status, conversation_id, sender_counter);
+             CREATE TABLE daemon_cursor_observation (
+                conversation_id BLOB NOT NULL,
+                cursor INTEGER NOT NULL CHECK (cursor >= 1),
+                envelope_id BLOB NOT NULL UNIQUE CHECK (length(envelope_id) = 16),
+                sealed_observation BLOB NOT NULL,
+                PRIMARY KEY (conversation_id, cursor),
+                FOREIGN KEY (conversation_id)
+                    REFERENCES daemon_conversation(conversation_id)
+                    ON DELETE CASCADE
+             ) WITHOUT ROWID;
              CREATE TABLE daemon_inbox (
                 conversation_id BLOB NOT NULL,
                 cursor INTEGER NOT NULL CHECK (cursor >= 1),
@@ -1825,6 +2038,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
                 status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 3),
                 sealed_envelope BLOB NOT NULL,
                 sender_device_id BLOB,
+                sender_epoch INTEGER,
                 message_id BLOB,
                 sender_counter INTEGER,
                 sealed_message BLOB,
@@ -1833,17 +2047,28 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
                     REFERENCES daemon_conversation(conversation_id)
                     ON DELETE CASCADE,
                 UNIQUE (conversation_id, message_id),
-                UNIQUE (conversation_id, sender_device_id, sender_counter),
+                UNIQUE (
+                    conversation_id,
+                    sender_device_id,
+                    sender_epoch,
+                    sender_counter
+                ),
                 CHECK (
                     (status = 1
                         AND sender_device_id IS NULL
+                        AND sender_epoch IS NULL
                         AND message_id IS NULL
                         AND sender_counter IS NULL
                         AND sealed_message IS NULL)
                     OR
                     (status BETWEEN 2 AND 3
+                        AND sender_device_id IS NOT NULL
                         AND length(sender_device_id) = 32
+                        AND sender_epoch IS NOT NULL
+                        AND sender_epoch >= 0
+                        AND message_id IS NOT NULL
                         AND length(message_id) = 16
+                        AND sender_counter IS NOT NULL
                         AND sender_counter >= 1
                         AND sealed_message IS NOT NULL)
                 )
@@ -1851,6 +2076,14 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
              CREATE INDEX daemon_inbox_pending_idx
                 ON daemon_inbox(conversation_id, cursor)
                 WHERE status < 3;
+             CREATE INDEX daemon_inbox_sender_counter_idx
+                ON daemon_inbox(
+                    conversation_id,
+                    sender_device_id,
+                    sender_epoch,
+                    sender_counter
+                )
+                WHERE status = 3;
              PRAGMA user_version = 2;
              COMMIT;",
         )
@@ -1930,6 +2163,32 @@ fn decode_outbox_record(
     })
 }
 
+fn encode_cursor_observation(
+    cursor: u64,
+    envelope: &RelayEnvelope,
+) -> Result<Vec<u8>, ProfileStoreError> {
+    if cursor == 0 {
+        return Err(ProfileStoreError::InvalidTransition);
+    }
+    let envelope = encode_relay_envelope(envelope).map_err(|_| ProfileStoreError::Protocol)?;
+    let mut record = Vec::with_capacity(1 + 8 + envelope.len());
+    record.push(LOCAL_RECORD_VERSION);
+    record.extend_from_slice(&cursor.to_be_bytes());
+    record.extend_from_slice(&envelope);
+    Ok(record)
+}
+
+fn decode_cursor_observation(record: &[u8]) -> Result<StoredRelayEnvelope, ProfileStoreError> {
+    const HEADER_LENGTH: usize = 1 + 8;
+    if record.len() <= HEADER_LENGTH || record[0] != LOCAL_RECORD_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let cursor = decode_positive_u64(&record[1..9])?;
+    let envelope =
+        decode_relay_envelope(&record[HEADER_LENGTH..]).map_err(|_| ProfileStoreError::Protocol)?;
+    StoredRelayEnvelope::new(envelope, cursor).map_err(|_| ProfileStoreError::CorruptData)
+}
+
 fn encode_inbox_envelope_record(
     stored: &StoredRelayEnvelope,
 ) -> Result<Vec<u8>, ProfileStoreError> {
@@ -1957,6 +2216,7 @@ fn encode_inbox_message_record(
     cursor: u64,
     envelope_id: EnvelopeId,
     sender: DeviceId,
+    sender_epoch: u64,
     message: &ApplicationMessage,
 ) -> Result<Zeroizing<Vec<u8>>, ProfileStoreError> {
     if cursor == 0 {
@@ -1966,12 +2226,13 @@ fn encode_inbox_message_record(
         encode_application_message(message).map_err(|_| ProfileStoreError::Protocol)?,
     );
     let mut record = Zeroizing::new(Vec::with_capacity(
-        1 + 8 + EnvelopeId::LENGTH + DeviceId::LENGTH + message.len(),
+        1 + 8 + EnvelopeId::LENGTH + DeviceId::LENGTH + 8 + message.len(),
     ));
     record.push(LOCAL_RECORD_VERSION);
     record.extend_from_slice(&cursor.to_be_bytes());
     record.extend_from_slice(envelope_id.as_bytes());
     record.extend_from_slice(sender.as_bytes());
+    record.extend_from_slice(&sender_epoch.to_be_bytes());
     record.extend_from_slice(&message);
     Ok(record)
 }
@@ -1981,21 +2242,28 @@ fn decode_inbox_message_record(
 ) -> Result<StoredApplicationMessage, ProfileStoreError> {
     const ENVELOPE_ID_START: usize = 1 + 8;
     const SENDER_START: usize = ENVELOPE_ID_START + EnvelopeId::LENGTH;
-    const HEADER_LENGTH: usize = SENDER_START + DeviceId::LENGTH;
+    const EPOCH_START: usize = SENDER_START + DeviceId::LENGTH;
+    const HEADER_LENGTH: usize = EPOCH_START + 8;
     if record.len() <= HEADER_LENGTH || record[0] != LOCAL_RECORD_VERSION {
         return Err(ProfileStoreError::CorruptData);
     }
     let cursor = decode_positive_u64(&record[1..9])?;
     let envelope_id = EnvelopeId::from_slice(&record[ENVELOPE_ID_START..SENDER_START])
         .map_err(|_| ProfileStoreError::CorruptData)?;
-    let sender = DeviceId::from_slice(&record[SENDER_START..HEADER_LENGTH])
+    let sender = DeviceId::from_slice(&record[SENDER_START..EPOCH_START])
         .map_err(|_| ProfileStoreError::CorruptData)?;
+    let epoch = u64::from_be_bytes(
+        record[EPOCH_START..HEADER_LENGTH]
+            .try_into()
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+    );
     let message = decode_application_message(&record[HEADER_LENGTH..])
         .map_err(|_| ProfileStoreError::Protocol)?;
     Ok(StoredApplicationMessage {
         cursor,
         envelope_id,
         sender,
+        epoch,
         message,
     })
 }
@@ -2195,6 +2463,35 @@ mod tests {
         .unwrap()
     }
 
+    fn stage_inbox_message(
+        fixture: &ConversationFixture,
+        cursor: u64,
+        identifier: u8,
+        sender_epoch: u64,
+        sender_counter: u64,
+    ) {
+        let envelope = StoredRelayEnvelope::new(
+            relay_envelope(fixture.routing_id, identifier, &[identifier]),
+            cursor,
+        )
+        .unwrap();
+        fixture.store.record_inbox_envelope(&envelope).unwrap();
+        fixture
+            .store
+            .save_inbox_message(
+                fixture.conversation_id,
+                cursor,
+                fixture.device_id,
+                sender_epoch,
+                &application_message(
+                    identifier.wrapping_add(100),
+                    sender_counter,
+                    &format!("message-{identifier}"),
+                ),
+            )
+            .unwrap();
+    }
+
     fn create_v1_profile_database(path: &Path) {
         let connection = Connection::open(path).unwrap();
         connection
@@ -2315,6 +2612,149 @@ mod tests {
     }
 
     #[test]
+    fn cursor_observations_reject_relay_equivocation_in_both_directions() {
+        let fixture = conversation_fixture("cursor-observation-test");
+        let first_reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                MessageId::from_bytes([1; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([1; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        let first = relay_envelope(fixture.routing_id, 1, b"first");
+        fixture
+            .store
+            .store_outbound_envelope(first_reservation, &first)
+            .unwrap();
+        fixture
+            .store
+            .mark_outbox_accepted(first.envelope_id(), 1)
+            .unwrap();
+        let sealed_observation: Vec<u8> = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sealed_observation FROM daemon_cursor_observation
+                 WHERE conversation_id = ?1 AND cursor = 1",
+                params![fixture.conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_outbox SET accepted_cursor = 2
+                 WHERE envelope_id = ?1",
+                params![first.envelope_id().as_bytes().as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.mark_outbox_accepted(first.envelope_id(), 2),
+            Err(ProfileStoreError::CursorConflict)
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_outbox SET accepted_cursor = 1
+                 WHERE envelope_id = ?1",
+                params![first.envelope_id().as_bytes().as_slice()],
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_cursor_observation
+                 SET sealed_observation = (
+                    SELECT sealed_envelope FROM daemon_outbox WHERE envelope_id = ?1
+                 )
+                 WHERE conversation_id = ?2 AND cursor = 1",
+                params![
+                    first.envelope_id().as_bytes().as_slice(),
+                    fixture.conversation_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.mark_outbox_accepted(first.envelope_id(), 1),
+            Err(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_cursor_observation SET sealed_observation = ?1
+                 WHERE conversation_id = ?2 AND cursor = 1",
+                params![
+                    sealed_observation,
+                    fixture.conversation_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        let altered_first = RelayEnvelope::new(
+            first.version(),
+            first.routing_id(),
+            first.envelope_id(),
+            first.delivery_class(),
+            first.expected_parent_epoch(),
+            first.expires_at_unix_seconds(),
+            b"altered-first".to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .record_inbox_envelope(&StoredRelayEnvelope::new(altered_first, 1).unwrap()),
+            Err(ProfileStoreError::CursorConflict)
+        );
+        let conflicting_first = StoredRelayEnvelope::new(
+            relay_envelope(fixture.routing_id, 2, b"conflicting-first"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.store.record_inbox_envelope(&conflicting_first),
+            Err(ProfileStoreError::CursorConflict)
+        );
+        fixture
+            .store
+            .record_inbox_envelope(&StoredRelayEnvelope::new(first.clone(), 1).unwrap())
+            .unwrap();
+
+        let second =
+            StoredRelayEnvelope::new(relay_envelope(fixture.routing_id, 3, b"second"), 2).unwrap();
+        fixture.store.record_inbox_envelope(&second).unwrap();
+        let conflicting_reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                MessageId::from_bytes([4; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([4; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        let conflicting_second = relay_envelope(fixture.routing_id, 4, b"conflicting-second");
+        fixture
+            .store
+            .store_outbound_envelope(conflicting_reservation, &conflicting_second)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .mark_outbox_accepted(conflicting_second.envelope_id(), 2),
+            Err(ProfileStoreError::CursorConflict)
+        );
+        assert_eq!(fixture.store.ready_outbox().unwrap().len(), 1);
+    }
+
+    #[test]
     fn inbox_transitions_enforce_deduplication_and_contiguous_completion() {
         let fixture = conversation_fixture("inbox-test");
         let envelope = relay_envelope(fixture.routing_id, 1, b"opaque-inbox-ciphertext");
@@ -2332,12 +2772,12 @@ mod tests {
                 .unwrap();
         assert_eq!(
             fixture.store.record_inbox_envelope(&conflict),
-            Err(ProfileStoreError::DuplicateOperation)
+            Err(ProfileStoreError::CursorConflict)
         );
         let moved_duplicate = StoredRelayEnvelope::new(envelope, 2).unwrap();
         assert_eq!(
             fixture.store.record_inbox_envelope(&moved_duplicate),
-            Err(ProfileStoreError::DuplicateOperation)
+            Err(ProfileStoreError::CursorConflict)
         );
 
         let pending = fixture
@@ -2355,11 +2795,11 @@ mod tests {
         let message = application_message(3, 1, "sealed-inbox-plaintext");
         fixture
             .store
-            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, &message)
+            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, 0, &message)
             .unwrap();
         fixture
             .store
-            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, &message)
+            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, 0, &message)
             .unwrap();
         let pending = fixture
             .store
@@ -2375,6 +2815,7 @@ mod tests {
                 && stored.cursor() == 1
                 && message.cursor == 1
                 && message.sender == fixture.device_id
+                && message.epoch == 0
                 && message.message.message_id() == MessageId::from_bytes([3; MessageId::LENGTH])
         ));
 
@@ -2418,12 +2859,78 @@ mod tests {
                 fixture.conversation_id,
                 3,
                 fixture.device_id,
+                0,
                 &application_message(4, 2, "gap"),
             )
             .unwrap();
         assert_eq!(
             fixture.store.complete_inbox(fixture.conversation_id, 3),
             Err(ProfileStoreError::CursorGap)
+        );
+    }
+
+    #[test]
+    fn completed_inbox_rejects_sender_counter_regressions_per_epoch() {
+        let fixture = conversation_fixture("sender-counter-regression-test");
+        stage_inbox_message(&fixture, 1, 1, 4, 10);
+        assert_eq!(
+            fixture
+                .store
+                .complete_inbox(fixture.conversation_id, 1)
+                .unwrap(),
+            1
+        );
+        stage_inbox_message(&fixture, 2, 2, 5, 1);
+        assert_eq!(
+            fixture
+                .store
+                .complete_inbox(fixture.conversation_id, 2)
+                .unwrap(),
+            2
+        );
+        stage_inbox_message(&fixture, 3, 3, 4, 9);
+        assert_eq!(
+            fixture.store.complete_inbox(fixture.conversation_id, 3),
+            Err(ProfileStoreError::SenderCounterRegression)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .replay_cursor,
+            2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .incomplete_inbox(fixture.conversation_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn completed_inbox_keeps_sender_counter_gaps_visible() {
+        let fixture = conversation_fixture("sender-counter-gap-test");
+        stage_inbox_message(&fixture, 1, 1, 7, 10);
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, 1)
+            .unwrap();
+        stage_inbox_message(&fixture, 2, 2, 7, 12);
+        assert_eq!(
+            fixture.store.complete_inbox(fixture.conversation_id, 2),
+            Err(ProfileStoreError::SenderCounterGap)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .replay_cursor,
+            1
         );
     }
 
@@ -2477,6 +2984,7 @@ mod tests {
                 fixture.conversation_id,
                 2,
                 fixture.device_id,
+                0,
                 &application_message(3, 1, "saved"),
             )
             .unwrap();
@@ -2508,6 +3016,7 @@ mod tests {
                 && second.cursor() == 2
                 && message.cursor == 2
                 && message.sender == device_id
+                && message.epoch == 0
         ));
     }
 
@@ -2569,25 +3078,32 @@ mod tests {
                 fixture.conversation_id,
                 1,
                 fixture.device_id,
+                0,
                 &application_message(4, 1, "PLAINTEXT-MESSAGE-SENTINEL"),
             )
             .unwrap();
-        let (outbox, inbox, message): (Vec<u8>, Vec<u8>, Vec<u8>) = fixture
-            .store
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT
+        let (outbox, cursor_observation, inbox, message): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) =
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT
                     (SELECT sealed_envelope FROM daemon_outbox LIMIT 1),
+                    (SELECT sealed_observation FROM daemon_cursor_observation LIMIT 1),
                     sealed_envelope,
                     sealed_message
                  FROM daemon_inbox LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
         for (sealed, sentinel) in [
             (outbox.as_slice(), b"OUTBOX-CIPHERTEXT-SENTINEL".as_slice()),
+            (
+                cursor_observation.as_slice(),
+                b"INBOX-CIPHERTEXT-SENTINEL".as_slice(),
+            ),
             (inbox.as_slice(), b"INBOX-CIPHERTEXT-SENTINEL".as_slice()),
             (message.as_slice(), b"PLAINTEXT-MESSAGE-SENTINEL".as_slice()),
         ] {
@@ -2686,7 +3202,7 @@ mod tests {
         let message = application_message(4, 1, "message");
         fixture
             .store
-            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, &message)
+            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, 0, &message)
             .unwrap();
         fixture
             .store
@@ -2745,7 +3261,24 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE daemon_inbox
-                 SET sender_counter = 1, envelope_id = ?1",
+                 SET sender_counter = 1, sender_epoch = 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .load_message_at(fixture.conversation_id, 1)
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_inbox
+                 SET sender_epoch = 0, envelope_id = ?1",
                 params![
                     EnvelopeId::from_bytes([7; EnvelopeId::LENGTH])
                         .as_bytes()
@@ -3016,7 +3549,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, PROFILE_SCHEMA_VERSION);
-        for table in ["daemon_outbox", "daemon_inbox"] {
+        for table in ["daemon_outbox", "daemon_cursor_observation", "daemon_inbox"] {
             let exists: i64 = store
                 .lock()
                 .unwrap()
