@@ -4,7 +4,7 @@ use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRe
 use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use async_trait::async_trait;
 
-use crate::{RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
+use crate::{EncodedReplayPage, RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
 
 /// Relay action checked independently by the authorization adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -155,7 +155,7 @@ where
         &self,
         principal: RelayPrincipalId,
         request: ReplayRequest,
-    ) -> Result<Vec<u8>, RelayError> {
+    ) -> Result<EncodedReplayPage, RelayError> {
         self.authorizer
             .authorize(principal, request.routing_id(), RelayPermission::Replay)
             .await?;

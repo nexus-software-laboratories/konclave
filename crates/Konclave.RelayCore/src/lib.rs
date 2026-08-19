@@ -10,7 +10,7 @@ mod sqlite;
 
 pub use error::RelayError;
 pub use identifiers::RelayPrincipalId;
-pub use repository::{RelayRepository, SubmitResult};
+pub use repository::{EncodedReplayPage, RelayRepository, SubmitResult};
 pub use service::{RelayAuthorizer, RelayClock, RelayPermission, RelayService, SystemRelayClock};
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteRelayRepository;

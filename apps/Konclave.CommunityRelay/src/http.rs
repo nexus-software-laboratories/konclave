@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use KonclaveDomainCore::{
@@ -14,7 +15,7 @@ use KonclaveProtocolContracts::v1::{
 use KonclaveRelayCore::{RelayError, RelayPrincipalId};
 use anyhow::{Context, bail};
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, State, WebSocketUpgrade};
 use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -34,6 +35,7 @@ const PROTOBUF_MEDIA_TYPE: &str = "application/protobuf";
 const ERROR_CODE_HEADER: &str = "x-konclave-error-code";
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_REQUESTS: usize = 256;
+const MAX_WEBSOCKET_SESSIONS: usize = 256;
 const ACCESS_FILE_ENV: &str = "KONCLAVE_RELAY_ACCESS_FILE";
 const DATABASE_PATH_ENV: &str = "KONCLAVE_RELAY_DATABASE_PATH";
 const TLS_TERMINATED_ENV: &str = "KONCLAVE_RELAY_TLS_TERMINATED";
@@ -43,6 +45,8 @@ const TLS_TERMINATED_ENV: &str = "KONCLAVE_RELAY_TLS_TERMINATED";
 pub struct HttpState {
     service_name: String,
     application: RelayApplication,
+    websocket_slots: Arc<tokio::sync::Semaphore>,
+    watch_config: crate::websocket::SessionConfig,
 }
 
 impl HttpState {
@@ -52,7 +56,30 @@ impl HttpState {
         Self {
             service_name: service_name.into(),
             application,
+            websocket_slots: Arc::new(tokio::sync::Semaphore::new(MAX_WEBSOCKET_SESSIONS)),
+            watch_config: crate::websocket::SessionConfig::default(),
         }
+    }
+
+    /// Overrides watch timing while retaining the production protocol bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any timeout or interval is zero.
+    pub fn with_watch_timing(
+        mut self,
+        handshake_timeout: Duration,
+        write_timeout: Duration,
+        ping_interval: Duration,
+        replay_safety_interval: Duration,
+    ) -> anyhow::Result<Self> {
+        self.watch_config = crate::websocket::SessionConfig::new(
+            handshake_timeout,
+            write_timeout,
+            ping_interval,
+            replay_safety_interval,
+        )?;
+        Ok(self)
     }
 }
 
@@ -75,7 +102,33 @@ pub fn router(
         .route("/v1/acknowledgments", post(acknowledge))
         .route(
             "/ws",
-            get(move |upgrade| crate::websocket::upgrade(upgrade, websocket_shutdown.clone())),
+            get(
+                move |upgrade: WebSocketUpgrade,
+                      State(state): State<HttpState>,
+                      Extension(principal): Extension<RelayPrincipalId>| {
+                    let shutdown = websocket_shutdown.clone();
+                    async move {
+                        let permit = match state.websocket_slots.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                return error_response(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "relay_websocket_capacity",
+                                );
+                            }
+                        };
+                        crate::websocket::upgrade(
+                            upgrade,
+                            principal,
+                            state.application,
+                            permit,
+                            shutdown,
+                            state.watch_config,
+                        )
+                        .await
+                    }
+                },
+            ),
         )
         .route_layer(middleware::from_fn_with_state(
             access.clone(),
@@ -251,7 +304,7 @@ async fn replay(
         Ok(page) => page,
         Err(error) => return relay_error_response(&error),
     };
-    protobuf_response(StatusCode::OK, page)
+    protobuf_response(StatusCode::OK, page.into_bytes())
 }
 
 async fn acknowledge(

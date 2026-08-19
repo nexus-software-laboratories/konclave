@@ -63,6 +63,8 @@ crash or excessive-allocation case becomes a permanent regression input.
   invitation redemption;
 - test conflicting Commits, honest compare-and-set epoch serialization, and
   fail-closed behavior when a client observes a fork;
+- test authenticated WebSocket catch-up, live notification, disconnect, reconnect,
+  missed-message replay, heartbeat failure, and notification-loss recovery;
 - document that an isolated split view cannot be detected under the initial trusted
   sequencer assumption;
 - prove retries are idempotent and do not repeat application side effects.
