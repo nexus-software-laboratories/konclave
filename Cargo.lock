@@ -109,6 +109,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveRelayCore"
+version = "0.1.0"
+dependencies = [
+ "KonclaveDomainCore",
+ "KonclaveProtocolContracts",
+ "async-trait",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "KonclaveSecretStorage"
 version = "0.1.0"
 dependencies = [

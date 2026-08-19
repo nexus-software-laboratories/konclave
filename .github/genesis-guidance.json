@@ -82,6 +82,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/relay-storage.md",
+        "title": "Opaque relay storage",
+        "section": "Development",
+        "order": 28,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",

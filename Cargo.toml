@@ -1,8 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts", "crates/Konclave.SecretStorage"]
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage"]
 
 [workspace.dependencies]
+async-trait = "0.1.92"
 aws-lc-rs = { version = "=1.16.3", default-features = false, features = ["alloc", "aws-lc-sys"] }
 keyring = "=4.1.6"
 mls-rs = { version = "=0.55.3", default-features = false, features = ["std", "rfc_compliant", "tree_index", "fast_serialize"] }
@@ -12,5 +13,6 @@ prost = "0.14.4"
 prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls"], default-features = false }
 thiserror = "2.0.20"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }

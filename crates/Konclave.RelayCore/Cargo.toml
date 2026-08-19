@@ -1,0 +1,21 @@
+[package]
+name = "KonclaveRelayCore"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:sqlx"]
+
+[dependencies]
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+async-trait.workspace = true
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
