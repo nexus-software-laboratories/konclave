@@ -6,4 +6,10 @@ license = "Apache-2.0"
 rust-version = "1.85"
 
 [dependencies]
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+mls-rs.workspace = true
+mls-rs-core.workspace = true
+mls-rs-crypto-awslc.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true

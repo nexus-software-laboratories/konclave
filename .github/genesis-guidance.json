@@ -26,6 +26,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/protocol/identity-signatures.md",
+        "title": "Identity signature encodings",
+        "section": "Protocol",
+        "order": 20,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/security/threat-model.md",
         "title": "Threat model",
         "section": "Security",

@@ -10,6 +10,7 @@ rust-version = "1.85"
 cargo-fuzz = true
 
 [dependencies]
+KonclaveCryptographicCore = { path = "../crates/Konclave.CryptographicCore" }
 KonclaveProtocolContracts = { path = "../crates/Konclave.ProtocolContracts" }
 libfuzzer-sys = "0.4.13"
 

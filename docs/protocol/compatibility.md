@@ -86,6 +86,9 @@ the exact credential binding with an invitation for the same device and conversa
 and one bounded MLS KeyPackage. Signature, expiry, role, and invitation-consumption
 checks occur outside generic wire decoding.
 
+The exact v1 hash and signature inputs are defined in
+[Identity signature encodings](identity-signatures.md).
+
 ### Konclave application message
 
 Application data encrypted by MLS includes:
@@ -137,6 +140,11 @@ durably assigned a cursor, not that every recipient has processed it.
 Epoch-changing Commits require compare-and-set serialization against the expected
 parent epoch. Only one Commit is selected for an epoch. The initial protocol trusts
 the relay sequencer not to return different winning Commits to isolated clients.
+
+Membership-sensitive MLS control messages use PrivateMessage framing. Their
+authenticated data contains only the domain-separated SHA-256 digest of the canonical
+`MembershipChange` bytes so clients can reject a valid MLS Commit paired with a
+different application authorization without exposing membership data to the relay.
 
 Clients verify the selected Commit, reject observed conflicts or stale proposals, and
 halt security-sensitive sending on an unresolved branch. Compare-and-set does not
