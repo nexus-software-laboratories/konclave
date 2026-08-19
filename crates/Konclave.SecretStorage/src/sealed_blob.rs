@@ -28,6 +28,11 @@ pub enum SecretRecordKind {
     MlsGroupState = 3,
     MlsPriorEpoch = 4,
     ConversationSigningMaterial = 5,
+    RelayAccessCredential = 6,
+    ConversationPolicyState = 7,
+    ConversationCredentialBinding = 8,
+    LocalApplicationMessage = 9,
+    LocalOperation = 10,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.

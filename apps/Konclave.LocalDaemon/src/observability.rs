@@ -147,8 +147,13 @@ mod tests {
             ("request_id".to_string(), "abc".to_string()),
             ("body".to_string(), "secret".to_string()),
         ]);
-        let span = metadata_only_span("demo", &metadata);
-        let debug = format!("{span:?}");
-        assert!(debug.contains("service.operation"));
+        let span =
+            tracing::subscriber::with_default(tracing_subscriber::Registry::default(), || {
+                metadata_only_span("demo", &metadata)
+            });
+        assert_eq!(
+            span.metadata().map(tracing::Metadata::name),
+            Some("service.operation")
+        );
     }
 }

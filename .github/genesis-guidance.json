@@ -33,6 +33,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0004-daemon-profile-journal.md",
+        "title": "ADR 0004: Daemon profile journal",
+        "section": "Architecture",
+        "order": 50,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -107,6 +114,13 @@
         "title": "Outbound relay client",
         "section": "Development",
         "order": 29,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/daemon-profiles.md",
+        "title": "Daemon profiles and recovery",
+        "section": "Development",
+        "order": 30,
         "owner": "project:konclave"
       },
       {

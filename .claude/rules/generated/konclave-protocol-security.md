@@ -44,6 +44,9 @@ paths:
   halt security-sensitive sending.
 - Secret-bearing types are not `Clone`, `Debug`, generally serializable, logged,
   snapshotted, or persisted unsealed. Missing key custody fails closed.
+- Daemon profiles acquire their exclusive lock before key custody or database open.
+  Daemon and MLS schemas stay separately owned; incoming plaintext is journaled
+  idempotently before receiver-ratchet persistence and relay acknowledgment.
 - Membership changes are application-authorized on every client; MLS validity alone
   does not authorize them.
 - Bind invitations to an independently verified expected `DeviceId` and enforce
