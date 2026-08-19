@@ -6,4 +6,24 @@ license = "Apache-2.0"
 rust-version = "1.85"
 
 [dependencies]
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+async-trait.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+log.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 thiserror.workspace = true
+tokio = { version = "1.53.1", features = ["net", "time"] }
+tokio-tungstenite.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+KonclaveCommunityRelay = { path = "../../apps/Konclave.CommunityRelay" }
+KonclaveRelayCore = { path = "../Konclave.RelayCore" }
+axum = "0.8.9"
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
