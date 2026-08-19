@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Carries bounded UTF-8 chat content.
+message TextContent {
+  // Bounded to 255 KiB of UTF-8 in protocol v1.
+  string body = 1;
+}
+
+// Carries one application operation encrypted and authenticated by MLS.
+// The complete encoded message is bounded to 256 KiB in protocol v1.
+message ApplicationMessage {
+  ProtocolVersion version = 1;
+  MessageId message_id = 2;
+  uint64 sender_counter = 3;
+  uint64 sent_at_unix_milliseconds = 4;
+  MessageId reply_to = 5;
+
+  oneof content {
+    TextContent text = 10;
+  }
+}

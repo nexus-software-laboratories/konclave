@@ -1,0 +1,24 @@
+[package]
+name = "konclave-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+KonclaveProtocolContracts = { path = "../crates/Konclave.ProtocolContracts" }
+libfuzzer-sys = "0.4.13"
+
+[[bin]]
+name = "protocol_v1_decode"
+path = "fuzz_targets/protocol_v1_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

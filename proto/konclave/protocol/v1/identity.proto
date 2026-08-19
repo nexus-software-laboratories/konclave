@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Identifies the signature algorithm used by a device credential binding.
+enum SignatureScheme {
+  SIGNATURE_SCHEME_UNSPECIFIED = 0;
+  SIGNATURE_SCHEME_ED25519 = 1;
+}
+
+// Binds a conversation-scoped MLS signature key to one device root identity.
+message DeviceCredentialBinding {
+  ProtocolVersion version = 1;
+  DeviceId device_id = 2;
+  ConversationId conversation_id = 3;
+  SignatureScheme signature_scheme = 4;
+  // Exactly 32 bytes for Ed25519 in protocol v1.
+  bytes device_root_public_key = 5;
+  // Exactly 32 bytes for Ed25519 in protocol v1.
+  bytes conversation_signature_public_key = 6;
+  // Exactly 64 bytes for Ed25519 in protocol v1.
+  bytes device_binding_signature = 7;
+}
+
+// Authorizes one expected device to request membership in one conversation.
+message Invitation {
+  ProtocolVersion version = 1;
+  InvitationId invitation_id = 2;
+  ConversationId conversation_id = 3;
+  DeviceId expected_device_id = 4;
+  ConversationRole role = 5;
+  uint64 expires_at_unix_seconds = 6;
+  // Exactly 32 cryptographically random bytes in protocol v1.
+  bytes nonce = 7;
+  DeviceId issuer_device_id = 8;
+  // Exactly 64 bytes for Ed25519 in protocol v1.
+  bytes issuer_signature = 9;
+}
+
+// Presents the material required for an administrator-authorized MLS join.
+message JoinProof {
+  Invitation invitation = 1;
+  DeviceCredentialBinding credential = 2;
+  // Bounded to 64 KiB by protocol v1 validation.
+  bytes mls_key_package = 3;
+}

@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+// Identifies one version of a Konclave protocol layer.
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+// Identifies one device root public key.
+message DeviceId {
+  // Exactly 32 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Identifies one conversation independently from relay routing.
+message ConversationId {
+  // Exactly 32 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Identifies one signed application message.
+message MessageId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Identifies one relay submission for idempotent retry.
+message EnvelopeId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Identifies one invitation authorization.
+message InvitationId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Identifies one opaque relay route.
+message RoutingId {
+  // Exactly 32 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Defines the application authorization assigned to a conversation member.
+enum ConversationRole {
+  CONVERSATION_ROLE_UNSPECIFIED = 0;
+  CONVERSATION_ROLE_ADMINISTRATOR = 1;
+  CONVERSATION_ROLE_MEMBER = 2;
+}

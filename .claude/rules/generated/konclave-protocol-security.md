@@ -8,6 +8,7 @@ paths:
   - "apps/Konclave.LocalDaemon/**/*.rs"
   - "apps/Konclave.CommunityRelay/**/*.rs"
   - "extensions/Konclave.HostExtension/**/*.{ts,tsx}"
+  - "packages/Konclave.ProtocolContracts.TypeScript/**/*.{ts,tsx}"
   - "**/*.proto"
   - "fuzz/**"
 ---

@@ -16,5 +16,9 @@
 *.jpeg binary
 *.gif binary
 *.ico binary
+fixtures/protocol/**/*.bin binary
+
+# Generated bindings preserve generator formatting.
+packages/Konclave.ProtocolContracts.TypeScript/src/generated/**/*.ts -whitespace
 
 .github/workflows/*.lock.yml linguist-generated=true

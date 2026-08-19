@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Defines the minimum relay-visible class needed for delivery.
+enum DeliveryClass {
+  DELIVERY_CLASS_UNSPECIFIED = 0;
+  DELIVERY_CLASS_KEY_PACKAGE = 1;
+  DELIVERY_CLASS_WELCOME = 2;
+  DELIVERY_CLASS_GROUP_PROPOSAL = 3;
+  DELIVERY_CLASS_GROUP_COMMIT = 4;
+  DELIVERY_CLASS_GROUP_APPLICATION = 5;
+}
+
+// Carries opaque MLS or KeyPackage bytes to one relay route.
+message RelayEnvelope {
+  ProtocolVersion version = 1;
+  RoutingId routing_id = 2;
+  EnvelopeId envelope_id = 3;
+  DeliveryClass delivery_class = 4;
+  optional uint64 expected_parent_epoch = 5;
+  uint64 expires_at_unix_seconds = 6;
+  // Bounded to 1,023 KiB so the complete encoded envelope fits within 1 MiB.
+  bytes payload = 7;
+}
+
+// Associates a durable relay cursor with an accepted envelope.
+message StoredRelayEnvelope {
+  RelayEnvelope envelope = 1;
+  uint64 cursor = 2;
+}
+
+// Requests bounded replay after one durable cursor.
+// The complete encoded request is bounded to 1 KiB in protocol v1.
+message ReplayRequest {
+  RoutingId routing_id = 1;
+  uint64 after_cursor = 2;
+  // Must be from 1 through 100.
+  uint32 limit = 3;
+}
+
+// Returns one page of ordered relay envelopes.
+message ReplayPage {
+  // Protocol v1 permits at most 100 envelopes and 16 MiB encoded per page.
+  repeated StoredRelayEnvelope envelopes = 1;
+  uint64 next_cursor = 2;
+  bool has_more = 3;
+}
+
+// Acknowledges one contiguous durable cursor.
+// The complete encoded request is bounded to 1 KiB in protocol v1.
+message AcknowledgeRequest {
+  RoutingId routing_id = 1;
+  uint64 cursor = 2;
+}

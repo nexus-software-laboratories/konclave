@@ -76,6 +76,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --workspace --verbose
       - run: cargo test --workspace --verbose
+      - run: cargo check --locked --manifest-path fuzz/Cargo.toml --bin protocol_v1_decode
 
   rust-lint:
     needs: validation-plan
@@ -94,6 +95,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+      - run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --bin protocol_v1_decode -- -D warnings
 
   node-build-and-test:
     needs: validation-plan
@@ -106,6 +109,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
@@ -113,7 +117,7 @@ jobs:
         with:
           node-version: 24
           npm-cache-scope: ${{ github.job }}
-          npm-cache-dependency-hash: ${{ hashFiles('apps/**/package-lock.json', 'extensions/**/package-lock.json') }}
+          npm-cache-dependency-hash: ${{ hashFiles('apps/**/package-lock.json', 'extensions/**/package-lock.json', 'packages/**/package-lock.json') }}
 
       - name: Build and test Node guests
         shell: pwsh

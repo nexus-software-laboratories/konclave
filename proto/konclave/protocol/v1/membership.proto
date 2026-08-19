@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Describes one device authorized in a conversation epoch.
+message Member {
+  DeviceId device_id = 1;
+  ConversationRole role = 2;
+  // Must not exceed the containing ConversationState epoch.
+  uint64 joined_epoch = 3;
+}
+
+// Captures the application-authorized membership state for one MLS epoch.
+message ConversationState {
+  ProtocolVersion version = 1;
+  ConversationId conversation_id = 2;
+  uint64 epoch = 3;
+  // Protocol v1 permits at most 128 active devices.
+  repeated Member members = 4;
+  // Protocol v1 permits at most 1024 retained invitation identifiers.
+  repeated InvitationId consumed_invitation_ids = 5;
+}
+
+// Identifies one membership operation independently from relay delivery.
+message MembershipOperationId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Adds an invited device to a conversation.
+message AddMember {
+  DeviceId device_id = 1;
+  ConversationRole role = 2;
+  InvitationId invitation_id = 3;
+  // SHA-256 digest of the canonical credential binding.
+  bytes credential_binding_hash = 4;
+}
+
+// Removes one device identity from a conversation.
+message RemoveMember {
+  DeviceId device_id = 1;
+}
+
+// Replaces one device's application authorization.
+message ChangeMemberRole {
+  DeviceId device_id = 1;
+  ConversationRole role = 2;
+}
+
+// Authorizes one membership transition from an expected parent epoch.
+message MembershipChange {
+  ProtocolVersion version = 1;
+  ConversationId conversation_id = 2;
+  uint64 parent_epoch = 3;
+  MembershipOperationId operation_id = 4;
+
+  oneof change {
+    AddMember add = 10;
+    RemoveMember remove = 11;
+    ChangeMemberRole change_role = 12;
+  }
+}
