@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
-use crate::{RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
+use crate::{EncodedReplayPage, RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
 
 const SQLITE_SCHEMA_VERSION: u32 = 2;
 const REPLAY_PAGE_FIXED_WIRE_BUDGET: usize = 64;
@@ -127,18 +127,24 @@ impl RelayRepository for SqliteRelayRepository {
         Ok(ReplayPage::new(envelopes, page.next_cursor, page.has_more)?)
     }
 
-    async fn replay_encoded(&self, request: ReplayRequest) -> Result<Vec<u8>, RelayError> {
+    async fn replay_encoded(
+        &self,
+        request: ReplayRequest,
+    ) -> Result<EncodedReplayPage, RelayError> {
         let page = self.load_replay_entries(request).await?;
         let envelopes = page
             .entries
             .iter()
             .map(|entry| (entry.encoded_envelope.as_slice(), entry.cursor))
             .collect::<Vec<_>>();
-        Ok(encode_replay_page_preserving(
-            &envelopes,
+        let bytes = encode_replay_page_preserving(&envelopes, page.next_cursor, page.has_more)?;
+        EncodedReplayPage::new(
+            bytes,
+            request.after_cursor(),
             page.next_cursor,
             page.has_more,
-        )?)
+            page.entries.len(),
+        )
     }
 
     async fn acknowledge(
@@ -1232,10 +1238,14 @@ mod tests {
             .unwrap();
         assert!(
             replay
+                .as_bytes()
                 .windows(encoded.len())
                 .any(|window| window == encoded)
         );
-        assert_eq!(decode_replay_page(&replay).unwrap().next_cursor(), 1);
+        assert_eq!(
+            decode_replay_page(replay.as_bytes()).unwrap().next_cursor(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1327,10 +1337,14 @@ mod tests {
             .unwrap();
         assert!(
             replay
+                .as_bytes()
                 .windows(envelope.payload().len())
                 .any(|window| { window == envelope.payload() })
         );
-        assert_eq!(decode_replay_page(&replay).unwrap().next_cursor(), 1);
+        assert_eq!(
+            decode_replay_page(replay.as_bytes()).unwrap().next_cursor(),
+            1
+        );
     }
 
     #[tokio::test]

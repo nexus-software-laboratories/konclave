@@ -48,9 +48,10 @@ Schema rules:
 
 ### Transport frame
 
-One binary WebSocket message carries one encoded relay operation or envelope. HTTP
-operations use an explicit protobuf media type. JSON is not a core relay wire format.
-Local MCP messages remain a separate adapter contract.
+The v1 WebSocket watch begins with one binary `ReplayRequest` and returns binary
+`ReplayPage` messages for catch-up and live delivery. Submit and acknowledgment
+remain HTTP operations using an explicit protobuf media type. JSON is not a core
+relay wire format. Local MCP messages remain a separate adapter contract.
 
 Relay data-plane authentication is transport metadata, not a protobuf field. The
 community HTTP and WebSocket adapter follows the

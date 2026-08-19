@@ -1,19 +1,23 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRequest};
+use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRequest, RoutingId};
+use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use KonclaveRelayCore::{
-    RelayError, RelayPrincipalId, RelayService, SqliteRelayRepository, SubmitResult,
+    EncodedReplayPage, RelayError, RelayPrincipalId, RelayService, SqliteRelayRepository,
+    SubmitResult,
 };
 
 use crate::access::StaticRelayAccess;
 
 type AuthorizedRelayService = RelayService<SqliteRelayRepository, StaticRelayAccess>;
+const RELAY_EVENT_CAPACITY: usize = 1_024;
 
 /// Composes authenticated relay policy with durable opaque persistence.
 #[derive(Clone)]
 pub struct RelayApplication {
     service: Arc<AuthorizedRelayService>,
+    events: tokio::sync::broadcast::Sender<RelayEvent>,
 }
 
 impl RelayApplication {
@@ -27,8 +31,10 @@ impl RelayApplication {
         access: StaticRelayAccess,
     ) -> Result<Self, RelayError> {
         let repository = SqliteRelayRepository::connect(database_path).await?;
+        let (events, _) = tokio::sync::broadcast::channel(RELAY_EVENT_CAPACITY);
         Ok(Self {
             service: Arc::new(RelayService::new(repository, access)),
+            events,
         })
     }
 
@@ -42,7 +48,9 @@ impl RelayApplication {
         principal: RelayPrincipalId,
         envelope: &RelayEnvelope,
     ) -> Result<SubmitResult, RelayError> {
-        self.service.submit(principal, envelope).await
+        let outcome = self.service.submit(principal, envelope).await?;
+        self.publish_if_new(envelope.routing_id(), outcome);
+        Ok(outcome)
     }
 
     /// Decodes, authorizes, and submits exact bounded envelope bytes.
@@ -56,9 +64,13 @@ impl RelayApplication {
         principal: RelayPrincipalId,
         encoded_envelope: &[u8],
     ) -> Result<SubmitResult, RelayError> {
-        self.service
+        let route = decode_relay_envelope(encoded_envelope)?.routing_id();
+        let outcome = self
+            .service
             .submit_encoded(principal, encoded_envelope)
-            .await
+            .await?;
+        self.publish_if_new(route, outcome);
+        Ok(outcome)
     }
 
     /// Authorizes and returns one bounded replay page.
@@ -83,7 +95,7 @@ impl RelayApplication {
         &self,
         principal: RelayPrincipalId,
         request: ReplayRequest,
-    ) -> Result<Vec<u8>, RelayError> {
+    ) -> Result<EncodedReplayPage, RelayError> {
         self.service.replay_encoded(principal, request).await
     }
 
@@ -99,4 +111,26 @@ impl RelayApplication {
     ) -> Result<u64, RelayError> {
         self.service.acknowledge(principal, request).await
     }
+
+    /// Subscribes to best-effort durable-cursor notifications.
+    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RelayEvent> {
+        self.events.subscribe()
+    }
+
+    fn publish_if_new(&self, routing_id: RoutingId, outcome: SubmitResult) {
+        if !outcome.duplicate() {
+            let _ = self.events.send(RelayEvent {
+                routing_id,
+                cursor: outcome.cursor(),
+            });
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RelayEvent {
+    /// Route whose durable cursor advanced.
+    pub routing_id: RoutingId,
+    /// Newly assigned cursor.
+    pub cursor: u64,
 }

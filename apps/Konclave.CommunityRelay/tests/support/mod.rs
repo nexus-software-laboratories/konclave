@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
@@ -13,6 +13,8 @@ pub struct TestRelay {
     _directory: TempDir,
     pub access: StaticRelayAccess,
     pub application: RelayApplication,
+    #[allow(dead_code)]
+    pub database_path: PathBuf,
     #[allow(dead_code)]
     pub route: RoutingId,
     pub token: [u8; RelayPrincipalId::LENGTH],
@@ -39,6 +41,7 @@ impl TestRelay {
             _directory: directory,
             access,
             application,
+            database_path,
             route,
             token,
         }

@@ -70,7 +70,7 @@ The initial endpoints are:
 | `POST` | `/v1/envelopes` | `RelayEnvelope` | `StoredRelayEnvelope`; `201` when new, `200` for an exact retry |
 | `POST` | `/v1/replay` | `ReplayRequest` | `ReplayPage` |
 | `POST` | `/v1/acknowledgments` | `AcknowledgeRequest` | `AcknowledgeRequest` containing the effective monotonic cursor |
-| `GET` | `/ws` | WebSocket upgrade | Authenticated WebSocket session |
+| `GET` | `/ws` | WebSocket upgrade, then one `ReplayRequest` binary frame | One or more `ReplayPage` binary frames followed by live replay pages |
 
 Protobuf request and response bodies use `Content-Type: application/protobuf`.
 Requests with another media type fail. Request bodies are read only after bearer
@@ -84,6 +84,36 @@ for behavior.
 The relay stores each exact validated `RelayEnvelope` encoding. Submit and replay
 responses preserve those bytes inside their protobuf parent messages, including
 additive fields unknown to the relay.
+
+## WebSocket watch
+
+The authenticated WebSocket watch is server-to-client delivery, not a second submit
+or acknowledgment API:
+
+1. The client sends one binary `ReplayRequest` within 10 seconds of upgrade.
+2. The server authorizes `replay` for that request's route.
+3. The server sends bounded `ReplayPage` binary messages until `has_more` is false.
+   It sends an empty initial page when the route has no newer envelope, confirming
+   that the watch is active at the requested cursor.
+4. Each new durable submission signals connected watchers. A watcher reloads from
+   its last sent cursor and sends another `ReplayPage`.
+5. A bounded safety replay runs periodically, so a dropped in-process notification
+   or a write by another process cannot leave a healthy connection permanently
+   stalled.
+6. The client persists and acknowledges processed cursors through the HTTP endpoint.
+   After disconnect, it reconnects with its last durable cursor.
+
+Client frames after initialization are limited to Ping, Pong, and Close. A second
+binary operation or any text frame closes the session as a protocol error. The
+initial request is bounded to 1 KiB; each server replay page remains bounded to
+16 MiB and 100 envelopes. Every write has a deadline, concurrent WebSocket sessions
+are capped, and a missing heartbeat Pong closes the connection so clients can
+reconnect instead of silently stalling.
+
+Close reasons contain stable bounded error codes only. Malformed initialization uses
+WebSocket protocol-error code 1002, route denial and heartbeat timeout use
+policy-violation code 1008, server failures use 1011, and coordinated shutdown uses
+1001.
 
 ## Runtime configuration
 
