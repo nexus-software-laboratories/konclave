@@ -5,13 +5,9 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+. (Join-Path $PSScriptRoot 'ProtocolBaseline.Functions.ps1')
 $protoPath = Join-Path $repositoryRoot 'proto'
-$baseRef = 'refs/remotes/origin/main'
-
-git -C $repositoryRoot rev-parse --verify $baseRef *> $null
-if ($LASTEXITCODE -ne 0) {
-    throw "Required breaking-change baseline '$baseRef' is unavailable."
-}
+$baseRef = Resolve-ProtocolBaseline -RepositoryRoot $repositoryRoot
 
 $baseFiles = @(
     git -C $repositoryRoot ls-tree -r --name-only $baseRef -- proto

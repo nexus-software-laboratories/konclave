@@ -5,9 +5,10 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+. (Join-Path $PSScriptRoot 'ProtocolBaseline.Functions.ps1')
 $fixtureRelativeRoot = 'fixtures/protocol'
 $fixtureRoot = Join-Path $repositoryRoot $fixtureRelativeRoot
-$baseRef = 'refs/remotes/origin/main'
+$baseRef = Resolve-ProtocolBaseline -RepositoryRoot $repositoryRoot
 
 $backtick = [char]96
 foreach ($fixture in Get-ChildItem -LiteralPath $fixtureRoot -Recurse -Filter '*.bin' -File) {
@@ -21,11 +22,6 @@ foreach ($fixture in Get-ChildItem -LiteralPath $fixtureRoot -Recurse -Filter '*
     if ($expectedRow -cnotin $readmeLines) {
         throw "Fixture manifest is stale for $($fixture.Name)."
     }
-}
-
-git -C $repositoryRoot rev-parse --verify $baseRef *> $null
-if ($LASTEXITCODE -ne 0) {
-    throw "Required fixture baseline '$baseRef' is unavailable."
 }
 
 $baseFiles = @(
