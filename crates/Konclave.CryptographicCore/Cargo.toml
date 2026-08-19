@@ -8,6 +8,7 @@ rust-version = "1.85"
 [dependencies]
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }
 mls-rs.workspace = true
 mls-rs-core.workspace = true
 mls-rs-crypto-awslc.workspace = true

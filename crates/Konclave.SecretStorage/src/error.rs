@@ -39,6 +39,10 @@ pub enum SecretStorageError {
     /// A native credential exists but does not contain a valid wrapping key.
     #[error("native wrapping-key credential is invalid")]
     InvalidNativeCredential,
+
+    /// The selected persistence backend rejected an MLS storage operation.
+    #[error("MLS storage backend failed during {operation}")]
+    MlsStorageBackendFailure { operation: &'static str },
 }
 
 impl SecretStorageError {
@@ -55,6 +59,7 @@ impl SecretStorageError {
             Self::InvalidExternalKey => "invalid_external_wrapping_key",
             Self::NativeCustodyUnavailable => "native_key_custody_unavailable",
             Self::InvalidNativeCredential => "invalid_native_key_credential",
+            Self::MlsStorageBackendFailure { .. } => "mls_storage_backend_failure",
         }
     }
 }

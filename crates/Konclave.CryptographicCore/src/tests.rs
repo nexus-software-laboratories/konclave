@@ -7,6 +7,7 @@ use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
     encode_membership_change,
 };
+use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
 
 use crate::{
     DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit, MlsWelcome,
@@ -26,6 +27,13 @@ fn device_binding_and_invitation_signatures_fail_closed() {
         .unwrap();
     let verified = verify_device_credential_binding(material.binding()).unwrap();
     assert_eq!(verified.binding().device_id(), issuer.device_id());
+    let sealer =
+        SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([8; 32])).unwrap();
+    let sealed = issuer.seal(&sealer, b"default-profile").unwrap();
+    let reopened = DeviceIdentity::open(&sealer, b"default-profile", &sealed).unwrap();
+    assert_eq!(reopened.device_id(), issuer.device_id());
+    assert_eq!(reopened.public_key(), issuer.public_key());
+    assert!(DeviceIdentity::open(&sealer, b"other-profile", &sealed).is_err());
 
     let tampered = DeviceCredentialBinding::new(
         ProtocolVersion::application_v1(),

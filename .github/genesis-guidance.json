@@ -75,6 +75,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/secret-storage.md",
+        "title": "Sealed secret storage",
+        "section": "Development",
+        "order": 27,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",

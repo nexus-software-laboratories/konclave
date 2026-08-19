@@ -1,6 +1,6 @@
 #![no_main]
 
-use KonclaveCryptographicCore::{MlsApplicationMessage, MlsCommit, MlsWelcome};
+use KonclaveCryptographicCore::{DeviceIdentity, MlsApplicationMessage, MlsCommit, MlsWelcome};
 use KonclaveProtocolContracts::v1::{
     decode_acknowledge_request, decode_application_message, decode_conversation_state,
     decode_device_credential_binding, decode_invitation, decode_join_proof,
@@ -33,6 +33,7 @@ fuzz_target!(|bytes: &[u8]| {
             SecretRecordContext::new(SecretRecordKind::MlsGroupState, b"fuzz".to_vec()),
         ) {
             let _ = sealer.open(&context, &blob);
+            let _ = DeviceIdentity::open(&sealer, b"fuzz", &blob);
         }
     }
 });
