@@ -68,9 +68,10 @@ Outbox acceptance and inbox receipt share the same cursor-observation ledger. Ea
 entry authenticates the exact envelope, not only its identifier, so a relay that
 assigns conflicting envelopes or content to one observed cursor halts processing.
 Completed messages also retain the authenticated MLS epoch and sender counter. The
-first observed counter establishes that sender-and-epoch baseline; later counters must
-advance by exactly one. Regressions and forward gaps remain incomplete and therefore
-cannot advance the durable replay cursor.
+first observed counter establishes a sealed sender-and-epoch high-water record;
+completion updates that record and the replay cursor in one transaction. Later
+counters must advance by exactly one. Regressions and forward gaps remain incomplete
+and therefore cannot advance the durable replay cursor.
 
 ## Startup sequence
 

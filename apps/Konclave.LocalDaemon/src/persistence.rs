@@ -37,6 +37,7 @@ const OUTBOX_RECORD_SCOPE: u8 = 1;
 const INBOX_ENVELOPE_RECORD_SCOPE: u8 = 2;
 const INBOX_MESSAGE_RECORD_SCOPE: u8 = 3;
 const CURSOR_OBSERVATION_RECORD_SCOPE: u8 = 4;
+const SENDER_COUNTER_RECORD_SCOPE: u8 = 5;
 
 type InboxMessageMetadata = (Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, Vec<u8>, i64);
 
@@ -801,13 +802,14 @@ impl ProfileStore {
     /// Returns a cursor conflict, invalid transition, sequence, or storage error.
     pub(crate) fn mark_outbox_accepted(
         &self,
-        envelope_id: EnvelopeId,
-        cursor: u64,
+        stored: &StoredRelayEnvelope,
     ) -> Result<(), ProfileStoreError> {
-        if cursor == 0 {
-            return Err(ProfileStoreError::InvalidTransition);
-        }
+        let envelope_id = stored.envelope().envelope_id();
+        let cursor = stored.cursor();
         let record = self.load_outbox_record(envelope_id)?;
+        if record.envelope != *stored.envelope() {
+            return Err(ProfileStoreError::CursorConflict);
+        }
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
@@ -1130,10 +1132,21 @@ impl ProfileStore {
         cursor: u64,
     ) -> Result<u64, ProfileStoreError> {
         let message = self.load_message_at(conversation_id, cursor)?;
+        let envelope = self.load_inbox_envelope(message.envelope_id)?;
+        if envelope.cursor() != cursor {
+            return Err(ProfileStoreError::CorruptData);
+        }
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
+        self.verify_cursor_observation(
+            &transaction,
+            conversation_id,
+            envelope.envelope().routing_id(),
+            cursor,
+            envelope.envelope(),
+        )?;
         let current: i64 = transaction
             .query_row(
                 "SELECT replay_cursor FROM daemon_conversation WHERE conversation_id = ?1",
@@ -1144,6 +1157,12 @@ impl ProfileStore {
             .map_err(|_| ProfileStoreError::Storage)?
             .ok_or(ProfileStoreError::ConversationNotFound)?;
         let current = from_sql_integer(current)?;
+        let high_water = self.load_sender_high_water(
+            &transaction,
+            conversation_id,
+            message.sender,
+            message.epoch,
+        )?;
         if cursor <= current {
             let status: Option<i64> = transaction
                 .query_row(
@@ -1157,7 +1176,9 @@ impl ProfileStore {
                 )
                 .optional()
                 .map_err(|_| ProfileStoreError::Storage)?;
-            return if status == Some(3) {
+            return if status == Some(3)
+                && high_water.is_some_and(|counter| counter >= message.message.sender_counter())
+            {
                 Ok(current)
             } else {
                 Err(ProfileStoreError::CorruptData)
@@ -1166,24 +1187,7 @@ impl ProfileStore {
         if current.checked_add(1) != Some(cursor) {
             return Err(ProfileStoreError::CursorGap);
         }
-        let high_water: Option<i64> = transaction
-            .query_row(
-                "SELECT max(sender_counter)
-                 FROM daemon_inbox
-                 WHERE conversation_id = ?1
-                   AND sender_device_id = ?2
-                   AND sender_epoch = ?3
-                   AND status = 3",
-                params![
-                    conversation_id.as_bytes().as_slice(),
-                    message.sender.as_bytes().as_slice(),
-                    to_sql_integer(message.epoch)?
-                ],
-                |row| row.get(0),
-            )
-            .map_err(|_| ProfileStoreError::Storage)?;
         if let Some(high_water) = high_water {
-            let high_water = from_sql_integer(high_water)?;
             let sender_counter = message.message.sender_counter();
             if sender_counter <= high_water {
                 return Err(ProfileStoreError::SenderCounterRegression);
@@ -1192,6 +1196,13 @@ impl ProfileStore {
                 return Err(ProfileStoreError::SenderCounterGap);
             }
         }
+        self.store_sender_high_water(
+            &transaction,
+            conversation_id,
+            message.sender,
+            message.epoch,
+            message.message.sender_counter(),
+        )?;
         let changed = transaction
             .execute(
                 "UPDATE daemon_inbox SET status = 3
@@ -1316,7 +1327,7 @@ impl ProfileStore {
 
     fn verify_cursor_observation(
         &self,
-        transaction: &rusqlite::Transaction<'_>,
+        connection: &Connection,
         conversation_id: ConversationId,
         routing_id: RoutingId,
         cursor: u64,
@@ -1324,7 +1335,7 @@ impl ProfileStore {
     ) -> Result<(), ProfileStoreError> {
         let envelope_id = envelope.envelope_id();
         let metadata = {
-            let mut statement = transaction
+            let mut statement = connection
                 .prepare(
                     "SELECT
                         CASE WHEN length(conversation_id) = 32 THEN conversation_id END,
@@ -1365,7 +1376,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::CursorConflict);
         }
         validate_blob_length(metadata[0].3)?;
-        let bytes: Vec<u8> = transaction
+        let bytes: Vec<u8> = connection
             .query_row(
                 "SELECT sealed_observation
                  FROM daemon_cursor_observation
@@ -1393,6 +1404,119 @@ impl ProfileStore {
             return Err(ProfileStoreError::CursorConflict);
         }
         Ok(())
+    }
+
+    fn load_sender_high_water(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        sender: DeviceId,
+        epoch: u64,
+    ) -> Result<Option<u64>, ProfileStoreError> {
+        let metadata: Option<(i64, i64)> = connection
+            .query_row(
+                "SELECT highest_counter, length(sealed_state)
+                 FROM daemon_sender_counter
+                 WHERE conversation_id = ?1
+                   AND sender_device_id = ?2
+                   AND sender_epoch = ?3",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    sender.as_bytes().as_slice(),
+                    to_sql_integer(epoch)?
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some((highest_counter, length)) = metadata else {
+            return Ok(None);
+        };
+        validate_blob_length(length)?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_state
+                 FROM daemon_sender_counter
+                 WHERE conversation_id = ?1
+                   AND sender_device_id = ?2
+                   AND sender_epoch = ?3",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    sender.as_bytes().as_slice(),
+                    to_sql_integer(epoch)?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if bytes.len() != usize::try_from(length).unwrap_or_default() {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let blob = SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
+        let plaintext = self
+            .sealer
+            .open(
+                &sender_counter_record_context(
+                    &self.locked_profile.profile_id,
+                    conversation_id,
+                    sender,
+                    epoch,
+                )?,
+                &blob,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let (stored_sender, stored_epoch, stored_counter) =
+            decode_sender_counter_state(&plaintext)?;
+        let highest_counter = from_sql_integer(highest_counter)?;
+        if stored_sender != sender || stored_epoch != epoch || stored_counter != highest_counter {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(Some(highest_counter))
+    }
+
+    fn store_sender_high_water(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        sender: DeviceId,
+        epoch: u64,
+        highest_counter: u64,
+    ) -> Result<(), ProfileStoreError> {
+        let plaintext = encode_sender_counter_state(sender, epoch, highest_counter)?;
+        let blob = self
+            .sealer
+            .seal(
+                &sender_counter_record_context(
+                    &self.locked_profile.profile_id,
+                    conversation_id,
+                    sender,
+                    epoch,
+                )?,
+                &plaintext,
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        connection
+            .execute(
+                "INSERT INTO daemon_sender_counter (
+                    conversation_id,
+                    sender_device_id,
+                    sender_epoch,
+                    highest_counter,
+                    sealed_state
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (conversation_id, sender_device_id, sender_epoch)
+                 DO UPDATE SET
+                    highest_counter = excluded.highest_counter,
+                    sealed_state = excluded.sealed_state",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    sender.as_bytes().as_slice(),
+                    to_sql_integer(epoch)?,
+                    to_sql_integer(highest_counter)?,
+                    blob.as_bytes()
+                ],
+            )
+            .map(|_| ())
+            .map_err(|_| ProfileStoreError::Storage)
     }
 
     fn seal_operation_record(
@@ -1557,6 +1681,16 @@ impl ProfileStore {
             || stored.envelope().routing_id() != routing_id
         {
             return Err(ProfileStoreError::CorruptData);
+        }
+        {
+            let connection = self.lock()?;
+            self.verify_cursor_observation(
+                &connection,
+                conversation_id,
+                routing_id,
+                stored.cursor(),
+                stored.envelope(),
+            )?;
         }
         Ok(stored)
     }
@@ -2076,14 +2210,17 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
              CREATE INDEX daemon_inbox_pending_idx
                 ON daemon_inbox(conversation_id, cursor)
                 WHERE status < 3;
-             CREATE INDEX daemon_inbox_sender_counter_idx
-                ON daemon_inbox(
-                    conversation_id,
-                    sender_device_id,
-                    sender_epoch,
-                    sender_counter
-                )
-                WHERE status = 3;
+             CREATE TABLE daemon_sender_counter (
+                conversation_id BLOB NOT NULL,
+                sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 32),
+                sender_epoch INTEGER NOT NULL CHECK (sender_epoch >= 0),
+                highest_counter INTEGER NOT NULL CHECK (highest_counter >= 1),
+                sealed_state BLOB NOT NULL,
+                PRIMARY KEY (conversation_id, sender_device_id, sender_epoch),
+                FOREIGN KEY (conversation_id)
+                    REFERENCES daemon_conversation(conversation_id)
+                    ON DELETE CASCADE
+             ) WITHOUT ROWID;
              PRAGMA user_version = 2;
              COMMIT;",
         )
@@ -2187,6 +2324,40 @@ fn decode_cursor_observation(record: &[u8]) -> Result<StoredRelayEnvelope, Profi
     let envelope =
         decode_relay_envelope(&record[HEADER_LENGTH..]).map_err(|_| ProfileStoreError::Protocol)?;
     StoredRelayEnvelope::new(envelope, cursor).map_err(|_| ProfileStoreError::CorruptData)
+}
+
+fn encode_sender_counter_state(
+    sender: DeviceId,
+    epoch: u64,
+    highest_counter: u64,
+) -> Result<Vec<u8>, ProfileStoreError> {
+    if highest_counter == 0 {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let mut record = Vec::with_capacity(1 + DeviceId::LENGTH + 8 + 8);
+    record.push(LOCAL_RECORD_VERSION);
+    record.extend_from_slice(sender.as_bytes());
+    record.extend_from_slice(&epoch.to_be_bytes());
+    record.extend_from_slice(&highest_counter.to_be_bytes());
+    Ok(record)
+}
+
+fn decode_sender_counter_state(record: &[u8]) -> Result<(DeviceId, u64, u64), ProfileStoreError> {
+    const EPOCH_START: usize = 1 + DeviceId::LENGTH;
+    const COUNTER_START: usize = EPOCH_START + 8;
+    const RECORD_LENGTH: usize = COUNTER_START + 8;
+    if record.len() != RECORD_LENGTH || record[0] != LOCAL_RECORD_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let sender = DeviceId::from_slice(&record[1..EPOCH_START])
+        .map_err(|_| ProfileStoreError::CorruptData)?;
+    let epoch = u64::from_be_bytes(
+        record[EPOCH_START..COUNTER_START]
+            .try_into()
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+    );
+    let highest_counter = decode_positive_u64(&record[COUNTER_START..])?;
+    Ok((sender, epoch, highest_counter))
 }
 
 fn encode_inbox_envelope_record(
@@ -2346,6 +2517,28 @@ fn operation_record_context(
     identifier.push(scope);
     identifier.extend_from_slice(record_id);
     SecretRecordContext::new(kind, identifier).map_err(|_| ProfileStoreError::Storage)
+}
+
+fn sender_counter_record_context(
+    profile_id: &ProfileId,
+    conversation_id: ConversationId,
+    sender: DeviceId,
+    epoch: u64,
+) -> Result<SecretRecordContext, ProfileStoreError> {
+    let mut identifier = Vec::with_capacity(
+        2 + profile_id.as_bytes().len() + ConversationId::LENGTH + DeviceId::LENGTH + 8,
+    );
+    identifier.push(
+        u8::try_from(profile_id.as_bytes().len())
+            .map_err(|_| ProfileStoreError::InvalidProfileId)?,
+    );
+    identifier.extend_from_slice(profile_id.as_bytes());
+    identifier.extend_from_slice(conversation_id.as_bytes());
+    identifier.push(SENDER_COUNTER_RECORD_SCOPE);
+    identifier.extend_from_slice(sender.as_bytes());
+    identifier.extend_from_slice(&epoch.to_be_bytes());
+    SecretRecordContext::new(SecretRecordKind::LocalOperation, identifier)
+        .map_err(|_| ProfileStoreError::Storage)
 }
 
 fn validate_blob_length(length: i64) -> Result<(), ProfileStoreError> {
@@ -2578,10 +2771,11 @@ mod tests {
         let ready = reopened.ready_outbox().unwrap();
         assert_eq!(ready.len(), 1);
         assert!(ready[0].envelope == envelope);
-        reopened.mark_outbox_accepted(envelope_id, 7).unwrap();
-        reopened.mark_outbox_accepted(envelope_id, 7).unwrap();
+        let accepted = StoredRelayEnvelope::new(envelope.clone(), 7).unwrap();
+        reopened.mark_outbox_accepted(&accepted).unwrap();
+        reopened.mark_outbox_accepted(&accepted).unwrap();
         assert_eq!(
-            reopened.mark_outbox_accepted(envelope_id, 8),
+            reopened.mark_outbox_accepted(&StoredRelayEnvelope::new(envelope.clone(), 8).unwrap()),
             Err(ProfileStoreError::InvalidTransition)
         );
         assert!(reopened.ready_outbox().unwrap().is_empty());
@@ -2627,9 +2821,25 @@ mod tests {
             .store
             .store_outbound_envelope(first_reservation, &first)
             .unwrap();
+        let altered_response = RelayEnvelope::new(
+            first.version(),
+            first.routing_id(),
+            first.envelope_id(),
+            first.delivery_class(),
+            first.expected_parent_epoch(),
+            first.expires_at_unix_seconds(),
+            b"altered-response".to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .mark_outbox_accepted(&StoredRelayEnvelope::new(altered_response, 1).unwrap()),
+            Err(ProfileStoreError::CursorConflict)
+        );
         fixture
             .store
-            .mark_outbox_accepted(first.envelope_id(), 1)
+            .mark_outbox_accepted(&StoredRelayEnvelope::new(first.clone(), 1).unwrap())
             .unwrap();
         let sealed_observation: Vec<u8> = fixture
             .store
@@ -2653,7 +2863,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            fixture.store.mark_outbox_accepted(first.envelope_id(), 2),
+            fixture
+                .store
+                .mark_outbox_accepted(&StoredRelayEnvelope::new(first.clone(), 2).unwrap()),
             Err(ProfileStoreError::CursorConflict)
         );
         fixture
@@ -2683,7 +2895,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            fixture.store.mark_outbox_accepted(first.envelope_id(), 1),
+            fixture
+                .store
+                .mark_outbox_accepted(&StoredRelayEnvelope::new(first.clone(), 1).unwrap()),
             Err(ProfileStoreError::CorruptData)
         );
         fixture
@@ -2746,9 +2960,9 @@ mod tests {
             .store_outbound_envelope(conflicting_reservation, &conflicting_second)
             .unwrap();
         assert_eq!(
-            fixture
-                .store
-                .mark_outbox_accepted(conflicting_second.envelope_id(), 2),
+            fixture.store.mark_outbox_accepted(
+                &StoredRelayEnvelope::new(conflicting_second.clone(), 2).unwrap()
+            ),
             Err(ProfileStoreError::CursorConflict)
         );
         assert_eq!(fixture.store.ready_outbox().unwrap().len(), 1);
@@ -2880,6 +3094,82 @@ mod tests {
                 .unwrap(),
             1
         );
+        let sealed_high_water: Vec<u8> = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sealed_state FROM daemon_sender_counter
+                 WHERE conversation_id = ?1
+                   AND sender_device_id = ?2
+                   AND sender_epoch = 4",
+                params![
+                    fixture.conversation_id.as_bytes().as_slice(),
+                    fixture.device_id.as_bytes().as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_sender_counter SET highest_counter = 9
+                 WHERE conversation_id = ?1
+                   AND sender_device_id = ?2
+                   AND sender_epoch = 4",
+                params![
+                    fixture.conversation_id.as_bytes().as_slice(),
+                    fixture.device_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.complete_inbox(fixture.conversation_id, 1),
+            Err(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_sender_counter
+                 SET highest_counter = 10,
+                     sealed_state = (
+                        SELECT sealed_observation
+                        FROM daemon_cursor_observation
+                        WHERE conversation_id = ?1 AND cursor = 1
+                     )
+                 WHERE conversation_id = ?1
+                   AND sender_device_id = ?2
+                   AND sender_epoch = 4",
+                params![
+                    fixture.conversation_id.as_bytes().as_slice(),
+                    fixture.device_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.complete_inbox(fixture.conversation_id, 1),
+            Err(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_sender_counter SET sealed_state = ?1
+                 WHERE conversation_id = ?2
+                   AND sender_device_id = ?3
+                   AND sender_epoch = 4",
+                params![
+                    sealed_high_water,
+                    fixture.conversation_id.as_bytes().as_slice(),
+                    fixture.device_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
         stage_inbox_message(&fixture, 2, 2, 5, 1);
         assert_eq!(
             fixture
@@ -3549,7 +3839,12 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, PROFILE_SCHEMA_VERSION);
-        for table in ["daemon_outbox", "daemon_cursor_observation", "daemon_inbox"] {
+        for table in [
+            "daemon_outbox",
+            "daemon_cursor_observation",
+            "daemon_inbox",
+            "daemon_sender_counter",
+        ] {
             let exists: i64 = store
                 .lock()
                 .unwrap()
