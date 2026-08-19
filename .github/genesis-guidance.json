@@ -19,6 +19,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0002-sealed-local-secret-custody.md",
+        "title": "ADR 0002: Sealed local secret custody",
+        "section": "Architecture",
+        "order": 30,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

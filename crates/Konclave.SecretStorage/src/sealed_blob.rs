@@ -1,0 +1,368 @@
+use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use zeroize::Zeroizing;
+
+use crate::key::WrappingKey;
+use crate::{SecretStorageError, WrappingKeyProvider};
+
+const MAGIC: &[u8; 4] = b"KSC1";
+const FORMAT_VERSION: u8 = 1;
+const ALGORITHM_AES_256_GCM: u8 = 1;
+const KEY_SLOT: u32 = 1;
+const NONCE_BYTES: usize = 12;
+const TAG_BYTES: usize = 16;
+const HEADER_BYTES: usize = MAGIC.len() + 1 + 1 + 4 + NONCE_BYTES;
+const AAD_DOMAIN: &[u8] = b"konclave-sealed-secret-aad-v1\0";
+const MAX_RECORD_IDENTIFIER_BYTES: usize = 128;
+
+/// Maximum plaintext bytes accepted by one sealed secret record.
+pub const MAX_SECRET_PLAINTEXT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SEALED_BLOB_BYTES: usize = HEADER_BYTES + MAX_SECRET_PLAINTEXT_BYTES + TAG_BYTES;
+
+/// Closed namespace for secret record associated-data binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SecretRecordKind {
+    DeviceRootIdentity = 1,
+    MlsKeyPackage = 2,
+    MlsGroupState = 3,
+    MlsPriorEpoch = 4,
+}
+
+/// Bounded non-secret context authenticated with one sealed record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretRecordContext {
+    kind: SecretRecordKind,
+    identifier: Vec<u8>,
+}
+
+impl SecretRecordContext {
+    /// Creates associated-data context for one stable secret record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an empty or oversized identifier.
+    pub fn new(
+        kind: SecretRecordKind,
+        identifier: impl Into<Vec<u8>>,
+    ) -> Result<Self, SecretStorageError> {
+        let identifier = identifier.into();
+        if identifier.is_empty() || identifier.len() > MAX_RECORD_IDENTIFIER_BYTES {
+            return Err(SecretStorageError::InvalidRecordIdentifier {
+                maximum: MAX_RECORD_IDENTIFIER_BYTES,
+            });
+        }
+        Ok(Self { kind, identifier })
+    }
+
+    /// Returns the record namespace.
+    #[must_use]
+    pub const fn kind(&self) -> SecretRecordKind {
+        self.kind
+    }
+
+    /// Returns the stable record identifier.
+    #[must_use]
+    pub fn identifier(&self) -> &[u8] {
+        &self.identifier
+    }
+}
+
+/// Versioned authenticated ciphertext safe to cross into ordinary persistence.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealedBlob(Vec<u8>);
+
+impl SealedBlob {
+    /// Validates framing without attempting decryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for oversized, truncated, or unsupported framing.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, SecretStorageError> {
+        validate_header(&bytes)?;
+        Ok(Self(bytes))
+    }
+
+    /// Validates framing and copies a bounded transport slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error before allocation for oversized or invalid framing.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, SecretStorageError> {
+        validate_header(bytes)?;
+        Ok(Self(bytes.to_vec()))
+    }
+
+    /// Returns the complete versioned ciphertext bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the complete ciphertext bytes.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+/// AES-256-GCM sealer initialized from one explicit custody provider.
+pub struct SecretSealer {
+    key: WrappingKey,
+    random: SystemRandom,
+}
+
+impl SecretSealer {
+    /// Loads the wrapping key once and constructs a sealer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the provider error without attempting any fallback.
+    pub fn from_provider(provider: impl WrappingKeyProvider) -> Result<Self, SecretStorageError> {
+        Ok(Self {
+            key: provider.load_or_create()?,
+            random: SystemRandom::new(),
+        })
+    }
+
+    /// Seals plaintext under a fresh nonce and bound record context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for oversized plaintext, random failure, or AEAD
+    /// initialization failure.
+    pub fn seal(
+        &self,
+        context: &SecretRecordContext,
+        plaintext: &[u8],
+    ) -> Result<SealedBlob, SecretStorageError> {
+        if plaintext.len() > MAX_SECRET_PLAINTEXT_BYTES {
+            return Err(SecretStorageError::PlaintextTooLarge {
+                maximum: MAX_SECRET_PLAINTEXT_BYTES,
+                actual: plaintext.len(),
+            });
+        }
+        let mut nonce = [0_u8; NONCE_BYTES];
+        self.random
+            .fill(&mut nonce)
+            .map_err(|_| SecretStorageError::RandomGenerationFailed)?;
+        self.seal_with_nonce(context, plaintext, nonce)
+    }
+
+    /// Authenticates and opens one sealed record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for malformed framing, context mismatch, wrong key, or
+    /// modified ciphertext.
+    pub fn open(
+        &self,
+        context: &SecretRecordContext,
+        blob: &SealedBlob,
+    ) -> Result<Zeroizing<Vec<u8>>, SecretStorageError> {
+        let header = validate_header(blob.as_bytes())?;
+        let nonce: [u8; NONCE_BYTES] = header[10..HEADER_BYTES]
+            .try_into()
+            .map_err(|_| SecretStorageError::InvalidSealedBlob)?;
+        let aad = associated_data(context, header);
+        let key = less_safe_key(&self.key)?;
+        let mut plaintext = Zeroizing::new(blob.as_bytes()[HEADER_BYTES..].to_vec());
+        let length = key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad),
+                &mut plaintext,
+            )
+            .map_err(|_| SecretStorageError::AuthenticationFailed)?
+            .len();
+        plaintext.truncate(length);
+        Ok(plaintext)
+    }
+
+    fn seal_with_nonce(
+        &self,
+        context: &SecretRecordContext,
+        plaintext: &[u8],
+        nonce: [u8; NONCE_BYTES],
+    ) -> Result<SealedBlob, SecretStorageError> {
+        let header = header(nonce);
+        let aad = associated_data(context, &header);
+        let key = less_safe_key(&self.key)?;
+        let mut ciphertext = Zeroizing::new(plaintext.to_vec());
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad),
+            &mut *ciphertext,
+        )
+        .map_err(|_| SecretStorageError::AuthenticationFailed)?;
+        let mut output = Vec::with_capacity(HEADER_BYTES + ciphertext.len());
+        output.extend_from_slice(&header);
+        output.extend_from_slice(&ciphertext);
+        SealedBlob::from_bytes(output)
+    }
+}
+
+fn less_safe_key(key: &WrappingKey) -> Result<LessSafeKey, SecretStorageError> {
+    UnboundKey::new(&AES_256_GCM, key.as_bytes())
+        .map(LessSafeKey::new)
+        .map_err(|_| SecretStorageError::AuthenticationFailed)
+}
+
+fn header(nonce: [u8; NONCE_BYTES]) -> [u8; HEADER_BYTES] {
+    let mut header = [0_u8; HEADER_BYTES];
+    header[..4].copy_from_slice(MAGIC);
+    header[4] = FORMAT_VERSION;
+    header[5] = ALGORITHM_AES_256_GCM;
+    header[6..10].copy_from_slice(&KEY_SLOT.to_be_bytes());
+    header[10..].copy_from_slice(&nonce);
+    header
+}
+
+fn validate_header(bytes: &[u8]) -> Result<&[u8], SecretStorageError> {
+    if bytes.len() > MAX_SEALED_BLOB_BYTES {
+        return Err(SecretStorageError::SealedBlobTooLarge {
+            maximum: MAX_SEALED_BLOB_BYTES,
+            actual: bytes.len(),
+        });
+    }
+    if bytes.len() < HEADER_BYTES + TAG_BYTES
+        || &bytes[..4] != MAGIC
+        || bytes[4] != FORMAT_VERSION
+        || bytes[5] != ALGORITHM_AES_256_GCM
+        || bytes[6..10] != KEY_SLOT.to_be_bytes()
+    {
+        return Err(SecretStorageError::InvalidSealedBlob);
+    }
+    Ok(&bytes[..HEADER_BYTES])
+}
+
+fn associated_data(context: &SecretRecordContext, header: &[u8]) -> Vec<u8> {
+    let mut aad =
+        Vec::with_capacity(AAD_DOMAIN.len() + header.len() + 1 + 2 + context.identifier.len());
+    aad.extend_from_slice(AAD_DOMAIN);
+    aad.extend_from_slice(header);
+    aad.push(context.kind as u8);
+    aad.extend_from_slice(&(context.identifier.len() as u16).to_be_bytes());
+    aad.extend_from_slice(&context.identifier);
+    aad
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExternalWrappingKeyProvider;
+
+    #[test]
+    fn sealed_blob_vector_is_stable() {
+        let key = std::array::from_fn(|index| index as u8);
+        let sealer =
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes(key)).unwrap();
+        let context =
+            SecretRecordContext::new(SecretRecordKind::MlsGroupState, b"group-1".to_vec()).unwrap();
+        let nonce = std::array::from_fn(|index| 0xa0 + index as u8);
+        let blob = sealer
+            .seal_with_nonce(&context, b"secret-state", nonce)
+            .unwrap();
+        assert_eq!(
+            blob.as_bytes(),
+            decode_hex(
+                "4b534331010100000001a0a1a2a3a4a5a6a7a8a9aaab957d1f5f20bf2fcc1604f3b6959610c96ebef98ebd4dba2b47e40a21"
+            )
+        );
+        assert_eq!(
+            sealer.open(&context, &blob).unwrap().as_slice(),
+            b"secret-state"
+        );
+    }
+
+    #[test]
+    fn repeated_plaintext_uses_distinct_ciphertext() {
+        let sealer =
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap();
+        let context =
+            SecretRecordContext::new(SecretRecordKind::DeviceRootIdentity, b"device".to_vec())
+                .unwrap();
+        let first = sealer.seal(&context, b"same").unwrap();
+        let second = sealer.seal(&context, b"same").unwrap();
+        assert_ne!(first.as_bytes(), second.as_bytes());
+        assert_eq!(sealer.open(&context, &first).unwrap().as_slice(), b"same");
+        assert_eq!(sealer.open(&context, &second).unwrap().as_slice(), b"same");
+    }
+
+    #[test]
+    fn wrong_key_context_and_modified_ciphertext_fail_closed() {
+        let sealer =
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([1; 32])).unwrap();
+        let wrong_key =
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([2; 32])).unwrap();
+        let context =
+            SecretRecordContext::new(SecretRecordKind::MlsGroupState, b"group".to_vec()).unwrap();
+        let wrong_context =
+            SecretRecordContext::new(SecretRecordKind::MlsPriorEpoch, b"group".to_vec()).unwrap();
+        let wrong_identifier =
+            SecretRecordContext::new(SecretRecordKind::MlsGroupState, b"other".to_vec()).unwrap();
+        let blob = sealer.seal(&context, b"state").unwrap();
+        assert_eq!(
+            wrong_key.open(&context, &blob).unwrap_err(),
+            SecretStorageError::AuthenticationFailed
+        );
+        assert_eq!(
+            sealer.open(&wrong_context, &blob).unwrap_err(),
+            SecretStorageError::AuthenticationFailed
+        );
+        assert_eq!(
+            sealer.open(&wrong_identifier, &blob).unwrap_err(),
+            SecretStorageError::AuthenticationFailed
+        );
+
+        let mut nonce_modified = blob.as_bytes().to_vec();
+        nonce_modified[10] ^= 1;
+        let nonce_modified = SealedBlob::from_bytes(nonce_modified).unwrap();
+        assert_eq!(
+            sealer.open(&context, &nonce_modified).unwrap_err(),
+            SecretStorageError::AuthenticationFailed
+        );
+
+        let mut modified = blob.into_bytes();
+        let last = modified.len() - 1;
+        modified[last] ^= 1;
+        let modified = SealedBlob::from_bytes(modified).unwrap();
+        assert_eq!(
+            sealer.open(&context, &modified).unwrap_err(),
+            SecretStorageError::AuthenticationFailed
+        );
+    }
+
+    #[test]
+    fn invalid_context_and_header_are_rejected() {
+        assert_eq!(
+            SecretRecordContext::new(SecretRecordKind::MlsGroupState, Vec::new()).unwrap_err(),
+            SecretStorageError::InvalidRecordIdentifier {
+                maximum: MAX_RECORD_IDENTIFIER_BYTES
+            }
+        );
+        assert_eq!(
+            SealedBlob::from_bytes(vec![0; HEADER_BYTES + TAG_BYTES]).err(),
+            Some(SecretStorageError::InvalidSealedBlob)
+        );
+        let mut unsupported = header([0; NONCE_BYTES]).to_vec();
+        unsupported.extend_from_slice(&[0; TAG_BYTES]);
+        unsupported[4] = 2;
+        assert_eq!(
+            SealedBlob::from_bytes(unsupported).err(),
+            Some(SecretStorageError::InvalidSealedBlob)
+        );
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+}
