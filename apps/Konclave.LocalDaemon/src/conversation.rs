@@ -15,8 +15,9 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::persistence::{
-    HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE, MessageDirection, OutboundReservation,
-    PendingOutbox, ProfileStore, ProfileStoreError, StoredOutboundApplication,
+    ExpireOutboundResult, HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE,
+    MessageDirection, OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
+    StoredOutboundApplication,
 };
 
 /// Durable conversation composition over one locked daemon profile.
@@ -279,7 +280,7 @@ impl ConversationCoordinator {
         }
     }
 
-    /// Loads one ready or accepted outbound request by stable message ID.
+    /// Loads one ready, accepted, or terminal outbound request by stable message ID.
     ///
     /// # Errors
     ///
@@ -387,6 +388,24 @@ impl ConversationCoordinator {
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
         self.store.mark_outbox_accepted(stored).map_err(Into::into)
+    }
+
+    /// Marks one exact ready application envelope terminal after local expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile integrity, transition, or storage error.
+    pub(crate) fn expire_outbound_application(
+        &self,
+        envelope: &RelayEnvelope,
+    ) -> Result<ExpireOutboundResult, ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.store
+            .expire_outbound_application(envelope)
+            .map_err(Into::into)
     }
 
     /// Returns the exact route and durable contiguous replay cursor.

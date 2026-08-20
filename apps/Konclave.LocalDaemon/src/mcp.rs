@@ -188,7 +188,7 @@ impl StdioServer {
             .transpose()?;
         let content =
             ApplicationContent::text(request.text).map_err(|_| "invalid_text".to_string())?;
-        let (sent_at, expires_at) = message_times()?;
+        let (sent_at, now, expires_at) = message_times()?;
         let sent = applications
             .send(SendApplicationRequest {
                 conversation_id,
@@ -196,6 +196,7 @@ impl StdioServer {
                 content,
                 reply_to,
                 sent_at_unix_milliseconds: sent_at,
+                now_unix_seconds: now,
                 expires_at_unix_seconds: expires_at,
             })
             .await
@@ -392,7 +393,7 @@ fn page_size(value: Option<usize>) -> Result<usize, String> {
     }
 }
 
-fn message_times() -> Result<(u64, u64), String> {
+fn message_times() -> Result<(u64, u64, u64), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system_time_unavailable".to_string())?;
@@ -404,7 +405,7 @@ fn message_times() -> Result<(u64, u64), String> {
         .checked_mul(1_000)
         .and_then(|value| value.checked_add(u64::from(now.subsec_millis())))
         .ok_or_else(|| "system_time_unavailable".to_string())?;
-    Ok((milliseconds, expires_at))
+    Ok((milliseconds, seconds, expires_at))
 }
 
 fn history_result(

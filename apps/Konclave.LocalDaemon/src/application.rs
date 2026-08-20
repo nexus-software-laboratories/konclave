@@ -11,7 +11,7 @@ use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, PreparedApplication,
     ProcessedApplication,
 };
-use crate::persistence::HistoryPage;
+use crate::persistence::{ExpireOutboundResult, HistoryPage, OutboundApplicationStatus};
 
 /// Outbound application input with caller-supplied display and expiry times.
 pub(crate) struct SendApplicationRequest {
@@ -20,6 +20,7 @@ pub(crate) struct SendApplicationRequest {
     pub(crate) content: ApplicationContent,
     pub(crate) reply_to: Option<MessageId>,
     pub(crate) sent_at_unix_milliseconds: u64,
+    pub(crate) now_unix_seconds: u64,
     pub(crate) expires_at_unix_seconds: u64,
 }
 
@@ -88,23 +89,27 @@ where
             {
                 return Err(ApplicationServiceError::IdempotencyConflict);
             }
-            return match existing.cursor {
-                Some(cursor) => Ok(SentApplication {
+            return match existing.status {
+                OutboundApplicationStatus::Accepted { cursor } => Ok(SentApplication {
                     conversation_id: existing.conversation_id,
                     message: existing.message,
                     cursor,
                 }),
-                None => {
-                    self.submit_prepared(PreparedApplication {
-                        conversation_id: existing.conversation_id,
-                        message: existing.message,
-                        envelope: existing.envelope,
-                    })
+                OutboundApplicationStatus::Ready => {
+                    self.submit_prepared(
+                        PreparedApplication {
+                            conversation_id: existing.conversation_id,
+                            message: existing.message,
+                            envelope: existing.envelope,
+                        },
+                        request.now_unix_seconds,
+                    )
                     .await
                 }
+                OutboundApplicationStatus::Expired => Err(ApplicationServiceError::OutboundExpired),
             };
         }
-        self.retry_ready_locked().await?;
+        self.retry_ready_locked(request.now_unix_seconds).await?;
         let conversations = self.conversations.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             conversations.prepare_application_with_id(
@@ -118,20 +123,24 @@ where
         })
         .await
         .map_err(|_| ApplicationServiceError::Task)??;
-        self.submit_prepared(prepared).await
+        self.submit_prepared(prepared, request.now_unix_seconds)
+            .await
     }
 
     /// Retries every bounded ready envelope in deterministic journal order.
     ///
-    /// Processing stops at the first relay or persistence failure. Unattempted and
-    /// failed envelopes remain ready for a later retry.
+    /// Expired envelopes become durable terminal operations and do not block later
+    /// ready work. Processing stops at the first other relay or persistence failure.
     ///
     /// # Errors
     ///
     /// Returns a task, conversation, relay, or persistence error.
-    pub(crate) async fn retry_ready(&self) -> Result<usize, ApplicationServiceError> {
+    pub(crate) async fn retry_ready(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, ApplicationServiceError> {
         let _submission = self.submissions.lock().await;
-        self.retry_ready_locked().await
+        self.retry_ready_locked(now_unix_seconds).await
     }
 
     /// Replays, processes, and acknowledges one bounded page for a conversation.
@@ -257,13 +266,25 @@ where
         .map_err(Into::into)
     }
 
-    async fn retry_ready_locked(&self) -> Result<usize, ApplicationServiceError> {
+    async fn retry_ready_locked(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, ApplicationServiceError> {
         let conversations = self.conversations.clone();
         let pending = tokio::task::spawn_blocking(move || conversations.ready_outbox())
             .await
             .map_err(|_| ApplicationServiceError::Task)??;
         let mut accepted = 0;
         for pending in pending {
+            if pending.envelope.expires_at_unix_seconds() <= now_unix_seconds {
+                match self.expire_outbound(pending.envelope).await? {
+                    ExpireOutboundResult::Expired => continue,
+                    ExpireOutboundResult::Accepted { .. } => {
+                        accepted += 1;
+                        continue;
+                    }
+                }
+            }
             let stored = self.transport.submit(&pending.envelope).await?;
             self.mark_accepted(stored).await?;
             accepted += 1;
@@ -274,7 +295,18 @@ where
     async fn submit_prepared(
         &self,
         prepared: PreparedApplication,
+        now_unix_seconds: u64,
     ) -> Result<SentApplication, ApplicationServiceError> {
+        if prepared.envelope.expires_at_unix_seconds() <= now_unix_seconds {
+            return match self.expire_outbound(prepared.envelope).await? {
+                ExpireOutboundResult::Expired => Err(ApplicationServiceError::OutboundExpired),
+                ExpireOutboundResult::Accepted { cursor } => Ok(SentApplication {
+                    conversation_id: prepared.conversation_id,
+                    message: prepared.message,
+                    cursor,
+                }),
+            };
+        }
         let stored = self.transport.submit(&prepared.envelope).await?;
         let cursor = stored.cursor();
         self.mark_accepted(stored).await?;
@@ -283,6 +315,17 @@ where
             message: prepared.message,
             cursor,
         })
+    }
+
+    async fn expire_outbound(
+        &self,
+        envelope: KonclaveDomainCore::RelayEnvelope,
+    ) -> Result<ExpireOutboundResult, ApplicationServiceError> {
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || conversations.expire_outbound_application(&envelope))
+            .await
+            .map_err(|_| ApplicationServiceError::Task)?
+            .map_err(Into::into)
     }
 
     async fn mark_accepted(
@@ -317,6 +360,8 @@ pub(crate) enum ApplicationServiceError {
     Protocol,
     #[error("application idempotency key conflicts with a prior request")]
     IdempotencyConflict,
+    #[error("application message expired before relay acceptance")]
+    OutboundExpired,
     #[error("relay response does not match the requested operation")]
     InvalidRelayResponse,
 }
@@ -370,6 +415,10 @@ mod tests {
 
         fn push_replay_page(&self, page: ReplayPage) {
             self.replay_pages.lock().unwrap().push_back(page);
+        }
+
+        fn lose_next_submit_response(&self) {
+            self.fail_after_accept.store(true, Ordering::SeqCst);
         }
     }
 
@@ -446,6 +495,15 @@ mod tests {
     }
 
     fn request(conversation_id: ConversationId, text: &str) -> SendApplicationRequest {
+        request_at(conversation_id, text, 1_700_000_000, 1_900_000_000)
+    }
+
+    fn request_at(
+        conversation_id: ConversationId,
+        text: &str,
+        now_unix_seconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> SendApplicationRequest {
         let mut message_id = [0_u8; MessageId::LENGTH];
         for (index, byte) in text.bytes().enumerate() {
             message_id[index % MessageId::LENGTH] ^=
@@ -456,8 +514,9 @@ mod tests {
             message_id: MessageId::from_bytes(message_id),
             content: ApplicationContent::text(text).unwrap(),
             reply_to: None,
-            sent_at_unix_milliseconds: 1_700_000_000_000,
-            expires_at_unix_seconds: 1_900_000_000,
+            sent_at_unix_milliseconds: now_unix_seconds.checked_mul(1_000).unwrap(),
+            now_unix_seconds,
+            expires_at_unix_seconds,
         }
     }
 
@@ -575,7 +634,7 @@ mod tests {
         assert_eq!(sent.message.sender_counter(), 2);
         assert_eq!(sent.cursor, 2);
         assert!(coordinator.ready_outbox().unwrap().is_empty());
-        assert_eq!(service.retry_ready().await.unwrap(), 0);
+        assert_eq!(service.retry_ready(1_800_000_000).await.unwrap(), 0);
         assert_eq!(service.transport.envelopes.lock().unwrap().len(), 2);
         let history = service
             .read(conversation.conversation_id, 0, 10)
@@ -630,7 +689,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.message.message_id(), message_id);
-        assert_eq!(stored.cursor, Some(accepted.cursor));
+        assert_eq!(
+            stored.status,
+            OutboundApplicationStatus::Accepted {
+                cursor: accepted.cursor
+            }
+        );
 
         let mut conflicting = request(conversation.conversation_id, "idempotent-retry-secret");
         conflicting.content = ApplicationContent::text("conflicting-content").unwrap();
@@ -647,6 +711,150 @@ mod tests {
             Err(ApplicationServiceError::IdempotencyConflict)
         ));
         assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn own_echo_reconciles_lost_submit_response_for_stable_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "send-own-echo-reconcile");
+        let conversation = coordinator.create().unwrap();
+        let service = ApplicationService::new(coordinator.clone(), RecordingRelay::new(false));
+        service.transport.lose_next_submit_response();
+
+        assert!(matches!(
+            service
+                .send(request(
+                    conversation.conversation_id,
+                    "lost-response-own-echo"
+                ))
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(coordinator.ready_outbox().unwrap().len(), 1);
+        let stored = service.transport.envelopes.lock().unwrap()[0].clone();
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
+
+        let replayed = service
+            .replay_once(conversation.conversation_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(replayed.messages.len(), 1);
+        assert!(replayed.messages[0].duplicate);
+        assert_eq!(coordinator.ready_outbox().unwrap().len(), 0);
+
+        let repeated = service
+            .send(request(
+                conversation.conversation_id,
+                "lost-response-own-echo",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(repeated.cursor, 1);
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn late_own_echo_supersedes_local_expiry_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "send-late-own-echo");
+        let conversation = coordinator.create().unwrap();
+        let service = ApplicationService::new(coordinator.clone(), RecordingRelay::new(false));
+        service.transport.lose_next_submit_response();
+        let request = |now_unix_seconds, expires_at_unix_seconds| {
+            request_at(
+                conversation.conversation_id,
+                "late-own-echo-after-expiry",
+                now_unix_seconds,
+                expires_at_unix_seconds,
+            )
+        };
+
+        assert!(matches!(
+            service.send(request(100, 101)).await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        let stored = service.transport.envelopes.lock().unwrap()[0].clone();
+        assert_eq!(service.retry_ready(102).await.unwrap(), 0);
+        assert!(coordinator.ready_outbox().unwrap().is_empty());
+        assert!(matches!(
+            service.send(request(102, 200)).await,
+            Err(ApplicationServiceError::OutboundExpired)
+        ));
+
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
+        service
+            .replay_once(conversation.conversation_id, 100)
+            .await
+            .unwrap();
+
+        let accepted = service.send(request(103, 200)).await.unwrap();
+        assert_eq!(accepted.cursor, 1);
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_ready_message_does_not_block_another_conversation() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = coordinator(root.path(), "send-expired-terminal");
+        let expired_conversation = initial.create().unwrap();
+        let active_conversation = initial.create().unwrap();
+        let service = ApplicationService::new(initial.clone(), RecordingRelay::new(true));
+        let expired_request = || {
+            request_at(
+                expired_conversation.conversation_id,
+                "expired-never-accepted",
+                100,
+                101,
+            )
+        };
+
+        assert!(matches!(
+            service.send(expired_request()).await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
+
+        let sent = service
+            .send(request_at(
+                active_conversation.conversation_id,
+                "unrelated-active-message",
+                102,
+                200,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sent.cursor, 1);
+        assert!(initial.ready_outbox().unwrap().is_empty());
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+
+        drop(service);
+        drop(initial);
+        let reopened = coordinator(root.path(), "send-expired-terminal");
+        let reopened_service =
+            ApplicationService::new(reopened.clone(), RecordingRelay::new(false));
+        assert!(matches!(
+            reopened_service.send(expired_request()).await,
+            Err(ApplicationServiceError::OutboundExpired)
+        ));
+        assert!(reopened.ready_outbox().unwrap().is_empty());
+        assert!(
+            reopened_service
+                .transport
+                .envelopes
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

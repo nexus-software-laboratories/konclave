@@ -26,7 +26,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 3;
+const PROFILE_SCHEMA_VERSION: u32 = 8;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -40,9 +40,11 @@ const INBOX_MESSAGE_RECORD_SCOPE: u8 = 3;
 const CURSOR_OBSERVATION_RECORD_SCOPE: u8 = 4;
 const SENDER_COUNTER_RECORD_SCOPE: u8 = 5;
 const MESSAGE_HISTORY_RECORD_SCOPE: u8 = 6;
+const OUTBOX_TERMINAL_REASON_EXPIRED: i64 = 1;
 
 type InboxMessageMetadata = (Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, Vec<u8>, i64);
 type HistoryMetadata = (Vec<u8>, Option<i64>, i64, i64, Vec<u8>, i64, i64, i64);
+type OutboundApplicationMetadata = (Vec<u8>, i64, Option<i64>, Option<i64>);
 
 /// Portable, filesystem-safe local profile identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -716,7 +718,8 @@ impl ProfileStore {
                         CASE WHEN length(message_id) = 16 THEN message_id END,
                         CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
                         sender_counter,
-                        status
+                        status,
+                        terminal_reason
                      FROM daemon_outbox
                      WHERE envelope_id = ?1
                         OR (conversation_id = ?2 AND message_id = ?3)
@@ -737,6 +740,7 @@ impl ProfileStore {
                             row.get::<_, Vec<u8>>(2)?,
                             row.get::<_, i64>(3)?,
                             row.get::<_, i64>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
                         ))
                     },
                 )
@@ -752,7 +756,7 @@ impl ProfileStore {
             {
                 return Err(ProfileStoreError::DuplicateOperation);
             }
-            if existing[0].4 == 4 {
+            if existing[0].4 != 1 || existing[0].5.is_some() {
                 return Err(ProfileStoreError::InvalidTransition);
             }
             return Ok(OutboundReservation {
@@ -764,7 +768,9 @@ impl ProfileStore {
         }
         let pending: i64 = transaction
             .query_row(
-                "SELECT count(*) FROM daemon_outbox WHERE status < 3",
+                "SELECT count(*) FROM daemon_outbox
+                 WHERE status = 1
+                    OR (status = 2 AND terminal_reason IS NULL)",
                 [],
                 |row| row.get(0),
             )
@@ -959,7 +965,8 @@ impl ProfileStore {
         let count: i64 = self
             .lock()?
             .query_row(
-                "SELECT count(*) FROM daemon_outbox WHERE status = 2",
+                "SELECT count(*) FROM daemon_outbox
+                 WHERE status = 2 AND terminal_reason IS NULL",
                 [],
                 |row| row.get(0),
             )
@@ -985,7 +992,7 @@ impl ProfileStore {
                      FROM daemon_outbox o
                      JOIN daemon_conversation c
                        ON c.conversation_id = o.conversation_id
-                     WHERE o.status = 2
+                     WHERE o.status = 2 AND o.terminal_reason IS NULL
                      ORDER BY o.conversation_id, o.sender_counter",
                 )
                 .map_err(|_| ProfileStoreError::Storage)?;
@@ -1051,7 +1058,8 @@ impl ProfileStore {
         Ok(pending)
     }
 
-    /// Loads one ready or accepted outbound application by its stable message ID.
+    /// Loads one ready, accepted, or terminal outbound application by its stable
+    /// message ID.
     ///
     /// # Errors
     ///
@@ -1061,29 +1069,27 @@ impl ProfileStore {
         conversation_id: ConversationId,
         message_id: MessageId,
     ) -> Result<Option<StoredOutboundApplication>, ProfileStoreError> {
-        let metadata: Option<(Vec<u8>, i64, Option<i64>)> = self
+        let metadata: Option<OutboundApplicationMetadata> = self
             .lock()?
             .query_row(
                 "SELECT
                     CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
                     status,
-                    accepted_cursor
+                    accepted_cursor,
+                    terminal_reason
                  FROM daemon_outbox
                  WHERE conversation_id = ?1 AND message_id = ?2",
                 params![
                     conversation_id.as_bytes().as_slice(),
                     message_id.as_bytes().as_slice()
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|_| ProfileStoreError::Storage)?;
-        let Some((envelope_id, status, accepted_cursor)) = metadata else {
+        let Some((envelope_id, status, accepted_cursor, terminal_reason)) = metadata else {
             return Ok(None);
         };
-        if !matches!(status, 2 | 3) {
-            return Err(ProfileStoreError::InvalidTransition);
-        }
         let envelope_id =
             EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let outbox = self.load_outbox_record(envelope_id)?;
@@ -1101,17 +1107,23 @@ impl ProfileStore {
         if history.direction != MessageDirection::Outbound || history.envelope_id != envelope_id {
             return Err(ProfileStoreError::CorruptData);
         }
-        let cursor = accepted_cursor.map(from_sql_integer).transpose()?;
-        if status == 2 && (cursor.is_some() || history.cursor.is_some())
-            || status == 3 && (cursor.is_none() || history.cursor != cursor)
-        {
-            return Err(ProfileStoreError::CorruptData);
-        }
+        let accepted_cursor = accepted_cursor.map(from_sql_integer).transpose()?;
+        let terminal_reason = outbox_terminal_reason(terminal_reason)?;
+        let status = match (status, accepted_cursor, terminal_reason, history.cursor) {
+            (2, None, None, None) => OutboundApplicationStatus::Ready,
+            (2, None, Some(OutboxTerminalReason::Expired), None) => {
+                OutboundApplicationStatus::Expired
+            }
+            (3, Some(cursor), None, Some(history_cursor)) if cursor == history_cursor => {
+                OutboundApplicationStatus::Accepted { cursor }
+            }
+            _ => return Err(ProfileStoreError::CorruptData),
+        };
         Ok(Some(StoredOutboundApplication {
             conversation_id,
             message: history.message,
             envelope: outbox.envelope,
-            cursor,
+            status,
         }))
     }
 
@@ -1228,6 +1240,98 @@ impl ProfileStore {
         }
     }
 
+    /// Marks one exact ready application envelope terminal when it expired locally.
+    ///
+    /// A later authenticated relay echo may still prove that a prior submission was
+    /// accepted and supersede this local terminal reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cursor conflict, invalid transition, authentication, or storage
+    /// error.
+    pub(crate) fn expire_outbound_application(
+        &self,
+        envelope: &RelayEnvelope,
+    ) -> Result<ExpireOutboundResult, ProfileStoreError> {
+        let envelope_id = envelope.envelope_id();
+        let record = self.load_outbox_record(envelope_id)?;
+        if record.envelope != *envelope {
+            return Err(ProfileStoreError::CursorConflict);
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let history = self
+            .load_history_record(
+                &transaction,
+                record.reservation.conversation_id,
+                record.envelope.routing_id(),
+                record.reservation.message_id,
+            )?
+            .ok_or(ProfileStoreError::CorruptData)?;
+        if history.direction != MessageDirection::Outbound || history.envelope_id != envelope_id {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let state: Option<(i64, Option<i64>, Option<i64>)> = transaction
+            .query_row(
+                "SELECT status, accepted_cursor, terminal_reason
+                 FROM daemon_outbox
+                 WHERE envelope_id = ?1",
+                params![envelope_id.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let result = match state {
+            Some((2, None, None)) if history.cursor.is_none() => {
+                let changed = transaction
+                    .execute(
+                        "UPDATE daemon_outbox
+                         SET terminal_reason = ?1
+                         WHERE envelope_id = ?2
+                           AND status = 2
+                           AND terminal_reason IS NULL",
+                        params![
+                            OUTBOX_TERMINAL_REASON_EXPIRED,
+                            envelope_id.as_bytes().as_slice()
+                        ],
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                if changed != 1 {
+                    return Err(ProfileStoreError::InvalidTransition);
+                }
+                ExpireOutboundResult::Expired
+            }
+            Some((2, None, terminal_reason))
+                if outbox_terminal_reason(terminal_reason)?
+                    == Some(OutboxTerminalReason::Expired)
+                    && history.cursor.is_none() =>
+            {
+                ExpireOutboundResult::Expired
+            }
+            Some((3, Some(cursor), None)) => {
+                let cursor = from_sql_integer(cursor)?;
+                if history.cursor != Some(cursor) {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                self.verify_cursor_observation(
+                    &transaction,
+                    record.reservation.conversation_id,
+                    record.envelope.routing_id(),
+                    cursor,
+                    &record.envelope,
+                )?;
+                ExpireOutboundResult::Accepted { cursor }
+            }
+            _ => return Err(ProfileStoreError::InvalidTransition),
+        };
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(result)
+    }
+
     /// Marks a ready outbox operation accepted at one durable relay cursor.
     ///
     /// # Errors
@@ -1247,19 +1351,36 @@ impl ProfileStore {
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
-        let state: Option<(i64, Option<i64>)> = transaction
+        self.accept_outbox_in_transaction(&transaction, &record, cursor, false)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    fn accept_outbox_in_transaction(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        record: &OutboxRecord,
+        cursor: u64,
+        accept_expired: bool,
+    ) -> Result<(), ProfileStoreError> {
+        let envelope_id = record.envelope.envelope_id();
+        let state: Option<(i64, Option<i64>, Option<i64>)> = transaction
             .query_row(
-                "SELECT status, accepted_cursor FROM daemon_outbox
+                "SELECT status, accepted_cursor, terminal_reason FROM daemon_outbox
                  WHERE envelope_id = ?1",
                 params![envelope_id.as_bytes().as_slice()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(|_| ProfileStoreError::Storage)?;
         match state {
-            Some((2, None)) => {
+            Some((2, None, terminal_reason))
+                if terminal_reason.is_none()
+                    || accept_expired
+                        && outbox_terminal_reason(terminal_reason)?
+                            == Some(OutboxTerminalReason::Expired) =>
+            {
                 self.insert_or_verify_cursor_observation(
-                    &transaction,
+                    transaction,
                     record.reservation.conversation_id,
                     record.envelope.routing_id(),
                     cursor,
@@ -1268,7 +1389,9 @@ impl ProfileStore {
                 let changed = transaction
                     .execute(
                         "UPDATE daemon_outbox
-                         SET status = 3, accepted_cursor = ?1
+                         SET status = 3,
+                             accepted_cursor = ?1,
+                             terminal_reason = NULL
                          WHERE envelope_id = ?2 AND status = 2",
                         params![to_sql_integer(cursor)?, envelope_id.as_bytes().as_slice()],
                     )
@@ -1277,9 +1400,9 @@ impl ProfileStore {
                     return Err(ProfileStoreError::InvalidTransition);
                 }
             }
-            Some((3, Some(accepted))) if from_sql_integer(accepted)? == cursor => {
+            Some((3, Some(accepted), None)) if from_sql_integer(accepted)? == cursor => {
                 self.verify_cursor_observation(
-                    &transaction,
+                    transaction,
                     record.reservation.conversation_id,
                     record.envelope.routing_id(),
                     cursor,
@@ -1289,7 +1412,7 @@ impl ProfileStore {
             _ => return Err(ProfileStoreError::InvalidTransition),
         }
         if !self.assign_history_cursor(
-            &transaction,
+            transaction,
             record.reservation.conversation_id,
             record.envelope.routing_id(),
             record.reservation.message_id,
@@ -1298,7 +1421,7 @@ impl ProfileStore {
         )? {
             return Err(ProfileStoreError::CorruptData);
         }
-        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+        Ok(())
     }
 
     /// Journals one received relay envelope before cryptographic processing.
@@ -1626,28 +1749,20 @@ impl ProfileStore {
         let Some(message_id) = message_id else {
             return Ok(None);
         };
+        let message_id =
+            MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let outbox = self.load_outbox_record(envelope_id)?;
         if outbox.reservation.conversation_id != conversation_id
+            || outbox.reservation.message_id != message_id
             || outbox.envelope != *stored.envelope()
         {
             return Err(ProfileStoreError::CursorConflict);
         }
-        let message_id =
-            MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
-        if !self.assign_history_cursor(
-            &transaction,
-            conversation_id,
-            routing_id,
-            message_id,
-            envelope_id,
-            cursor,
-        )? {
-            return Err(ProfileStoreError::CorruptData);
-        }
+        self.accept_outbox_in_transaction(&transaction, &outbox, cursor, true)?;
         let history = self
             .load_history_record(&transaction, conversation_id, routing_id, message_id)?
             .ok_or(ProfileStoreError::CorruptData)?;
@@ -1740,8 +1855,8 @@ impl ProfileStore {
     ///
     /// # Errors
     ///
-    /// Returns a cursor or sender-counter gap, sender-counter regression,
-    /// transition, sequence, or storage error.
+    /// Returns a cursor gap, sender-counter regression, transition, sequence, or
+    /// storage error.
     pub(crate) fn complete_inbox(
         &self,
         conversation_id: ConversationId,
@@ -1807,9 +1922,6 @@ impl ProfileStore {
             let sender_counter = message.message.sender_counter();
             if sender_counter <= high_water {
                 return Err(ProfileStoreError::SenderCounterRegression);
-            }
-            if high_water.checked_add(1) != Some(sender_counter) {
-                return Err(ProfileStoreError::SenderCounterGap);
             }
         }
         self.store_sender_high_water(
@@ -3006,7 +3118,20 @@ pub(crate) struct StoredOutboundApplication {
     pub conversation_id: ConversationId,
     pub message: ApplicationMessage,
     pub envelope: RelayEnvelope,
-    pub cursor: Option<u64>,
+    pub status: OutboundApplicationStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboundApplicationStatus {
+    Ready,
+    Accepted { cursor: u64 },
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpireOutboundResult {
+    Expired,
+    Accepted { cursor: u64 },
 }
 
 struct OutboxRecord {
@@ -3122,8 +3247,6 @@ pub(crate) enum ProfileStoreError {
     CursorConflict,
     #[error("authenticated sender counter regressed")]
     SenderCounterRegression,
-    #[error("authenticated sender counter contains a gap")]
-    SenderCounterGap,
     #[error("local sequence exhausted its supported range")]
     SequenceExhausted,
     #[error("local outbox reached its pending-operation limit")]
@@ -3162,7 +3285,11 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
-        2 => return initialize_message_history_schema(connection),
+        3 => return initialize_outbox_terminal_schema(connection),
+        2 => {
+            initialize_message_history_schema(connection)?;
+            return initialize_outbox_terminal_schema(connection);
+        }
         0 => connection
             .execute_batch(
                 "BEGIN;
@@ -3301,7 +3428,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
              COMMIT;",
         )
         .map_err(|_| ProfileStoreError::Storage)?;
-    initialize_message_history_schema(connection)
+    initialize_message_history_schema(connection)?;
+    initialize_outbox_terminal_schema(connection)
 }
 
 fn initialize_message_history_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -3347,6 +3475,22 @@ fn initialize_message_history_schema(connection: &Connection) -> Result<(), Prof
                 ON daemon_message_history(conversation_id, cursor)
                 WHERE status = 2;
              PRAGMA user_version = 3;
+             COMMIT;",
+        )
+        .map_err(|_| ProfileStoreError::Storage)
+}
+
+fn initialize_outbox_terminal_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
+    connection
+        .execute_batch(
+            "BEGIN;
+             ALTER TABLE daemon_outbox
+                ADD COLUMN terminal_reason INTEGER
+                CHECK (
+                    terminal_reason IS NULL
+                    OR (status = 2 AND terminal_reason = 1)
+                );
+             PRAGMA user_version = 8;
              COMMIT;",
         )
         .map_err(|_| ProfileStoreError::Storage)
@@ -3633,6 +3777,21 @@ fn decode_positive_u64(bytes: &[u8]) -> Result<u64, ProfileStoreError> {
         Err(ProfileStoreError::CorruptData)
     } else {
         Ok(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutboxTerminalReason {
+    Expired,
+}
+
+fn outbox_terminal_reason(
+    value: Option<i64>,
+) -> Result<Option<OutboxTerminalReason>, ProfileStoreError> {
+    match value {
+        None => Ok(None),
+        Some(OUTBOX_TERMINAL_REASON_EXPIRED) => Ok(Some(OutboxTerminalReason::Expired)),
+        Some(_) => Err(ProfileStoreError::CorruptData),
     }
 }
 
@@ -3929,6 +4088,15 @@ mod tests {
                         ON DELETE CASCADE
                  ) WITHOUT ROWID;
                  PRAGMA user_version = 1;",
+            )
+            .unwrap();
+    }
+
+    fn downgrade_v8_to_v3(connection: &Connection) {
+        connection
+            .execute_batch(
+                "ALTER TABLE daemon_outbox DROP COLUMN terminal_reason;
+                 PRAGMA user_version = 3;",
             )
             .unwrap();
     }
@@ -4484,25 +4652,130 @@ mod tests {
     }
 
     #[test]
-    fn completed_inbox_keeps_sender_counter_gaps_visible() {
-        let fixture = conversation_fixture("sender-counter-gap-test");
-        stage_inbox_message(&fixture, 1, 1, 7, 10);
+    fn recovered_abandoned_sender_counter_gap_allows_next_authenticated_counter() {
+        let fixture = conversation_fixture("counter-gap-recovery");
+        let first_reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                MessageId::from_bytes([1; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([1; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        let first_message = application_message(1, 1, "counter one");
+        let first_envelope = relay_envelope(fixture.routing_id, 1, b"counter-one");
+        fixture
+            .store
+            .store_outbound_message(
+                first_reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &first_message,
+            )
+            .unwrap();
+        fixture
+            .store
+            .store_outbound_envelope(first_reservation, &first_envelope)
+            .unwrap();
+        let first = StoredRelayEnvelope::new(first_envelope, 1).unwrap();
+        fixture.store.record_inbox_envelope(&first).unwrap();
+        let first_history = fixture
+            .store
+            .outbound_history_message(fixture.conversation_id, &first)
+            .unwrap()
+            .unwrap();
+        fixture
+            .store
+            .save_inbox_message(
+                fixture.conversation_id,
+                1,
+                first_history.sender,
+                first_history.epoch,
+                &first_history.message,
+            )
+            .unwrap();
         fixture
             .store
             .complete_inbox(fixture.conversation_id, 1)
             .unwrap();
-        stage_inbox_message(&fixture, 2, 2, 7, 12);
+        let reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                MessageId::from_bytes([2; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([2; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        assert_eq!(reservation.sender_counter, 2);
+        fixture
+            .store
+            .store_outbound_message(
+                reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &application_message(2, 2, "encrypted-before-crash"),
+            )
+            .unwrap();
+
+        let root = fixture.root.path().to_path_buf();
+        let profile_id = fixture.profile_id.clone();
+        let conversation_id = fixture.conversation_id;
+        let routing_id = fixture.routing_id;
+        let device_id = fixture.device_id;
+        drop(fixture.store);
+        let reopened = LockedProfile::acquire(&root, profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        assert_eq!(reopened.abandon_unsealed_outbox().unwrap(), 1);
+
+        let third_reservation = reopened
+            .reserve_outbound_application(
+                conversation_id,
+                MessageId::from_bytes([3; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([3; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        assert_eq!(third_reservation.sender_counter, 3);
+        let third_message = application_message(3, 3, "counter three");
+        let third_envelope = relay_envelope(routing_id, 3, b"counter-three-after-recovery");
+        reopened
+            .store_outbound_message(third_reservation, routing_id, device_id, 0, &third_message)
+            .unwrap();
+        reopened
+            .store_outbound_envelope(third_reservation, &third_envelope)
+            .unwrap();
+        let third = StoredRelayEnvelope::new(third_envelope, 2).unwrap();
+        reopened.record_inbox_envelope(&third).unwrap();
+        let third_history = reopened
+            .outbound_history_message(conversation_id, &third)
+            .unwrap()
+            .unwrap();
+        reopened
+            .save_inbox_message(
+                conversation_id,
+                2,
+                third_history.sender,
+                third_history.epoch,
+                &third_history.message,
+            )
+            .unwrap();
+        assert_eq!(reopened.complete_inbox(conversation_id, 2).unwrap(), 2);
         assert_eq!(
-            fixture.store.complete_inbox(fixture.conversation_id, 2),
-            Err(ProfileStoreError::SenderCounterGap)
-        );
-        assert_eq!(
-            fixture
-                .store
-                .load_conversation(fixture.conversation_id)
+            reopened
+                .load_conversation(conversation_id)
                 .unwrap()
                 .replay_cursor,
-            1
+            2
+        );
+        let connection = reopened.lock().unwrap();
+        assert_eq!(
+            reopened
+                .load_sender_high_water(&connection, conversation_id, device_id, 0)
+                .unwrap(),
+            Some(3)
         );
     }
 
@@ -5205,7 +5478,7 @@ mod tests {
         let locked =
             LockedProfile::acquire(root.path(), ProfileId::parse("schema-test").unwrap()).unwrap();
         let connection = Connection::open(locked.profile_database_path()).unwrap();
-        connection.pragma_update(None, "user_version", 4).unwrap();
+        connection.pragma_update(None, "user_version", 9).unwrap();
         drop(connection);
         assert_eq!(
             locked.open_store(sealer()).err(),
@@ -5214,7 +5487,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v1_to_v3_transactionally() {
+    fn profile_schema_migrates_v1_to_v8_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration-test").unwrap();
         let locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
@@ -5246,10 +5519,21 @@ mod tests {
                 .unwrap();
             assert_eq!(exists, 1);
         }
+        let terminal_reason_columns: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_outbox')
+                 WHERE name = 'terminal_reason'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_reason_columns, 1);
     }
 
     #[test]
-    fn profile_schema_migrates_v2_to_v3_message_history() {
+    fn profile_schema_migrates_v2_to_v8_message_history() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("message-history-migration").unwrap();
         let database_path = {
@@ -5260,6 +5544,7 @@ mod tests {
             store.locked_profile.profile_database_path()
         };
         let connection = Connection::open(&database_path).unwrap();
+        downgrade_v8_to_v3(&connection);
         connection
             .execute("DROP TABLE daemon_message_history", [])
             .unwrap();
@@ -5287,6 +5572,88 @@ mod tests {
             .unwrap();
         assert_eq!(version, PROFILE_SCHEMA_VERSION);
         assert_eq!(history_exists, 1);
+    }
+
+    #[test]
+    fn profile_schema_migrates_v3_to_v8_outbox_terminal_reasons() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("outbox-terminal-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_v8_to_v3(&connection);
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let version: u32 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let terminal_reason_columns: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_outbox')
+                 WHERE name = 'terminal_reason'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert_eq!(terminal_reason_columns, 1);
+    }
+
+    #[test]
+    fn failed_v8_outbox_terminal_migration_preserves_v3_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("outbox-terminal-rollback").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_v8_to_v3(&connection);
+        connection
+            .execute(
+                "ALTER TABLE daemon_outbox ADD COLUMN terminal_reason INTEGER",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let terminal_reason_columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_outbox')
+                 WHERE name = 'terminal_reason'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 3);
+        assert_eq!(terminal_reason_columns, 1);
     }
 
     #[test]

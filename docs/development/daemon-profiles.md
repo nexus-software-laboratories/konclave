@@ -23,7 +23,7 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 
 ## Profile store
 
-Schema version 3 stores:
+Schema version 8 stores:
 
 - one profile row with a sealed device root and optional sealed relay credential;
 - normalized non-secret relay endpoint;
@@ -31,12 +31,13 @@ Schema version 3 stores:
 - sealed conversation signing material and policy state;
 - sealed, root-verified conversation credential bindings;
 - sender counter and replay cursor;
-- outbound application reservations, sealed envelopes, and relay acceptance state;
+- outbound application reservations, sealed envelopes, relay acceptance state, and
+  explicit terminal expiry reasons;
 - one sealed envelope observation for every accepted route cursor;
 - received application envelopes, sealed decoded messages, and completion state;
 - one sealed cursor-ordered history for both sent and received messages.
 
-Version 1 and 2 schema changes use explicit transactions. Before changing a v2 schema,
+Versions 1 through 3 schema changes use explicit transactions. Before changing a v2 schema,
 startup rejects ready or accepted outbound rows whose plaintext cannot be
 reconstructed, leaving version 2 unchanged. Sealer-backed inbound history rehydration
 runs afterward in bounded, resumable batches; a failure preserves the source rows and
@@ -64,9 +65,16 @@ their profile, conversation, operation scope, identifier, counter or cursor, and
 authenticated sender where applicable. Metadata is cross-checked against the opened
 record before recovery proceeds.
 
-The application outbox transitions from reserved to ready to accepted. Before new
-outbound work begins, recovery must turn any unsealed reservation into an abandoned
-tombstone without rolling back its sender counter or making its identifiers reusable.
+The application outbox transitions from reserved to ready to accepted. A ready
+envelope that expires before observed acceptance retains its sealed envelope and
+transitions to an explicit terminal-expired state. It no longer consumes retry
+capacity or blocks later ready operations, but its stable message ID remains reserved
+and an exact retry returns a permanent expiry error. An authenticated exact relay echo
+can still prove that an earlier response-lost submission was accepted and atomically
+supersede the local expiry reason. Before new outbound work begins, recovery must turn
+any unsealed reservation into an abandoned tombstone without rolling back its sender
+counter or making its identifiers reusable.
+
 The application inbox transitions from received to message-saved to complete, and
 completion advances only the next contiguous replay cursor. Exact repeats are
 idempotent; conflicting identifiers, counters, cursors, routes, senders, or
@@ -81,8 +89,11 @@ assigns conflicting envelopes or content to one observed cursor halts processing
 Completed messages also retain the authenticated MLS epoch and sender counter. The
 first observed counter establishes a sealed sender-and-epoch high-water record;
 completion updates that record and the replay cursor in one transaction. Later
-counters must advance by exactly one. Regressions and forward gaps remain incomplete
-and therefore cannot advance the durable replay cursor.
+counters must be strictly greater than the authenticated high-water value. Lower or
+equal counters fail completion as replays or regressions. Forward counter gaps are
+valid because crash-before-ready can permanently consume a local sender generation;
+the later counter completes and advances both the high-water value and durable replay
+cursor.
 
 ## Startup sequence
 
@@ -114,10 +125,12 @@ missing MLS state for an advanced conversation.
 
 Outbound application operations serialize sender-counter reservation, MLS
 sender-ratchet persistence, sealed-envelope journaling, relay submission, and exact
-cursor acceptance. Ready envelopes are retried before a newer message may reserve a
-counter, so concurrent callers cannot reorder one sender's relay sequence. Blocking
-cryptographic and SQLite work runs outside Tokio executor threads; the ordered relay
-submission gate is the only lock intentionally held across network I/O.
+cursor acceptance. Eligible ready envelopes are retried before a newer message may
+reserve a counter, while locally expired rows transition terminal and are skipped so
+they cannot block another conversation. Safe sender-counter gaps remain monotonic and
+cannot reuse ciphertext generations. Blocking cryptographic and SQLite work runs
+outside Tokio executor threads; the ordered relay submission gate is the only lock
+intentionally held across network I/O.
 
 Inbound replay rejects pages that move behind the requested durable cursor. Each
 application envelope is journaled before decryption, the authenticated sender and MLS
@@ -130,8 +143,10 @@ Sent history records the relay-assigned cursor but remains pending and hidden un
 the sender replays that exact echo and advances the contiguous replay frontier.
 Received history remains pending until the receiver ratchet and contiguous inbox
 transition complete. A sender's own relay echo reuses the already sealed outbound
-message instead of attempting to decrypt an MLS message from self, so one message
-appears exactly once in cursor order after reconnect.
+message instead of attempting to decrypt an MLS message from self. Authenticating that
+full envelope and assigning its cursor atomically reconciles a still-ready outbox to
+accepted, including the response-lost case, so a stable retry returns the original
+accepted result and one message appears exactly once in cursor order after reconnect.
 
 ## MCP application tools
 
@@ -145,7 +160,10 @@ boundary.
 `send_message` requires a caller-stable 16-byte `message_id`. Repeating the same
 conversation/message ID resumes or returns the exact durable operation; changing its
 content or reply target fails with an idempotency conflict. A new logical message must
-use a new ID.
+use a new ID. If the exact never-accepted envelope expired, the stable ID remains
+reserved and its retry returns a permanent expiry error rather than producing new
+ciphertext. An already accepted identical operation continues returning its original
+cursor after envelope expiry.
 
 MCP starts read-only. `KONCLAVE_MCP_ALLOW_WRITE=true` (or `1`) must be set in the
 long-lived daemon environment to authorize create, send, sync, and watch operations.
