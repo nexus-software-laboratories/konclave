@@ -912,6 +912,70 @@ impl ProfileStore {
         Ok(pending)
     }
 
+    /// Loads one ready or accepted outbound application by its stable message ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a malformed, authentication, protocol, transition, or storage error.
+    pub(crate) fn outbound_application(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+    ) -> Result<Option<StoredOutboundApplication>, ProfileStoreError> {
+        let metadata: Option<(Vec<u8>, i64, Option<i64>)> = self
+            .lock()?
+            .query_row(
+                "SELECT
+                    CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
+                    status,
+                    accepted_cursor
+                 FROM daemon_outbox
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    message_id.as_bytes().as_slice()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some((envelope_id, status, accepted_cursor)) = metadata else {
+            return Ok(None);
+        };
+        if !matches!(status, 2 | 3) {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        let envelope_id =
+            EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
+        let outbox = self.load_outbox_record(envelope_id)?;
+        if outbox.reservation.conversation_id != conversation_id
+            || outbox.reservation.message_id != message_id
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let routing_id = outbox.envelope.routing_id();
+        let connection = self.lock()?;
+        let history = self
+            .load_history_record(&connection, conversation_id, routing_id, message_id)?
+            .ok_or(ProfileStoreError::CorruptData)?;
+        drop(connection);
+        if history.direction != MessageDirection::Outbound || history.envelope_id != envelope_id {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let cursor = accepted_cursor.map(from_sql_integer).transpose()?;
+        if status == 2 && (cursor.is_some() || history.cursor.is_some())
+            || status == 3 && (cursor.is_none() || history.cursor != cursor)
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(Some(StoredOutboundApplication {
+            conversation_id,
+            message: history.message,
+            envelope: outbox.envelope,
+            cursor,
+        }))
+    }
+
     /// Converts unsealed reservations into durable counter-gap tombstones.
     ///
     /// This recovery transition is valid only before new outbound work begins.
@@ -1085,7 +1149,7 @@ impl ProfileStore {
             }
             _ => return Err(ProfileStoreError::InvalidTransition),
         }
-        self.complete_history(
+        self.assign_history_cursor(
             &transaction,
             record.reservation.conversation_id,
             record.envelope.routing_id(),
@@ -1423,7 +1487,7 @@ impl ProfileStore {
         };
         let message_id =
             MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
-        self.complete_history(
+        self.assign_history_cursor(
             &transaction,
             conversation_id,
             routing_id,
@@ -1437,9 +1501,14 @@ impl ProfileStore {
         transaction
             .commit()
             .map_err(|_| ProfileStoreError::Storage)?;
-        Ok(Some(
-            stored_history_message(history).ok_or(ProfileStoreError::CorruptData)?,
-        ))
+        Ok(Some(StoredHistoryMessage {
+            cursor,
+            direction: history.direction,
+            envelope_id: history.envelope_id,
+            sender: history.sender,
+            epoch: history.epoch,
+            message: history.message,
+        }))
     }
 
     /// Loads bounded incomplete inbox operations in durable cursor order.
@@ -1694,7 +1763,8 @@ impl ProfileStore {
         if !(1..=MAX_MESSAGE_PAGE_SIZE).contains(&limit) {
             return Err(ProfileStoreError::InvalidTransition);
         }
-        let routing_id = self.conversation_routing_id(conversation_id)?;
+        let conversation = self.load_conversation(conversation_id)?;
+        let routing_id = conversation.routing_id;
         let message_ids = {
             let connection = self.lock()?;
             let mut statement = connection
@@ -1704,8 +1774,9 @@ impl ProfileStore {
                      WHERE conversation_id = ?1
                        AND status = 2
                        AND cursor > ?2
+                       AND cursor <= ?3
                      ORDER BY cursor
-                     LIMIT ?3",
+                     LIMIT ?4",
                 )
                 .map_err(|_| ProfileStoreError::Storage)?;
             statement
@@ -1713,6 +1784,7 @@ impl ProfileStore {
                     params![
                         conversation_id.as_bytes().as_slice(),
                         to_sql_integer(after_cursor)?,
+                        to_sql_integer(conversation.replay_cursor)?,
                         i64::try_from(limit + 1)
                             .map_err(|_| ProfileStoreError::SequenceExhausted)?
                     ],
@@ -2098,6 +2170,49 @@ impl ProfileStore {
             message,
             complete,
         }))
+    }
+
+    fn assign_history_cursor(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        message_id: MessageId,
+        envelope_id: EnvelopeId,
+        cursor: u64,
+    ) -> Result<bool, ProfileStoreError> {
+        let Some(history) =
+            self.load_history_record(connection, conversation_id, routing_id, message_id)?
+        else {
+            return Ok(false);
+        };
+        if history.envelope_id != envelope_id
+            || history.cursor.is_some_and(|existing| existing != cursor)
+        {
+            return Err(ProfileStoreError::CursorConflict);
+        }
+        if history.cursor == Some(cursor) {
+            return Ok(true);
+        }
+        let changed = connection
+            .execute(
+                "UPDATE daemon_message_history
+                 SET cursor = ?1
+                 WHERE conversation_id = ?2
+                   AND message_id = ?3
+                   AND cursor IS NULL",
+                params![
+                    to_sql_integer(cursor)?,
+                    conversation_id.as_bytes().as_slice(),
+                    message_id.as_bytes().as_slice()
+                ],
+            )
+            .map_err(map_history_update_error)?;
+        if changed == 1 {
+            Ok(true)
+        } else {
+            Err(ProfileStoreError::InvalidTransition)
+        }
     }
 
     fn complete_history(
@@ -2730,6 +2845,13 @@ pub(crate) struct OutboundReservation {
 pub(crate) struct PendingOutbox {
     pub conversation_id: ConversationId,
     pub envelope: RelayEnvelope,
+}
+
+pub(crate) struct StoredOutboundApplication {
+    pub conversation_id: ConversationId,
+    pub message: ApplicationMessage,
+    pub envelope: RelayEnvelope,
+    pub cursor: Option<u64>,
 }
 
 struct OutboxRecord {
@@ -4574,6 +4696,106 @@ mod tests {
                 .load_inbox_envelope(stored.envelope().envelope_id())
                 .err(),
             Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn history_hides_accepted_outbound_until_contiguous_echo_completion() {
+        let fixture = conversation_fixture("history-contiguous-frontier");
+        let message_id = MessageId::from_bytes([71; MessageId::LENGTH]);
+        let envelope_id = EnvelopeId::from_bytes([72; EnvelopeId::LENGTH]);
+        let reservation = fixture
+            .store
+            .reserve_outbound_application(fixture.conversation_id, message_id, envelope_id)
+            .unwrap();
+        let outbound_message = application_message(71, 1, "outbound-at-two");
+        let outbound_envelope = relay_envelope(fixture.routing_id, 72, b"outbound-ciphertext");
+        fixture
+            .store
+            .store_outbound_message(
+                reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &outbound_message,
+            )
+            .unwrap();
+        fixture
+            .store
+            .store_outbound_envelope(reservation, &outbound_envelope)
+            .unwrap();
+        fixture
+            .store
+            .mark_outbox_accepted(&StoredRelayEnvelope::new(outbound_envelope.clone(), 2).unwrap())
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .load_history(fixture.conversation_id, 0, 10)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+
+        let inbound = StoredRelayEnvelope::new(
+            relay_envelope(fixture.routing_id, 73, b"inbound-ciphertext"),
+            1,
+        )
+        .unwrap();
+        fixture.store.record_inbox_envelope(&inbound).unwrap();
+        fixture
+            .store
+            .save_inbox_message(
+                fixture.conversation_id,
+                1,
+                DeviceId::from_bytes([74; DeviceId::LENGTH]),
+                0,
+                &application_message(74, 1, "inbound-at-one"),
+            )
+            .unwrap();
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, 1)
+            .unwrap();
+        let first_page = fixture
+            .store
+            .load_history(fixture.conversation_id, 0, 10)
+            .unwrap();
+        assert_eq!(first_page.messages.len(), 1);
+        assert_eq!(first_page.messages[0].cursor, 1);
+
+        let echo = StoredRelayEnvelope::new(outbound_envelope, 2).unwrap();
+        fixture.store.record_inbox_envelope(&echo).unwrap();
+        let outbound = fixture
+            .store
+            .outbound_history_message(fixture.conversation_id, envelope_id, 2)
+            .unwrap()
+            .unwrap();
+        fixture
+            .store
+            .save_inbox_message(
+                fixture.conversation_id,
+                2,
+                outbound.sender,
+                outbound.epoch,
+                &outbound.message,
+            )
+            .unwrap();
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, 2)
+            .unwrap();
+        let complete = fixture
+            .store
+            .load_history(fixture.conversation_id, 0, 10)
+            .unwrap();
+        assert_eq!(
+            complete
+                .messages
+                .iter()
+                .map(|message| message.cursor)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 

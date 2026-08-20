@@ -118,7 +118,8 @@ advanced before relay acknowledgment. Recovery distinguishes a ratchet that stil
 needs persistence from the exact already-consumed MLS generation; completed replay
 returns the sealed message without repeating side effects.
 
-Sent history remains pending and hidden until the relay assigns its exact cursor.
+Sent history records the relay-assigned cursor but remains pending and hidden until
+the sender replays that exact echo and advances the contiguous replay frontier.
 Received history remains pending until the receiver ratchet and contiguous inbox
 transition complete. A sender's own relay echo reuses the already sealed outbound
 message instead of attempting to decrypt an MLS message from self, so one message
@@ -132,6 +133,11 @@ the local process capability boundary, and every handler also passes an explicit
 method allowlist before parsing or side effects. Identifiers use canonical lowercase
 hex; keys, credentials, provider state, and raw MLS plaintext never cross the MCP
 boundary.
+
+`send_message` requires a caller-stable 16-byte `message_id`. Repeating the same
+conversation/message ID resumes or returns the exact durable operation; changing its
+content or reply target fails with an idempotency conflict. A new logical message must
+use a new ID.
 
 MCP starts read-only. `KONCLAVE_MCP_ALLOW_WRITE=true` (or `1`) must be set in the
 long-lived daemon environment to authorize create, send, sync, and watch operations.

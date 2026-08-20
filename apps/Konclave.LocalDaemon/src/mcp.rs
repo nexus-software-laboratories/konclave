@@ -42,6 +42,7 @@ struct ListConversationsRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SendMessageRequest {
     conversation_id: String,
+    message_id: String,
     text: String,
     reply_to_message_id: Option<String>,
 }
@@ -167,7 +168,7 @@ impl StdioServer {
 
     #[tool(
         name = "send_message",
-        description = "Encrypt, journal, and submit one text message in sender order."
+        description = "Encrypt, journal, and submit one text message using a caller-stable 16-byte message_id."
     )]
     async fn send_message(
         &self,
@@ -179,6 +180,7 @@ impl StdioServer {
             .as_ref()
             .ok_or_else(|| "relay_not_configured".to_string())?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let message_id = parse_message_id(&request.message_id)?;
         let reply_to = request
             .reply_to_message_id
             .as_deref()
@@ -190,6 +192,7 @@ impl StdioServer {
         let sent = applications
             .send(SendApplicationRequest {
                 conversation_id,
+                message_id,
                 content,
                 reply_to,
                 sent_at_unix_milliseconds: sent_at,

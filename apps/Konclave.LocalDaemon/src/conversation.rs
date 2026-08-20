@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::persistence::{
     HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE, OutboundReservation, PendingOutbox,
-    ProfileStore, ProfileStoreError,
+    ProfileStore, ProfileStoreError, StoredOutboundApplication,
 };
 
 /// Durable conversation composition over one locked daemon profile.
@@ -217,24 +217,50 @@ impl ConversationCoordinator {
         sent_at_unix_milliseconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
+        let message_id = self
+            .device
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
+            .generate_message_id()
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+        self.prepare_application_with_id(
+            conversation_id,
+            message_id,
+            content,
+            reply_to,
+            sent_at_unix_milliseconds,
+            expires_at_unix_seconds,
+        )
+    }
+
+    /// Encrypts and journals one caller-identified outbound application message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed profile, protocol, cryptographic, or state error.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the durable application request fields remain explicit"
+    )]
+    pub(crate) fn prepare_application_with_id(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        content: ApplicationContent,
+        reply_to: Option<MessageId>,
+        sent_at_unix_milliseconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<PreparedApplication, ConversationCoordinatorError> {
         let _operation = self
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        let (message_id, envelope_id) = {
-            let device = self
-                .device
-                .lock()
-                .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-            (
-                device
-                    .generate_message_id()
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
-                device
-                    .generate_envelope_id()
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
-            )
-        };
+        let envelope_id = self
+            .device
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
+            .generate_envelope_id()
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
         let reservation =
             self.store
                 .reserve_outbound_application(conversation_id, message_id, envelope_id)?;
@@ -251,6 +277,21 @@ impl ConversationCoordinator {
                 Err(error)
             }
         }
+    }
+
+    /// Loads one ready or accepted outbound request by stable message ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sealed profile, protocol, or storage error.
+    pub(crate) fn outbound_application(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+    ) -> Result<Option<StoredOutboundApplication>, ConversationCoordinatorError> {
+        self.store
+            .outbound_application(conversation_id, message_id)
+            .map_err(Into::into)
     }
 
     fn prepare_reserved_application(

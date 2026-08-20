@@ -16,6 +16,7 @@ use crate::persistence::HistoryPage;
 /// Outbound application input with caller-supplied display and expiry times.
 pub(crate) struct SendApplicationRequest {
     pub(crate) conversation_id: ConversationId,
+    pub(crate) message_id: MessageId,
     pub(crate) content: ApplicationContent,
     pub(crate) reply_to: Option<MessageId>,
     pub(crate) sent_at_unix_milliseconds: u64,
@@ -73,11 +74,42 @@ where
         request: SendApplicationRequest,
     ) -> Result<SentApplication, ApplicationServiceError> {
         let _submission = self.submissions.lock().await;
+        let conversations = self.conversations.clone();
+        let conversation_id = request.conversation_id;
+        let message_id = request.message_id;
+        if let Some(existing) = tokio::task::spawn_blocking(move || {
+            conversations.outbound_application(conversation_id, message_id)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??
+        {
+            if !application_content_equal(existing.message.content(), &request.content)
+                || existing.message.reply_to() != request.reply_to
+            {
+                return Err(ApplicationServiceError::IdempotencyConflict);
+            }
+            return match existing.cursor {
+                Some(cursor) => Ok(SentApplication {
+                    conversation_id: existing.conversation_id,
+                    message: existing.message,
+                    cursor,
+                }),
+                None => {
+                    self.submit_prepared(PreparedApplication {
+                        conversation_id: existing.conversation_id,
+                        message: existing.message,
+                        envelope: existing.envelope,
+                    })
+                    .await
+                }
+            };
+        }
         self.retry_ready_locked().await?;
         let conversations = self.conversations.clone();
         let prepared = tokio::task::spawn_blocking(move || {
-            conversations.prepare_application(
+            conversations.prepare_application_with_id(
                 request.conversation_id,
+                request.message_id,
                 request.content,
                 request.reply_to,
                 request.sent_at_unix_milliseconds,
@@ -265,6 +297,12 @@ where
     }
 }
 
+fn application_content_equal(left: &ApplicationContent, right: &ApplicationContent) -> bool {
+    match (left, right) {
+        (ApplicationContent::Text(left), ApplicationContent::Text(right)) => left == right,
+    }
+}
+
 /// Stable application-service failures.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -277,6 +315,8 @@ pub(crate) enum ApplicationServiceError {
     Task,
     #[error("application request is invalid")]
     Protocol,
+    #[error("application idempotency key conflicts with a prior request")]
+    IdempotencyConflict,
     #[error("relay response does not match the requested operation")]
     InvalidRelayResponse,
 }
@@ -302,6 +342,7 @@ mod tests {
     struct RecordingRelay {
         cursor: AtomicU64,
         fail_submit: AtomicBool,
+        fail_after_accept: AtomicBool,
         envelopes: Mutex<Vec<StoredRelayEnvelope>>,
         replay_pages: Mutex<VecDeque<ReplayPage>>,
         replay_requests: Mutex<Vec<ReplayRequest>>,
@@ -313,11 +354,18 @@ mod tests {
             Self {
                 cursor: AtomicU64::new(0),
                 fail_submit: AtomicBool::new(fail_submit),
+                fail_after_accept: AtomicBool::new(false),
                 envelopes: Mutex::new(Vec::new()),
                 replay_pages: Mutex::new(VecDeque::new()),
                 replay_requests: Mutex::new(Vec::new()),
                 acknowledgments: Mutex::new(Vec::new()),
             }
+        }
+
+        fn failing_after_accept() -> Self {
+            let relay = Self::new(false);
+            relay.fail_after_accept.store(true, Ordering::SeqCst);
+            relay
         }
 
         fn push_replay_page(&self, page: ReplayPage) {
@@ -334,10 +382,24 @@ mod tests {
             if self.fail_submit.load(Ordering::SeqCst) {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
+            let mut envelopes = self.envelopes.lock().unwrap();
+            if let Some(existing) = envelopes
+                .iter()
+                .find(|stored| {
+                    stored.envelope().envelope_id() == envelope.envelope_id()
+                        && stored.envelope() == envelope
+                })
+                .cloned()
+            {
+                return Ok(existing);
+            }
             let cursor = self.cursor.fetch_add(1, Ordering::SeqCst) + 1;
             let stored = StoredRelayEnvelope::new(envelope.clone(), cursor)
                 .map_err(|_| KonclaveClientError::InvalidResponse)?;
-            self.envelopes.lock().unwrap().push(stored.clone());
+            envelopes.push(stored.clone());
+            if self.fail_after_accept.swap(false, Ordering::SeqCst) {
+                return Err(KonclaveClientError::TransportUnavailable);
+            }
             Ok(stored)
         }
 
@@ -384,8 +446,14 @@ mod tests {
     }
 
     fn request(conversation_id: ConversationId, text: &str) -> SendApplicationRequest {
+        let mut message_id = [0_u8; MessageId::LENGTH];
+        for (index, byte) in text.bytes().enumerate() {
+            message_id[index % MessageId::LENGTH] ^=
+                byte.wrapping_add(u8::try_from(index).unwrap_or(u8::MAX));
+        }
         SendApplicationRequest {
             conversation_id,
+            message_id: MessageId::from_bytes(message_id),
             content: ApplicationContent::text(text).unwrap(),
             reply_to: None,
             sent_at_unix_milliseconds: 1_700_000_000_000,
@@ -434,6 +502,22 @@ mod tests {
             .read(conversation.conversation_id, 0, 10)
             .await
             .unwrap();
+        assert!(history.messages.is_empty());
+
+        let echoed = service.transport.envelopes.lock().unwrap().clone();
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(echoed, 2, false).unwrap());
+        let replayed = service
+            .replay_once(conversation.conversation_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(replayed.messages.len(), 2);
+        assert!(replayed.messages.iter().all(|message| message.duplicate));
+        let history = service
+            .read(conversation.conversation_id, 0, 10)
+            .await
+            .unwrap();
         assert_eq!(history.messages.len(), 2);
         assert!(!history.has_more);
         assert_eq!(history.messages[0].direction, MessageDirection::Outbound);
@@ -456,26 +540,6 @@ mod tests {
             .unwrap();
         assert_eq!(second_page.messages.len(), 1);
         assert!(!second_page.has_more);
-
-        let echoed = service.transport.envelopes.lock().unwrap().clone();
-        service
-            .transport
-            .push_replay_page(ReplayPage::new(echoed, 2, false).unwrap());
-        let replayed = service
-            .replay_once(conversation.conversation_id, 100)
-            .await
-            .unwrap();
-        assert_eq!(replayed.messages.len(), 2);
-        assert!(replayed.messages.iter().all(|message| message.duplicate));
-        assert_eq!(
-            service
-                .read(conversation.conversation_id, 0, 10)
-                .await
-                .unwrap()
-                .messages
-                .len(),
-            2
-        );
     }
 
     #[tokio::test]
@@ -517,9 +581,72 @@ mod tests {
             .read(conversation.conversation_id, 0, 10)
             .await
             .unwrap();
-        assert_eq!(history.messages.len(), 2);
-        assert_eq!(history.messages[0].message.sender_counter(), 1);
-        assert_eq!(history.messages[1].message.sender_counter(), 2);
+        assert!(history.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn identical_send_retry_resumes_one_message_after_ambiguous_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "send-idempotency");
+        let conversation = coordinator.create().unwrap();
+        let service =
+            ApplicationService::new(coordinator.clone(), RecordingRelay::failing_after_accept());
+        let initial = request(conversation.conversation_id, "idempotent-retry-secret");
+        let message_id = initial.message_id;
+
+        assert!(matches!(
+            service.send(initial).await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+        assert_eq!(coordinator.ready_outbox().unwrap().len(), 1);
+
+        let accepted = service
+            .send(request(
+                conversation.conversation_id,
+                "idempotent-retry-secret",
+            ))
+            .await
+            .unwrap();
+        let repeated = service
+            .send(request(
+                conversation.conversation_id,
+                "idempotent-retry-secret",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.message.message_id(), message_id);
+        assert_eq!(accepted.message.message_id(), repeated.message.message_id());
+        assert_eq!(accepted.message.sender_counter(), 1);
+        assert_eq!(accepted.cursor, repeated.cursor);
+        assert_eq!(accepted.cursor, 1);
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+        assert!(coordinator.ready_outbox().unwrap().is_empty());
+        let stored = coordinator
+            .outbound_application(conversation.conversation_id, message_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.message.message_id(), message_id);
+        assert_eq!(stored.cursor, Some(accepted.cursor));
+
+        let mut conflicting = request(conversation.conversation_id, "idempotent-retry-secret");
+        conflicting.content = ApplicationContent::text("conflicting-content").unwrap();
+        assert!(matches!(
+            service.send(conflicting).await,
+            Err(ApplicationServiceError::IdempotencyConflict)
+        ));
+
+        let mut conflicting_reply =
+            request(conversation.conversation_id, "idempotent-retry-secret");
+        conflicting_reply.reply_to = Some(MessageId::from_bytes([91; MessageId::LENGTH]));
+        assert!(matches!(
+            service.send(conflicting_reply).await,
+            Err(ApplicationServiceError::IdempotencyConflict)
+        ));
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
