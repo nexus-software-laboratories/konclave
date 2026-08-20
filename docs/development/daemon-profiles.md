@@ -39,6 +39,11 @@ Schema version 3 stores:
 Version 1 and 2 profiles migrate transactionally. A failed migration leaves the prior
 schema intact.
 
+When upgrading the unified-history schema, sealed inbound messages are re-sealed into
+history after the profile key is available. Legacy ready or accepted outbound
+operations have no recoverable plaintext and therefore fail startup explicitly
+instead of losing idempotency or attempting MLS self-decryption.
+
 The store checks blob lengths before materialization, rejects unknown schema versions,
 uses parameterized SQL, and writes a conversation plus all initial bindings in one
 transaction. Profile identity mismatches and duplicate conversations fail closed.

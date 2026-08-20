@@ -485,6 +485,29 @@ impl ConversationCoordinator {
                 })
             }
             InboxOperation::MessageSaved { stored, message } => {
+                if let Some(outbound) = self.store.outbound_history_message(
+                    conversation_id,
+                    stored.envelope().envelope_id(),
+                    stored.cursor(),
+                )? {
+                    if outbound.sender != message.sender
+                        || outbound.epoch != message.epoch
+                        || !application_messages_equal(&outbound.message, &message.message)?
+                    {
+                        return Err(ConversationCoordinatorError::StateMismatch);
+                    }
+                    self.store
+                        .complete_inbox(conversation_id, stored.cursor())?;
+                    return Ok(ProcessedApplication {
+                        conversation_id,
+                        cursor: stored.cursor(),
+                        envelope_id: stored.envelope().envelope_id(),
+                        sender: message.sender,
+                        epoch: message.epoch,
+                        message: message.message,
+                        duplicate: true,
+                    });
+                }
                 if conversation.group.epoch() != message.epoch {
                     return Err(ConversationCoordinatorError::StateMismatch);
                 }
@@ -791,6 +814,34 @@ pub(crate) mod tests {
         }
     }
 
+    fn stage_own_echo_saved(
+        coordinator: &ConversationCoordinator,
+        conversation_id: ConversationId,
+        stored: &StoredRelayEnvelope,
+    ) {
+        let _operation = coordinator.operations.lock().unwrap();
+        coordinator.store.record_inbox_envelope(stored).unwrap();
+        let outbound = coordinator
+            .store
+            .outbound_history_message(
+                conversation_id,
+                stored.envelope().envelope_id(),
+                stored.cursor(),
+            )
+            .unwrap()
+            .unwrap();
+        coordinator
+            .store
+            .save_inbox_message(
+                conversation_id,
+                stored.cursor(),
+                outbound.sender,
+                outbound.epoch,
+                &outbound.message,
+            )
+            .unwrap();
+    }
+
     #[test]
     fn creates_reopens_and_lists_a_persisted_conversation() {
         let root = tempfile::tempdir().unwrap();
@@ -952,6 +1003,42 @@ pub(crate) mod tests {
             received.message.message_id()
         );
         assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+    }
+
+    #[test]
+    fn recovers_own_echo_after_message_saved_crash() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "own-echo-message-saved");
+        let conversation = coordinator.create().unwrap();
+        let prepared = coordinator
+            .prepare_application(
+                conversation.conversation_id,
+                ApplicationContent::text("own echo").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let stored = StoredRelayEnvelope::new(prepared.envelope, 1).unwrap();
+        coordinator.mark_outbox_accepted(&stored).unwrap();
+        stage_own_echo_saved(&coordinator, conversation.conversation_id, &stored);
+
+        let recovered = coordinator
+            .process_inbound_application(conversation.conversation_id, &stored)
+            .unwrap();
+
+        assert!(recovered.duplicate);
+        assert_eq!(
+            recovered.message.message_id(),
+            prepared.message.message_id()
+        );
+        assert_eq!(
+            coordinator
+                .replay_position(conversation.conversation_id)
+                .unwrap()
+                .1,
+            1
+        );
     }
 
     #[test]
