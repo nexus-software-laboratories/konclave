@@ -8,7 +8,8 @@ use KonclaveDomainCore::{
     MembershipOperationId, ProtocolVersion, RemoveMember,
 };
 use KonclaveProtocolContracts::v1::{
-    decode_conversation_state, encode_conversation_state, encode_membership_change,
+    decode_conversation_state, decode_membership_commit_bundle, decode_membership_control,
+    encode_conversation_state, encode_membership_change, encode_membership_commit_bundle,
     encode_membership_control,
 };
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
@@ -938,6 +939,38 @@ impl MlsConversation {
         self.policy.clear_pending()
     }
 
+    /// Decrypts membership control and applies its digest-bound MLS Commit.
+    ///
+    /// The receiver ratchet and epoch transition are persisted together by the
+    /// successful commit path. A rejected commit restores the pre-control in-memory
+    /// group so an exact durable replay can retry safely.
+    ///
+    /// # Errors
+    ///
+    /// Returns a framing, decryption, authorization, or MLS transition error.
+    pub fn process_membership_bundle(
+        &mut self,
+        bundle: &[u8],
+        now_unix_seconds: u64,
+    ) -> Result<AppliedMembershipCommit, KonclaveCryptographicError> {
+        self.ensure_no_pending_commit()?;
+        let bundle = decode_membership_commit_bundle(bundle)
+            .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?;
+        let encrypted_control = MlsApplicationMessage::from_bytes(bundle.encrypted_control())?;
+        let commit = MlsCommit::from_bytes(bundle.mls_commit())?;
+        let original_group = self.group.clone();
+        let decrypted = self.decrypt_application_message(&encrypted_control)?;
+        let (authorization, join_proof) = decode_membership_control(decrypted.plaintext())
+            .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?;
+        match self.process_membership_commit(&commit, authorization, join_proof, now_unix_seconds) {
+            Ok(applied) => Ok(applied),
+            Err(error) => {
+                self.group = original_group;
+                Err(error)
+            }
+        }
+    }
+
     /// Processes an incoming commit only when its exact application authorization
     /// and add-member proof have been supplied.
     ///
@@ -1366,6 +1399,16 @@ pub struct OutboundMembershipCommit {
 }
 
 impl OutboundMembershipCommit {
+    /// Encodes the opaque encrypted control and Commit relay payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol size error when the aggregate exceeds one relay payload.
+    pub fn encode_bundle(&self) -> Result<Vec<u8>, KonclaveCryptographicError> {
+        encode_membership_commit_bundle(self.encrypted_control.as_bytes(), self.commit.as_bytes())
+            .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)
+    }
+
     /// Returns the MLS application PrivateMessage carrying membership context.
     #[must_use]
     pub const fn encrypted_control(&self) -> &MlsApplicationMessage {
