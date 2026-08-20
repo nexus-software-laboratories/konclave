@@ -6,8 +6,8 @@ use KonclaveCryptographicCore::{
 };
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
-    DeliveryClass, DeviceId, Member, MessageId, ProtocolVersion, RelayEnvelope, RoutingId,
-    StoredRelayEnvelope,
+    DeliveryClass, DeviceId, EnvelopeId, Member, MessageId, ProtocolVersion, RelayEnvelope,
+    RoutingId, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{decode_application_message, encode_application_message};
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
@@ -15,8 +15,8 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::persistence::{
-    InboxOperation, MAX_CONVERSATION_PAGE_SIZE, OutboundReservation, PendingOutbox, ProfileStore,
-    ProfileStoreError, StoredHistoryMessage,
+    HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE, OutboundReservation, PendingOutbox,
+    ProfileStore, ProfileStoreError,
 };
 
 /// Durable conversation composition over one locked daemon profile.
@@ -326,7 +326,7 @@ impl ConversationCoordinator {
         conversation_id: ConversationId,
         after_cursor: u64,
         limit: usize,
-    ) -> Result<Vec<StoredHistoryMessage>, ConversationCoordinatorError> {
+    ) -> Result<HistoryPage, ConversationCoordinatorError> {
         self.store
             .load_history(conversation_id, after_cursor, limit)
             .map_err(Into::into)
@@ -410,6 +410,7 @@ impl ConversationCoordinator {
                     return Ok(ProcessedApplication {
                         conversation_id,
                         cursor: stored.cursor(),
+                        envelope_id: stored.envelope().envelope_id(),
                         sender: outbound.sender,
                         epoch: outbound.epoch,
                         message: outbound.message,
@@ -435,6 +436,7 @@ impl ConversationCoordinator {
                 Ok(ProcessedApplication {
                     conversation_id,
                     cursor: stored.cursor(),
+                    envelope_id: stored.envelope().envelope_id(),
                     sender,
                     epoch,
                     message,
@@ -471,6 +473,7 @@ impl ConversationCoordinator {
                 Ok(ProcessedApplication {
                     conversation_id,
                     cursor: stored.cursor(),
+                    envelope_id: stored.envelope().envelope_id(),
                     sender: message.sender,
                     epoch: message.epoch,
                     message: message.message,
@@ -480,6 +483,7 @@ impl ConversationCoordinator {
             InboxOperation::Complete { stored, message } => Ok(ProcessedApplication {
                 conversation_id,
                 cursor: stored.cursor(),
+                envelope_id: stored.envelope().envelope_id(),
                 sender: message.sender,
                 epoch: message.epoch,
                 message: message.message,
@@ -500,6 +504,7 @@ pub(crate) struct PreparedApplication {
 pub(crate) struct ProcessedApplication {
     pub(crate) conversation_id: ConversationId,
     pub(crate) cursor: u64,
+    pub(crate) envelope_id: EnvelopeId,
     pub(crate) sender: DeviceId,
     pub(crate) epoch: u64,
     pub(crate) message: ApplicationMessage,
@@ -612,7 +617,7 @@ pub(crate) mod tests {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap()
     }
 
-    fn open_coordinator(root: &Path, profile_name: &str) -> ConversationCoordinator {
+    pub(crate) fn open_coordinator(root: &Path, profile_name: &str) -> ConversationCoordinator {
         let locked = LockedProfile::acquire(root, ProfileId::parse(profile_name).unwrap()).unwrap();
         let mls_path = locked.mls_database_path();
         let profile_sealer = sealer();

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
 use KonclaveDomainCore::{
     AcknowledgeRequest, ApplicationContent, ApplicationMessage, ConversationId, MessageId,
-    ReplayRequest, StoredRelayEnvelope,
+    ReplayPage, ReplayRequest, StoredRelayEnvelope,
 };
 use thiserror::Error;
 
@@ -11,7 +11,7 @@ use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, PreparedApplication,
     ProcessedApplication,
 };
-use crate::persistence::StoredHistoryMessage;
+use crate::persistence::HistoryPage;
 
 /// Outbound application input with caller-supplied display and expiry times.
 pub(crate) struct SendApplicationRequest {
@@ -116,6 +116,46 @@ where
         conversation_id: ConversationId,
         limit: u32,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
+        let (request, routing_id, after_cursor) =
+            self.replay_request(conversation_id, limit).await?;
+        let page = self.transport.replay(request).await?;
+        self.process_page(conversation_id, routing_id, after_cursor, page)
+            .await
+    }
+
+    /// Waits for and processes one bounded WebSocket replay page.
+    ///
+    /// The caller owns cancellation by dropping the returned future. The temporary
+    /// watch session is closed normally after the page has been durably processed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a request, task, conversation, relay, or response-integrity error.
+    pub(crate) async fn watch_once(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ReplayBatch, ApplicationServiceError> {
+        let (request, routing_id, after_cursor) = self.replay_request(conversation_id, 100).await?;
+        let mut watch = self.transport.connect_watch(request).await?;
+        let page = watch.next_page().await?;
+        let processed = self
+            .process_page(conversation_id, routing_id, after_cursor, page)
+            .await;
+        let closed = watch.close().await;
+        match processed {
+            Err(error) => Err(error),
+            Ok(batch) => {
+                closed?;
+                Ok(batch)
+            }
+        }
+    }
+
+    async fn replay_request(
+        &self,
+        conversation_id: ConversationId,
+        limit: u32,
+    ) -> Result<(ReplayRequest, KonclaveDomainCore::RoutingId, u64), ApplicationServiceError> {
         let conversations = self.conversations.clone();
         let (routing_id, after_cursor) =
             tokio::task::spawn_blocking(move || conversations.replay_position(conversation_id))
@@ -123,7 +163,16 @@ where
                 .map_err(|_| ApplicationServiceError::Task)??;
         let request = ReplayRequest::new(routing_id, after_cursor, limit)
             .map_err(|_| ApplicationServiceError::Protocol)?;
-        let page = self.transport.replay(request).await?;
+        Ok((request, routing_id, after_cursor))
+    }
+
+    async fn process_page(
+        &self,
+        conversation_id: ConversationId,
+        routing_id: KonclaveDomainCore::RoutingId,
+        after_cursor: u64,
+        page: ReplayPage,
+    ) -> Result<ReplayBatch, ApplicationServiceError> {
         if page.next_cursor() < after_cursor
             || page
                 .envelopes()
@@ -166,7 +215,7 @@ where
         conversation_id: ConversationId,
         after_cursor: u64,
         limit: usize,
-    ) -> Result<Vec<StoredHistoryMessage>, ApplicationServiceError> {
+    ) -> Result<HistoryPage, ApplicationServiceError> {
         let conversations = self.conversations.clone();
         tokio::task::spawn_blocking(move || {
             conversations.history(conversation_id, after_cursor, limit)
@@ -385,11 +434,28 @@ mod tests {
             .read(conversation.conversation_id, 0, 10)
             .await
             .unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].direction, MessageDirection::Outbound);
-        assert_eq!(history[1].direction, MessageDirection::Outbound);
-        assert_eq!(history[0].message.sender_counter(), 1);
-        assert_eq!(history[1].message.sender_counter(), 2);
+        assert_eq!(history.messages.len(), 2);
+        assert!(!history.has_more);
+        assert_eq!(history.messages[0].direction, MessageDirection::Outbound);
+        assert_eq!(history.messages[1].direction, MessageDirection::Outbound);
+        assert_eq!(history.messages[0].message.sender_counter(), 1);
+        assert_eq!(history.messages[1].message.sender_counter(), 2);
+        let first_page = service
+            .read(conversation.conversation_id, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(first_page.messages.len(), 1);
+        assert!(first_page.has_more);
+        let second_page = service
+            .read(
+                conversation.conversation_id,
+                first_page.messages[0].cursor,
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_page.messages.len(), 1);
+        assert!(!second_page.has_more);
 
         let echoed = service.transport.envelopes.lock().unwrap().clone();
         service
@@ -406,6 +472,7 @@ mod tests {
                 .read(conversation.conversation_id, 0, 10)
                 .await
                 .unwrap()
+                .messages
                 .len(),
             2
         );
@@ -432,6 +499,7 @@ mod tests {
                 .read(conversation.conversation_id, 0, 10)
                 .await
                 .unwrap()
+                .messages
                 .is_empty()
         );
 
@@ -449,9 +517,9 @@ mod tests {
             .read(conversation.conversation_id, 0, 10)
             .await
             .unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].message.sender_counter(), 1);
-        assert_eq!(history[1].message.sender_counter(), 2);
+        assert_eq!(history.messages.len(), 2);
+        assert_eq!(history.messages[0].message.sender_counter(), 1);
+        assert_eq!(history.messages[1].message.sender_counter(), 2);
     }
 
     #[tokio::test]
@@ -484,11 +552,11 @@ mod tests {
             &[AcknowledgeRequest::new(prepared.envelope.routing_id(), 1,).unwrap()]
         );
         let history = service.read(conversation_id, 0, 10).await.unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].direction, MessageDirection::Inbound);
-        assert_eq!(history[0].sender, alice_device_id);
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(history.messages[0].direction, MessageDirection::Inbound);
+        assert_eq!(history.messages[0].sender, alice_device_id);
         assert!(matches!(
-            history[0].message.content(),
+            history.messages[0].message.content(),
             ApplicationContent::Text(body) if body == "replayed message"
         ));
 
@@ -514,6 +582,12 @@ mod tests {
         assert!(matches!(
             service.replay_once(conversation_id, 100).await,
             Err(ApplicationServiceError::InvalidRelayResponse)
+        ));
+        assert!(matches!(
+            service.watch_once(conversation_id).await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
         ));
     }
 }

@@ -123,3 +123,20 @@ Received history remains pending until the receiver ratchet and contiguous inbox
 transition complete. A sender's own relay echo reuses the already sealed outbound
 message instead of attempting to decrypt an MLS message from self, so one message
 appears exactly once in cursor order after reconnect.
+
+## MCP application tools
+
+The stdio daemon exposes bounded `create_conversation`, `list_conversations`,
+`send_message`, `read_messages`, `sync_messages`, and `watch_messages` tools. Stdio is
+the local process capability boundary, and every handler also passes an explicit
+method allowlist before parsing or side effects. Identifiers use canonical lowercase
+hex; keys, credentials, provider state, and raw MLS plaintext never cross the MCP
+boundary.
+
+MCP starts read-only. `KONCLAVE_MCP_ALLOW_WRITE=true` (or `1`) must be set in the
+long-lived daemon environment to authorize create, send, sync, and watch operations.
+Invalid values fail startup; the daemon never infers write permission from a model
+request.
+
+`watch_messages` owns one cancellable WebSocket session and returns after one replay
+page. Agents repeat the bounded call rather than creating a detached polling task.

@@ -64,6 +64,7 @@ impl ProfileId {
         {
             return Err(ProfileStoreError::InvalidProfileId);
         }
+
         Ok(Self(value))
     }
 
@@ -1689,7 +1690,7 @@ impl ProfileStore {
         conversation_id: ConversationId,
         after_cursor: u64,
         limit: usize,
-    ) -> Result<Vec<StoredHistoryMessage>, ProfileStoreError> {
+    ) -> Result<HistoryPage, ProfileStoreError> {
         if !(1..=MAX_MESSAGE_PAGE_SIZE).contains(&limit) {
             return Err(ProfileStoreError::InvalidTransition);
         }
@@ -1712,7 +1713,8 @@ impl ProfileStore {
                     params![
                         conversation_id.as_bytes().as_slice(),
                         to_sql_integer(after_cursor)?,
-                        i64::try_from(limit).map_err(|_| ProfileStoreError::SequenceExhausted)?
+                        i64::try_from(limit + 1)
+                            .map_err(|_| ProfileStoreError::SequenceExhausted)?
                     ],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
@@ -1720,8 +1722,9 @@ impl ProfileStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| ProfileStoreError::Storage)?
         };
-        let mut messages = Vec::with_capacity(message_ids.len());
-        for message_id in message_ids {
+        let has_more = message_ids.len() > limit;
+        let mut messages = Vec::with_capacity(message_ids.len().min(limit));
+        for message_id in message_ids.into_iter().take(limit) {
             let message_id =
                 MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
             let connection = self.lock()?;
@@ -1754,7 +1757,7 @@ impl ProfileStore {
             }
             messages.push(stored_history_message(history).ok_or(ProfileStoreError::CorruptData)?);
         }
-        Ok(messages)
+        Ok(HistoryPage { messages, has_more })
     }
 
     fn insert_or_verify_cursor_observation(
@@ -2765,6 +2768,11 @@ pub(crate) struct StoredHistoryMessage {
     pub(crate) sender: DeviceId,
     pub(crate) epoch: u64,
     pub(crate) message: ApplicationMessage,
+}
+
+pub(crate) struct HistoryPage {
+    pub(crate) messages: Vec<StoredHistoryMessage>,
+    pub(crate) has_more: bool,
 }
 
 pub(crate) enum PendingInbox {
