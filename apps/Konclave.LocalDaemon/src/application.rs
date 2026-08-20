@@ -11,6 +11,7 @@ use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, PreparedApplication,
     ProcessedApplication,
 };
+use crate::persistence::StoredHistoryMessage;
 
 /// Outbound application input with caller-supplied display and expiry times.
 pub(crate) struct SendApplicationRequest {
@@ -155,6 +156,26 @@ where
         Ok(ReplayBatch { messages, has_more })
     }
 
+    /// Reads one bounded page of completed sent and received history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a task or sealed conversation-history error.
+    pub(crate) async fn read(
+        &self,
+        conversation_id: ConversationId,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredHistoryMessage>, ApplicationServiceError> {
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || {
+            conversations.history(conversation_id, after_cursor, limit)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)?
+        .map_err(Into::into)
+    }
+
     async fn retry_ready_locked(&self) -> Result<usize, ApplicationServiceError> {
         let conversations = self.conversations.clone();
         let pending = tokio::task::spawn_blocking(move || conversations.ready_outbox())
@@ -227,7 +248,7 @@ mod tests {
 
     use super::*;
     use crate::conversation::tests::paired_coordinators;
-    use crate::persistence::{LockedProfile, ProfileId};
+    use crate::persistence::{LockedProfile, MessageDirection, ProfileId};
 
     struct RecordingRelay {
         cursor: AtomicU64,
@@ -346,18 +367,48 @@ mod tests {
         assert_eq!(sent[0].cursor, 1);
         assert_eq!(sent[1].cursor, 2);
         assert!(coordinator.ready_outbox().unwrap().is_empty());
-        let envelopes = service.transport.envelopes.lock().unwrap();
-        for envelope in envelopes.iter() {
-            for sentinel in [FIRST_SENTINEL.as_bytes(), SECOND_SENTINEL.as_bytes()] {
-                assert!(
-                    !envelope
-                        .envelope()
-                        .payload()
-                        .windows(sentinel.len())
-                        .any(|window| window == sentinel)
-                );
+        {
+            let envelopes = service.transport.envelopes.lock().unwrap();
+            for envelope in envelopes.iter() {
+                for sentinel in [FIRST_SENTINEL.as_bytes(), SECOND_SENTINEL.as_bytes()] {
+                    assert!(
+                        !envelope
+                            .envelope()
+                            .payload()
+                            .windows(sentinel.len())
+                            .any(|window| window == sentinel)
+                    );
+                }
             }
         }
+        let history = service
+            .read(conversation.conversation_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].direction, MessageDirection::Outbound);
+        assert_eq!(history[1].direction, MessageDirection::Outbound);
+        assert_eq!(history[0].message.sender_counter(), 1);
+        assert_eq!(history[1].message.sender_counter(), 2);
+
+        let echoed = service.transport.envelopes.lock().unwrap().clone();
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(echoed, 2, false).unwrap());
+        let replayed = service
+            .replay_once(conversation.conversation_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(replayed.messages.len(), 2);
+        assert!(replayed.messages.iter().all(|message| message.duplicate));
+        assert_eq!(
+            service
+                .read(conversation.conversation_id, 0, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -376,6 +427,13 @@ mod tests {
             ))
         ));
         assert_eq!(coordinator.ready_outbox().unwrap().len(), 1);
+        assert!(
+            service
+                .read(conversation.conversation_id, 0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         service.transport.fail_submit.store(false, Ordering::SeqCst);
         let sent = service
@@ -387,6 +445,13 @@ mod tests {
         assert!(coordinator.ready_outbox().unwrap().is_empty());
         assert_eq!(service.retry_ready().await.unwrap(), 0);
         assert_eq!(service.transport.envelopes.lock().unwrap().len(), 2);
+        let history = service
+            .read(conversation.conversation_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].message.sender_counter(), 1);
+        assert_eq!(history[1].message.sender_counter(), 2);
     }
 
     #[tokio::test]
@@ -418,6 +483,14 @@ mod tests {
             service.transport.acknowledgments.lock().unwrap().as_slice(),
             &[AcknowledgeRequest::new(prepared.envelope.routing_id(), 1,).unwrap()]
         );
+        let history = service.read(conversation_id, 0, 10).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].direction, MessageDirection::Inbound);
+        assert_eq!(history[0].sender, alice_device_id);
+        assert!(matches!(
+            history[0].message.content(),
+            ApplicationContent::Text(body) if body == "replayed message"
+        ));
 
         service
             .transport

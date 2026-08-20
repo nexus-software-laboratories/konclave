@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::persistence::{
     InboxOperation, MAX_CONVERSATION_PAGE_SIZE, OutboundReservation, PendingOutbox, ProfileStore,
-    ProfileStoreError,
+    ProfileStoreError, StoredHistoryMessage,
 };
 
 /// Durable conversation composition over one locked daemon profile.
@@ -275,6 +275,8 @@ impl ConversationCoordinator {
                 .map_err(|_| ConversationCoordinatorError::Protocol)?,
         );
         let mut conversation = self.open_unlocked(reservation.conversation_id)?;
+        let sender = self.device_id()?;
+        let epoch = conversation.group.epoch();
         let ciphertext = conversation
             .group
             .encrypt_application_message(&plaintext)
@@ -289,6 +291,13 @@ impl ConversationCoordinator {
             ciphertext.into_bytes(),
         )
         .map_err(|_| ConversationCoordinatorError::Protocol)?;
+        self.store.store_outbound_message(
+            reservation,
+            conversation.routing_id,
+            sender,
+            epoch,
+            &message,
+        )?;
         self.store.store_outbound_envelope(reservation, &envelope)?;
         Ok(PreparedApplication {
             conversation_id: reservation.conversation_id,
@@ -304,6 +313,23 @@ impl ConversationCoordinator {
     /// Returns a profile bounds, authentication, protocol, or storage error.
     pub(crate) fn ready_outbox(&self) -> Result<Vec<PendingOutbox>, ConversationCoordinatorError> {
         self.store.ready_outbox().map_err(Into::into)
+    }
+
+    /// Loads one bounded cursor-ordered page of completed local history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile bounds, corruption, authentication, protocol, or storage
+    /// error.
+    pub(crate) fn history(
+        &self,
+        conversation_id: ConversationId,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredHistoryMessage>, ConversationCoordinatorError> {
+        self.store
+            .load_history(conversation_id, after_cursor, limit)
+            .map_err(Into::into)
     }
 
     /// Records one exact relay submission response.
@@ -367,6 +393,29 @@ impl ConversationCoordinator {
             .inbox_operation(conversation_id, stored.cursor())?
         {
             InboxOperation::Received { stored } => {
+                if let Some(outbound) = self.store.outbound_history_message(
+                    conversation_id,
+                    stored.envelope().envelope_id(),
+                    stored.cursor(),
+                )? {
+                    self.store.save_inbox_message(
+                        conversation_id,
+                        stored.cursor(),
+                        outbound.sender,
+                        outbound.epoch,
+                        &outbound.message,
+                    )?;
+                    self.store
+                        .complete_inbox(conversation_id, stored.cursor())?;
+                    return Ok(ProcessedApplication {
+                        conversation_id,
+                        cursor: stored.cursor(),
+                        sender: outbound.sender,
+                        epoch: outbound.epoch,
+                        message: outbound.message,
+                        duplicate: true,
+                    });
+                }
                 let epoch = conversation.group.epoch();
                 let (sender, message) =
                     decrypt_application(&mut conversation.group, stored.envelope())?;

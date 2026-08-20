@@ -26,7 +26,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 2;
+const PROFILE_SCHEMA_VERSION: u32 = 3;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -39,8 +39,10 @@ const INBOX_ENVELOPE_RECORD_SCOPE: u8 = 2;
 const INBOX_MESSAGE_RECORD_SCOPE: u8 = 3;
 const CURSOR_OBSERVATION_RECORD_SCOPE: u8 = 4;
 const SENDER_COUNTER_RECORD_SCOPE: u8 = 5;
+const MESSAGE_HISTORY_RECORD_SCOPE: u8 = 6;
 
 type InboxMessageMetadata = (Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, Vec<u8>, i64);
+type HistoryMetadata = (Vec<u8>, Option<i64>, i64, i64, Vec<u8>, i64, i64, i64);
 
 /// Portable, filesystem-safe local profile identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -748,6 +750,66 @@ impl ProfileStore {
         }
     }
 
+    /// Stores one sealed outbound plaintext record before its envelope becomes ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns a mismatch, duplicate, transition, sealing, protocol, or storage error.
+    pub(crate) fn store_outbound_message(
+        &self,
+        reservation: OutboundReservation,
+        routing_id: RoutingId,
+        sender: DeviceId,
+        epoch: u64,
+        message: &ApplicationMessage,
+    ) -> Result<(), ProfileStoreError> {
+        if message.message_id() != reservation.message_id
+            || message.sender_counter() != reservation.sender_counter
+        {
+            return Err(ProfileStoreError::ConversationMismatch);
+        }
+        let stored_routing_id = self.conversation_routing_id(reservation.conversation_id)?;
+        if stored_routing_id != routing_id {
+            return Err(ProfileStoreError::ConversationMismatch);
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let status: Option<i64> = transaction
+            .query_row(
+                "SELECT status FROM daemon_outbox
+                 WHERE envelope_id = ?1
+                   AND conversation_id = ?2
+                   AND message_id = ?3
+                   AND sender_counter = ?4",
+                params![
+                    reservation.envelope_id.as_bytes().as_slice(),
+                    reservation.conversation_id.as_bytes().as_slice(),
+                    reservation.message_id.as_bytes().as_slice(),
+                    to_sql_integer(reservation.sender_counter)?
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if status != Some(1) {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        self.insert_or_verify_history(
+            &transaction,
+            reservation.conversation_id,
+            routing_id,
+            reservation.envelope_id,
+            None,
+            MessageDirection::Outbound,
+            sender,
+            epoch,
+            message,
+        )?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
     /// Loads every bounded ready outbox envelope for retry.
     ///
     /// # Errors
@@ -857,9 +919,29 @@ impl ProfileStore {
     ///
     /// Returns a storage error when the transition cannot be persisted.
     pub(crate) fn abandon_unsealed_outbox(&self) -> Result<usize, ProfileStoreError> {
-        self.lock()?
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let changed = transaction
             .execute("UPDATE daemon_outbox SET status = 4 WHERE status = 1", [])
-            .map_err(|_| ProfileStoreError::Storage)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction
+            .execute(
+                "DELETE FROM daemon_message_history
+                 WHERE direction = 1
+                   AND status = 1
+                   AND cursor IS NULL
+                   AND envelope_id IN (
+                        SELECT envelope_id FROM daemon_outbox WHERE status = 4
+                   )",
+                [],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(changed)
     }
 
     /// Converts one exact unsealed reservation into a durable counter-gap tombstone.
@@ -871,8 +953,11 @@ impl ProfileStore {
         &self,
         reservation: OutboundReservation,
     ) -> Result<(), ProfileStoreError> {
-        let changed = self
-            .lock()?
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let changed = transaction
             .execute(
                 "UPDATE daemon_outbox SET status = 4
                  WHERE envelope_id = ?1
@@ -889,10 +974,28 @@ impl ProfileStore {
             )
             .map_err(|_| ProfileStoreError::Storage)?;
         if changed == 1 {
+            transaction
+                .execute(
+                    "DELETE FROM daemon_message_history
+                     WHERE conversation_id = ?1
+                       AND message_id = ?2
+                       AND envelope_id = ?3
+                       AND direction = 1
+                       AND status = 1
+                       AND cursor IS NULL",
+                    params![
+                        reservation.conversation_id.as_bytes().as_slice(),
+                        reservation.message_id.as_bytes().as_slice(),
+                        reservation.envelope_id.as_bytes().as_slice()
+                    ],
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            transaction
+                .commit()
+                .map_err(|_| ProfileStoreError::Storage)?;
             return Ok(());
         }
-        let state: Option<(Vec<u8>, Vec<u8>, i64, i64)> = self
-            .lock()?
+        let state: Option<(Vec<u8>, Vec<u8>, i64, i64)> = transaction
             .query_row(
                 "SELECT
                     CASE WHEN length(conversation_id) = 32 THEN conversation_id END,
@@ -912,6 +1015,9 @@ impl ProfileStore {
                 && from_sql_integer(sender_counter).ok() == Some(reservation.sender_counter)
                 && status == 4
         }) {
+            transaction
+                .commit()
+                .map_err(|_| ProfileStoreError::Storage)?;
             Ok(())
         } else {
             Err(ProfileStoreError::InvalidTransition)
@@ -978,6 +1084,14 @@ impl ProfileStore {
             }
             _ => return Err(ProfileStoreError::InvalidTransition),
         }
+        self.complete_history(
+            &transaction,
+            record.reservation.conversation_id,
+            record.envelope.routing_id(),
+            record.reservation.message_id,
+            envelope_id,
+            cursor,
+        )?;
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
 
@@ -1144,7 +1258,11 @@ impl ProfileStore {
             message.message_id().as_bytes(),
             &plaintext,
         )?;
-        let update = self.lock()?.execute(
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let update = transaction.execute(
             "UPDATE daemon_inbox
              SET sender_device_id = ?1,
                  sender_epoch = ?2,
@@ -1164,13 +1282,46 @@ impl ProfileStore {
             ],
         );
         match update {
-            Ok(1) => Ok(()),
+            Ok(1) => {
+                self.insert_or_verify_history(
+                    &transaction,
+                    conversation_id,
+                    routing_id,
+                    envelope_id,
+                    Some(cursor),
+                    MessageDirection::Inbound,
+                    sender,
+                    sender_epoch,
+                    message,
+                )?;
+                transaction.commit().map_err(|_| ProfileStoreError::Storage)
+            }
             Ok(_) => {
+                drop(transaction);
+                drop(connection);
                 let existing = self.load_message_at(conversation_id, cursor)?;
                 if existing.sender == sender
                     && existing.epoch == sender_epoch
                     && application_messages_equal(&existing.message, message)?
                 {
+                    let mut connection = self.lock()?;
+                    let transaction = connection
+                        .transaction()
+                        .map_err(|_| ProfileStoreError::Storage)?;
+                    self.insert_or_verify_history(
+                        &transaction,
+                        conversation_id,
+                        routing_id,
+                        envelope_id,
+                        Some(cursor),
+                        MessageDirection::Inbound,
+                        sender,
+                        sender_epoch,
+                        message,
+                    )?;
+                    transaction
+                        .commit()
+                        .map_err(|_| ProfileStoreError::Storage)?;
                     Ok(())
                 } else {
                     Err(ProfileStoreError::InvalidTransition)
@@ -1179,6 +1330,8 @@ impl ProfileStore {
             Err(rusqlite::Error::SqliteFailure(ref details, _))
                 if details.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
+                drop(transaction);
+                drop(connection);
                 Err(ProfileStoreError::DuplicateOperation)
             }
             Err(_) => Err(ProfileStoreError::Storage),
@@ -1230,6 +1383,62 @@ impl ProfileStore {
             }),
             _ => Err(ProfileStoreError::CorruptData),
         }
+    }
+
+    /// Loads and cursor-binds one locally sent message echoed by the relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cursor conflict, malformed, authentication, protocol, or storage
+    /// error.
+    pub(crate) fn outbound_history_message(
+        &self,
+        conversation_id: ConversationId,
+        envelope_id: EnvelopeId,
+        cursor: u64,
+    ) -> Result<Option<StoredHistoryMessage>, ProfileStoreError> {
+        let routing_id = self.conversation_routing_id(conversation_id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let message_id: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT CASE WHEN length(message_id) = 16 THEN message_id END
+                 FROM daemon_message_history
+                 WHERE conversation_id = ?1
+                   AND envelope_id = ?2
+                   AND direction = 1",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    envelope_id.as_bytes().as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some(message_id) = message_id else {
+            return Ok(None);
+        };
+        let message_id =
+            MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
+        self.complete_history(
+            &transaction,
+            conversation_id,
+            routing_id,
+            message_id,
+            envelope_id,
+            cursor,
+        )?;
+        let history = self
+            .load_history_record(&transaction, conversation_id, routing_id, message_id)?
+            .ok_or(ProfileStoreError::CorruptData)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(Some(
+            stored_history_message(history).ok_or(ProfileStoreError::CorruptData)?,
+        ))
     }
 
     /// Loads bounded incomplete inbox operations in durable cursor order.
@@ -1387,6 +1596,14 @@ impl ProfileStore {
             message.epoch,
             message.message.sender_counter(),
         )?;
+        self.complete_history(
+            &transaction,
+            conversation_id,
+            envelope.envelope().routing_id(),
+            message.message.message_id(),
+            message.envelope_id,
+            cursor,
+        )?;
         let changed = transaction
             .execute(
                 "UPDATE daemon_inbox SET status = 3
@@ -1458,6 +1675,84 @@ impl ProfileStore {
         let mut messages = Vec::with_capacity(metadata.len());
         for cursor in metadata {
             messages.push(self.load_message_at(conversation_id, from_sql_integer(cursor)?)?);
+        }
+        Ok(messages)
+    }
+
+    /// Loads one bounded cursor-ordered page of completed sent and received messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounds, malformed, authentication, protocol, or storage error.
+    pub(crate) fn load_history(
+        &self,
+        conversation_id: ConversationId,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredHistoryMessage>, ProfileStoreError> {
+        if !(1..=MAX_MESSAGE_PAGE_SIZE).contains(&limit) {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        let routing_id = self.conversation_routing_id(conversation_id)?;
+        let message_ids = {
+            let connection = self.lock()?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT CASE WHEN length(message_id) = 16 THEN message_id END
+                     FROM daemon_message_history
+                     WHERE conversation_id = ?1
+                       AND status = 2
+                       AND cursor > ?2
+                     ORDER BY cursor
+                     LIMIT ?3",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(
+                    params![
+                        conversation_id.as_bytes().as_slice(),
+                        to_sql_integer(after_cursor)?,
+                        i64::try_from(limit).map_err(|_| ProfileStoreError::SequenceExhausted)?
+                    ],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        let mut messages = Vec::with_capacity(message_ids.len());
+        for message_id in message_ids {
+            let message_id =
+                MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
+            let connection = self.lock()?;
+            let history = self
+                .load_history_record(&connection, conversation_id, routing_id, message_id)?
+                .ok_or(ProfileStoreError::CorruptData)?;
+            drop(connection);
+            let cursor = history.cursor.ok_or(ProfileStoreError::CorruptData)?;
+            match history.direction {
+                MessageDirection::Outbound => {
+                    let outbox = self.load_outbox_record(history.envelope_id)?;
+                    if outbox.reservation.conversation_id != conversation_id {
+                        return Err(ProfileStoreError::CorruptData);
+                    }
+                    let connection = self.lock()?;
+                    self.verify_cursor_observation(
+                        &connection,
+                        conversation_id,
+                        routing_id,
+                        cursor,
+                        &outbox.envelope,
+                    )?;
+                }
+                MessageDirection::Inbound => {
+                    let inbox = self.load_inbox_envelope(history.envelope_id)?;
+                    if inbox.cursor() != cursor {
+                        return Err(ProfileStoreError::CorruptData);
+                    }
+                }
+            }
+            messages.push(stored_history_message(history).ok_or(ProfileStoreError::CorruptData)?);
         }
         Ok(messages)
     }
@@ -1588,6 +1883,261 @@ impl ProfileStore {
             return Err(ProfileStoreError::CursorConflict);
         }
         Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "history identity and authenticated message fields remain explicit"
+    )]
+    fn insert_or_verify_history(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        envelope_id: EnvelopeId,
+        cursor: Option<u64>,
+        direction: MessageDirection,
+        sender: DeviceId,
+        epoch: u64,
+        message: &ApplicationMessage,
+    ) -> Result<(), ProfileStoreError> {
+        let plaintext =
+            encode_history_message_record(direction, envelope_id, sender, epoch, message)?;
+        let blob = self.seal_operation_record(
+            SecretRecordKind::LocalApplicationMessage,
+            conversation_id,
+            routing_id,
+            MESSAGE_HISTORY_RECORD_SCOPE,
+            message.message_id().as_bytes(),
+            &plaintext,
+        )?;
+        let insert = connection.execute(
+            "INSERT INTO daemon_message_history (
+                conversation_id,
+                message_id,
+                envelope_id,
+                cursor,
+                direction,
+                status,
+                sender_device_id,
+                sender_epoch,
+                sender_counter,
+                sealed_message
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9)",
+            params![
+                conversation_id.as_bytes().as_slice(),
+                message.message_id().as_bytes().as_slice(),
+                envelope_id.as_bytes().as_slice(),
+                cursor.map(to_sql_integer).transpose()?,
+                direction as i64,
+                sender.as_bytes().as_slice(),
+                to_sql_integer(epoch)?,
+                to_sql_integer(message.sender_counter())?,
+                blob.as_bytes()
+            ],
+        );
+        match insert {
+            Ok(1) => return Ok(()),
+            Ok(_) => return Err(ProfileStoreError::Storage),
+            Err(rusqlite::Error::SqliteFailure(ref details, _))
+                if details.code == rusqlite::ErrorCode::ConstraintViolation => {}
+            Err(_) => return Err(ProfileStoreError::Storage),
+        }
+        let existing = self
+            .load_history_record(
+                connection,
+                conversation_id,
+                routing_id,
+                message.message_id(),
+            )?
+            .ok_or(ProfileStoreError::DuplicateOperation)?;
+        if existing.envelope_id != envelope_id
+            || existing.sender != sender
+            || existing.epoch != epoch
+            || !application_messages_equal(&existing.message, message)?
+        {
+            return Err(ProfileStoreError::DuplicateOperation);
+        }
+        match (existing.cursor, cursor) {
+            (Some(existing), Some(candidate)) if existing != candidate => {
+                return Err(ProfileStoreError::CursorConflict);
+            }
+            (None, Some(cursor)) => {
+                connection
+                    .execute(
+                        "UPDATE daemon_message_history SET cursor = ?1
+                         WHERE conversation_id = ?2
+                           AND message_id = ?3
+                           AND cursor IS NULL",
+                        params![
+                            to_sql_integer(cursor)?,
+                            conversation_id.as_bytes().as_slice(),
+                            message.message_id().as_bytes().as_slice()
+                        ],
+                    )
+                    .map_err(map_history_update_error)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn load_history_record(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        message_id: MessageId,
+    ) -> Result<Option<HistoryRecord>, ProfileStoreError> {
+        let metadata: Option<HistoryMetadata> = connection
+            .query_row(
+                "SELECT
+                    CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
+                    cursor,
+                    direction,
+                    status,
+                    CASE WHEN length(sender_device_id) = 32
+                        THEN sender_device_id
+                    END,
+                    sender_epoch,
+                    sender_counter,
+                    length(sealed_message)
+                 FROM daemon_message_history
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    message_id.as_bytes().as_slice()
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some((envelope_id, cursor, direction, status, sender, epoch, sender_counter, length)) =
+            metadata
+        else {
+            return Ok(None);
+        };
+        validate_blob_length(length)?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_message
+                 FROM daemon_message_history
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    message_id.as_bytes().as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if bytes.len() != usize::try_from(length).unwrap_or_default() {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let blob = SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
+        let plaintext = self
+            .sealer
+            .open(
+                &operation_record_context(
+                    &self.locked_profile.profile_id,
+                    SecretRecordKind::LocalApplicationMessage,
+                    conversation_id,
+                    routing_id,
+                    MESSAGE_HISTORY_RECORD_SCOPE,
+                    message_id.as_bytes(),
+                )?,
+                &blob,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let (stored_direction, stored_envelope, stored_sender, stored_epoch, message) =
+            decode_history_message_record(&plaintext)?;
+        let envelope_id =
+            EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
+        let sender = DeviceId::from_slice(&sender).map_err(|_| ProfileStoreError::CorruptData)?;
+        let epoch = from_sql_integer(epoch)?;
+        if stored_envelope != envelope_id
+            || stored_sender != sender
+            || stored_epoch != epoch
+            || message.message_id() != message_id
+            || message.sender_counter() != from_sql_integer(sender_counter)?
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let direction = match direction {
+            1 => MessageDirection::Outbound,
+            2 => MessageDirection::Inbound,
+            _ => return Err(ProfileStoreError::CorruptData),
+        };
+        if stored_direction != direction {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let complete = match status {
+            1 => false,
+            2 => true,
+            _ => return Err(ProfileStoreError::CorruptData),
+        };
+        Ok(Some(HistoryRecord {
+            cursor: cursor.map(from_sql_integer).transpose()?,
+            direction,
+            envelope_id,
+            sender,
+            epoch,
+            message,
+            complete,
+        }))
+    }
+
+    fn complete_history(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        message_id: MessageId,
+        envelope_id: EnvelopeId,
+        cursor: u64,
+    ) -> Result<bool, ProfileStoreError> {
+        let Some(history) =
+            self.load_history_record(connection, conversation_id, routing_id, message_id)?
+        else {
+            return Ok(false);
+        };
+        if history.envelope_id != envelope_id
+            || history.cursor.is_some_and(|existing| existing != cursor)
+        {
+            return Err(ProfileStoreError::CursorConflict);
+        }
+        if history.complete && history.cursor == Some(cursor) {
+            return Ok(true);
+        }
+        let changed = connection
+            .execute(
+                "UPDATE daemon_message_history
+                 SET cursor = ?1, status = 2
+                 WHERE conversation_id = ?2
+                   AND message_id = ?3
+                   AND status = 1",
+                params![
+                    to_sql_integer(cursor)?,
+                    conversation_id.as_bytes().as_slice(),
+                    message_id.as_bytes().as_slice()
+                ],
+            )
+            .map_err(map_history_update_error)?;
+        if changed == 1 {
+            Ok(true)
+        } else {
+            Err(ProfileStoreError::InvalidTransition)
+        }
     }
 
     fn load_sender_high_water(
@@ -2184,12 +2734,37 @@ struct OutboxRecord {
     envelope: RelayEnvelope,
 }
 
+struct HistoryRecord {
+    cursor: Option<u64>,
+    direction: MessageDirection,
+    envelope_id: EnvelopeId,
+    sender: DeviceId,
+    epoch: u64,
+    message: ApplicationMessage,
+    complete: bool,
+}
+
 pub(crate) struct StoredApplicationMessage {
     pub cursor: u64,
     pub envelope_id: EnvelopeId,
     pub sender: DeviceId,
     pub epoch: u64,
     pub message: ApplicationMessage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageDirection {
+    Outbound = 1,
+    Inbound = 2,
+}
+
+pub(crate) struct StoredHistoryMessage {
+    pub(crate) cursor: u64,
+    pub(crate) direction: MessageDirection,
+    pub(crate) envelope_id: EnvelopeId,
+    pub(crate) sender: DeviceId,
+    pub(crate) epoch: u64,
+    pub(crate) message: ApplicationMessage,
 }
 
 pub(crate) enum PendingInbox {
@@ -2285,6 +2860,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
+        2 => return initialize_message_history_schema(connection),
         0 => connection
             .execute_batch(
                 "BEGIN;
@@ -2420,6 +2996,55 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
                     ON DELETE CASCADE
              ) WITHOUT ROWID;
              PRAGMA user_version = 2;
+             COMMIT;",
+        )
+        .map_err(|_| ProfileStoreError::Storage)?;
+    initialize_message_history_schema(connection)
+}
+
+fn initialize_message_history_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
+    connection
+        .execute_batch(
+            "BEGIN;
+             CREATE TABLE daemon_message_history (
+                conversation_id BLOB NOT NULL,
+                message_id BLOB NOT NULL CHECK (length(message_id) = 16),
+                envelope_id BLOB NOT NULL UNIQUE CHECK (length(envelope_id) = 16),
+                cursor INTEGER,
+                direction INTEGER NOT NULL CHECK (direction BETWEEN 1 AND 2),
+                status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 2),
+                sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 32),
+                sender_epoch INTEGER NOT NULL CHECK (sender_epoch >= 0),
+                sender_counter INTEGER NOT NULL CHECK (sender_counter >= 1),
+                sealed_message BLOB NOT NULL,
+                PRIMARY KEY (conversation_id, message_id),
+                FOREIGN KEY (conversation_id)
+                    REFERENCES daemon_conversation(conversation_id)
+                    ON DELETE CASCADE,
+                UNIQUE (
+                    conversation_id,
+                    sender_device_id,
+                    sender_epoch,
+                    sender_counter
+                ),
+                CHECK (
+                    (direction = 1 AND (cursor IS NULL OR cursor >= 1))
+                    OR
+                    (direction = 2 AND cursor IS NOT NULL AND cursor >= 1)
+                ),
+                CHECK (
+                    (status = 1)
+                    OR
+                    (status = 2 AND cursor IS NOT NULL AND cursor >= 1)
+                )
+             ) WITHOUT ROWID;
+             CREATE UNIQUE INDEX daemon_message_history_cursor_idx
+                ON daemon_message_history(conversation_id, cursor)
+                WHERE cursor IS NOT NULL;
+             CREATE INDEX daemon_message_history_page_idx
+                ON daemon_message_history(conversation_id, cursor)
+                WHERE status = 2;
+             PRAGMA user_version = 3;
              COMMIT;",
         )
         .map_err(|_| ProfileStoreError::Storage)
@@ -2637,6 +3262,66 @@ fn decode_inbox_message_record(
     })
 }
 
+fn encode_history_message_record(
+    direction: MessageDirection,
+    envelope_id: EnvelopeId,
+    sender: DeviceId,
+    epoch: u64,
+    message: &ApplicationMessage,
+) -> Result<Zeroizing<Vec<u8>>, ProfileStoreError> {
+    let message = Zeroizing::new(
+        encode_application_message(message).map_err(|_| ProfileStoreError::Protocol)?,
+    );
+    let mut record = Zeroizing::new(Vec::with_capacity(
+        2 + EnvelopeId::LENGTH + DeviceId::LENGTH + 8 + message.len(),
+    ));
+    record.push(LOCAL_RECORD_VERSION);
+    record.push(direction as u8);
+    record.extend_from_slice(envelope_id.as_bytes());
+    record.extend_from_slice(sender.as_bytes());
+    record.extend_from_slice(&epoch.to_be_bytes());
+    record.extend_from_slice(&message);
+    Ok(record)
+}
+
+fn decode_history_message_record(
+    record: &[u8],
+) -> Result<
+    (
+        MessageDirection,
+        EnvelopeId,
+        DeviceId,
+        u64,
+        ApplicationMessage,
+    ),
+    ProfileStoreError,
+> {
+    const ENVELOPE_START: usize = 2;
+    const SENDER_START: usize = ENVELOPE_START + EnvelopeId::LENGTH;
+    const EPOCH_START: usize = SENDER_START + DeviceId::LENGTH;
+    const HEADER_LENGTH: usize = EPOCH_START + 8;
+    if record.len() <= HEADER_LENGTH || record[0] != LOCAL_RECORD_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let direction = match record[1] {
+        1 => MessageDirection::Outbound,
+        2 => MessageDirection::Inbound,
+        _ => return Err(ProfileStoreError::CorruptData),
+    };
+    let envelope_id = EnvelopeId::from_slice(&record[ENVELOPE_START..SENDER_START])
+        .map_err(|_| ProfileStoreError::CorruptData)?;
+    let sender = DeviceId::from_slice(&record[SENDER_START..EPOCH_START])
+        .map_err(|_| ProfileStoreError::CorruptData)?;
+    let epoch = u64::from_be_bytes(
+        record[EPOCH_START..HEADER_LENGTH]
+            .try_into()
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+    );
+    let message = decode_application_message(&record[HEADER_LENGTH..])
+        .map_err(|_| ProfileStoreError::Protocol)?;
+    Ok((direction, envelope_id, sender, epoch, message))
+}
+
 fn decode_positive_u64(bytes: &[u8]) -> Result<u64, ProfileStoreError> {
     let bytes: [u8; 8] = bytes
         .try_into()
@@ -2658,6 +3343,20 @@ fn application_messages_equal(
     let right =
         Zeroizing::new(encode_application_message(right).map_err(|_| ProfileStoreError::Protocol)?);
     Ok(left == right)
+}
+
+fn stored_history_message(history: HistoryRecord) -> Option<StoredHistoryMessage> {
+    if !history.complete {
+        return None;
+    }
+    Some(StoredHistoryMessage {
+        cursor: history.cursor?,
+        direction: history.direction,
+        envelope_id: history.envelope_id,
+        sender: history.sender,
+        epoch: history.epoch,
+        message: history.message,
+    })
 }
 
 fn conversation_record_context(
@@ -2764,6 +3463,17 @@ fn map_operation_insert_error(error: rusqlite::Error) -> ProfileStoreError {
             if details.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
             ProfileStoreError::DuplicateOperation
+        }
+        _ => ProfileStoreError::Storage,
+    }
+}
+
+fn map_history_update_error(error: rusqlite::Error) -> ProfileStoreError {
+    match error {
+        rusqlite::Error::SqliteFailure(ref details, _)
+            if details.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            ProfileStoreError::CursorConflict
         }
         _ => ProfileStoreError::Storage,
     }
@@ -3622,31 +4332,37 @@ mod tests {
                 &application_message(4, 1, "PLAINTEXT-MESSAGE-SENTINEL"),
             )
             .unwrap();
-        let (outbox, cursor_observation, inbox, message): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) =
-            fixture
-                .store
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT
+        let sealed_records: Vec<Vec<u8>> = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
                     (SELECT sealed_envelope FROM daemon_outbox LIMIT 1),
                     (SELECT sealed_observation FROM daemon_cursor_observation LIMIT 1),
+                    (SELECT sealed_message FROM daemon_message_history LIMIT 1),
                     sealed_envelope,
                     sealed_message
                  FROM daemon_inbox LIMIT 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .unwrap();
-        for (sealed, sentinel) in [
-            (outbox.as_slice(), b"OUTBOX-CIPHERTEXT-SENTINEL".as_slice()),
-            (
-                cursor_observation.as_slice(),
-                b"INBOX-CIPHERTEXT-SENTINEL".as_slice(),
-            ),
-            (inbox.as_slice(), b"INBOX-CIPHERTEXT-SENTINEL".as_slice()),
-            (message.as_slice(), b"PLAINTEXT-MESSAGE-SENTINEL".as_slice()),
-        ] {
+                [],
+                |row| {
+                    Ok(vec![
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(2)?,
+                    ])
+                },
+            )
+            .unwrap();
+        for (sealed, sentinel) in sealed_records.iter().zip([
+            b"OUTBOX-CIPHERTEXT-SENTINEL".as_slice(),
+            b"INBOX-CIPHERTEXT-SENTINEL".as_slice(),
+            b"INBOX-CIPHERTEXT-SENTINEL".as_slice(),
+            b"PLAINTEXT-MESSAGE-SENTINEL".as_slice(),
+            b"PLAINTEXT-MESSAGE-SENTINEL".as_slice(),
+        ]) {
             assert!(
                 !sealed
                     .windows(sentinel.len())
@@ -4067,7 +4783,7 @@ mod tests {
         let locked =
             LockedProfile::acquire(root.path(), ProfileId::parse("schema-test").unwrap()).unwrap();
         let connection = Connection::open(locked.profile_database_path()).unwrap();
-        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
         drop(connection);
         assert_eq!(
             locked.open_store(sealer()).err(),
@@ -4076,7 +4792,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v1_to_v2_transactionally() {
+    fn profile_schema_migrates_v1_to_v3_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration-test").unwrap();
         let locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
@@ -4094,6 +4810,7 @@ mod tests {
             "daemon_cursor_observation",
             "daemon_inbox",
             "daemon_sender_counter",
+            "daemon_message_history",
         ] {
             let exists: i64 = store
                 .lock()
@@ -4107,6 +4824,90 @@ mod tests {
                 .unwrap();
             assert_eq!(exists, 1);
         }
+    }
+
+    #[test]
+    fn profile_schema_migrates_v2_to_v3_message_history() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("message-history-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("DROP TABLE daemon_message_history", [])
+            .unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let version: u32 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let history_exists: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'daemon_message_history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert_eq!(history_exists, 1);
+    }
+
+    #[test]
+    fn failed_v3_history_migration_preserves_v2_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("message-history-rollback").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("DROP TABLE daemon_message_history", [])
+            .unwrap();
+        connection
+            .execute("CREATE TABLE daemon_message_history (sentinel INTEGER)", [])
+            .unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        drop(connection);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let history_columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_message_history')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(history_columns, 1);
     }
 
     #[test]

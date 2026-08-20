@@ -23,7 +23,7 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 
 ## Profile store
 
-Schema version 2 stores:
+Schema version 3 stores:
 
 - one profile row with a sealed device root and optional sealed relay credential;
 - normalized non-secret relay endpoint;
@@ -33,9 +33,10 @@ Schema version 2 stores:
 - sender counter and replay cursor;
 - outbound application reservations, sealed envelopes, and relay acceptance state;
 - one sealed envelope observation for every accepted route cursor;
-- received application envelopes, sealed decoded messages, and completion state.
+- received application envelopes, sealed decoded messages, and completion state;
+- one sealed cursor-ordered history for both sent and received messages.
 
-Version 1 profiles migrate transactionally. A failed migration leaves the version 1
+Version 1 and 2 profiles migrate transactionally. A failed migration leaves the prior
 schema intact.
 
 The store checks blob lengths before materialization, rejects unknown schema versions,
@@ -116,3 +117,9 @@ epoch are sealed before receiver-ratchet persistence, and the contiguous cursor 
 advanced before relay acknowledgment. Recovery distinguishes a ratchet that still
 needs persistence from the exact already-consumed MLS generation; completed replay
 returns the sealed message without repeating side effects.
+
+Sent history remains pending and hidden until the relay assigns its exact cursor.
+Received history remains pending until the receiver ratchet and contiguous inbox
+transition complete. A sender's own relay echo reuses the already sealed outbound
+message instead of attempting to decrypt an MLS message from self, so one message
+appears exactly once in cursor order after reconnect.
