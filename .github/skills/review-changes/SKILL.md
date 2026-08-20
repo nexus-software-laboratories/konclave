@@ -72,6 +72,20 @@ Read the returned package scripts, solution/project files, language manifests,
 workflows, and Genesis delivery metadata. Inspect their actual definitions before
 choosing commands.
 
+Audit local generated-output retention:
+
+```powershell
+pwsh scripts/guidance/Invoke-OutputRetention.ps1
+```
+
+- Review is read-only: never pass `-Prune` during a review.
+- Record a retention violation under validation as local housekeeping evidence, not
+  as an introduced code finding.
+- When the change creates or configures a new output root, require the same change to
+  ignore it, give it path-scoped retention guidance, and make the retention command
+  discover it. Missing ownership for a newly introduced output root is a changed-code
+  finding.
+
 - Run only the smallest offline command that covers the changed behavior.
 - Use package/workspace filters, project/test selectors, or equivalent repository
   scoping when declared by the toolchain.
