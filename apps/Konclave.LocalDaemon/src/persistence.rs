@@ -919,6 +919,20 @@ impl ProfileStore {
         );
         match insert {
             Ok(_) => {
+                let replay_cursor: i64 = transaction
+                    .query_row(
+                        "SELECT replay_cursor FROM daemon_conversation
+                         WHERE conversation_id = ?1",
+                        params![conversation_id.as_bytes().as_slice()],
+                        |row| row.get(0),
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                let replay_cursor = from_sql_integer(replay_cursor)?;
+                let cursor_window = u64::try_from(MAX_MESSAGE_PAGE_SIZE)
+                    .map_err(|_| ProfileStoreError::SequenceExhausted)?;
+                if stored.cursor() > replay_cursor.saturating_add(cursor_window) {
+                    return Err(ProfileStoreError::InboxCapacityExceeded);
+                }
                 let count: i64 = transaction
                     .query_row(
                         "SELECT count(*) FROM daemon_inbox
@@ -3080,6 +3094,48 @@ mod tests {
         assert_eq!(
             fixture.store.complete_inbox(fixture.conversation_id, 3),
             Err(ProfileStoreError::CursorGap)
+        );
+    }
+
+    #[test]
+    fn inbox_window_preserves_capacity_for_missing_head_cursor() {
+        let fixture = conversation_fixture("inbox-window");
+        for cursor in 2_u64..=100 {
+            stage_inbox_message(&fixture, cursor, u8::try_from(cursor).unwrap(), 0, cursor);
+        }
+        let cursor_101 =
+            StoredRelayEnvelope::new(relay_envelope(fixture.routing_id, 101, b"cursor-101"), 101)
+                .unwrap();
+        assert_eq!(
+            fixture.store.record_inbox_envelope(&cursor_101),
+            Err(ProfileStoreError::InboxCapacityExceeded)
+        );
+
+        stage_inbox_message(&fixture, 1, 1, 0, 1);
+        assert_eq!(
+            fixture
+                .store
+                .complete_inbox(fixture.conversation_id, 1)
+                .unwrap(),
+            1
+        );
+        stage_inbox_message(&fixture, 101, 101, 0, 101);
+        for cursor in 2_u64..=101 {
+            assert_eq!(
+                fixture
+                    .store
+                    .complete_inbox(fixture.conversation_id, cursor)
+                    .unwrap(),
+                cursor
+            );
+        }
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .replay_cursor,
+            101
         );
     }
 

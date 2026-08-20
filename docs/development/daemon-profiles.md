@@ -62,7 +62,9 @@ The application inbox transitions from received to message-saved to complete, an
 completion advances only the next contiguous replay cursor. Exact repeats are
 idempotent; conflicting identifiers, counters, cursors, routes, senders, or
 sealed-record scopes fail closed. Pending outbox and incomplete inbox work are bounded
-at persistence and recovery boundaries.
+at persistence and recovery boundaries. A new inbox cursor must remain within one
+bounded replay page above the durable cursor, so far-ahead delivery cannot consume the
+slot needed to journal the missing contiguous head.
 
 Outbox acceptance and inbox receipt share the same cursor-observation ledger. Each
 entry authenticates the exact envelope, not only its identifier, so a relay that
