@@ -427,6 +427,10 @@ fn history_result(
 }
 
 fn processed_result(processed: ProcessedApplication) -> Result<MessageResult, String> {
+    let direction = match processed.direction {
+        MessageDirection::Outbound => "outbound",
+        MessageDirection::Inbound => "inbound",
+    };
     message_result(
         processed.conversation_id,
         processed.cursor,
@@ -434,7 +438,7 @@ fn processed_result(processed: ProcessedApplication) -> Result<MessageResult, St
         processed.sender,
         processed.epoch,
         processed.message,
-        "inbound",
+        direction,
         processed.duplicate,
     )
 }
@@ -551,7 +555,10 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 mod tests {
     use std::sync::Arc;
 
-    use KonclaveDomainCore::ConversationId;
+    use KonclaveDomainCore::{
+        ApplicationContent, ApplicationMessage, ConversationId, DeviceId, EnvelopeId, MessageId,
+        ProtocolVersion,
+    };
     use rmcp::model::CallToolRequestParams;
     use rmcp::{ClientHandler, ServiceExt};
     use serde_json::json;
@@ -560,7 +567,9 @@ mod tests {
         AuthorizationContext, AuthorizationHook, StdioServer, ensure_stdout_safe_diagnostics,
         local_stdio_authorization,
     };
+    use crate::conversation::ProcessedApplication;
     use crate::conversation::tests::open_coordinator;
+    use crate::persistence::MessageDirection;
 
     #[derive(Clone, Default)]
     struct TestClient;
@@ -610,6 +619,30 @@ mod tests {
         let error = ensure_stdout_safe_diagnostics("stdout").unwrap_err();
         assert!(error.to_string().contains("stdout"));
         assert!(ensure_stdout_safe_diagnostics("stderr").is_ok());
+    }
+
+    #[test]
+    fn own_echo_result_preserves_outbound_direction() {
+        let result = super::processed_result(ProcessedApplication {
+            conversation_id: ConversationId::from_bytes([1; ConversationId::LENGTH]),
+            cursor: 1,
+            envelope_id: EnvelopeId::from_bytes([2; EnvelopeId::LENGTH]),
+            sender: DeviceId::from_bytes([3; DeviceId::LENGTH]),
+            epoch: 0,
+            message: ApplicationMessage::new(
+                ProtocolVersion::application_v1(),
+                MessageId::from_bytes([4; MessageId::LENGTH]),
+                1,
+                1_700_000_000_000,
+                None,
+                ApplicationContent::text("own echo").unwrap(),
+            )
+            .unwrap(),
+            direction: MessageDirection::Outbound,
+            duplicate: true,
+        })
+        .unwrap();
+        assert_eq!(result.direction, "outbound");
     }
 
     #[tokio::test]

@@ -15,8 +15,8 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::persistence::{
-    HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE, OutboundReservation, PendingOutbox,
-    ProfileStore, ProfileStoreError, StoredOutboundApplication,
+    HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE, MessageDirection, OutboundReservation,
+    PendingOutbox, ProfileStore, ProfileStoreError, StoredOutboundApplication,
 };
 
 /// Durable conversation composition over one locked daemon profile.
@@ -454,6 +454,7 @@ impl ConversationCoordinator {
                         sender: outbound.sender,
                         epoch: outbound.epoch,
                         message: outbound.message,
+                        direction: MessageDirection::Outbound,
                         duplicate: true,
                     });
                 }
@@ -480,6 +481,7 @@ impl ConversationCoordinator {
                     sender,
                     epoch,
                     message,
+                    direction: MessageDirection::Inbound,
                     duplicate: false,
                 })
             }
@@ -503,6 +505,7 @@ impl ConversationCoordinator {
                         sender: message.sender,
                         epoch: message.epoch,
                         message: message.message,
+                        direction: MessageDirection::Outbound,
                         duplicate: true,
                     });
                 }
@@ -539,18 +542,31 @@ impl ConversationCoordinator {
                     sender: message.sender,
                     epoch: message.epoch,
                     message: message.message,
+                    direction: MessageDirection::Inbound,
                     duplicate: true,
                 })
             }
-            InboxOperation::Complete { stored, message } => Ok(ProcessedApplication {
-                conversation_id,
-                cursor: stored.cursor(),
-                envelope_id: stored.envelope().envelope_id(),
-                sender: message.sender,
-                epoch: message.epoch,
-                message: message.message,
-                duplicate: true,
-            }),
+            InboxOperation::Complete { stored, message } => {
+                let direction = if self
+                    .store
+                    .outbound_history_message(conversation_id, &stored)?
+                    .is_some()
+                {
+                    MessageDirection::Outbound
+                } else {
+                    MessageDirection::Inbound
+                };
+                Ok(ProcessedApplication {
+                    conversation_id,
+                    cursor: stored.cursor(),
+                    envelope_id: stored.envelope().envelope_id(),
+                    sender: message.sender,
+                    epoch: message.epoch,
+                    message: message.message,
+                    direction,
+                    duplicate: true,
+                })
+            }
         }
     }
 }
@@ -570,6 +586,7 @@ pub(crate) struct ProcessedApplication {
     pub(crate) sender: DeviceId,
     pub(crate) epoch: u64,
     pub(crate) message: ApplicationMessage,
+    pub(crate) direction: MessageDirection,
     pub(crate) duplicate: bool,
 }
 

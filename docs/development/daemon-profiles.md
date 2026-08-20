@@ -36,8 +36,11 @@ Schema version 3 stores:
 - received application envelopes, sealed decoded messages, and completion state;
 - one sealed cursor-ordered history for both sent and received messages.
 
-Version 1 and 2 profiles migrate transactionally. A failed migration leaves the prior
-schema intact.
+Version 1 and 2 schema changes use explicit transactions. Before changing a v2 schema,
+startup rejects ready or accepted outbound rows whose plaintext cannot be
+reconstructed, leaving version 2 unchanged. Sealer-backed inbound history rehydration
+runs afterward in bounded, resumable batches; a failure preserves the source rows and
+retries forward on the next open.
 
 When upgrading the unified-history schema, sealed inbound messages are re-sealed into
 history after the profile key is available. Legacy ready or accepted outbound

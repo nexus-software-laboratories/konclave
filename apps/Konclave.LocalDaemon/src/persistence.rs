@@ -138,6 +138,12 @@ impl LockedProfile {
     ) -> Result<ProfileStore, ProfileStoreError> {
         let connection =
             Connection::open(self.profile_database_path()).map_err(|_| ProfileStoreError::Io)?;
+        let source_version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if source_version == 2 {
+            validate_v2_outbound_migration(&connection)?;
+        }
         initialize_schema(&connection)?;
         connection
             .busy_timeout(Duration::from_secs(5))
@@ -3126,6 +3132,21 @@ pub(crate) enum ProfileStoreError {
     InboxCapacityExceeded,
 }
 
+fn validate_v2_outbound_migration(connection: &Connection) -> Result<(), ProfileStoreError> {
+    let unrecoverable: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM daemon_outbox WHERE status IN (2, 3)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ProfileStoreError::Storage)?;
+    if unrecoverable == 0 {
+        Ok(())
+    } else {
+        Err(ProfileStoreError::LegacyOutboundRecoveryUnsupported)
+    }
+}
+
 fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
     connection
         .pragma_update(None, "foreign_keys", "ON")
@@ -5373,10 +5394,14 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .execute("DELETE FROM daemon_message_history", [])
+                .execute_batch(
+                    "DELETE FROM daemon_message_history;
+                     PRAGMA user_version = 2;",
+                )
                 .unwrap();
             let root = fixture.root.path().to_path_buf();
             let profile_id = fixture.profile_id.clone();
+            let database_path = fixture.store.locked_profile.profile_database_path();
             drop(fixture.store);
 
             assert_eq!(
@@ -5386,6 +5411,11 @@ mod tests {
                     .err(),
                 Some(ProfileStoreError::LegacyOutboundRecoveryUnsupported)
             );
+            let connection = Connection::open(database_path).unwrap();
+            let version: u32 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 2);
         }
     }
 
