@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   bootExtension,
+  createExtensionJoinConfig,
   createProcessController,
   createStderrDiagnostics,
-  extensionJoinConfig,
   type AssistantMessageEvent,
   type ExtensionSession,
   type ProcessController,
@@ -105,14 +105,82 @@ function createDiagnosticsRecorder() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.stubEnv('SESSION_ID', 'foreground-session-123');
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
 describe('bootExtension', () => {
+  it('registers the local daemon as a session-scoped MCP server', () => {
+    const windows = createExtensionJoinConfig(
+      {
+        SESSION_ID: 'session-a',
+        KONCLAVE_DAEMON_PATH: 'C:\\tools\\KonclaveLocalDaemon.exe',
+        KONCLAVE_PROFILE_ROOT: 'C:\\profiles',
+        KONCLAVE_WRAPPING_KEY_FILE: 'C:\\secrets\\wrapping.key',
+        KONCLAVE_RELAY_ENDPOINT: 'https://relay.example.test',
+        KONCLAVE_RELAY_CREDENTIAL_FILE: 'C:\\secrets\\relay.credential',
+      },
+      'win32',
+    );
+    const repeated = createExtensionJoinConfig({ SESSION_ID: 'session-a' }, 'linux');
+    const different = createExtensionJoinConfig({ SESSION_ID: 'session-b' }, 'linux');
+    const windowsServer = windows.mcpServers.konclave;
+    const repeatedServer = repeated.mcpServers.konclave;
+    const differentServer = different.mcpServers.konclave;
+
+    if (!windowsServer || !repeatedServer || !differentServer) {
+      throw new Error('Konclave MCP server configuration is missing.');
+    }
+
+    expect(windowsServer).toMatchObject({
+      type: 'stdio',
+      command: 'C:\\tools\\KonclaveLocalDaemon.exe',
+      args: [],
+      tools: ['*'],
+      timeout: 90_000,
+      env: {
+        KONCLAVE_MCP_ALLOW_WRITE: 'true',
+        KONCLAVE_PROFILE_ROOT: 'C:\\profiles',
+        KONCLAVE_WRAPPING_KEY_FILE: 'C:\\secrets\\wrapping.key',
+        KONCLAVE_RELAY_ENDPOINT: 'https://relay.example.test',
+        KONCLAVE_RELAY_CREDENTIAL_FILE: 'C:\\secrets\\relay.credential',
+      },
+    });
+    expect(windowsServer.env.KONCLAVE_PROFILE_ID).toMatch(/^session-[0-9a-f]{24}$/);
+    expect(repeatedServer.command).toBe('KonclaveLocalDaemon');
+    expect(repeatedServer.env.KONCLAVE_PROFILE_ID).toBe(windowsServer.env.KONCLAVE_PROFILE_ID);
+    expect(differentServer.env.KONCLAVE_PROFILE_ID).not.toBe(
+      repeatedServer.env.KONCLAVE_PROFILE_ID,
+    );
+    expect(JSON.stringify(windows)).not.toContain('session-a');
+  });
+
+  it('fails before joining when the host session identity is unavailable', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const joinSession = vi.fn();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession,
+      processController,
+      environment: {},
+      platform: 'linux',
+    });
+
+    expect(controller).toBeNull();
+    expect(joinSession).not.toHaveBeenCalled();
+    expect(processController.exitCode).toBe(1);
+    expect(diagnostics.stderr).toHaveBeenCalledWith(
+      'Failed to join Copilot session: SESSION_ID is required to derive the Konclave profile.',
+    );
+  });
+
   it('joins the foreground session with the safe default config and cleans up handlers', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
@@ -126,7 +194,9 @@ describe('bootExtension', () => {
     });
 
     expect(controller).not.toBeNull();
-    expect(joinSession).toHaveBeenCalledWith(extensionJoinConfig);
+    expect(joinSession).toHaveBeenCalledWith(
+      createExtensionJoinConfig(process.env, process.platform),
+    );
     expect([...sessionMock.handlers.keys()].sort()).toEqual([
       'assistant.message',
       'session.error',
