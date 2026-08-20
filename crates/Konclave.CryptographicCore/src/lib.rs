@@ -13,6 +13,7 @@ pub use identity::{
 pub use mls::{
     AppliedMembershipCommit, DecryptedApplicationMessage, MlsApplicationMessage, MlsCommit,
     MlsConversation, MlsConversationClient, MlsWelcome, OutboundMembershipCommit,
+    PreparedJoinedConversation,
 };
 
 #[cfg(test)]

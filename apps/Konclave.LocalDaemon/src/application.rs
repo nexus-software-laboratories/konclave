@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
 use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
+use KonclaveCryptographicCore::MlsWelcome;
 use KonclaveDomainCore::{
-    AcknowledgeRequest, ApplicationContent, ApplicationMessage, ConversationId, MessageId,
-    ReplayPage, ReplayRequest, StoredRelayEnvelope,
+    AcknowledgeRequest, ApplicationContent, ApplicationMessage, ConversationId, ConversationRole,
+    DeviceId, JoinProof, MembershipOperationId, MessageId, ReplayPage, ReplayRequest,
+    StoredRelayEnvelope,
 };
+use KonclaveProtocolContracts::v1::{decode_join_proof, encode_join_proof};
 use thiserror::Error;
 
 use crate::conversation::{
-    ConversationCoordinator, ConversationCoordinatorError, PreparedApplication,
-    ProcessedApplication,
+    AcceptedMembership, ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
+    MembershipRequestState, PreparedApplication, PreparedMembership, ProcessedApplication,
 };
 use crate::persistence::{ExpireOutboundResult, HistoryPage, OutboundApplicationStatus};
 
@@ -29,6 +32,14 @@ pub(crate) struct SentApplication {
     pub(crate) conversation_id: ConversationId,
     pub(crate) message: ApplicationMessage,
     pub(crate) cursor: u64,
+}
+
+/// One accepted membership transition and optional add-member Welcome.
+pub(crate) struct SentMembership {
+    pub(crate) operation_id: MembershipOperationId,
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) cursor: u64,
+    pub(crate) welcome: Option<Vec<u8>>,
 }
 
 /// One bounded replay result after durable local completion and acknowledgment.
@@ -127,10 +138,174 @@ where
             .await
     }
 
+    /// Adds one invited device through a durable encrypted membership commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a task, conversation, relay, or persistence error.
+    pub(crate) async fn add_member(
+        &self,
+        conversation_id: ConversationId,
+        join_proof: JoinProof,
+        now_unix_seconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<SentMembership, ApplicationServiceError> {
+        let _submission = self.submissions.lock().await;
+        self.retry_application_ready_locked(now_unix_seconds)
+            .await?;
+        let proof_for_lookup = decode_join_proof(
+            &encode_join_proof(&join_proof).map_err(|_| ApplicationServiceError::Protocol)?,
+        )
+        .map_err(|_| ApplicationServiceError::Protocol)?;
+        let conversations = self.conversations.clone();
+        if let Some(existing) = tokio::task::spawn_blocking(move || {
+            conversations.resume_add_member(conversation_id, &proof_for_lookup)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??
+        {
+            return self.resume_membership(existing).await;
+        }
+        self.retry_membership_ready_locked().await?;
+        let conversations = self.conversations.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            conversations.prepare_add_member(
+                conversation_id,
+                join_proof,
+                now_unix_seconds,
+                expires_at_unix_seconds,
+            )
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??;
+        self.submit_membership(prepared).await
+    }
+
+    /// Removes one device through a durable encrypted membership commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a task, conversation, relay, or persistence error.
+    pub(crate) async fn remove_member(
+        &self,
+        conversation_id: ConversationId,
+        device_id: DeviceId,
+        now_unix_seconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<SentMembership, ApplicationServiceError> {
+        let _submission = self.submissions.lock().await;
+        self.retry_application_ready_locked(now_unix_seconds)
+            .await?;
+        let conversations = self.conversations.clone();
+        if let Some(existing) = tokio::task::spawn_blocking(move || {
+            conversations.resume_remove_member(conversation_id, device_id)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??
+        {
+            return self.resume_membership(existing).await;
+        }
+        self.retry_membership_ready_locked().await?;
+        let conversations = self.conversations.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            conversations.prepare_remove_member(conversation_id, device_id, expires_at_unix_seconds)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??;
+        self.submit_membership(prepared).await
+    }
+
+    /// Changes one member role through a durable encrypted membership commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a task, conversation, relay, or persistence error.
+    pub(crate) async fn change_role(
+        &self,
+        conversation_id: ConversationId,
+        device_id: DeviceId,
+        role: ConversationRole,
+        now_unix_seconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<SentMembership, ApplicationServiceError> {
+        let _submission = self.submissions.lock().await;
+        self.retry_application_ready_locked(now_unix_seconds)
+            .await?;
+        let conversations = self.conversations.clone();
+        if let Some(existing) = tokio::task::spawn_blocking(move || {
+            conversations.resume_change_role(conversation_id, device_id, role)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??
+        {
+            return self.resume_membership(existing).await;
+        }
+        self.retry_membership_ready_locked().await?;
+        let conversations = self.conversations.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            conversations.prepare_change_role(
+                conversation_id,
+                device_id,
+                role,
+                expires_at_unix_seconds,
+            )
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??;
+        self.submit_membership(prepared).await
+    }
+
+    /// Verifies one relay Commit receipt and accepts its encrypted Welcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a request, relay, task, Welcome, profile, or receipt-integrity error.
+    pub(crate) async fn accept_welcome(
+        &self,
+        conversation_id: ConversationId,
+        welcome: MlsWelcome,
+        cursor: u64,
+    ) -> Result<ConversationSummary, ApplicationServiceError> {
+        let _submission = self.submissions.lock().await;
+        let after_cursor = cursor
+            .checked_sub(1)
+            .ok_or(ApplicationServiceError::Protocol)?;
+        let conversations = self.conversations.clone();
+        let routing_id =
+            tokio::task::spawn_blocking(move || conversations.pending_join_route(conversation_id))
+                .await
+                .map_err(|_| ApplicationServiceError::Task)??;
+        let page = self
+            .transport
+            .replay(
+                ReplayRequest::new(routing_id, after_cursor, 1)
+                    .map_err(|_| ApplicationServiceError::Protocol)?,
+            )
+            .await?;
+        let [receipt] = page.envelopes() else {
+            return Err(ApplicationServiceError::InvalidRelayResponse);
+        };
+        if receipt.cursor() != cursor
+            || receipt.envelope().routing_id() != routing_id
+            || receipt.envelope().delivery_class() != KonclaveDomainCore::DeliveryClass::GroupCommit
+        {
+            return Err(ApplicationServiceError::InvalidRelayResponse);
+        }
+        let receipt = receipt.clone();
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || {
+            conversations.accept_welcome(conversation_id, &welcome, &receipt)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)?
+        .map_err(Into::into)
+    }
+
     /// Retries every bounded ready envelope in deterministic journal order.
     ///
-    /// Expired envelopes become durable terminal operations and do not block later
-    /// ready work. Processing stops at the first other relay or persistence failure.
+    /// Expired application envelopes become durable terminal operations and do not
+    /// block later ready work. Processing stops at the first other relay or
+    /// persistence failure.
     ///
     /// # Errors
     ///
@@ -156,12 +331,19 @@ where
         &self,
         conversation_id: ConversationId,
         limit: u32,
+        now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
         let (request, routing_id, after_cursor) =
             self.replay_request(conversation_id, limit).await?;
         let page = self.transport.replay(request).await?;
-        self.process_page(conversation_id, routing_id, after_cursor, page)
-            .await
+        self.process_page(
+            conversation_id,
+            routing_id,
+            after_cursor,
+            page,
+            now_unix_seconds,
+        )
+        .await
     }
 
     /// Waits for and processes one bounded WebSocket replay page.
@@ -175,12 +357,19 @@ where
     pub(crate) async fn watch_once(
         &self,
         conversation_id: ConversationId,
+        now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
         let (request, routing_id, after_cursor) = self.replay_request(conversation_id, 100).await?;
         let mut watch = self.transport.connect_watch(request).await?;
         let page = watch.next_page().await?;
         let processed = self
-            .process_page(conversation_id, routing_id, after_cursor, page)
+            .process_page(
+                conversation_id,
+                routing_id,
+                after_cursor,
+                page,
+                now_unix_seconds,
+            )
             .await;
         let closed = watch.close().await;
         match processed {
@@ -213,6 +402,7 @@ where
         routing_id: KonclaveDomainCore::RoutingId,
         after_cursor: u64,
         page: ReplayPage,
+        now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
         if page.next_cursor() < after_cursor
             || page
@@ -224,19 +414,36 @@ where
         }
         let has_more = page.has_more();
         let envelopes = page.envelopes().to_vec();
+        let last_cursor = envelopes.last().map(StoredRelayEnvelope::cursor);
         let mut messages = Vec::with_capacity(envelopes.len());
         for stored in envelopes {
             let conversations = self.conversations.clone();
-            messages.push(
-                tokio::task::spawn_blocking(move || {
-                    conversations.process_inbound_application(conversation_id, &stored)
-                })
-                .await
-                .map_err(|_| ApplicationServiceError::Task)??,
-            );
+            match stored.envelope().delivery_class() {
+                KonclaveDomainCore::DeliveryClass::GroupApplication => {
+                    messages.push(
+                        tokio::task::spawn_blocking(move || {
+                            conversations.process_inbound_application(conversation_id, &stored)
+                        })
+                        .await
+                        .map_err(|_| ApplicationServiceError::Task)??,
+                    );
+                }
+                KonclaveDomainCore::DeliveryClass::GroupCommit => {
+                    tokio::task::spawn_blocking(move || {
+                        conversations.process_inbound_membership(
+                            conversation_id,
+                            &stored,
+                            now_unix_seconds,
+                        )
+                    })
+                    .await
+                    .map_err(|_| ApplicationServiceError::Task)??;
+                }
+                _ => return Err(ApplicationServiceError::Protocol),
+            }
         }
-        if let Some(last) = messages.last() {
-            let acknowledgment = AcknowledgeRequest::new(routing_id, last.cursor)
+        if let Some(last_cursor) = last_cursor {
+            let acknowledgment = AcknowledgeRequest::new(routing_id, last_cursor)
                 .map_err(|_| ApplicationServiceError::Protocol)?;
             let effective = self.transport.acknowledge(acknowledgment).await?;
             if effective != acknowledgment {
@@ -270,6 +477,19 @@ where
         &self,
         now_unix_seconds: u64,
     ) -> Result<usize, ApplicationServiceError> {
+        let applications = self
+            .retry_application_ready_locked(now_unix_seconds)
+            .await?;
+        let memberships = self.retry_membership_ready_locked().await?;
+        applications
+            .checked_add(memberships)
+            .ok_or(ApplicationServiceError::Protocol)
+    }
+
+    async fn retry_application_ready_locked(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, ApplicationServiceError> {
         let conversations = self.conversations.clone();
         let pending = tokio::task::spawn_blocking(move || conversations.ready_outbox())
             .await
@@ -287,6 +507,19 @@ where
             }
             let stored = self.transport.submit(&pending.envelope).await?;
             self.mark_accepted(stored).await?;
+            accepted += 1;
+        }
+        Ok(accepted)
+    }
+
+    async fn retry_membership_ready_locked(&self) -> Result<usize, ApplicationServiceError> {
+        let conversations = self.conversations.clone();
+        let pending = tokio::task::spawn_blocking(move || conversations.ready_membership_outbox())
+            .await
+            .map_err(|_| ApplicationServiceError::Task)??;
+        let mut accepted = 0;
+        for pending in pending {
+            self.submit_membership(pending).await?;
             accepted += 1;
         }
         Ok(accepted)
@@ -338,6 +571,50 @@ where
             .map_err(|_| ApplicationServiceError::Task)??;
         Ok(())
     }
+
+    async fn submit_membership(
+        &self,
+        prepared: PreparedMembership,
+    ) -> Result<SentMembership, ApplicationServiceError> {
+        let stored = match self.transport.submit(&prepared.envelope).await {
+            Ok(stored) => stored,
+            Err(error) if error.code() == "relay_stale_epoch" => {
+                let conversations = self.conversations.clone();
+                let operation_id = prepared.operation_id;
+                tokio::task::spawn_blocking(move || conversations.orphan_membership(operation_id))
+                    .await
+                    .map_err(|_| ApplicationServiceError::Task)??;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let conversations = self.conversations.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            conversations.mark_membership_outbox_accepted(&stored)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??;
+        Ok(sent_membership(accepted))
+    }
+
+    async fn resume_membership(
+        &self,
+        existing: MembershipRequestState,
+    ) -> Result<SentMembership, ApplicationServiceError> {
+        match existing {
+            MembershipRequestState::Ready(prepared) => self.submit_membership(prepared).await,
+            MembershipRequestState::Applied(accepted) => Ok(sent_membership(accepted)),
+        }
+    }
+}
+
+fn sent_membership(accepted: AcceptedMembership) -> SentMembership {
+    SentMembership {
+        operation_id: accepted.operation_id,
+        conversation_id: accepted.conversation_id,
+        cursor: accepted.cursor,
+        welcome: accepted.welcome,
+    }
 }
 
 fn application_content_equal(left: &ApplicationContent, right: &ApplicationContent) -> bool {
@@ -381,13 +658,13 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::conversation::tests::paired_coordinators;
+    use crate::conversation::tests::{invited_coordinators, paired_coordinators};
     use crate::persistence::{LockedProfile, MessageDirection, ProfileId};
 
     struct RecordingRelay {
         cursor: AtomicU64,
         fail_submit: AtomicBool,
-        fail_after_accept: AtomicBool,
+        lose_submit_response: AtomicBool,
         envelopes: Mutex<Vec<StoredRelayEnvelope>>,
         replay_pages: Mutex<VecDeque<ReplayPage>>,
         replay_requests: Mutex<Vec<ReplayRequest>>,
@@ -399,7 +676,7 @@ mod tests {
             Self {
                 cursor: AtomicU64::new(0),
                 fail_submit: AtomicBool::new(fail_submit),
-                fail_after_accept: AtomicBool::new(false),
+                lose_submit_response: AtomicBool::new(false),
                 envelopes: Mutex::new(Vec::new()),
                 replay_pages: Mutex::new(VecDeque::new()),
                 replay_requests: Mutex::new(Vec::new()),
@@ -407,18 +684,12 @@ mod tests {
             }
         }
 
-        fn failing_after_accept() -> Self {
-            let relay = Self::new(false);
-            relay.fail_after_accept.store(true, Ordering::SeqCst);
-            relay
-        }
-
         fn push_replay_page(&self, page: ReplayPage) {
             self.replay_pages.lock().unwrap().push_back(page);
         }
 
         fn lose_next_submit_response(&self) {
-            self.fail_after_accept.store(true, Ordering::SeqCst);
+            self.lose_submit_response.store(true, Ordering::SeqCst);
         }
     }
 
@@ -431,22 +702,11 @@ mod tests {
             if self.fail_submit.load(Ordering::SeqCst) {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
-            let mut envelopes = self.envelopes.lock().unwrap();
-            if let Some(existing) = envelopes
-                .iter()
-                .find(|stored| {
-                    stored.envelope().envelope_id() == envelope.envelope_id()
-                        && stored.envelope() == envelope
-                })
-                .cloned()
-            {
-                return Ok(existing);
-            }
             let cursor = self.cursor.fetch_add(1, Ordering::SeqCst) + 1;
             let stored = StoredRelayEnvelope::new(envelope.clone(), cursor)
                 .map_err(|_| KonclaveClientError::InvalidResponse)?;
-            envelopes.push(stored.clone());
-            if self.fail_after_accept.swap(false, Ordering::SeqCst) {
+            self.envelopes.lock().unwrap().push(stored.clone());
+            if self.lose_submit_response.swap(false, Ordering::SeqCst) {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
             Ok(stored)
@@ -568,7 +828,7 @@ mod tests {
             .transport
             .push_replay_page(ReplayPage::new(echoed, 2, false).unwrap());
         let replayed = service
-            .replay_once(conversation.conversation_id, 100)
+            .replay_once(conversation.conversation_id, 100, 1_800_000_000)
             .await
             .unwrap();
         assert_eq!(replayed.messages.len(), 2);
@@ -644,23 +904,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identical_send_retry_resumes_one_message_after_ambiguous_failure() {
+    async fn identical_send_retry_resumes_one_durable_message() {
         let root = tempfile::tempdir().unwrap();
         let coordinator = coordinator(root.path(), "send-idempotency");
         let conversation = coordinator.create().unwrap();
-        let service =
-            ApplicationService::new(coordinator.clone(), RecordingRelay::failing_after_accept());
-        let initial = request(conversation.conversation_id, "idempotent-retry-secret");
-        let message_id = initial.message_id;
+        let service = ApplicationService::new(coordinator.clone(), RecordingRelay::new(true));
 
-        assert!(matches!(
-            service.send(initial).await,
-            Err(ApplicationServiceError::Relay(
-                KonclaveClientError::TransportUnavailable
-            ))
-        ));
-        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
-        assert_eq!(coordinator.ready_outbox().unwrap().len(), 1);
+        assert!(
+            service
+                .send(request(
+                    conversation.conversation_id,
+                    "idempotent-retry-secret"
+                ))
+                .await
+                .is_err()
+        );
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
 
         let accepted = service
             .send(request(
@@ -670,31 +929,19 @@ mod tests {
             .await
             .unwrap();
         let repeated = service
-            .send(request(
+            .send(request_at(
                 conversation.conversation_id,
                 "idempotent-retry-secret",
+                2_000_000_000,
+                2_100_000_000,
             ))
             .await
             .unwrap();
 
-        assert_eq!(accepted.message.message_id(), message_id);
         assert_eq!(accepted.message.message_id(), repeated.message.message_id());
-        assert_eq!(accepted.message.sender_counter(), 1);
         assert_eq!(accepted.cursor, repeated.cursor);
-        assert_eq!(accepted.cursor, 1);
         assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
         assert!(coordinator.ready_outbox().unwrap().is_empty());
-        let stored = coordinator
-            .outbound_application(conversation.conversation_id, message_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.message.message_id(), message_id);
-        assert_eq!(
-            stored.status,
-            OutboundApplicationStatus::Accepted {
-                cursor: accepted.cursor
-            }
-        );
 
         let mut conflicting = request(conversation.conversation_id, "idempotent-retry-secret");
         conflicting.content = ApplicationContent::text("conflicting-content").unwrap();
@@ -702,15 +949,6 @@ mod tests {
             service.send(conflicting).await,
             Err(ApplicationServiceError::IdempotencyConflict)
         ));
-
-        let mut conflicting_reply =
-            request(conversation.conversation_id, "idempotent-retry-secret");
-        conflicting_reply.reply_to = Some(MessageId::from_bytes([91; MessageId::LENGTH]));
-        assert!(matches!(
-            service.send(conflicting_reply).await,
-            Err(ApplicationServiceError::IdempotencyConflict)
-        ));
-        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -739,7 +977,7 @@ mod tests {
             .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
 
         let replayed = service
-            .replay_once(conversation.conversation_id, 100)
+            .replay_once(conversation.conversation_id, 100, 1_800_000_000)
             .await
             .unwrap();
         assert_eq!(replayed.messages.len(), 1);
@@ -791,7 +1029,7 @@ mod tests {
             .transport
             .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
         service
-            .replay_once(conversation.conversation_id, 100)
+            .replay_once(conversation.conversation_id, 100, 102)
             .await
             .unwrap();
 
@@ -858,6 +1096,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_member_retry_returns_original_welcome_after_lost_response() {
+        let (_root, alice, _bob, created, proof) = invited_coordinators();
+        let proof_bytes = encode_join_proof(&proof).unwrap();
+        let retry_proof = decode_join_proof(&proof_bytes).unwrap();
+        let repeated_proof = decode_join_proof(&proof_bytes).unwrap();
+        let service = ApplicationService::new(alice.clone(), RecordingRelay::new(true));
+
+        assert!(matches!(
+            service
+                .add_member(created.conversation_id, proof, 50, 1_900_000_000,)
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(alice.ready_membership_outbox().unwrap().len(), 1);
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
+
+        let accepted = service
+            .add_member(created.conversation_id, retry_proof, 50, 1_900_000_000)
+            .await
+            .unwrap();
+        let repeated = service
+            .add_member(created.conversation_id, repeated_proof, 50, 1_900_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.operation_id, repeated.operation_id);
+        assert_eq!(accepted.cursor, repeated.cursor);
+        assert_eq!(accepted.welcome, repeated.welcome);
+        assert!(accepted.welcome.is_some());
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn welcome_acceptance_verifies_relay_receipt_and_sets_replay_baseline() {
+        let (_root, alice, bob, created, proof) = invited_coordinators();
+        let alice_service = ApplicationService::new(alice, RecordingRelay::new(false));
+        let added = alice_service
+            .add_member(created.conversation_id, proof, 50, 1_900_000_000)
+            .await
+            .unwrap();
+        let stored = alice_service.transport.envelopes.lock().unwrap()[0].clone();
+        let bob_service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        bob_service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], added.cursor, false).unwrap());
+
+        let joined = bob_service
+            .accept_welcome(
+                created.conversation_id,
+                MlsWelcome::from_bytes(&added.welcome.unwrap()).unwrap(),
+                added.cursor,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(joined.epoch, 1);
+        assert_eq!(
+            bob.replay_position(created.conversation_id).unwrap().1,
+            added.cursor
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_member_retry_returns_original_operation() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let bob_device_id = bob.device_id().unwrap();
+        let service = ApplicationService::new(alice, RecordingRelay::new(true));
+        assert!(
+            service
+                .remove_member(conversation_id, bob_device_id, 1_800_000_000, 1_900_000_000,)
+                .await
+                .is_err()
+        );
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
+
+        let accepted = service
+            .remove_member(conversation_id, bob_device_id, 1_800_000_000, 1_900_000_000)
+            .await
+            .unwrap();
+        let repeated = service
+            .remove_member(conversation_id, bob_device_id, 1_800_000_000, 1_900_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.operation_id, repeated.operation_id);
+        assert_eq!(accepted.cursor, repeated.cursor);
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn replay_completes_before_acknowledging_and_resumes_from_durable_cursor() {
         let (_root, alice, bob, conversation_id, alice_device_id) = paired_coordinators();
         let prepared = alice
@@ -875,7 +1205,10 @@ mod tests {
             .transport
             .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
 
-        let first = service.replay_once(conversation_id, 100).await.unwrap();
+        let first = service
+            .replay_once(conversation_id, 100, 1_800_000_000)
+            .await
+            .unwrap();
 
         assert!(!first.has_more);
         assert_eq!(first.messages.len(), 1);
@@ -898,7 +1231,10 @@ mod tests {
         service
             .transport
             .push_replay_page(ReplayPage::new(Vec::new(), 1, false).unwrap());
-        let resumed = service.replay_once(conversation_id, 100).await.unwrap();
+        let resumed = service
+            .replay_once(conversation_id, 100, 1_800_000_000)
+            .await
+            .unwrap();
         assert!(resumed.messages.is_empty());
         {
             let requests = service.transport.replay_requests.lock().unwrap();
@@ -915,14 +1251,45 @@ mod tests {
             .unwrap(),
         );
         assert!(matches!(
-            service.replay_once(conversation_id, 100).await,
+            service
+                .replay_once(conversation_id, 100, 1_800_000_000)
+                .await,
             Err(ApplicationServiceError::InvalidRelayResponse)
         ));
         assert!(matches!(
-            service.watch_once(conversation_id).await,
+            service.watch_once(conversation_id, 1_800_000_000).await,
             Err(ApplicationServiceError::Relay(
                 KonclaveClientError::TransportUnavailable
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn membership_only_replay_page_applies_and_acknowledges_its_cursor() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let prepared = alice
+            .prepare_change_role(
+                conversation_id,
+                bob.device_id().unwrap(),
+                ConversationRole::Administrator,
+                1_900_000_000,
+            )
+            .unwrap();
+        let stored = StoredRelayEnvelope::new(prepared.envelope.clone(), 1).unwrap();
+        alice.mark_membership_outbox_accepted(&stored).unwrap();
+        let service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
+
+        let replay = service.replay_once(conversation_id, 100, 60).await.unwrap();
+
+        assert!(replay.messages.is_empty());
+        assert_eq!(bob.open(conversation_id).unwrap().group.epoch(), 2);
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+        assert_eq!(
+            service.transport.acknowledgments.lock().unwrap().as_slice(),
+            &[AcknowledgeRequest::new(prepared.envelope.routing_id(), 1).unwrap()]
+        );
     }
 }

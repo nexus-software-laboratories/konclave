@@ -37,6 +37,9 @@ message Invitation {
   DeviceId issuer_device_id = 8;
   // Exactly 64 bytes for Ed25519 in protocol v1.
   bytes issuer_signature = 9;
+  // Optional for legacy v1 decoding. Newly issued invitations include this opaque
+  // relay route in the issuer signature.
+  RoutingId routing_id = 10;
 }
 
 // Presents the material required for an administrator-authorized MLS join.

@@ -473,9 +473,26 @@ impl MlsConversationClient {
     /// Returns a typed error when the Welcome, ciphersuite, roster, or state does
     /// not match this conversation.
     pub fn join_group(
-        mut self,
+        self,
         welcome: &MlsWelcome,
     ) -> Result<MlsConversation, KonclaveCryptographicError> {
+        self.prepare_join_group(welcome)?.persist()
+    }
+
+    /// Validates and constructs a joined group without persisting it.
+    ///
+    /// The caller durably checkpoints the authenticated state and public bindings,
+    /// then invokes [`PreparedJoinedConversation::persist`]. This closes the crash
+    /// window between Welcome processing and daemon profile publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the Welcome, ciphersuite, roster, or state does
+    /// not match this conversation.
+    pub fn prepare_join_group(
+        mut self,
+        welcome: &MlsWelcome,
+    ) -> Result<PreparedJoinedConversation, KonclaveCryptographicError> {
         let welcome_message =
             parse_mls_message(welcome.as_bytes(), "welcome", MAX_RELAY_PAYLOAD_BYTES)?;
         require_welcome_message(&welcome_message)?;
@@ -483,7 +500,7 @@ impl MlsConversationClient {
             .client
             .examine_welcome_message(&welcome_message)
             .map_err(|_| mls_failure("Welcome examination"))?;
-        let (mut group, member_info) = self
+        let (group, member_info) = self
             .client
             .join_group(None, &welcome_message, None)
             .map_err(|_| mls_failure("group join"))?;
@@ -519,15 +536,39 @@ impl MlsConversationClient {
         }
         self.policy.set_state(state.clone())?;
         verify_group_state(&group, &state, &self.policy)?;
-        persist_group(&mut group, "joined group persistence")?;
-        Ok(MlsConversation {
-            group,
-            policy: self.policy,
-            state,
-            self_device_id: self.binding.device_id(),
-            pending_state: None,
-            removed: false,
+        Ok(PreparedJoinedConversation {
+            conversation: MlsConversation {
+                group,
+                policy: self.policy,
+                state,
+                self_device_id: self.binding.device_id(),
+                pending_state: None,
+                removed: false,
+            },
         })
+    }
+}
+
+/// Validated Welcome result awaiting the daemon's durable profile checkpoint.
+pub struct PreparedJoinedConversation {
+    conversation: MlsConversation,
+}
+
+impl PreparedJoinedConversation {
+    /// Returns the authenticated state carried by the Welcome.
+    #[must_use]
+    pub const fn state(&self) -> &ConversationState {
+        self.conversation.state()
+    }
+
+    /// Persists the joined MLS group after its daemon checkpoint exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sealed MLS storage error.
+    pub fn persist(mut self) -> Result<MlsConversation, KonclaveCryptographicError> {
+        self.conversation.persist()?;
+        Ok(self.conversation)
     }
 }
 
@@ -546,6 +587,12 @@ impl MlsConversation {
     #[must_use]
     pub const fn state(&self) -> &ConversationState {
         &self.state
+    }
+
+    /// Returns whether sealed MLS state contains a locally pending membership Commit.
+    #[must_use]
+    pub fn has_pending_membership_commit(&self) -> bool {
+        self.group.has_pending_commit()
     }
 
     /// Returns the current MLS epoch.

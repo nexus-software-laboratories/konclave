@@ -173,6 +173,7 @@ pub struct Invitation {
     version: ProtocolVersion,
     invitation_id: InvitationId,
     conversation_id: ConversationId,
+    routing_id: Option<RoutingId>,
     expected_device_id: DeviceId,
     role: ConversationRole,
     expires_at_unix_seconds: u64,
@@ -196,6 +197,7 @@ impl Invitation {
         version: ProtocolVersion,
         invitation_id: InvitationId,
         conversation_id: ConversationId,
+        routing_id: Option<RoutingId>,
         expected_device_id: DeviceId,
         role: ConversationRole,
         expires_at_unix_seconds: u64,
@@ -208,6 +210,7 @@ impl Invitation {
             version,
             invitation_id,
             conversation_id,
+            routing_id,
             expected_device_id,
             role,
             expires_at_unix_seconds,
@@ -233,6 +236,12 @@ impl Invitation {
     #[must_use]
     pub const fn conversation_id(&self) -> ConversationId {
         self.conversation_id
+    }
+
+    /// Returns the opaque relay route authenticated by this invitation.
+    #[must_use]
+    pub const fn routing_id(&self) -> Option<RoutingId> {
+        self.routing_id
     }
 
     /// Returns the device identity that may redeem the invitation.
@@ -1199,6 +1208,7 @@ mod tests {
             ProtocolVersion::application_v1(),
             InvitationId::from_bytes(bytes(3)),
             ConversationId::from_bytes(bytes(4)),
+            None,
             invited_device,
             ConversationRole::Member,
             1,

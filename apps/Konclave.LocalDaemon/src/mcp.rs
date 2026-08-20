@@ -2,8 +2,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use KonclaveClientLibrary::RelayClient;
+use KonclaveCryptographicCore::MlsWelcome;
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, EnvelopeId, MessageId,
+    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, DeviceId,
+    Ed25519PublicKey, EnvelopeId, MAX_RELAY_PAYLOAD_BYTES, MessageId, RoutingId,
+};
+use KonclaveProtocolContracts::v1::{
+    decode_device_credential_binding, decode_invitation, decode_join_proof,
+    encode_device_credential_binding, encode_invitation, encode_join_proof,
 };
 use anyhow::{Context, bail, ensure};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -14,13 +20,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::time::timeout;
 
-use crate::application::{ApplicationService, SendApplicationRequest};
-use crate::conversation::{ConversationCoordinator, ProcessedApplication};
+use crate::application::{ApplicationService, SendApplicationRequest, SentMembership};
+use crate::conversation::{ConversationCoordinator, ConversationSummary, ProcessedApplication};
 use crate::persistence::{MessageDirection, StoredHistoryMessage};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const MESSAGE_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
+const INVITATION_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
 pub struct AuthorizationContext<'a> {
     pub method: &'a str,
 }
@@ -54,6 +61,47 @@ struct ReadMessagesRequest {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreateInvitationRequest {
+    conversation_id: String,
+    expected_device_id: String,
+    role: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreateJoinProofRequest {
+    invitation: String,
+    routing_id: String,
+    issuer_public_key: String,
+    peer_bindings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AddMemberRequest {
+    conversation_id: String,
+    join_proof: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AcceptWelcomeRequest {
+    conversation_id: String,
+    welcome: String,
+    cursor: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RemoveMemberRequest {
+    conversation_id: String,
+    device_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ChangeMemberRoleRequest {
+    conversation_id: String,
+    device_id: String,
+    role: String,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct ConversationResult {
     conversation_id: String,
@@ -64,6 +112,34 @@ struct ConversationResult {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct ConversationListResult {
     conversation_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct IdentityResult {
+    device_id: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct InvitationResult {
+    conversation_id: String,
+    invitation: String,
+    routing_id: String,
+    issuer_public_key: String,
+    peer_bindings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct JoinProofResult {
+    conversation_id: String,
+    join_proof: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct MembershipResult {
+    conversation_id: String,
+    operation_id: String,
+    cursor: u64,
+    welcome: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -120,6 +196,22 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "get_identity",
+        description = "Return this daemon profile's public device identifier."
+    )]
+    async fn get_identity(&self) -> Result<Json<IdentityResult>, String> {
+        self.authorize("get_identity")?;
+        Ok(Json(IdentityResult {
+            device_id: encode_hex(
+                self.conversations
+                    .device_id()
+                    .map_err(tool_error)?
+                    .as_bytes(),
+            ),
+        }))
+    }
+
+    #[tool(
         name = "create_conversation",
         description = "Create a sealed MLS conversation owned by this device."
     )]
@@ -167,6 +259,100 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "create_invitation",
+        description = "Create a signed one-time invitation package for one expected device."
+    )]
+    async fn create_invitation(
+        &self,
+        Parameters(request): Parameters<CreateInvitationRequest>,
+    ) -> Result<Json<InvitationResult>, String> {
+        self.authorize("create_invitation")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let expected_device_id = parse_device_id(&request.expected_device_id)?;
+        let role = parse_role(&request.role)?;
+        let expires_at = current_unix_seconds()?
+            .checked_add(INVITATION_VALIDITY_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let conversations = self.conversations.clone();
+        let package = tokio::task::spawn_blocking(move || {
+            conversations.issue_invitation(conversation_id, expected_device_id, role, expires_at)
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+        Ok(Json(InvitationResult {
+            conversation_id: encode_hex(package.invitation.conversation_id().as_bytes()),
+            invitation: encode_hex(&encode_invitation(&package.invitation).map_err(tool_error)?),
+            routing_id: encode_hex(package.routing_id.as_bytes()),
+            issuer_public_key: encode_hex(package.issuer_public_key.as_bytes()),
+            peer_bindings: package
+                .peer_bindings
+                .iter()
+                .map(|binding| {
+                    encode_device_credential_binding(binding)
+                        .map(|bytes| encode_hex(&bytes))
+                        .map_err(tool_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }))
+    }
+
+    #[tool(
+        name = "create_join_proof",
+        description = "Validate an invitation package and create a durable one-time JoinProof."
+    )]
+    async fn create_join_proof(
+        &self,
+        Parameters(request): Parameters<CreateJoinProofRequest>,
+    ) -> Result<Json<JoinProofResult>, String> {
+        self.authorize("create_join_proof")?;
+        let invitation = decode_invitation(&decode_hex_bytes(
+            &request.invitation,
+            MAX_RELAY_PAYLOAD_BYTES,
+            "invalid_invitation",
+        )?)
+        .map_err(tool_error)?;
+        let conversation_id = invitation.conversation_id();
+        let routing_id = parse_routing_id(&request.routing_id)?;
+        let issuer_public_key = parse_public_key(&request.issuer_public_key)?;
+        if request.peer_bindings.is_empty()
+            || request.peer_bindings.len() > KonclaveDomainCore::MAX_MEMBERS
+        {
+            return Err("invalid_peer_bindings".to_string());
+        }
+        let peer_bindings = request
+            .peer_bindings
+            .iter()
+            .map(|binding| {
+                decode_device_credential_binding(&decode_hex_bytes(
+                    binding,
+                    MAX_RELAY_PAYLOAD_BYTES,
+                    "invalid_peer_binding",
+                )?)
+                .map_err(tool_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let now_unix_seconds = current_unix_seconds()?;
+        let conversations = self.conversations.clone();
+        let proof = tokio::task::spawn_blocking(move || {
+            conversations.create_join_proof(
+                invitation,
+                routing_id,
+                issuer_public_key,
+                peer_bindings,
+                now_unix_seconds,
+            )
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+        Ok(Json(JoinProofResult {
+            conversation_id: encode_hex(conversation_id.as_bytes()),
+            join_proof: encode_hex(&encode_join_proof(&proof).map_err(tool_error)?),
+        }))
+    }
+
+    #[tool(
         name = "send_message",
         description = "Encrypt, journal, and submit one text message using a caller-stable 16-byte message_id."
     )]
@@ -207,6 +393,117 @@ impl StdioServer {
             sender_counter: sent.message.sender_counter(),
             cursor: sent.cursor,
         }))
+    }
+
+    #[tool(
+        name = "add_member",
+        description = "Validate a JoinProof and submit its encrypted membership Commit."
+    )]
+    async fn add_member(
+        &self,
+        Parameters(request): Parameters<AddMemberRequest>,
+    ) -> Result<Json<MembershipResult>, String> {
+        self.authorize("add_member")?;
+        let applications = self
+            .applications
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let proof = decode_join_proof(&decode_hex_bytes(
+            &request.join_proof,
+            MAX_RELAY_PAYLOAD_BYTES,
+            "invalid_join_proof",
+        )?)
+        .map_err(tool_error)?;
+        let now = current_unix_seconds()?;
+        let expires_at = now
+            .checked_add(MESSAGE_RETENTION_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let sent = applications
+            .add_member(conversation_id, proof, now, expires_at)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(membership_result(sent)))
+    }
+
+    #[tool(
+        name = "accept_welcome",
+        description = "Accept an encrypted Welcome for a durable pending join."
+    )]
+    async fn accept_welcome(
+        &self,
+        Parameters(request): Parameters<AcceptWelcomeRequest>,
+    ) -> Result<Json<ConversationResult>, String> {
+        self.authorize("accept_welcome")?;
+        let applications = self
+            .applications
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let welcome = MlsWelcome::from_bytes(&decode_hex_bytes(
+            &request.welcome,
+            MAX_RELAY_PAYLOAD_BYTES,
+            "invalid_welcome",
+        )?)
+        .map_err(tool_error)?;
+        let summary = applications
+            .accept_welcome(conversation_id, welcome, request.cursor)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(conversation_result(summary)))
+    }
+
+    #[tool(
+        name = "remove_member",
+        description = "Submit an encrypted Commit removing one conversation device."
+    )]
+    async fn remove_member(
+        &self,
+        Parameters(request): Parameters<RemoveMemberRequest>,
+    ) -> Result<Json<MembershipResult>, String> {
+        self.authorize("remove_member")?;
+        let applications = self
+            .applications
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let device_id = parse_device_id(&request.device_id)?;
+        let now = current_unix_seconds()?;
+        let expires_at = now
+            .checked_add(MESSAGE_RETENTION_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let sent = applications
+            .remove_member(conversation_id, device_id, now, expires_at)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(membership_result(sent)))
+    }
+
+    #[tool(
+        name = "change_member_role",
+        description = "Submit an encrypted Commit changing one conversation device role."
+    )]
+    async fn change_member_role(
+        &self,
+        Parameters(request): Parameters<ChangeMemberRoleRequest>,
+    ) -> Result<Json<MembershipResult>, String> {
+        self.authorize("change_member_role")?;
+        let applications = self
+            .applications
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let device_id = parse_device_id(&request.device_id)?;
+        let role = parse_role(&request.role)?;
+        let now = current_unix_seconds()?;
+        let expires_at = now
+            .checked_add(MESSAGE_RETENTION_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let sent = applications
+            .change_role(conversation_id, device_id, role, now, expires_at)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(membership_result(sent)))
     }
 
     #[tool(
@@ -253,7 +550,11 @@ impl StdioServer {
             .ok_or_else(|| "relay_not_configured".to_string())?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let replay = applications
-            .replay_once(conversation_id, MAX_PAGE_SIZE as u32)
+            .replay_once(
+                conversation_id,
+                MAX_PAGE_SIZE as u32,
+                current_unix_seconds()?,
+            )
             .await
             .map_err(tool_error)?;
         Ok(Json(MessageListResult {
@@ -281,7 +582,7 @@ impl StdioServer {
             .ok_or_else(|| "relay_not_configured".to_string())?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let replay = applications
-            .watch_once(conversation_id)
+            .watch_once(conversation_id, current_unix_seconds()?)
             .await
             .map_err(tool_error)?;
         Ok(Json(MessageListResult {
@@ -312,8 +613,17 @@ impl ServerHandler for StdioServer {
 #[must_use]
 pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook {
     Arc::new(move |context| match context.method {
-        "initialize" | "list_conversations" | "read_messages" => Ok(()),
-        "create_conversation" | "send_message" | "sync_messages" | "watch_messages"
+        "initialize" | "get_identity" | "list_conversations" | "read_messages" => Ok(()),
+        "create_conversation"
+        | "create_invitation"
+        | "create_join_proof"
+        | "add_member"
+        | "accept_welcome"
+        | "remove_member"
+        | "change_member_role"
+        | "send_message"
+        | "sync_messages"
+        | "watch_messages"
             if allow_write =>
         {
             Ok(())
@@ -384,6 +694,32 @@ fn parse_message_id(value: &str) -> Result<MessageId, String> {
         .map_err(|_| "invalid_message_id".to_string())
 }
 
+fn parse_device_id(value: &str) -> Result<DeviceId, String> {
+    decode_hex(value)
+        .map(DeviceId::from_bytes)
+        .map_err(|_| "invalid_device_id".to_string())
+}
+
+fn parse_routing_id(value: &str) -> Result<RoutingId, String> {
+    decode_hex(value)
+        .map(RoutingId::from_bytes)
+        .map_err(|_| "invalid_routing_id".to_string())
+}
+
+fn parse_public_key(value: &str) -> Result<Ed25519PublicKey, String> {
+    decode_hex(value)
+        .map(Ed25519PublicKey::from_bytes)
+        .map_err(|_| "invalid_issuer_public_key".to_string())
+}
+
+fn parse_role(value: &str) -> Result<ConversationRole, String> {
+    match value {
+        "administrator" => Ok(ConversationRole::Administrator),
+        "member" => Ok(ConversationRole::Member),
+        _ => Err("invalid_role".to_string()),
+    }
+}
+
 fn page_size(value: Option<usize>) -> Result<usize, String> {
     let value = value.unwrap_or(DEFAULT_PAGE_SIZE);
     if (1..=MAX_PAGE_SIZE).contains(&value) {
@@ -406,6 +742,30 @@ fn message_times() -> Result<(u64, u64, u64), String> {
         .and_then(|value| value.checked_add(u64::from(now.subsec_millis())))
         .ok_or_else(|| "system_time_unavailable".to_string())?;
     Ok((milliseconds, seconds, expires_at))
+}
+
+fn current_unix_seconds() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| "system_time_unavailable".to_string())
+}
+
+fn conversation_result(summary: ConversationSummary) -> ConversationResult {
+    ConversationResult {
+        conversation_id: encode_hex(summary.conversation_id.as_bytes()),
+        routing_id: encode_hex(summary.routing_id.as_bytes()),
+        epoch: summary.epoch,
+    }
+}
+
+fn membership_result(sent: SentMembership) -> MembershipResult {
+    MembershipResult {
+        conversation_id: encode_hex(sent.conversation_id.as_bytes()),
+        operation_id: encode_hex(sent.operation_id.as_bytes()),
+        cursor: sent.cursor,
+        welcome: sent.welcome.map(|welcome| encode_hex(&welcome)),
+    }
 }
 
 fn history_result(
@@ -498,6 +858,28 @@ fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], ()> {
         output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(output)
+}
+
+fn decode_hex_bytes(
+    value: &str,
+    maximum_bytes: usize,
+    error: &'static str,
+) -> Result<Vec<u8>, String> {
+    if value.is_empty()
+        || !value.len().is_multiple_of(2)
+        || value.len() > maximum_bytes.saturating_mul(2)
+        || !value.is_ascii()
+    {
+        return Err(error.to_string());
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            Ok((hex_nibble(pair[0]).map_err(|_| error.to_string())? << 4)
+                | hex_nibble(pair[1]).map_err(|_| error.to_string())?)
+        })
+        .collect()
 }
 
 const fn hex_nibble(value: u8) -> Result<u8, ()> {
@@ -601,6 +983,10 @@ mod tests {
             method: "list_conversations",
         })
         .unwrap();
+        read_only(AuthorizationContext {
+            method: "get_identity",
+        })
+        .unwrap();
         assert!(
             read_only(AuthorizationContext {
                 method: "create_conversation",
@@ -610,6 +996,14 @@ mod tests {
         let writable = local_stdio_authorization(true);
         writable(AuthorizationContext {
             method: "create_conversation",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "create_invitation",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "accept_welcome",
         })
         .unwrap();
         assert!(writable(AuthorizationContext { method: "unknown" }).is_err());
@@ -672,6 +1066,16 @@ mod tests {
         assert_eq!(server_info.version, env!("CARGO_PKG_VERSION"));
         assert!(peer.capabilities.tools.is_some());
 
+        let identity = client
+            .call_tool(CallToolRequestParams::new("get_identity"))
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            identity["device_id"].as_str().unwrap().len(),
+            KonclaveDomainCore::DeviceId::LENGTH * 2
+        );
         let created = client
             .call_tool(CallToolRequestParams::new("create_conversation"))
             .await

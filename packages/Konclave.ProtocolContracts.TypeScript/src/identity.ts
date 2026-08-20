@@ -142,6 +142,9 @@ function validateInvitation(value: Invitation): void {
     32,
     'conversation_id',
   );
+  if (value.routingId !== undefined) {
+    validateFixedBytes(value.routingId.value, 32, 'routing_id');
+  }
   validateFixedBytes(
     required(value.expectedDeviceId, 'expected_device_id').value,
     32,

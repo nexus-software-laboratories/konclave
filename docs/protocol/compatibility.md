@@ -90,8 +90,12 @@ A device credential binding identifies the device and conversation, names the
 signature scheme, carries the device-root and conversation-scoped public keys, and
 carries the device-root signature over that canonical binding. A join proof combines
 the exact credential binding with an invitation for the same device and conversation
-and one bounded MLS KeyPackage. Signature, expiry, role, and invitation-consumption
-checks occur outside generic wire decoding.
+and one bounded MLS KeyPackage. Newly issued join-capable invitations also bind the
+opaque relay routing identifier in the issuer signature, so handoff cannot redirect
+the new member to a different route. Generic readers retain compatibility with early
+unbound invitation fixtures, but the daemon refuses them for joining. Signature,
+expiry, route, role, and invitation-consumption checks occur outside generic wire
+decoding.
 
 The exact v1 hash and signature inputs are defined in
 [Identity signature encodings](identity-signatures.md).

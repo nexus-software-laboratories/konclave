@@ -19,6 +19,7 @@ production identifiers, or cryptographic test vectors.
 | `relay-envelope.bin` | 102 | `561b793b22ce2d1ce8cda1b7066b1f7499b5ef6ed599915e3763c1bf4b84ec82` |
 | `replay-page.bin` | 218 | `643ff81ba25e4322e38825c0ccfe91d12c0884a8115b227222ed3eb64db5c01d` |
 | `replay-request.bin` | 38 | `2667f31090b525e67584cc7f876893b93df85ee10d8057f395091697f51af69e` |
+| `route-bound-invitation.bin` | 276 | `90056ccfe65c943ba009163085acec38fb7b9a26bdf71abcfbd56b9c74494600` |
 | `stored-relay-envelope.bin` | 106 | `259830618f14a86b64095792b32c781d5c0e419999fd8a3ff4935783841101c5` |
 
 Before the first stable v1 release, maintainers can regenerate the complete set with

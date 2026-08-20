@@ -102,6 +102,11 @@ sessions can:
 
 The test records no plaintext or secrets in relay diagnostics.
 
+`multi_process_relay_e2e` exercises this milestone with two daemon child processes
+over the Community Relay HTTP API. It covers invitation/Welcome handoff, bidirectional
+messages, daemon disconnect and profile reopen, missed replay, duplicate suppression,
+removal, post-removal decryption failure, and post-removal send denial.
+
 ## Determinism
 
 Tests inject clocks, randomness, storage, and transport faults through explicit

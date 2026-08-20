@@ -127,6 +127,7 @@ export function invitation(options?: {
   expectedDevice?: number;
   major?: number;
   nonceLength?: number;
+  routingLength?: number;
   role?: ConversationRole;
 }): Invitation {
   return create(InvitationSchema, {
@@ -136,6 +137,10 @@ export function invitation(options?: {
     }),
     invitationId: create(InvitationIdSchema, { value: bytes(16, 5) }),
     conversationId: create(ConversationIdSchema, { value: bytes(32, 6) }),
+    routingId:
+      options?.routingLength === undefined
+        ? undefined
+        : create(RoutingIdSchema, { value: bytes(options.routingLength, 10) }),
     expectedDeviceId: create(DeviceIdSchema, {
       value: bytes(32, options?.expectedDevice ?? 1),
     }),

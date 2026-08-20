@@ -35,7 +35,13 @@ zeroize.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+base64.workspace = true
+KonclaveCommunityRelay = { path = "../Konclave.CommunityRelay" }
+KonclaveRelayCore = { path = "../../crates/Konclave.RelayCore" }
+axum = "0.8.9"
+rmcp = { version = "3.1.2", features = ["transport-child-process"] }
 tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["process"] }
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
 

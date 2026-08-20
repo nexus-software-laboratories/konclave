@@ -42,6 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write(
         &output,
+        "route-bound-invitation.bin",
+        encode_invitation(&route_bound_invitation(1))?,
+    )?;
+    write(
+        &output,
         "join-proof.bin",
         encode_join_proof(&JoinProof::new(invitation(1), credential(1), vec![10; 32])?)?,
     )?;
@@ -172,6 +177,7 @@ fn invitation(expected_device: u8) -> Invitation {
         ProtocolVersion::application_v1(),
         InvitationId::from_bytes([5; 16]),
         ConversationId::from_bytes([6; 32]),
+        None,
         DeviceId::from_bytes([expected_device; 32]),
         ConversationRole::Member,
         1_800_000_000,
@@ -180,6 +186,22 @@ fn invitation(expected_device: u8) -> Invitation {
         Ed25519Signature::from_bytes([9; 64]),
     )
     .expect("fixture invitation is valid")
+}
+
+fn route_bound_invitation(expected_device: u8) -> Invitation {
+    Invitation::new(
+        ProtocolVersion::application_v1(),
+        InvitationId::from_bytes([5; 16]),
+        ConversationId::from_bytes([6; 32]),
+        Some(RoutingId::from_bytes([10; 32])),
+        DeviceId::from_bytes([expected_device; 32]),
+        ConversationRole::Member,
+        1_800_000_000,
+        InvitationNonce::from_bytes([7; 32]),
+        DeviceId::from_bytes([8; 32]),
+        Ed25519Signature::from_bytes([9; 64]),
+    )
+    .expect("route-bound fixture invitation is valid")
 }
 
 fn relay_envelope(envelope: u8) -> RelayEnvelope {

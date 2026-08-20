@@ -1,7 +1,8 @@
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
-    DeviceCredentialBinding, Ed25519PublicKey, Member, MembershipAuthorization, MembershipChange,
-    MembershipOperationId, MessageId, ProtocolVersion, RemoveMember, SignatureScheme,
+    DeviceCredentialBinding, Ed25519PublicKey, Invitation, InvitationNonce, Member,
+    MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId, ProtocolVersion,
+    RemoveMember, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
@@ -17,6 +18,10 @@ use crate::{
 
 fn conversation_id(value: u8) -> ConversationId {
     ConversationId::from_bytes([value; ConversationId::LENGTH])
+}
+
+fn routing_id(value: u8) -> RoutingId {
+    RoutingId::from_bytes([value; RoutingId::LENGTH])
 }
 
 fn sealer(value: u8) -> SecretSealer {
@@ -54,6 +59,7 @@ fn sealed_mls_state_recovers_pending_join_commit_ratchets_and_removal() {
     let invitation = alice_identity
         .issue_invitation(
             conversation_id,
+            routing_id(1),
             bob_identity.device_id(),
             ConversationRole::Member,
             100,
@@ -371,12 +377,30 @@ fn device_binding_and_invitation_signatures_fail_closed() {
     let invitation = issuer
         .issue_invitation(
             conversation_id(1),
+            routing_id(1),
             recipient.device_id(),
             ConversationRole::Member,
             100,
         )
         .unwrap();
     verify_invitation(&invitation, issuer.public_key(), 99).unwrap();
+    let rerouted = Invitation::new(
+        invitation.version(),
+        invitation.invitation_id(),
+        invitation.conversation_id(),
+        Some(routing_id(2)),
+        invitation.expected_device_id(),
+        invitation.role(),
+        invitation.expires_at_unix_seconds(),
+        InvitationNonce::from_slice(invitation.nonce().as_bytes()).unwrap(),
+        invitation.issuer_device_id(),
+        invitation.issuer_signature(),
+    )
+    .unwrap();
+    assert_eq!(
+        verify_invitation(&rerouted, issuer.public_key(), 99).unwrap_err(),
+        KonclaveCryptographicError::InvalidInvitationSignature
+    );
     recipient
         .verify_invitation(&invitation, issuer.public_key(), 99)
         .unwrap();
@@ -422,6 +446,7 @@ fn mls_add_send_remove_flow_authenticates_sender_and_epochs() {
     let invitation = alice_identity
         .issue_invitation(
             conversation_id,
+            routing_id(1),
             bob_identity.device_id(),
             ConversationRole::Member,
             100,
@@ -523,6 +548,7 @@ fn incoming_commit_must_match_the_exact_authorization() {
     let invitation = alice_identity
         .issue_invitation(
             conversation_id,
+            routing_id(1),
             bob_identity.device_id(),
             ConversationRole::Member,
             100,
@@ -578,6 +604,7 @@ fn existing_member_can_validate_a_later_add_commit() {
     let bob_invitation = alice_identity
         .issue_invitation(
             conversation_id,
+            routing_id(1),
             bob_identity.device_id(),
             ConversationRole::Member,
             100,
@@ -608,6 +635,7 @@ fn existing_member_can_validate_a_later_add_commit() {
     let invitation = alice_identity
         .issue_invitation(
             conversation_id,
+            routing_id(1),
             charlie_identity.device_id(),
             ConversationRole::Member,
             100,
