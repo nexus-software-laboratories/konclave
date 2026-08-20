@@ -274,6 +274,7 @@ pub fn encode_membership_commit_bundle(
         "membership_commit_bundle.encrypted_control",
     )?;
     require_non_empty(mls_commit, "membership_commit_bundle.mls_commit")?;
+    require_membership_commit_bundle_size(encrypted_control.len(), mls_commit.len())?;
     let wire = wire::MembershipCommitBundle {
         encrypted_control: encrypted_control.to_vec().into(),
         mls_commit: mls_commit.to_vec().into(),
@@ -303,6 +304,39 @@ pub fn decode_membership_commit_bundle(
         encrypted_control: wire.encrypted_control.to_vec(),
         mls_commit: wire.mls_commit.to_vec(),
     })
+}
+
+fn require_membership_commit_bundle_size(
+    encrypted_control_length: usize,
+    mls_commit_length: usize,
+) -> Result<(), KonclaveProtocolError> {
+    let mut actual = 0_usize;
+    for length in [encrypted_control_length, mls_commit_length] {
+        if length > MAX_RELAY_PAYLOAD_BYTES {
+            return Err(KonclaveProtocolError::EncodedMessageTooLarge {
+                contract: COMMIT_BUNDLE_CONTRACT,
+                maximum: MAX_RELAY_PAYLOAD_BYTES,
+                actual: length,
+            });
+        }
+        actual = actual
+            .checked_add(1)
+            .and_then(|value| value.checked_add(prost::length_delimiter_len(length)))
+            .and_then(|value| value.checked_add(length))
+            .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+                contract: COMMIT_BUNDLE_CONTRACT,
+                maximum: MAX_RELAY_PAYLOAD_BYTES,
+                actual: usize::MAX,
+            })?;
+    }
+    if actual > MAX_RELAY_PAYLOAD_BYTES {
+        return Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: COMMIT_BUNDLE_CONTRACT,
+            maximum: MAX_RELAY_PAYLOAD_BYTES,
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn require_non_empty(bytes: &[u8], field: &'static str) -> Result<(), KonclaveProtocolError> {

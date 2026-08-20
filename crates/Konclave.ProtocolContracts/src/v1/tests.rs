@@ -2,7 +2,7 @@ use prost::Message;
 
 use KonclaveDomainCore::{
     KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES, MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS,
-    MAX_RELAY_ENVELOPE_BYTES, MAX_REPLAY_PAGE_SIZE,
+    MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_SIZE,
 };
 
 use super::{
@@ -168,9 +168,17 @@ fn membership_client_framing_rejects_missing_or_oversized_fields() {
             field: "membership_commit_bundle.encrypted_control"
         })
     );
-    let oversized = vec![1; MAX_RELAY_ENVELOPE_BYTES];
+    let oversized = vec![1; MAX_RELAY_PAYLOAD_BYTES + 1];
     assert!(matches!(
         encode_membership_commit_bundle(&oversized, &[1]),
+        Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "MembershipCommitBundle",
+            ..
+        })
+    ));
+    let aggregate_oversized = vec![1; MAX_RELAY_PAYLOAD_BYTES];
+    assert!(matches!(
+        encode_membership_commit_bundle(&aggregate_oversized, &[1]),
         Err(KonclaveProtocolError::EncodedMessageTooLarge {
             contract: "MembershipCommitBundle",
             ..
