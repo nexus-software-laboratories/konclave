@@ -434,11 +434,10 @@ impl ConversationCoordinator {
             .inbox_operation(conversation_id, stored.cursor())?
         {
             InboxOperation::Received { stored } => {
-                if let Some(outbound) = self.store.outbound_history_message(
-                    conversation_id,
-                    stored.envelope().envelope_id(),
-                    stored.cursor(),
-                )? {
+                if let Some(outbound) = self
+                    .store
+                    .outbound_history_message(conversation_id, &stored)?
+                {
                     self.store.save_inbox_message(
                         conversation_id,
                         stored.cursor(),
@@ -485,11 +484,10 @@ impl ConversationCoordinator {
                 })
             }
             InboxOperation::MessageSaved { stored, message } => {
-                if let Some(outbound) = self.store.outbound_history_message(
-                    conversation_id,
-                    stored.envelope().envelope_id(),
-                    stored.cursor(),
-                )? {
+                if let Some(outbound) = self
+                    .store
+                    .outbound_history_message(conversation_id, &stored)?
+                {
                     if outbound.sender != message.sender
                         || outbound.epoch != message.epoch
                         || !application_messages_equal(&outbound.message, &message.message)?
@@ -823,11 +821,7 @@ pub(crate) mod tests {
         coordinator.store.record_inbox_envelope(stored).unwrap();
         let outbound = coordinator
             .store
-            .outbound_history_message(
-                conversation_id,
-                stored.envelope().envelope_id(),
-                stored.cursor(),
-            )
+            .outbound_history_message(conversation_id, stored)
             .unwrap()
             .unwrap();
         coordinator
@@ -1038,6 +1032,51 @@ pub(crate) mod tests {
                 .unwrap()
                 .1,
             1
+        );
+    }
+
+    #[test]
+    fn rejects_altered_same_id_own_echo_before_cursor_advancement() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "altered-own-echo");
+        let conversation = coordinator.create().unwrap();
+        let prepared = coordinator
+            .prepare_application(
+                conversation.conversation_id,
+                ApplicationContent::text("original own echo").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let altered = RelayEnvelope::new(
+            prepared.envelope.version(),
+            prepared.envelope.routing_id(),
+            prepared.envelope.envelope_id(),
+            prepared.envelope.delivery_class(),
+            prepared.envelope.expected_parent_epoch(),
+            prepared.envelope.expires_at_unix_seconds(),
+            b"altered-own-echo".to_vec(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            coordinator
+                .process_inbound_application(
+                    conversation.conversation_id,
+                    &StoredRelayEnvelope::new(altered, 1).unwrap(),
+                )
+                .err(),
+            Some(ConversationCoordinatorError::Profile(
+                ProfileStoreError::CursorConflict
+            ))
+        );
+        assert_eq!(
+            coordinator
+                .replay_position(conversation.conversation_id)
+                .unwrap()
+                .1,
+            0
         );
     }
 

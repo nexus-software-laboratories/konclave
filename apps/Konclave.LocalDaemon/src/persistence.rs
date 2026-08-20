@@ -206,79 +206,116 @@ impl ProfileStore {
         if missing_outbound != 0 {
             return Err(ProfileStoreError::LegacyOutboundRecoveryUnsupported);
         }
-        let missing_inbound = {
-            let connection = self.lock()?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT
-                        CASE WHEN length(i.conversation_id) = 32
-                            THEN i.conversation_id
-                        END,
-                        i.cursor,
-                        CASE WHEN length(i.envelope_id) = 16 THEN i.envelope_id END,
-                        i.status
-                     FROM daemon_inbox i
-                     LEFT JOIN daemon_message_history h
-                       ON h.conversation_id = i.conversation_id
-                      AND h.message_id = i.message_id
-                     WHERE i.status IN (2, 3) AND h.message_id IS NULL
-                     ORDER BY i.conversation_id, i.cursor",
-                )
-                .map_err(|_| ProfileStoreError::Storage)?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                })
-                .map_err(|_| ProfileStoreError::Storage)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| ProfileStoreError::Storage)?
-        };
-        for (conversation_id, cursor, envelope_id, status) in missing_inbound {
-            let conversation_id = ConversationId::from_slice(&conversation_id)
-                .map_err(|_| ProfileStoreError::CorruptData)?;
-            let cursor = from_sql_integer(cursor)?;
-            let envelope_id =
-                EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
-            let routing_id = self.conversation_routing_id(conversation_id)?;
-            let message = self.load_message_at(conversation_id, cursor)?;
-            if message.envelope_id != envelope_id {
-                return Err(ProfileStoreError::CorruptData);
+        let mut after_conversation: Option<Vec<u8>> = None;
+        let mut after_cursor = 0_i64;
+        loop {
+            let batch = {
+                let connection = self.lock()?;
+                let mut statement = connection
+                    .prepare(
+                        "SELECT
+                            CASE WHEN length(i.conversation_id) = 32
+                                THEN i.conversation_id
+                            END,
+                            i.cursor,
+                            CASE WHEN length(i.envelope_id) = 16
+                                THEN i.envelope_id
+                            END,
+                            i.status
+                         FROM daemon_inbox i
+                         LEFT JOIN daemon_message_history h
+                           ON h.conversation_id = i.conversation_id
+                          AND h.message_id = i.message_id
+                         WHERE i.status IN (2, 3)
+                           AND h.message_id IS NULL
+                           AND (
+                                ?1 IS NULL
+                                OR i.conversation_id > ?1
+                                OR (
+                                    i.conversation_id = ?1
+                                    AND i.cursor > ?2
+                                )
+                           )
+                         ORDER BY i.conversation_id, i.cursor
+                         LIMIT ?3",
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                statement
+                    .query_map(
+                        params![
+                            after_conversation.as_deref(),
+                            after_cursor,
+                            i64::try_from(MAX_MESSAGE_PAGE_SIZE)
+                                .map_err(|_| ProfileStoreError::SequenceExhausted)?
+                        ],
+                        |row| {
+                            Ok((
+                                row.get::<_, Vec<u8>>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, Vec<u8>>(2)?,
+                                row.get::<_, i64>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ProfileStoreError::Storage)?
+            };
+            if batch.is_empty() {
+                break;
             }
-            let mut connection = self.lock()?;
-            let transaction = connection
-                .transaction()
-                .map_err(|_| ProfileStoreError::Storage)?;
-            self.insert_or_verify_history(
-                &transaction,
-                conversation_id,
-                routing_id,
-                envelope_id,
-                Some(cursor),
-                MessageDirection::Inbound,
-                message.sender,
-                message.epoch,
-                &message.message,
-            )?;
-            if status == 3
-                && !self.complete_history(
+            let batch_length = batch.len();
+            let last = batch
+                .last()
+                .cloned()
+                .ok_or(ProfileStoreError::CorruptData)?;
+            for (conversation_id, cursor, envelope_id, status) in batch {
+                let conversation_id = ConversationId::from_slice(&conversation_id)
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+                let cursor = from_sql_integer(cursor)?;
+                let envelope_id = EnvelopeId::from_slice(&envelope_id)
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+                let routing_id = self.conversation_routing_id(conversation_id)?;
+                let message = self.load_message_at(conversation_id, cursor)?;
+                if message.envelope_id != envelope_id {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                let mut connection = self.lock()?;
+                let transaction = connection
+                    .transaction()
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                self.insert_or_verify_history(
                     &transaction,
                     conversation_id,
                     routing_id,
-                    message.message.message_id(),
                     envelope_id,
-                    cursor,
-                )?
-            {
-                return Err(ProfileStoreError::CorruptData);
+                    Some(cursor),
+                    MessageDirection::Inbound,
+                    message.sender,
+                    message.epoch,
+                    &message.message,
+                )?;
+                if status == 3
+                    && !self.complete_history(
+                        &transaction,
+                        conversation_id,
+                        routing_id,
+                        message.message.message_id(),
+                        envelope_id,
+                        cursor,
+                    )?
+                {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                transaction
+                    .commit()
+                    .map_err(|_| ProfileStoreError::Storage)?;
             }
-            transaction
-                .commit()
-                .map_err(|_| ProfileStoreError::Storage)?;
+            after_conversation = Some(last.0);
+            after_cursor = last.1;
+            if batch_length < MAX_MESSAGE_PAGE_SIZE {
+                break;
+            }
         }
         Ok(())
     }
@@ -1557,34 +1594,44 @@ impl ProfileStore {
     pub(crate) fn outbound_history_message(
         &self,
         conversation_id: ConversationId,
-        envelope_id: EnvelopeId,
-        cursor: u64,
+        stored: &StoredRelayEnvelope,
     ) -> Result<Option<StoredHistoryMessage>, ProfileStoreError> {
+        let envelope_id = stored.envelope().envelope_id();
+        let cursor = stored.cursor();
         let routing_id = self.conversation_routing_id(conversation_id)?;
+        let message_id: Option<Vec<u8>> = {
+            let connection = self.lock()?;
+            connection
+                .query_row(
+                    "SELECT CASE WHEN length(message_id) = 16 THEN message_id END
+                     FROM daemon_message_history
+                     WHERE conversation_id = ?1
+                       AND envelope_id = ?2
+                       AND direction = 1",
+                    params![
+                        conversation_id.as_bytes().as_slice(),
+                        envelope_id.as_bytes().as_slice()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        let Some(message_id) = message_id else {
+            return Ok(None);
+        };
+        let outbox = self.load_outbox_record(envelope_id)?;
+        if outbox.reservation.conversation_id != conversation_id
+            || outbox.envelope != *stored.envelope()
+        {
+            return Err(ProfileStoreError::CursorConflict);
+        }
+        let message_id =
+            MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
-        let message_id: Option<Vec<u8>> = transaction
-            .query_row(
-                "SELECT CASE WHEN length(message_id) = 16 THEN message_id END
-                 FROM daemon_message_history
-                 WHERE conversation_id = ?1
-                   AND envelope_id = ?2
-                   AND direction = 1",
-                params![
-                    conversation_id.as_bytes().as_slice(),
-                    envelope_id.as_bytes().as_slice()
-                ],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| ProfileStoreError::Storage)?;
-        let Some(message_id) = message_id else {
-            return Ok(None);
-        };
-        let message_id =
-            MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
         if !self.assign_history_cursor(
             &transaction,
             conversation_id,
@@ -4892,7 +4939,7 @@ mod tests {
         fixture.store.record_inbox_envelope(&echo).unwrap();
         let outbound = fixture
             .store
-            .outbound_history_message(fixture.conversation_id, envelope_id, 2)
+            .outbound_history_message(fixture.conversation_id, &echo)
             .unwrap()
             .unwrap();
         fixture
@@ -5224,12 +5271,15 @@ mod tests {
     #[test]
     fn legacy_history_rehydrates_completed_and_pending_inbox_rows() {
         let fixture = conversation_fixture("legacy-inbox-history");
-        stage_inbox_message(&fixture, 1, 81, 0, 1);
-        fixture
-            .store
-            .complete_inbox(fixture.conversation_id, 1)
-            .unwrap();
-        stage_inbox_message(&fixture, 2, 82, 0, 2);
+        for cursor in 1_u64..=101 {
+            let identifier = u8::try_from(cursor).unwrap();
+            stage_inbox_message(&fixture, cursor, identifier, 0, cursor);
+            fixture
+                .store
+                .complete_inbox(fixture.conversation_id, cursor)
+                .unwrap();
+        }
+        stage_inbox_message(&fixture, 102, 102, 0, 102);
         fixture
             .store
             .lock()
@@ -5246,9 +5296,13 @@ mod tests {
             .open_store(sealer())
             .unwrap();
 
-        let history = reopened.load_history(conversation_id, 0, 10).unwrap();
-        assert_eq!(history.messages.len(), 1);
+        let history = reopened.load_history(conversation_id, 0, 100).unwrap();
+        assert_eq!(history.messages.len(), 100);
+        assert!(history.has_more);
         assert_eq!(history.messages[0].cursor, 1);
+        let final_page = reopened.load_history(conversation_id, 100, 100).unwrap();
+        assert_eq!(final_page.messages.len(), 1);
+        assert_eq!(final_page.messages[0].cursor, 101);
         let rows = {
             let connection = reopened.lock().unwrap();
             let mut statement = connection
@@ -5267,12 +5321,14 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(rows, vec![(1, 2), (2, 1)]);
+        assert_eq!(rows.len(), 102);
+        assert!(rows.iter().take(101).all(|(_, status)| *status == 2));
+        assert_eq!(rows.last(), Some(&(102, 1)));
         let pending = reopened.incomplete_inbox(conversation_id).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(matches!(
             &pending[0],
-            PendingInbox::MessageSaved { stored, .. } if stored.cursor() == 2
+            PendingInbox::MessageSaved { stored, .. } if stored.cursor() == 102
         ));
     }
 
