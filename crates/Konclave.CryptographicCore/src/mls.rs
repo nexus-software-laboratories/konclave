@@ -9,6 +9,7 @@ use KonclaveDomainCore::{
 };
 use KonclaveProtocolContracts::v1::{
     decode_conversation_state, encode_conversation_state, encode_membership_change,
+    encode_membership_control,
 };
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use mls_rs::client::MlsError;
@@ -605,6 +606,8 @@ impl MlsConversation {
             &authorization,
             self.next_epoch()?,
         )?;
+        let encrypted_control =
+            self.encrypt_membership_control(&authorization, Some(&join_proof))?;
         self.policy.register_binding(RegisteredBinding {
             binding: verified.into_binding(),
             hash: add.credential_binding_hash(),
@@ -684,6 +687,7 @@ impl MlsConversation {
             return Err(error);
         }
         Ok(OutboundMembershipCommit {
+            encrypted_control,
             commit,
             welcome: Some(welcome),
             authorization,
@@ -719,6 +723,7 @@ impl MlsConversation {
             &authorization,
             self.next_epoch()?,
         )?;
+        let encrypted_control = self.encrypt_membership_control(&authorization, None)?;
         let member_index = roster_index(&self.group.roster(), device_id)?;
         let authenticated_data = membership_authenticated_data(&authorization)?;
         let group_context_extensions = authenticated_state_digest_extensions(&next_state)?;
@@ -774,6 +779,7 @@ impl MlsConversation {
             return Err(error);
         }
         Ok(OutboundMembershipCommit {
+            encrypted_control,
             commit,
             welcome: None,
             authorization,
@@ -810,6 +816,7 @@ impl MlsConversation {
             &authorization,
             self.next_epoch()?,
         )?;
+        let encrypted_control = self.encrypt_membership_control(&authorization, None)?;
         let authenticated_data = membership_authenticated_data(&authorization)?;
         let group_context_extensions = authenticated_state_digest_extensions(&next_state)?;
         self.policy.prepare(authorization.clone())?;
@@ -863,6 +870,7 @@ impl MlsConversation {
             return Err(error);
         }
         Ok(OutboundMembershipCommit {
+            encrypted_control,
             commit,
             welcome: None,
             authorization,
@@ -1036,6 +1044,18 @@ impl MlsConversation {
             epoch: next_state.epoch(),
             removed_self,
         })
+    }
+
+    fn encrypt_membership_control(
+        &mut self,
+        authorization: &MembershipAuthorization,
+        join_proof: Option<&JoinProof>,
+    ) -> Result<MlsApplicationMessage, KonclaveCryptographicError> {
+        let plaintext = Zeroizing::new(
+            encode_membership_control(authorization, join_proof)
+                .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?,
+        );
+        self.encrypt_application_message(&plaintext)
     }
 
     /// Encrypts one already encoded Konclave application message as MLS
@@ -1337,6 +1357,7 @@ impl MlsWelcome {
 
 /// Outbound commit plus the exact application authorization used to create it.
 pub struct OutboundMembershipCommit {
+    encrypted_control: MlsApplicationMessage,
     commit: MlsCommit,
     welcome: Option<MlsWelcome>,
     authorization: MembershipAuthorization,
@@ -1345,6 +1366,12 @@ pub struct OutboundMembershipCommit {
 }
 
 impl OutboundMembershipCommit {
+    /// Returns the MLS application PrivateMessage carrying membership context.
+    #[must_use]
+    pub const fn encrypted_control(&self) -> &MlsApplicationMessage {
+        &self.encrypted_control
+    }
+
     /// Returns the MLS commit to submit through relay compare-and-set.
     #[must_use]
     pub const fn commit(&self) -> &MlsCommit {

@@ -14,6 +14,8 @@ production identifiers, or cryptographic test vectors.
 | `invitation.bin` | 240 | `cdca99b5057721c7f557b3fe2d04a5cd5ffb0e8b022790e592371612d9b65183` |
 | `join-proof.bin` | 492 | `edd36bc487fae333ab4acd701a999355e3897e9b7979ce79a08e0cc343a19539` |
 | `membership-change.bin` | 156 | `9f0025ac415b67df907e6f529554770bf3e14121fa435f68219097ad4be598db` |
+| `membership-commit-bundle.bin` | 84 | `409e5a3b8b234ba6b89b3f26864942ecb7c0a55256384824da8076fdd5001091` |
+| `membership-control.bin` | 654 | `3ae4f1b305a171f1ee4777064024cb277fd07abe84d88a809f916133e6622220` |
 | `relay-envelope.bin` | 102 | `561b793b22ce2d1ce8cda1b7066b1f7499b5ef6ed599915e3763c1bf4b84ec82` |
 | `replay-page.bin` | 218 | `643ff81ba25e4322e38825c0ccfe91d12c0884a8115b227222ed3eb64db5c01d` |
 | `replay-request.bin` | 38 | `2667f31090b525e67584cc7f876893b93df85ee10d8057f395091697f51af69e` |

@@ -29,10 +29,12 @@ import {
   ChangeMemberRoleSchema,
   ConversationStateSchema,
   MemberSchema,
+  MembershipCommitBundleSchema,
   MembershipChangeSchema,
   MembershipOperationIdSchema,
   RemoveMemberSchema,
   type ConversationState,
+  type MembershipCommitBundle,
   type MembershipChange,
 } from '../src/generated/konclave/protocol/v1/membership_pb.js';
 import {
@@ -51,6 +53,13 @@ import {
 
 export const bytes = (length: number, value: number): Uint8Array =>
   new Uint8Array(length).fill(value);
+
+export function membershipCommitBundle(): MembershipCommitBundle {
+  return create(MembershipCommitBundleSchema, {
+    encryptedControl: bytes(32, 0x81),
+    mlsCommit: bytes(48, 0x82),
+  });
+}
 
 export function applicationMessage(options?: {
   body?: string;

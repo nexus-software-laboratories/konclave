@@ -4,8 +4,9 @@ use KonclaveDomainCore::{
     MembershipOperationId, MessageId, ProtocolVersion, RemoveMember, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
-    decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
-    encode_membership_change,
+    decode_application_message, decode_join_proof, decode_membership_commit_bundle,
+    decode_membership_control, encode_application_message, encode_join_proof,
+    encode_membership_change, encode_membership_commit_bundle,
 };
 use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer};
 
@@ -622,15 +623,25 @@ fn existing_member_can_validate_a_later_add_commit() {
         )
         .unwrap();
     let charlie_add = alice_group.create_add_commit(charlie_proof, 50).unwrap();
-    let proof_bytes = encode_join_proof(charlie_add.join_proof().unwrap()).unwrap();
-    let proof_for_bob = decode_join_proof(&proof_bytes).unwrap();
+    let bundle_bytes = encode_membership_commit_bundle(
+        charlie_add.encrypted_control().as_bytes(),
+        charlie_add.commit().as_bytes(),
+    )
+    .unwrap();
+    let bundle = decode_membership_commit_bundle(&bundle_bytes).unwrap();
+    let encrypted_control = MlsApplicationMessage::from_bytes(bundle.encrypted_control()).unwrap();
+    let commit = MlsCommit::from_bytes(bundle.mls_commit()).unwrap();
+    let decrypted_control = bob_group
+        .decrypt_application_message(&encrypted_control)
+        .unwrap();
+    assert_eq!(
+        decrypted_control.authenticated_sender(),
+        alice_identity.device_id()
+    );
+    let (authorization, proof_for_bob) =
+        decode_membership_control(decrypted_control.plaintext()).unwrap();
     bob_group
-        .process_membership_commit(
-            charlie_add.commit(),
-            charlie_add.authorization().clone(),
-            Some(proof_for_bob),
-            50,
-        )
+        .process_membership_commit(&commit, authorization, proof_for_bob, 50)
         .unwrap();
     alice_group.accept_pending_commit().unwrap();
     let mut charlie_group = charlie_client
