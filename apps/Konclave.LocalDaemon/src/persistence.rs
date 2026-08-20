@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use KonclaveClientLibrary::{RelayAccessCredential, RelayEndpoint};
 use KonclaveCryptographicCore::{
-    ConversationSigningMaterial, DeviceIdentity, VerifiedDeviceCredentialBinding,
+    ConversationSigningMaterial, DeviceIdentity, MlsWelcome, VerifiedDeviceCredentialBinding,
     verify_device_credential_binding,
 };
 use KonclaveDomainCore::{
@@ -29,7 +29,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 8;
+const PROFILE_SCHEMA_VERSION: u32 = 9;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -51,6 +51,10 @@ const PENDING_JOIN_PROOF_RECORD_SCOPE: u8 = 11;
 const PENDING_JOIN_RECEIPT_RECORD_SCOPE: u8 = 12;
 const REPLAY_HEAD_RECORD_SCOPE: u8 = 13;
 const OUTBOX_TERMINAL_REASON_EXPIRED: i64 = 1;
+const OUTBOX_TERMINAL_REASON_REMOVED: i64 = 2;
+const PENDING_JOIN_CHECKPOINT_VERSION: u8 = 1;
+const REPLAY_HEAD_VERSION_V1: u8 = 1;
+const REPLAY_HEAD_VERSION_V2: u8 = 2;
 
 type InboxMessageMetadata = (Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, Vec<u8>, i64);
 type HistoryMetadata = (Vec<u8>, Option<i64>, i64, i64, Vec<u8>, i64, i64, i64);
@@ -547,6 +551,7 @@ impl ProfileStore {
                     replay_cursor,
                     ReplayCompletionKind::Join,
                     state,
+                    state,
                     receipt.envelope(),
                 )
             })
@@ -937,7 +942,7 @@ impl ProfileStore {
                 Ok(proof)
             })
             .transpose()?;
-        let state = state_bytes
+        let checkpoint = state_bytes
             .map(|bytes| {
                 let blob =
                     SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
@@ -954,9 +959,12 @@ impl ProfileStore {
                         &blob,
                     )
                     .map_err(|_| ProfileStoreError::CorruptData)?;
-                decode_conversation_state(&plaintext).map_err(|_| ProfileStoreError::Protocol)
+                decode_pending_join_checkpoint(&plaintext)
             })
             .transpose()?;
+        let (state, expected_commit_envelope_id) = checkpoint
+            .map(|(state, envelope_id)| (Some(state), Some(envelope_id)))
+            .unwrap_or((None, None));
         let join_receipt = match (join_cursor, join_envelope_id, receipt_bytes) {
             (Some(cursor), Some(envelope_id), Some(bytes)) => {
                 let cursor = from_sql_integer(cursor)?;
@@ -983,6 +991,13 @@ impl ProfileStore {
             (None, None, None) => None,
             _ => return Err(ProfileStoreError::CorruptData),
         };
+        if expected_commit_envelope_id
+            != join_receipt
+                .as_ref()
+                .map(|receipt| receipt.envelope().envelope_id())
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
         Ok(PendingJoin {
             conversation_id,
             routing_id,
@@ -993,6 +1008,7 @@ impl ProfileStore {
             issuer_public_key,
             peer_bindings,
             state,
+            expected_commit_envelope_id,
             join_receipt,
         })
     }
@@ -1006,6 +1022,7 @@ impl ProfileStore {
         &self,
         conversation_id: ConversationId,
         state: &ConversationState,
+        expected_commit_envelope_id: EnvelopeId,
         receipt: &StoredRelayEnvelope,
     ) -> Result<(), ProfileStoreError> {
         let pending = self.load_pending_join(conversation_id)?;
@@ -1028,6 +1045,7 @@ impl ProfileStore {
                 .contains(&proof.invitation().invitation_id())
             || receipt.envelope().routing_id() != pending.routing_id
             || receipt.envelope().delivery_class() != DeliveryClass::GroupCommit
+            || receipt.envelope().envelope_id() != expected_commit_envelope_id
             || receipt
                 .envelope()
                 .expected_parent_epoch()
@@ -1037,8 +1055,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::ConversationMismatch);
         }
         validate_bindings(state, pending.signing_material.binding(), &bindings)?;
-        let state_bytes =
-            encode_conversation_state(state).map_err(|_| ProfileStoreError::Protocol)?;
+        let state_bytes = encode_pending_join_checkpoint(state, expected_commit_envelope_id)?;
         let state_blob = self.seal_conversation_record(
             SecretRecordKind::ConversationPolicyState,
             conversation_id,
@@ -1078,7 +1095,9 @@ impl ProfileStore {
             return Ok(());
         }
         let existing = self.load_pending_join(conversation_id)?;
-        if existing.state.as_ref() == Some(state) && existing.join_receipt.as_ref() == Some(receipt)
+        if existing.state.as_ref() == Some(state)
+            && existing.expected_commit_envelope_id == Some(expected_commit_envelope_id)
+            && existing.join_receipt.as_ref() == Some(receipt)
         {
             Ok(())
         } else {
@@ -1277,6 +1296,12 @@ impl ProfileStore {
             (_, Some(length), Some(bytes)) => {
                 validate_blob_length(length)?;
                 let head = self.open_replay_head(conversation_id, routing_id, bytes)?;
+                let legacy = head.version == ReplayHeadVersion::V1;
+                let head = if legacy {
+                    self.migrate_v1_replay_head(conversation_id, routing_id, head)?
+                } else {
+                    head
+                };
                 self.verify_replay_position(
                     conversation_id,
                     routing_id,
@@ -1284,6 +1309,30 @@ impl ProfileStore {
                     replay_cursor,
                     &head,
                 )?;
+                if legacy {
+                    let migrated = self.seal_replay_head(
+                        conversation_id,
+                        routing_id,
+                        head.previous_cursor,
+                        head.cursor,
+                        head.kind,
+                        &head.completion_state,
+                        &head.policy_state,
+                        &head.envelope,
+                    )?;
+                    let changed = self
+                        .lock()?
+                        .execute(
+                            "UPDATE daemon_conversation
+                             SET sealed_replay_head = ?1
+                             WHERE conversation_id = ?2",
+                            params![migrated.as_bytes(), conversation_id.as_bytes().as_slice()],
+                        )
+                        .map_err(|_| ProfileStoreError::Storage)?;
+                    if changed != 1 {
+                        return Err(ProfileStoreError::Storage);
+                    }
+                }
             }
             _ => return Err(ProfileStoreError::CorruptData),
         }
@@ -1726,6 +1775,35 @@ impl ProfileStore {
         Ok(pending)
     }
 
+    /// Terminalizes every ready application envelope for a conversation whose
+    /// authenticated current policy no longer contains the local device.
+    ///
+    /// # Errors
+    ///
+    /// Returns a policy, transition, or storage error.
+    pub(crate) fn terminalize_removed_outbox(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<usize, ProfileStoreError> {
+        let conversation = self.load_conversation(conversation_id)?;
+        if conversation
+            .state
+            .member(conversation.signing_material.binding().device_id())
+            .is_some()
+        {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let changed = terminalize_removed_outbox_in_transaction(&transaction, conversation_id)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(changed)
+    }
+
     /// Loads one ready, accepted, or terminal outbound application by its stable
     /// message ID.
     ///
@@ -1781,6 +1859,17 @@ impl ProfileStore {
             (2, None, None, None) => OutboundApplicationStatus::Ready,
             (2, None, Some(OutboxTerminalReason::Expired), None) => {
                 OutboundApplicationStatus::Expired
+            }
+            (2, None, Some(OutboxTerminalReason::Removed), None) => {
+                let conversation = self.load_conversation(conversation_id)?;
+                if conversation
+                    .state
+                    .member(conversation.signing_material.binding().device_id())
+                    .is_some()
+                {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                OutboundApplicationStatus::Removed
             }
             (3, Some(cursor), None, Some(history_cursor)) if cursor == history_cursor => {
                 OutboundApplicationStatus::Accepted { cursor }
@@ -2028,7 +2117,7 @@ impl ProfileStore {
         transaction: &rusqlite::Transaction<'_>,
         record: &OutboxRecord,
         cursor: u64,
-        accept_expired: bool,
+        accept_terminal: bool,
     ) -> Result<(), ProfileStoreError> {
         let envelope_id = record.envelope.envelope_id();
         let state: Option<(i64, Option<i64>, Option<i64>)> = transaction
@@ -2044,9 +2133,7 @@ impl ProfileStore {
         match state {
             Some((2, None, terminal_reason))
                 if terminal_reason.is_none()
-                    || accept_expired
-                        && outbox_terminal_reason(terminal_reason)?
-                            == Some(OutboxTerminalReason::Expired) =>
+                    || accept_terminal && outbox_terminal_reason(terminal_reason)?.is_some() =>
             {
                 self.insert_or_verify_cursor_observation(
                     transaction,
@@ -2488,6 +2575,10 @@ impl ProfileStore {
             return Err(ProfileStoreError::InvalidTransition);
         }
         let current = self.load_conversation(record.conversation_id)?;
+        let self_removed = record
+            .next_state
+            .member(current.signing_material.binding().device_id())
+            .is_none();
         let bindings =
             final_membership_bindings(&record, current.signing_material.binding().device_id());
         let binding_values = bindings
@@ -2572,6 +2663,9 @@ impl ProfileStore {
             .map_err(|_| ProfileStoreError::Storage)?;
         if changed != 1 {
             return Err(ProfileStoreError::InvalidTransition);
+        }
+        if self_removed {
+            terminalize_removed_outbox_in_transaction(&transaction, record.conversation_id)?;
         }
         transaction
             .execute(
@@ -2904,6 +2998,10 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         let current = self.load_conversation(conversation_id)?;
+        let self_removed = transition
+            .next_state
+            .member(current.signing_material.binding().device_id())
+            .is_none();
         let bindings =
             final_transition_bindings(&transition, current.signing_material.binding().device_id());
         let binding_values = bindings
@@ -2976,6 +3074,7 @@ impl ProfileStore {
             cursor,
             ReplayCompletionKind::Membership,
             &transition.next_state,
+            &transition.next_state,
             transition.stored.envelope(),
         )?;
         transaction
@@ -2999,6 +3098,9 @@ impl ProfileStore {
                 params![conversation_id.as_bytes().as_slice()],
             )
             .map_err(|_| ProfileStoreError::Storage)?;
+        if self_removed {
+            terminalize_removed_outbox_in_transaction(&transaction, conversation_id)?;
+        }
         for (device_id, blob) in sealed_bindings {
             transaction
                 .execute(
@@ -3581,6 +3683,7 @@ impl ProfileStore {
             cursor,
             ReplayCompletionKind::Application,
             &conversation.state,
+            &conversation.state,
             envelope.envelope(),
         )?;
         self.store_sender_high_water(
@@ -3806,7 +3909,11 @@ impl ProfileStore {
         head: &ReplayHead,
     ) -> Result<(), ProfileStoreError> {
         if head.cursor != cursor
-            || head.state != *state
+            || head.policy_state != *state
+            || head.completion_state.conversation_id() != conversation_id
+            || head.policy_state.conversation_id() != conversation_id
+            || head.completion_state.version() != head.policy_state.version()
+            || head.completion_state.epoch() > head.policy_state.epoch()
             || head.envelope.routing_id() != routing_id
             || head.kind != ReplayCompletionKind::Join
                 && head.previous_cursor.checked_add(1) != Some(cursor)
@@ -3830,7 +3937,7 @@ impl ProfileStore {
             ReplayCompletionKind::Membership => {
                 let transition =
                     self.load_membership_inbox_transition(conversation_id, cursor, observed)?;
-                if transition.next_state == *state {
+                if transition.next_state == head.completion_state {
                     Ok(())
                 } else {
                     Err(ProfileStoreError::ConversationMismatch)
@@ -3842,7 +3949,7 @@ impl ProfileStore {
                         .envelope
                         .expected_parent_epoch()
                         .and_then(|epoch| epoch.checked_add(1))
-                        == Some(state.epoch()) =>
+                        == Some(head.completion_state.epoch()) =>
             {
                 let inbox_count: i64 = self
                     .lock()?
@@ -3868,6 +3975,35 @@ impl ProfileStore {
             }
             ReplayCompletionKind::Join => Err(ProfileStoreError::CorruptData),
         }
+    }
+
+    fn migrate_v1_replay_head(
+        &self,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        mut head: ReplayHead,
+    ) -> Result<ReplayHead, ProfileStoreError> {
+        if head.version != ReplayHeadVersion::V1 {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        if head.kind == ReplayCompletionKind::Membership {
+            let observed =
+                self.load_cursor_observation(conversation_id, routing_id, head.cursor)?;
+            if observed.envelope() != &head.envelope {
+                return Err(ProfileStoreError::CursorConflict);
+            }
+            head.completion_state = self
+                .load_membership_inbox_transition(conversation_id, head.cursor, observed)?
+                .next_state;
+        }
+        if head.completion_state.conversation_id() != conversation_id
+            || head.completion_state.version() != head.policy_state.version()
+            || head.completion_state.epoch() > head.policy_state.epoch()
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        head.version = ReplayHeadVersion::V2;
+        Ok(head)
     }
 
     fn load_cursor_observation(
@@ -4758,6 +4894,70 @@ impl ProfileStore {
         Ok(())
     }
 
+    pub(crate) fn verify_historical_applied_add(
+        &self,
+        record: &MembershipOutbox,
+    ) -> Result<(), ProfileStoreError> {
+        if record.status != MembershipOutboxStatus::Applied || record.accepted_cursor.is_none() {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        let (authorization, proof) =
+            decode_membership_control(&record.control).map_err(|_| ProfileStoreError::Protocol)?;
+        let proof = proof.ok_or(ProfileStoreError::CorruptData)?;
+        let MembershipChange::Add(add) = authorization.change() else {
+            return Err(ProfileStoreError::InvalidTransition);
+        };
+        let verified = verify_device_credential_binding(proof.credential())
+            .map_err(|_| ProfileStoreError::Cryptographic)?;
+        let welcome = record
+            .welcome
+            .as_deref()
+            .ok_or(ProfileStoreError::CorruptData)?;
+        MlsWelcome::from_bytes(welcome).map_err(|_| ProfileStoreError::Cryptographic)?;
+        if authorization.operation_id() != record.operation_id
+            || authorization.conversation_id() != record.conversation_id
+            || authorization.parent_epoch() != record.parent_epoch
+            || record.parent_epoch.checked_add(1) != Some(record.next_state.epoch())
+            || add.device_id() != proof.credential().device_id()
+            || add.role() != proof.invitation().role()
+            || add.invitation_id() != proof.invitation().invitation_id()
+            || add.credential_binding_hash() != verified.hash()
+            || record
+                .next_state
+                .member(add.device_id())
+                .is_none_or(|member| {
+                    member.role() != add.role()
+                        || member.joined_epoch() != record.next_state.epoch()
+                })
+            || !record
+                .next_state
+                .consumed_invitation_ids()
+                .contains(&add.invitation_id())
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let current = self.load_conversation(record.conversation_id)?;
+        if current.state.version() != record.next_state.version()
+            || current.state.conversation_id() != record.next_state.conversation_id()
+            || current.state.epoch() < record.next_state.epoch()
+            || !record
+                .next_state
+                .consumed_invitation_ids()
+                .iter()
+                .all(|invitation_id| {
+                    current
+                        .state
+                        .consumed_invitation_ids()
+                        .contains(invitation_id)
+                })
+            || current.state.epoch() == record.next_state.epoch()
+                && current.state != record.next_state
+        {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        Ok(())
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the authenticated replay-head fields remain explicit"
@@ -4769,10 +4969,18 @@ impl ProfileStore {
         previous_cursor: u64,
         cursor: u64,
         kind: ReplayCompletionKind,
-        state: &ConversationState,
+        completion_state: &ConversationState,
+        policy_state: &ConversationState,
         envelope: &RelayEnvelope,
     ) -> Result<SealedBlob, ProfileStoreError> {
-        let plaintext = encode_replay_head(previous_cursor, cursor, kind, state, envelope)?;
+        let plaintext = encode_replay_head(
+            previous_cursor,
+            cursor,
+            kind,
+            completion_state,
+            policy_state,
+            envelope,
+        )?;
         self.seal_operation_record(
             SecretRecordKind::LocalOperation,
             conversation_id,
@@ -4820,7 +5028,18 @@ impl ProfileStore {
             .map_err(|_| ProfileStoreError::Storage)?;
         let head =
             self.open_replay_head(next_state.conversation_id(), conversation.routing_id, bytes)?;
-        if head.cursor != conversation.replay_cursor || head.state != conversation.state {
+        self.verify_replay_position(
+            next_state.conversation_id(),
+            conversation.routing_id,
+            &conversation.state,
+            conversation.replay_cursor,
+            &head,
+        )?;
+        if head.policy_state != conversation.state
+            || next_state.version() != conversation.state.version()
+            || next_state.conversation_id() != conversation.state.conversation_id()
+            || conversation.state.epoch().checked_add(1) != Some(next_state.epoch())
+        {
             return Err(ProfileStoreError::CorruptData);
         }
         self.seal_replay_head(
@@ -4829,6 +5048,7 @@ impl ProfileStore {
             head.previous_cursor,
             head.cursor,
             head.kind,
+            &head.completion_state,
             next_state,
             &head.envelope,
         )
@@ -5559,6 +5779,7 @@ pub(crate) enum OutboundApplicationStatus {
     Ready,
     Accepted { cursor: u64 },
     Expired,
+    Removed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5614,6 +5835,7 @@ pub(crate) struct PendingJoin {
     pub issuer_public_key: Ed25519PublicKey,
     pub peer_bindings: Vec<VerifiedDeviceCredentialBinding>,
     pub state: Option<ConversationState>,
+    pub expected_commit_envelope_id: Option<EnvelopeId>,
     pub join_receipt: Option<StoredRelayEnvelope>,
 }
 
@@ -5654,11 +5876,19 @@ enum ReplayCompletionKind {
     Join = 3,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayHeadVersion {
+    V1,
+    V2,
+}
+
 struct ReplayHead {
+    version: ReplayHeadVersion,
     previous_cursor: u64,
     cursor: u64,
     kind: ReplayCompletionKind,
-    state: ConversationState,
+    completion_state: ConversationState,
+    policy_state: ConversationState,
     envelope: RelayEnvelope,
 }
 
@@ -5810,28 +6040,36 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
-        7 => return initialize_outbox_terminal_schema(connection),
+        8 => return initialize_outbox_removed_terminal_schema(connection),
+        7 => {
+            initialize_outbox_terminal_schema(connection)?;
+            return initialize_outbox_removed_terminal_schema(connection);
+        }
         6 => {
             initialize_replay_head_schema(connection)?;
-            return initialize_outbox_terminal_schema(connection);
+            initialize_outbox_terminal_schema(connection)?;
+            return initialize_outbox_removed_terminal_schema(connection);
         }
         5 => {
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
-            return initialize_outbox_terminal_schema(connection);
+            initialize_outbox_terminal_schema(connection)?;
+            return initialize_outbox_removed_terminal_schema(connection);
         }
         4 => {
             initialize_pending_join_schema(connection)?;
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
-            return initialize_outbox_terminal_schema(connection);
+            initialize_outbox_terminal_schema(connection)?;
+            return initialize_outbox_removed_terminal_schema(connection);
         }
         3 => {
             initialize_membership_outbox_schema(connection)?;
             initialize_pending_join_schema(connection)?;
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
-            return initialize_outbox_terminal_schema(connection);
+            initialize_outbox_terminal_schema(connection)?;
+            return initialize_outbox_removed_terminal_schema(connection);
         }
         2 => {
             initialize_message_history_schema(connection)?;
@@ -5839,7 +6077,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_pending_join_schema(connection)?;
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
-            return initialize_outbox_terminal_schema(connection);
+            initialize_outbox_terminal_schema(connection)?;
+            return initialize_outbox_removed_terminal_schema(connection);
         }
         0 => connection
             .execute_batch(
@@ -5984,7 +6223,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
     initialize_pending_join_schema(connection)?;
     initialize_pending_join_receipt_schema(connection)?;
     initialize_replay_head_schema(connection)?;
-    initialize_outbox_terminal_schema(connection)
+    initialize_outbox_terminal_schema(connection)?;
+    initialize_outbox_removed_terminal_schema(connection)
 }
 
 fn initialize_message_history_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -6189,6 +6429,86 @@ fn initialize_outbox_terminal_schema(connection: &Connection) -> Result<(), Prof
         .map_err(|_| ProfileStoreError::Storage)
 }
 
+fn initialize_outbox_removed_terminal_schema(
+    connection: &Connection,
+) -> Result<(), ProfileStoreError> {
+    let result = connection.execute_batch(
+        "BEGIN;
+         ALTER TABLE daemon_outbox RENAME TO daemon_outbox_v8;
+         CREATE TABLE daemon_outbox (
+            envelope_id BLOB PRIMARY KEY CHECK (length(envelope_id) = 16),
+            conversation_id BLOB NOT NULL,
+            message_id BLOB NOT NULL CHECK (length(message_id) = 16),
+            sender_counter INTEGER NOT NULL CHECK (sender_counter >= 1),
+            status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 4),
+            sealed_envelope BLOB,
+            accepted_cursor INTEGER,
+            terminal_reason INTEGER,
+            FOREIGN KEY (conversation_id)
+                REFERENCES daemon_conversation(conversation_id)
+                ON DELETE CASCADE,
+            UNIQUE (conversation_id, message_id),
+            UNIQUE (conversation_id, sender_counter),
+            CHECK (
+                (status = 1
+                    AND sealed_envelope IS NULL
+                    AND accepted_cursor IS NULL
+                    AND terminal_reason IS NULL)
+                OR
+                (status = 2
+                    AND sealed_envelope IS NOT NULL
+                    AND accepted_cursor IS NULL
+                    AND (terminal_reason IS NULL OR terminal_reason IN (1, 2)))
+                OR
+                (status = 3
+                    AND sealed_envelope IS NOT NULL
+                    AND accepted_cursor IS NOT NULL
+                    AND accepted_cursor >= 1
+                    AND terminal_reason IS NULL)
+                OR
+                (status = 4
+                    AND sealed_envelope IS NULL
+                    AND accepted_cursor IS NULL
+                    AND terminal_reason IS NULL)
+            )
+         ) WITHOUT ROWID;
+         INSERT INTO daemon_outbox (
+            envelope_id,
+            conversation_id,
+            message_id,
+            sender_counter,
+            status,
+            sealed_envelope,
+            accepted_cursor,
+            terminal_reason
+         )
+         SELECT
+            envelope_id,
+            conversation_id,
+            message_id,
+            sender_counter,
+            status,
+            sealed_envelope,
+            accepted_cursor,
+            terminal_reason
+         FROM daemon_outbox_v8;
+         DROP TABLE daemon_outbox_v8;
+         CREATE INDEX daemon_outbox_status_idx
+            ON daemon_outbox(status, conversation_id, sender_counter);
+         PRAGMA user_version = 9;
+         COMMIT;",
+    );
+    match result {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            connection
+                .execute_batch("ROLLBACK;")
+                .map_err(|_| ProfileStoreError::Storage)?;
+            Err(ProfileStoreError::Storage)
+        }
+    }
+}
+
 fn validate_bindings(
     state: &ConversationState,
     self_binding: &DeviceCredentialBinding,
@@ -6317,6 +6637,40 @@ fn encode_replay_head(
     previous_cursor: u64,
     cursor: u64,
     kind: ReplayCompletionKind,
+    completion_state: &ConversationState,
+    policy_state: &ConversationState,
+    envelope: &RelayEnvelope,
+) -> Result<Vec<u8>, ProfileStoreError> {
+    if cursor == 0 || previous_cursor >= cursor {
+        return Err(ProfileStoreError::InvalidTransition);
+    }
+    if completion_state.conversation_id() != policy_state.conversation_id()
+        || completion_state.version() != policy_state.version()
+        || completion_state.epoch() > policy_state.epoch()
+    {
+        return Err(ProfileStoreError::InvalidTransition);
+    }
+    let completion_state =
+        encode_conversation_state(completion_state).map_err(|_| ProfileStoreError::Protocol)?;
+    let policy_state =
+        encode_conversation_state(policy_state).map_err(|_| ProfileStoreError::Protocol)?;
+    let envelope = encode_relay_envelope(envelope).map_err(|_| ProfileStoreError::Protocol)?;
+    let mut record = Vec::new();
+    record.push(REPLAY_HEAD_VERSION_V2);
+    record.extend_from_slice(&previous_cursor.to_be_bytes());
+    record.extend_from_slice(&cursor.to_be_bytes());
+    record.push(kind as u8);
+    append_length_prefixed(&mut record, &completion_state)?;
+    append_length_prefixed(&mut record, &policy_state)?;
+    append_length_prefixed(&mut record, &envelope)?;
+    Ok(record)
+}
+
+#[cfg(test)]
+fn encode_replay_head_v1(
+    previous_cursor: u64,
+    cursor: u64,
+    kind: ReplayCompletionKind,
     state: &ConversationState,
     envelope: &RelayEnvelope,
 ) -> Result<Vec<u8>, ProfileStoreError> {
@@ -6326,7 +6680,7 @@ fn encode_replay_head(
     let state = encode_conversation_state(state).map_err(|_| ProfileStoreError::Protocol)?;
     let envelope = encode_relay_envelope(envelope).map_err(|_| ProfileStoreError::Protocol)?;
     let mut record = Vec::new();
-    record.push(LOCAL_RECORD_VERSION);
+    record.push(REPLAY_HEAD_VERSION_V1);
     record.extend_from_slice(&previous_cursor.to_be_bytes());
     record.extend_from_slice(&cursor.to_be_bytes());
     record.push(kind as u8);
@@ -6340,9 +6694,16 @@ fn decode_replay_head(record: &[u8]) -> Result<ReplayHead, ProfileStoreError> {
     const CURSOR_START: usize = PREVIOUS_START + 8;
     const KIND_INDEX: usize = CURSOR_START + 8;
     const HEADER_LENGTH: usize = KIND_INDEX + 1;
-    if record.len() <= HEADER_LENGTH || record[0] != LOCAL_RECORD_VERSION {
+    if record.len() <= HEADER_LENGTH
+        || !matches!(record[0], REPLAY_HEAD_VERSION_V1 | REPLAY_HEAD_VERSION_V2)
+    {
         return Err(ProfileStoreError::CorruptData);
     }
+    let version = match record[0] {
+        REPLAY_HEAD_VERSION_V1 => ReplayHeadVersion::V1,
+        REPLAY_HEAD_VERSION_V2 => ReplayHeadVersion::V2,
+        _ => return Err(ProfileStoreError::CorruptData),
+    };
     let previous_cursor = decode_u64(&record[PREVIOUS_START..CURSOR_START])?;
     let cursor = decode_positive_u64(&record[CURSOR_START..KIND_INDEX])?;
     if previous_cursor >= cursor {
@@ -6355,18 +6716,30 @@ fn decode_replay_head(record: &[u8]) -> Result<ReplayHead, ProfileStoreError> {
         _ => return Err(ProfileStoreError::CorruptData),
     };
     let mut remaining = &record[HEADER_LENGTH..];
-    let state = decode_conversation_state(take_length_prefixed(&mut remaining)?)
+    let completion_state = decode_conversation_state(take_length_prefixed(&mut remaining)?)
         .map_err(|_| ProfileStoreError::Protocol)?;
+    let policy_state = if version == ReplayHeadVersion::V2 {
+        decode_conversation_state(take_length_prefixed(&mut remaining)?)
+            .map_err(|_| ProfileStoreError::Protocol)?
+    } else {
+        completion_state.clone()
+    };
     let envelope = decode_relay_envelope(take_length_prefixed(&mut remaining)?)
         .map_err(|_| ProfileStoreError::Protocol)?;
-    if !remaining.is_empty() {
+    if !remaining.is_empty()
+        || completion_state.conversation_id() != policy_state.conversation_id()
+        || completion_state.version() != policy_state.version()
+        || completion_state.epoch() > policy_state.epoch()
+    {
         return Err(ProfileStoreError::CorruptData);
     }
     Ok(ReplayHead {
+        version,
         previous_cursor,
         cursor,
         kind,
-        state,
+        completion_state,
+        policy_state,
         envelope,
     })
 }
@@ -6403,6 +6776,36 @@ const fn conversation_role_value(role: KonclaveDomainCore::ConversationRole) -> 
         KonclaveDomainCore::ConversationRole::Administrator => 1,
         KonclaveDomainCore::ConversationRole::Member => 2,
     }
+}
+
+fn encode_pending_join_checkpoint(
+    state: &ConversationState,
+    expected_commit_envelope_id: EnvelopeId,
+) -> Result<Vec<u8>, ProfileStoreError> {
+    let state = encode_conversation_state(state).map_err(|_| ProfileStoreError::Protocol)?;
+    let mut record = Vec::with_capacity(1 + EnvelopeId::LENGTH + 2 + state.len());
+    record.push(PENDING_JOIN_CHECKPOINT_VERSION);
+    record.extend_from_slice(expected_commit_envelope_id.as_bytes());
+    append_length_prefixed(&mut record, &state)?;
+    Ok(record)
+}
+
+fn decode_pending_join_checkpoint(
+    record: &[u8],
+) -> Result<(ConversationState, EnvelopeId), ProfileStoreError> {
+    const HEADER_LENGTH: usize = 1 + EnvelopeId::LENGTH;
+    if record.len() <= HEADER_LENGTH || record[0] != PENDING_JOIN_CHECKPOINT_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let expected_commit_envelope_id = EnvelopeId::from_slice(&record[1..HEADER_LENGTH])
+        .map_err(|_| ProfileStoreError::CorruptData)?;
+    let mut remaining = &record[HEADER_LENGTH..];
+    let state = decode_conversation_state(take_length_prefixed(&mut remaining)?)
+        .map_err(|_| ProfileStoreError::Protocol)?;
+    if !remaining.is_empty() {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok((state, expected_commit_envelope_id))
 }
 
 fn encode_pending_join_record(
@@ -6582,6 +6985,25 @@ fn take_byte(input: &mut &[u8]) -> Result<u8, ProfileStoreError> {
     Ok(value)
 }
 
+fn terminalize_removed_outbox_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    conversation_id: ConversationId,
+) -> Result<usize, ProfileStoreError> {
+    transaction
+        .execute(
+            "UPDATE daemon_outbox
+             SET terminal_reason = ?1
+             WHERE conversation_id = ?2
+               AND status = 2
+               AND terminal_reason IS NULL",
+            params![
+                OUTBOX_TERMINAL_REASON_REMOVED,
+                conversation_id.as_bytes().as_slice()
+            ],
+        )
+        .map_err(|_| ProfileStoreError::Storage)
+}
+
 fn membership_outbox_status(value: i64) -> Result<MembershipOutboxStatus, ProfileStoreError> {
     match value {
         1 => Ok(MembershipOutboxStatus::Ready),
@@ -6595,6 +7017,7 @@ fn membership_outbox_status(value: i64) -> Result<MembershipOutboxStatus, Profil
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutboxTerminalReason {
     Expired,
+    Removed,
 }
 
 fn outbox_terminal_reason(
@@ -6603,6 +7026,7 @@ fn outbox_terminal_reason(
     match value {
         None => Ok(None),
         Some(OUTBOX_TERMINAL_REASON_EXPIRED) => Ok(Some(OutboxTerminalReason::Expired)),
+        Some(OUTBOX_TERMINAL_REASON_REMOVED) => Ok(Some(OutboxTerminalReason::Removed)),
         Some(_) => Err(ProfileStoreError::CorruptData),
     }
 }
@@ -7397,10 +7821,72 @@ mod tests {
     }
 
     fn downgrade_v8_to_v7(connection: &Connection) {
+        downgrade_v9_to_v8(connection);
         connection
             .execute_batch(
                 "ALTER TABLE daemon_outbox DROP COLUMN terminal_reason;
                  PRAGMA user_version = 7;",
+            )
+            .unwrap();
+    }
+
+    fn downgrade_v9_to_v8(connection: &Connection) {
+        connection
+            .execute_batch(
+                "ALTER TABLE daemon_outbox RENAME TO daemon_outbox_v9;
+                 CREATE TABLE daemon_outbox (
+                    envelope_id BLOB PRIMARY KEY CHECK (length(envelope_id) = 16),
+                    conversation_id BLOB NOT NULL,
+                    message_id BLOB NOT NULL CHECK (length(message_id) = 16),
+                    sender_counter INTEGER NOT NULL CHECK (sender_counter >= 1),
+                    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 4),
+                    sealed_envelope BLOB,
+                    accepted_cursor INTEGER,
+                    terminal_reason INTEGER
+                        CHECK (
+                            terminal_reason IS NULL
+                            OR (status = 2 AND terminal_reason = 1)
+                        ),
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES daemon_conversation(conversation_id)
+                        ON DELETE CASCADE,
+                    UNIQUE (conversation_id, message_id),
+                    UNIQUE (conversation_id, sender_counter),
+                    CHECK (
+                        (status = 1 AND sealed_envelope IS NULL AND accepted_cursor IS NULL)
+                        OR
+                        (status = 2 AND sealed_envelope IS NOT NULL AND accepted_cursor IS NULL)
+                        OR
+                        (status = 3 AND sealed_envelope IS NOT NULL
+                            AND accepted_cursor IS NOT NULL AND accepted_cursor >= 1)
+                        OR
+                        (status = 4 AND sealed_envelope IS NULL AND accepted_cursor IS NULL)
+                    )
+                 ) WITHOUT ROWID;
+                 INSERT INTO daemon_outbox (
+                    envelope_id,
+                    conversation_id,
+                    message_id,
+                    sender_counter,
+                    status,
+                    sealed_envelope,
+                    accepted_cursor,
+                    terminal_reason
+                 )
+                 SELECT
+                    envelope_id,
+                    conversation_id,
+                    message_id,
+                    sender_counter,
+                    status,
+                    sealed_envelope,
+                    accepted_cursor,
+                    terminal_reason
+                 FROM daemon_outbox_v9;
+                 DROP TABLE daemon_outbox_v9;
+                 CREATE INDEX daemon_outbox_status_idx
+                    ON daemon_outbox(status, conversation_id, sender_counter);
+                 PRAGMA user_version = 8;",
             )
             .unwrap();
     }
@@ -7846,6 +8332,228 @@ mod tests {
     }
 
     #[test]
+    fn valid_v1_replay_head_migrates_to_separated_v2_authority() {
+        let fixture = conversation_fixture("replay-head-v1-payload");
+        stage_inbox_message(&fixture, 1, 54, 0, 1);
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, 1)
+            .unwrap();
+        let stored = match fixture
+            .store
+            .inbox_operation(fixture.conversation_id, 1)
+            .unwrap()
+        {
+            InboxOperation::Complete { stored, .. } => stored,
+            _ => panic!("expected completed inbox"),
+        };
+        let conversation = fixture
+            .store
+            .load_conversation(fixture.conversation_id)
+            .unwrap();
+        let v1 = encode_replay_head_v1(
+            0,
+            1,
+            ReplayCompletionKind::Application,
+            &conversation.state,
+            stored.envelope(),
+        )
+        .unwrap();
+        let v1 = fixture
+            .store
+            .seal_operation_record(
+                SecretRecordKind::LocalOperation,
+                fixture.conversation_id,
+                fixture.routing_id,
+                REPLAY_HEAD_RECORD_SCOPE,
+                fixture.conversation_id.as_bytes(),
+                &v1,
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_conversation
+                 SET sealed_replay_head = ?1
+                 WHERE conversation_id = ?2",
+                params![v1.as_bytes(), fixture.conversation_id.as_bytes().as_slice()],
+            )
+            .unwrap();
+
+        fixture
+            .store
+            .load_conversation(fixture.conversation_id)
+            .unwrap();
+        let bytes: Vec<u8> = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sealed_replay_head FROM daemon_conversation
+                 WHERE conversation_id = ?1",
+                params![fixture.conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let migrated = fixture
+            .store
+            .open_replay_head(fixture.conversation_id, fixture.routing_id, bytes)
+            .unwrap();
+        assert_eq!(migrated.version, ReplayHeadVersion::V2);
+        assert_eq!(migrated.completion_state, conversation.state);
+        assert_eq!(migrated.policy_state, conversation.state);
+    }
+
+    #[test]
+    fn progressed_v1_membership_head_recovers_historical_completion_state() {
+        let fixture = conversation_fixture("v1-membership-progress");
+        let (first_operation, first_envelope, first_control, first_state, first_bindings) =
+            membership_transition(&fixture, 55);
+        let first_receipt = StoredRelayEnvelope::new(first_envelope, 1).unwrap();
+        fixture
+            .store
+            .record_membership_inbox_envelope(&first_receipt)
+            .unwrap();
+        fixture
+            .store
+            .save_membership_inbox_transition(
+                fixture.conversation_id,
+                1,
+                fixture.device_id,
+                0,
+                first_operation,
+                &first_control,
+                &first_state,
+                &first_bindings,
+            )
+            .unwrap();
+        fixture
+            .store
+            .complete_membership_inbox(fixture.conversation_id, 1)
+            .unwrap();
+
+        let current = fixture
+            .store
+            .load_conversation(fixture.conversation_id)
+            .unwrap();
+        let second_operation =
+            MembershipOperationId::from_bytes([56; MembershipOperationId::LENGTH]);
+        let second_authorization = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            fixture.conversation_id,
+            1,
+            second_operation,
+            MembershipChange::ChangeRole(ChangeMemberRole::new(
+                fixture.device_id,
+                ConversationRole::Administrator,
+            )),
+        );
+        let second_control = encode_membership_control(&second_authorization, None).unwrap();
+        let second_state = current
+            .state
+            .apply_membership_authorization(fixture.device_id, &second_authorization, 2)
+            .unwrap();
+        let second_envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            fixture.routing_id,
+            EnvelopeId::from_bytes([56; EnvelopeId::LENGTH]),
+            DeliveryClass::GroupCommit,
+            Some(1),
+            1_900_000_000,
+            vec![56],
+        )
+        .unwrap();
+        let second_bindings = current
+            .bindings
+            .iter()
+            .map(|binding| binding.binding().clone())
+            .collect::<Vec<_>>();
+        fixture
+            .store
+            .store_membership_outbox(
+                second_operation,
+                fixture.conversation_id,
+                1,
+                &second_envelope,
+                &second_control,
+                &second_state,
+                &second_bindings,
+                None,
+            )
+            .unwrap();
+        let second_receipt = StoredRelayEnvelope::new(second_envelope, 2).unwrap();
+        fixture
+            .store
+            .mark_membership_outbox_accepted(&second_receipt)
+            .unwrap();
+        fixture
+            .store
+            .complete_membership_outbox(second_operation)
+            .unwrap();
+
+        let current = fixture
+            .store
+            .load_conversation(fixture.conversation_id)
+            .unwrap();
+        let v1 = encode_replay_head_v1(
+            0,
+            1,
+            ReplayCompletionKind::Membership,
+            &current.state,
+            first_receipt.envelope(),
+        )
+        .unwrap();
+        let v1 = fixture
+            .store
+            .seal_operation_record(
+                SecretRecordKind::LocalOperation,
+                fixture.conversation_id,
+                fixture.routing_id,
+                REPLAY_HEAD_RECORD_SCOPE,
+                fixture.conversation_id.as_bytes(),
+                &v1,
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_conversation
+                 SET sealed_replay_head = ?1
+                 WHERE conversation_id = ?2",
+                params![v1.as_bytes(), fixture.conversation_id.as_bytes().as_slice()],
+            )
+            .unwrap();
+
+        let reopened = fixture
+            .store
+            .load_conversation(fixture.conversation_id)
+            .unwrap();
+        assert_eq!(reopened.state, second_state);
+        let bytes: Vec<u8> = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sealed_replay_head FROM daemon_conversation
+                 WHERE conversation_id = ?1",
+                params![fixture.conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let migrated = fixture
+            .store
+            .open_replay_head(fixture.conversation_id, fixture.routing_id, bytes)
+            .unwrap();
+        assert_eq!(migrated.version, ReplayHeadVersion::V2);
+        assert_eq!(migrated.completion_state, first_state);
+        assert_eq!(migrated.policy_state, second_state);
+    }
+
+    #[test]
     fn pending_join_reserves_proof_and_welcome_state_in_order() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("pending-join-test").unwrap();
@@ -7926,14 +8634,29 @@ mod tests {
             7,
         )
         .unwrap();
+        let expected_commit_envelope_id = receipt.envelope().envelope_id();
         store
-            .checkpoint_pending_join_state(conversation_id, &state, &receipt)
+            .checkpoint_pending_join_state(
+                conversation_id,
+                &state,
+                expected_commit_envelope_id,
+                &receipt,
+            )
             .unwrap();
         store
-            .checkpoint_pending_join_state(conversation_id, &state, &receipt)
+            .checkpoint_pending_join_state(
+                conversation_id,
+                &state,
+                expected_commit_envelope_id,
+                &receipt,
+            )
             .unwrap();
         let checkpointed = store.load_pending_join(conversation_id).unwrap();
         assert_eq!(checkpointed.state, Some(state));
+        assert_eq!(
+            checkpointed.expected_commit_envelope_id,
+            Some(expected_commit_envelope_id)
+        );
         assert!(checkpointed.join_receipt.as_ref() == Some(&receipt));
         assert_eq!(
             store.pending_join_ids(None, 10).unwrap(),
@@ -9320,7 +10043,9 @@ mod tests {
         let locked =
             LockedProfile::acquire(root.path(), ProfileId::parse("schema-test").unwrap()).unwrap();
         let connection = Connection::open(locked.profile_database_path()).unwrap();
-        connection.pragma_update(None, "user_version", 9).unwrap();
+        connection
+            .pragma_update(None, "user_version", PROFILE_SCHEMA_VERSION + 1)
+            .unwrap();
         drop(connection);
         assert_eq!(
             locked.open_store(sealer()).err(),
@@ -9329,7 +10054,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v1_to_v8_transactionally() {
+    fn profile_schema_migrates_v1_to_v9_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration-test").unwrap();
         let locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
@@ -9367,7 +10092,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v2_to_v8() {
+    fn profile_schema_migrates_v2_to_v9() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("message-history-migration").unwrap();
         let database_path = {
@@ -9527,7 +10252,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v3_to_v8_membership_journal() {
+    fn profile_schema_migrates_v3_to_v9_membership_journal() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("membership-migration").unwrap();
         let database_path = {
@@ -9575,7 +10300,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v6_to_v8_with_replay_heads() {
+    fn profile_schema_migrates_v6_to_v9_with_replay_heads() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("replay-head-migration").unwrap();
         let database_path = {
@@ -9686,7 +10411,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v7_to_v8_outbox_terminal_reasons() {
+    fn profile_schema_migrates_v7_to_v9_outbox_terminal_reasons() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-terminal-migration").unwrap();
         let database_path = {
@@ -9721,6 +10446,82 @@ mod tests {
             .unwrap();
         assert_eq!(version, PROFILE_SCHEMA_VERSION);
         assert_eq!(terminal_reason_columns, 1);
+    }
+
+    #[test]
+    fn profile_schema_migrates_v8_to_v9_removed_terminal_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("outbox-removed-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_v9_to_v8(&connection);
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let connection = store.lock().unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'daemon_outbox'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert!(schema.contains("terminal_reason IN (1, 2)"));
+    }
+
+    #[test]
+    fn failed_v9_removed_terminal_migration_preserves_v8_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("outbox-removed-rollback").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_v9_to_v8(&connection);
+        connection
+            .execute("CREATE TABLE daemon_outbox_v8 (sentinel INTEGER)", [])
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name IN ('daemon_outbox', 'daemon_outbox_v8')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 8);
+        assert_eq!(tables, 2);
     }
 
     #[test]
@@ -9759,7 +10560,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v5_to_v8_join_receipts() {
+    fn profile_schema_migrates_v5_to_v9_join_receipts() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("join-receipt-migration").unwrap();
         let database_path = {
@@ -9851,7 +10652,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v4_to_v8_pending_joins() {
+    fn profile_schema_migrates_v4_to_v9_pending_joins() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("pending-join-migration").unwrap();
         let database_path = {

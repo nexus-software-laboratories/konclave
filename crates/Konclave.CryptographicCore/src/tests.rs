@@ -1,6 +1,6 @@
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
-    DeviceCredentialBinding, Ed25519PublicKey, Invitation, InvitationNonce, Member,
+    DeviceCredentialBinding, Ed25519PublicKey, EnvelopeId, Invitation, InvitationNonce, Member,
     MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId, ProtocolVersion,
     RemoveMember, RoutingId, SignatureScheme,
 };
@@ -22,6 +22,10 @@ fn conversation_id(value: u8) -> ConversationId {
 
 fn routing_id(value: u8) -> RoutingId {
     RoutingId::from_bytes([value; RoutingId::LENGTH])
+}
+
+fn envelope_id(value: u8) -> EnvelopeId {
+    EnvelopeId::from_bytes([value; EnvelopeId::LENGTH])
 }
 
 fn sealer(value: u8) -> SecretSealer {
@@ -88,7 +92,9 @@ fn sealed_mls_state_recovers_pending_join_commit_ratchets_and_removal() {
         .restore_join_proof(&proof, alice_identity.public_key(), 50)
         .unwrap();
 
-    let orphaned_add = alice_group.create_add_commit(proof_for_alice, 50).unwrap();
+    let orphaned_add = alice_group
+        .create_add_commit(proof_for_alice, envelope_id(1), 50)
+        .unwrap();
     let alice_parent_state = alice_group.state().clone();
     drop(alice_group);
 
@@ -113,7 +119,7 @@ fn sealed_mls_state_recovers_pending_join_commit_ratchets_and_removal() {
         .unwrap();
     alice_group.reject_pending_commit().unwrap();
     let add = alice_group
-        .create_add_commit(decode_join_proof(&proof_bytes).unwrap(), 50)
+        .create_add_commit(decode_join_proof(&proof_bytes).unwrap(), envelope_id(2), 50)
         .unwrap();
     let alice_pending_state = add.next_state().clone();
     drop(orphaned_add);
@@ -455,7 +461,9 @@ fn mls_add_send_remove_flow_authenticates_sender_and_epochs() {
     let proof = bob_client
         .create_join_proof(&bob_identity, invitation, alice_identity.public_key(), 50)
         .unwrap();
-    let add = alice_group.create_add_commit(proof, 50).unwrap();
+    let add = alice_group
+        .create_add_commit(proof, envelope_id(3), 50)
+        .unwrap();
     let authorization_bytes = encode_membership_change(add.authorization()).unwrap();
     assert!(
         !add.commit()
@@ -557,7 +565,9 @@ fn incoming_commit_must_match_the_exact_authorization() {
     let proof = bob_client
         .create_join_proof(&bob_identity, invitation, alice_identity.public_key(), 50)
         .unwrap();
-    let add = alice_group.create_add_commit(proof, 50).unwrap();
+    let add = alice_group
+        .create_add_commit(proof, envelope_id(4), 50)
+        .unwrap();
     alice_group.accept_pending_commit().unwrap();
     let mut bob_group = bob_client.join_group(add.welcome().unwrap()).unwrap();
 
@@ -618,7 +628,9 @@ fn existing_member_can_validate_a_later_add_commit() {
             50,
         )
         .unwrap();
-    let bob_add = alice_group.create_add_commit(bob_proof, 50).unwrap();
+    let bob_add = alice_group
+        .create_add_commit(bob_proof, envelope_id(5), 50)
+        .unwrap();
     alice_group.accept_pending_commit().unwrap();
     let mut bob_group = bob_client.join_group(bob_add.welcome().unwrap()).unwrap();
 
@@ -649,7 +661,9 @@ fn existing_member_can_validate_a_later_add_commit() {
             50,
         )
         .unwrap();
-    let charlie_add = alice_group.create_add_commit(charlie_proof, 50).unwrap();
+    let charlie_add = alice_group
+        .create_add_commit(charlie_proof, envelope_id(6), 50)
+        .unwrap();
     let applied = bob_group
         .process_membership_bundle(&charlie_add.encode_bundle().unwrap(), 50)
         .unwrap();

@@ -131,6 +131,7 @@ the mutually supported maximum.
 | Relay forks epoch history | Outside the initial non-equivocation assumption; reject observed conflicts, halt sending on unresolved branches, and require a trusted sequencer until transparency or reconciliation is designed |
 | Insider replays a valid message | Signed application message identifier and persistent deduplication |
 | Unauthorized member change | Administrator policy checked by every client before applying the Commit |
+| Welcome receipt substitution | Reserve the add Commit envelope identifier before MLS creation, authenticate it in signed Welcome GroupInfo, and require the exact relay receipt at checkpoint and reopen |
 | Invitation theft | Bind the signed invitation to an independently verified expected `DeviceId`, conversation, role, expiry, and nonce; enforce consumption in authenticated conversation state |
 | Credential substitution | Device-root binding validation and optional out-of-band fingerprint comparison |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |

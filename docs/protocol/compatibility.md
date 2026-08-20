@@ -141,6 +141,10 @@ durably assigned a cursor, not that every recipient has processed it.
 - Each routing identifier has an append-only, monotonically increasing cursor.
 - Clients persist the highest contiguous processed cursor and acknowledge it.
 - Reconnect requests messages after the last durable cursor.
+- Before processing a replay page, clients validate every returned cursor as exactly
+  `after_cursor + 1`, then the next value in sequence, using checked arithmetic. A gap,
+  duplicate, regression, overflow, or inconsistent page `next_cursor` rejects the
+  whole page before journal or MLS mutation.
 - Cursor gaps remain visible until filled, expired by policy, or explicitly reported
   unrecoverable.
 - Application messages may arrive more than once and are deduplicated by signed
@@ -163,6 +167,16 @@ the parent epoch. `MembershipCommitBundle` pairs that encrypted control message 
 the bound MLS Commit PrivateMessage. Both bundle fields are opaque to the relay, and
 their aggregate encoding must fit the normal relay payload bound.
 
+An add-member sender reserves the relay `EnvelopeId` before creating the MLS Commit.
+The Welcome's signed GroupInfo carries extension `0xff02` with payload
+`version_u8 = 1 || expected_envelope_id[16]`. This extension accompanies the full
+conversation-state GroupInfo extension (`0xff00`), while the next GroupContext retains
+the authenticated state digest extension (`0xff01`). A joining daemon accepts only the
+exact GroupCommit receipt whose envelope identifier equals the signed expected value,
+in addition to matching route, class, parent epoch, and state. Legacy Welcomes without
+extension `0xff02` remain distinguishable for compatibility handling but fail daemon
+join before checkpoint or MLS persistence.
+
 Clients verify the selected Commit, reject observed conflicts or stale proposals, and
 halt security-sensitive sending on an unresolved branch. Compare-and-set does not
 provide non-equivocation against a malicious relay; replacing this trust requires a
@@ -182,6 +196,12 @@ A duplicate produces the original success outcome without repeating side effects
 A reused identifier with different authenticated content is a protocol violation.
 Attribution, deduplication, and authorization always key from the authenticated MLS
 sender, not a field asserted by the encrypted application payload.
+
+An exact retry of an already applied add-member operation returns its original sealed
+Welcome and accepted cursor even after later authenticated policy transitions. The
+retry must match the complete canonical JoinProof and historical operation, next
+state, Welcome, and exact receipt. Current policy must prove monotonic invitation
+consumption, but it is not required to equal the historical next state.
 
 In protocol v1, `expires_at_unix_seconds` is the deadline for accepting a first
 submission. An identical envelope retry returns its original cursor after that
@@ -205,6 +225,10 @@ Errors classify at least:
 - expired or consumed invitation;
 - unavailable dependency;
 - unrecoverable local state.
+
+A ready application operation terminalized by removal of its local sender returns a
+permanent not-member error. It is distinct from expiry, retains its stable identifiers
+and sealed envelope, and is never automatically resubmitted.
 
 Retryability is explicit. Clients use bounded exponential backoff with jitter and
 idempotency identifiers. Permanent validation and authorization failures are not

@@ -118,6 +118,7 @@ where
                     .await
                 }
                 OutboundApplicationStatus::Expired => Err(ApplicationServiceError::OutboundExpired),
+                OutboundApplicationStatus::Removed => Err(ApplicationServiceError::OutboundRemoved),
             };
         }
         self.retry_ready_locked(request.now_unix_seconds).await?;
@@ -404,14 +405,7 @@ where
         page: ReplayPage,
         now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
-        if page.next_cursor() < after_cursor
-            || page
-                .envelopes()
-                .iter()
-                .any(|stored| stored.cursor() <= after_cursor)
-        {
-            return Err(ApplicationServiceError::InvalidRelayResponse);
-        }
+        validate_replay_page(after_cursor, &page)?;
         let has_more = page.has_more();
         let envelopes = page.envelopes().to_vec();
         let last_cursor = envelopes.last().map(StoredRelayEnvelope::cursor);
@@ -496,6 +490,16 @@ where
             .map_err(|_| ApplicationServiceError::Task)??;
         let mut accepted = 0;
         for pending in pending {
+            let conversations = self.conversations.clone();
+            let conversation_id = pending.conversation_id;
+            let eligible = tokio::task::spawn_blocking(move || {
+                conversations.outbound_retry_eligible(conversation_id)
+            })
+            .await
+            .map_err(|_| ApplicationServiceError::Task)??;
+            if !eligible {
+                continue;
+            }
             if pending.envelope.expires_at_unix_seconds() <= now_unix_seconds {
                 match self.expire_outbound(pending.envelope).await? {
                     ExpireOutboundResult::Expired => continue,
@@ -608,6 +612,25 @@ where
     }
 }
 
+fn validate_replay_page(
+    after_cursor: u64,
+    page: &ReplayPage,
+) -> Result<(), ApplicationServiceError> {
+    let mut expected_cursor = after_cursor;
+    for stored in page.envelopes() {
+        expected_cursor = expected_cursor
+            .checked_add(1)
+            .ok_or(ApplicationServiceError::InvalidRelayResponse)?;
+        if stored.cursor() != expected_cursor {
+            return Err(ApplicationServiceError::InvalidRelayResponse);
+        }
+    }
+    if page.next_cursor() != expected_cursor {
+        return Err(ApplicationServiceError::InvalidRelayResponse);
+    }
+    Ok(())
+}
+
 fn sent_membership(accepted: AcceptedMembership) -> SentMembership {
     SentMembership {
         operation_id: accepted.operation_id,
@@ -639,6 +662,8 @@ pub(crate) enum ApplicationServiceError {
     IdempotencyConflict,
     #[error("application message expired before relay acceptance")]
     OutboundExpired,
+    #[error("application sender is no longer a conversation member")]
+    OutboundRemoved,
     #[error("relay response does not match the requested operation")]
     InvalidRelayResponse,
 }
@@ -651,7 +676,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use KonclaveClientLibrary::RelayWatchSession;
-    use KonclaveDomainCore::{AcknowledgeRequest, ApplicationContent, ReplayPage, ReplayRequest};
+    use KonclaveDomainCore::{
+        AcknowledgeRequest, ApplicationContent, DeliveryClass, EnvelopeId, ProtocolVersion,
+        RelayEnvelope, ReplayPage, ReplayRequest,
+    };
     use KonclaveSecretStorage::{
         ExternalWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
     };
@@ -1097,7 +1125,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_member_retry_returns_original_welcome_after_lost_response() {
-        let (_root, alice, _bob, created, proof) = invited_coordinators();
+        let (_root, alice, bob, created, proof) = invited_coordinators();
         let proof_bytes = encode_join_proof(&proof).unwrap();
         let retry_proof = decode_join_proof(&proof_bytes).unwrap();
         let repeated_proof = decode_join_proof(&proof_bytes).unwrap();
@@ -1118,16 +1146,27 @@ mod tests {
             .add_member(created.conversation_id, retry_proof, 50, 1_900_000_000)
             .await
             .unwrap();
+        let later = service
+            .change_role(
+                created.conversation_id,
+                bob.device_id().unwrap(),
+                ConversationRole::Administrator,
+                60,
+                1_900_000_000,
+            )
+            .await
+            .unwrap();
         let repeated = service
             .add_member(created.conversation_id, repeated_proof, 50, 1_900_000_000)
             .await
             .unwrap();
 
+        assert_eq!(later.cursor, 2);
         assert_eq!(accepted.operation_id, repeated.operation_id);
         assert_eq!(accepted.cursor, repeated.cursor);
         assert_eq!(accepted.welcome, repeated.welcome);
         assert!(accepted.welcome.is_some());
-        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -1158,6 +1197,62 @@ mod tests {
             bob.replay_position(created.conversation_id).unwrap().1,
             added.cursor
         );
+    }
+
+    #[tokio::test]
+    async fn welcome_rejects_same_parent_commit_with_a_different_envelope_id() {
+        let (_root, alice, bob, created, proof) = invited_coordinators();
+        let alice_service = ApplicationService::new(alice, RecordingRelay::new(false));
+        let added = alice_service
+            .add_member(created.conversation_id, proof, 50, 1_900_000_000)
+            .await
+            .unwrap();
+        let original = alice_service.transport.envelopes.lock().unwrap()[0].clone();
+        let wrong = StoredRelayEnvelope::new(
+            RelayEnvelope::new(
+                ProtocolVersion::application_v1(),
+                original.envelope().routing_id(),
+                EnvelopeId::from_bytes([99; EnvelopeId::LENGTH]),
+                DeliveryClass::GroupCommit,
+                original.envelope().expected_parent_epoch(),
+                original.envelope().expires_at_unix_seconds(),
+                original.envelope().payload().to_vec(),
+            )
+            .unwrap(),
+            original.cursor(),
+        )
+        .unwrap();
+        let welcome = added.welcome.unwrap();
+        let bob_service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        bob_service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![wrong], added.cursor, false).unwrap());
+
+        assert!(matches!(
+            bob_service
+                .accept_welcome(
+                    created.conversation_id,
+                    MlsWelcome::from_bytes(&welcome).unwrap(),
+                    added.cursor,
+                )
+                .await,
+            Err(ApplicationServiceError::Conversation(
+                ConversationCoordinatorError::StateMismatch
+            ))
+        ));
+
+        bob_service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![original], added.cursor, false).unwrap());
+        let joined = bob_service
+            .accept_welcome(
+                created.conversation_id,
+                MlsWelcome::from_bytes(&welcome).unwrap(),
+                added.cursor,
+            )
+            .await
+            .unwrap();
+        assert_eq!(joined.epoch, 1);
     }
 
     #[tokio::test]
@@ -1262,6 +1357,116 @@ mod tests {
                 KonclaveClientError::TransportUnavailable
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn replay_rejects_a_gap_before_mutation_then_accepts_the_contiguous_page() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let first = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::text("contiguous-first").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let second = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::text("contiguous-second").unwrap(),
+                None,
+                1_700_000_001_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let first = StoredRelayEnvelope::new(first.envelope, 1).unwrap();
+        let second = StoredRelayEnvelope::new(second.envelope, 2).unwrap();
+        let service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![second.clone()], 2, false).unwrap());
+
+        assert!(matches!(
+            service.replay_once(conversation_id, 100, 60).await,
+            Err(ApplicationServiceError::InvalidRelayResponse)
+        ));
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 0);
+        assert!(service.transport.acknowledgments.lock().unwrap().is_empty());
+
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![first, second], 2, false).unwrap());
+        let replayed = service.replay_once(conversation_id, 100, 60).await.unwrap();
+        assert_eq!(replayed.messages.len(), 2);
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 2);
+        let routing_id = bob.replay_position(conversation_id).unwrap().0;
+
+        let overflow = ReplayPage::new(
+            vec![
+                StoredRelayEnvelope::new(
+                    RelayEnvelope::new(
+                        ProtocolVersion::application_v1(),
+                        routing_id,
+                        EnvelopeId::from_bytes([98; EnvelopeId::LENGTH]),
+                        DeliveryClass::GroupApplication,
+                        None,
+                        1,
+                        vec![1],
+                    )
+                    .unwrap(),
+                    u64::MAX,
+                )
+                .unwrap(),
+            ],
+            u64::MAX,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_replay_page(u64::MAX, &overflow),
+            Err(ApplicationServiceError::InvalidRelayResponse)
+        ));
+    }
+
+    #[tokio::test]
+    async fn self_removal_terminalizes_ready_application_without_retry_submission() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let service = ApplicationService::new(bob.clone(), RecordingRelay::new(true));
+        let retry = || request(conversation_id, "removed-ready-application");
+
+        assert!(matches!(
+            service.send(retry()).await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        let ready_envelope = bob.ready_outbox().unwrap()[0].envelope.clone();
+        let removal = alice
+            .prepare_remove_member(conversation_id, bob.device_id().unwrap(), 1_900_000_000)
+            .unwrap();
+        let removal = StoredRelayEnvelope::new(removal.envelope, 1).unwrap();
+        alice.mark_membership_outbox_accepted(&removal).unwrap();
+        let removed = bob
+            .process_inbound_membership(conversation_id, &removal, 60)
+            .unwrap();
+        assert!(removed.removed_self);
+
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
+        assert_eq!(service.retry_ready(60).await.unwrap(), 0);
+        assert!(service.transport.envelopes.lock().unwrap().is_empty());
+        assert!(matches!(
+            service.send(retry()).await,
+            Err(ApplicationServiceError::OutboundRemoved)
+        ));
+        assert!(service.transport.envelopes.lock().unwrap().is_empty());
+
+        let late_echo = StoredRelayEnvelope::new(ready_envelope, 2).unwrap();
+        let replayed = bob
+            .process_inbound_application(conversation_id, &late_echo)
+            .unwrap();
+        assert_eq!(replayed.direction, MessageDirection::Outbound);
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 2);
     }
 
     #[tokio::test]

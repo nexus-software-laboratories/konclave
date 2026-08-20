@@ -23,7 +23,7 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 
 ## Profile store
 
-Schema version 8 stores:
+Schema version 9 stores:
 
 - one profile row with a sealed device root and optional sealed relay credential;
 - normalized non-secret relay endpoint;
@@ -32,7 +32,7 @@ Schema version 8 stores:
 - sealed, root-verified conversation credential bindings;
 - sender counter and replay cursor;
 - outbound application reservations, sealed envelopes, relay acceptance state, and
-  explicit terminal expiry reasons;
+  explicit terminal expiry or local-removal reasons;
 - sealed outbound membership control, Commit envelopes, next policy state, Welcome
   bytes, and ready/accepted/applied/orphaned state;
 - one sealed envelope observation for every accepted route cursor;
@@ -40,17 +40,24 @@ Schema version 8 stores:
 - received membership Commit envelopes plus sealed decrypted control and validated
   next-policy checkpoints;
 - pending invitation joins with sealed conversation signing material, one-time
-  KeyPackage proof, peer bindings, checkpointed Welcome state, and the exact relay
-  Commit receipt establishing the joined replay baseline;
-- one sealed replay head binding the previous and current cursor, exact envelope,
-  completion kind, and authenticated conversation policy;
+  KeyPackage proof, peer bindings, checkpointed Welcome state, the Welcome-authenticated
+  expected Commit envelope identifier, and the exact relay Commit receipt establishing
+  the joined replay baseline;
+- one versioned sealed replay head binding the previous and current cursor, exact
+  envelope, completion kind, historical completion policy, and independently advanced
+  current policy authority;
 - one sealed cursor-ordered history for both sent and received messages.
 
-Version 1 through 7 schema changes use explicit transactions. Before changing a v2
+Version 1 through 8 schema changes use explicit transactions. Before changing a v2
 schema, startup rejects ready or accepted outbound rows whose plaintext cannot be
 reconstructed, leaving version 2 unchanged. Sealer-backed inbound history
 rehydration runs afterward in bounded, resumable batches; a failure preserves the
 source rows and retries forward on the next open.
+
+The version 9 migration reconstructs the application outbox in one transaction so
+terminal reason `2` can represent local removal without reusing expiry. Any copy,
+constraint, or index failure rolls the migration back and leaves the version 8 table
+authoritative.
 
 Schema migration never infers a replay head from legacy plaintext completion fields.
 A legacy profile with a nonzero cursor and no sealed replay head fails closed and
@@ -95,6 +102,14 @@ supersede the local expiry reason. Before new outbound work begins, recovery mus
 any unsealed reservation into an abandoned tombstone without rolling back its sender
 counter or making its identifiers reusable.
 
+Publishing a policy that removes the local device atomically terminalizes every
+unaccepted ready application row for that conversation with the distinct removed
+reason. Stable message and envelope identifiers, sender counters, sealed envelopes,
+and pending history remain intact. Exact retry returns a permanent not-member error,
+and batch retry rechecks sealed current membership immediately before each network
+submission. A later exact authenticated echo may still supersede the local terminal
+reason and advance replay without poisoning the route.
+
 The application inbox transitions from received to message-saved to complete, and
 completion advances only the next contiguous replay cursor. Exact repeats are
 idempotent; conflicting identifiers, counters, cursors, routes, senders, or
@@ -115,15 +130,20 @@ valid because crash-before-ready can permanently consume a local sender generati
 the later counter completes and advances both the high-water value and durable replay
 cursor.
 
-Every cursor advance writes a sealed replay head in the same transaction as inbox
-completion. The head binds the previous and current cursor, exact envelope, completion
-kind, and authenticated conversation policy. On reopen, the plaintext replay cursor
-must match that head and its exact sealed cursor observation. Application heads
-require the matching sealed inbox message. Membership heads require the sealed next
-policy to equal the published conversation policy. A joined head is the only cursor
-without an inbox row, and it must be the sealed GroupCommit receipt whose parent epoch
-advances to the joined policy epoch. Plaintext status or cursor edits therefore cannot
-skip an unapplied removal or pre-join history.
+Every cursor advance writes a version 2 sealed replay head in the same transaction as
+inbox completion. The head binds the previous and current cursor, exact envelope,
+completion kind, historical completion policy, and current policy authority. Later
+local policy acceptance preserves the historical completion fields and advances only
+the current authority after verifying the prior head and an exact one-epoch policy
+transition. On reopen, the plaintext replay cursor and sealed profile policy must
+match the head and its exact sealed cursor observation. Application heads require the
+matching sealed inbox message. Membership heads require their historical completion
+policy to equal the sealed transition next state. A joined head is the only cursor
+without an inbox row, and its historical completion policy must match the exact
+GroupCommit receipt parent epoch. Valid version 1 heads are verified under their
+legacy constraints and rewritten as version 2; ambiguous or inconsistent version 1
+heads fail closed. Plaintext status or cursor edits therefore cannot skip an unapplied
+removal or pre-join history.
 
 Membership commits use separate sealed outbox and inbox journals because their
 acceptance advances both MLS state and application policy rather than an application
@@ -156,9 +176,14 @@ generating a one-time MLS KeyPackage. The resulting JoinProof is attached in a s
 transition. Welcome processing validates the encrypted state before checkpointing it,
 then persists the joined MLS group and publishes the conversation record. Recovery
 can retry from the checkpoint when group persistence did not occur, or finish profile
-publication when the group was already persisted. Before accepting the Welcome, the
-daemon replays the claimed relay cursor and requires the exact route and GroupCommit
-receipt. That sealed receipt initializes the joined conversation's replay cursor, so
+publication when the group was already persisted. Before creating an add Commit, the daemon reserves its relay `EnvelopeId` and places
+that expected identifier in a versioned MLS GroupInfo extension authenticated by the
+Welcome. Before accepting the Welcome, the daemon replays the claimed relay cursor and
+requires that exact identifier in addition to the route, class, parent epoch, and
+authenticated state. The checkpoint seals both the expected identifier and exact
+receipt, and reopen rechecks their equality. Legacy Welcomes without the binding are
+not joinable by the daemon. That sealed receipt initializes the joined conversation's
+replay cursor, so
 the new member neither reprocesses its already-consumed add Commit nor attempts to
 decrypt pre-membership history.
 
@@ -202,7 +227,10 @@ cannot reuse ciphertext generations. Blocking cryptographic and SQLite work runs
 outside Tokio executor threads; the ordered relay submission gate is the only lock
 intentionally held across network I/O.
 
-Inbound replay rejects pages that move behind the requested durable cursor. Each
+Inbound replay preflights the complete page before any journal or MLS mutation. Every
+returned cursor must be exactly one greater than the prior cursor, beginning at the
+requested durable cursor, and checked arithmetic rejects overflow. The page's next
+cursor must equal the final contiguous cursor. Each
 application or membership envelope is journaled before decryption. For application
 messages, the authenticated sender and MLS epoch are sealed before receiver-ratchet
 persistence. For membership commits, decrypted control and validated next policy are

@@ -553,7 +553,9 @@ impl ConversationCoordinator {
             .map_err(|_| ConversationCoordinatorError::SecretStorage)?;
         let pending = self.store.load_pending_join(conversation_id)?;
         if pending.state.is_some() && has_group {
-            if pending.join_receipt.as_ref() != Some(receipt) {
+            if pending.join_receipt.as_ref() != Some(receipt)
+                || pending.expected_commit_envelope_id != Some(receipt.envelope().envelope_id())
+            {
                 return Err(ConversationCoordinatorError::StateMismatch);
             }
             return self.finalize_pending_join_unlocked(conversation_id);
@@ -585,8 +587,18 @@ impl ConversationCoordinator {
         {
             return Err(ConversationCoordinatorError::StateMismatch);
         }
-        self.store
-            .checkpoint_pending_join_state(conversation_id, prepared.state(), receipt)?;
+        let expected_commit_envelope_id = prepared
+            .expected_commit_envelope_id()
+            .ok_or(ConversationCoordinatorError::StateMismatch)?;
+        if receipt.envelope().envelope_id() != expected_commit_envelope_id {
+            return Err(ConversationCoordinatorError::StateMismatch);
+        }
+        self.store.checkpoint_pending_join_state(
+            conversation_id,
+            prepared.state(),
+            expected_commit_envelope_id,
+            receipt,
+        )?;
         prepared
             .persist()
             .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
@@ -606,6 +618,9 @@ impl ConversationCoordinator {
             .join_receipt
             .as_ref()
             .ok_or(ConversationCoordinatorError::StateMismatch)?;
+        if pending.expected_commit_envelope_id != Some(join_receipt.envelope().envelope_id()) {
+            return Err(ConversationCoordinatorError::StateMismatch);
+        }
         let mut bindings = pending
             .peer_bindings
             .iter()
@@ -818,9 +833,11 @@ impl ConversationCoordinator {
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group| {
-            group.create_add_commit(join_proof, now_unix_seconds)
-        })
+        self.prepare_membership(
+            conversation_id,
+            expires_at_unix_seconds,
+            |group, envelope_id| group.create_add_commit(join_proof, envelope_id, now_unix_seconds),
+        )
     }
 
     /// Creates and journals one remove-member commit before relay transmission.
@@ -834,7 +851,7 @@ impl ConversationCoordinator {
         device_id: DeviceId,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group| {
+        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group, _| {
             group.create_remove_commit(device_id)
         })
     }
@@ -851,7 +868,7 @@ impl ConversationCoordinator {
         role: ConversationRole,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group| {
+        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group, _| {
             group.create_change_role_commit(device_id, role)
         })
     }
@@ -862,6 +879,7 @@ impl ConversationCoordinator {
         expires_at_unix_seconds: u64,
         create: impl FnOnce(
             &mut MlsConversation,
+            EnvelopeId,
         ) -> Result<OutboundMembershipCommit, KonclaveCryptographicError>,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
         let _operation = self
@@ -876,7 +894,7 @@ impl ConversationCoordinator {
             .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
         let mut conversation = self.open_unlocked(conversation_id)?;
         let parent_epoch = conversation.group.epoch();
-        let outbound = create(&mut conversation.group)
+        let outbound = create(&mut conversation.group, envelope_id)
             .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
         let operation_id = outbound.authorization().operation_id();
         let control = Zeroizing::new(
@@ -948,7 +966,47 @@ impl ConversationCoordinator {
     ///
     /// Returns a profile bounds, authentication, protocol, or storage error.
     pub(crate) fn ready_outbox(&self) -> Result<Vec<PendingOutbox>, ConversationCoordinatorError> {
-        self.store.ready_outbox().map_err(Into::into)
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let self_device_id = self.device_id()?;
+        let mut eligible = Vec::new();
+        for pending in self.store.ready_outbox()? {
+            let conversation = self.store.load_conversation(pending.conversation_id)?;
+            if conversation.state.member(self_device_id).is_none() {
+                self.store
+                    .terminalize_removed_outbox(pending.conversation_id)?;
+            } else {
+                eligible.push(pending);
+            }
+        }
+        Ok(eligible)
+    }
+
+    /// Rechecks current sealed membership immediately before one ready retry.
+    ///
+    /// A removed local device atomically terminalizes any lingering ready rows and
+    /// returns `false`, preventing network submission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile, policy, or storage error.
+    pub(crate) fn outbound_retry_eligible(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let conversation = self.store.load_conversation(conversation_id)?;
+        if conversation.state.member(self.device_id()?).is_some() {
+            Ok(true)
+        } else {
+            self.store.terminalize_removed_outbox(conversation_id)?;
+            Ok(false)
+        }
     }
 
     /// Loads bounded ready membership envelopes for idempotent relay retry.
@@ -1003,7 +1061,7 @@ impl ConversationCoordinator {
         {
             return Err(ConversationCoordinatorError::StateMismatch);
         }
-        self.resume_membership_record(record)
+        self.resume_membership_record(record, true)
     }
 
     /// Returns a prior remove-member operation when it is active or still current.
@@ -1026,7 +1084,7 @@ impl ConversationCoordinator {
         else {
             return Ok(None);
         };
-        self.resume_membership_record(record)
+        self.resume_membership_record(record, false)
     }
 
     /// Returns a prior role operation when it is active or still current.
@@ -1050,12 +1108,13 @@ impl ConversationCoordinator {
         else {
             return Ok(None);
         };
-        self.resume_membership_record(record)
+        self.resume_membership_record(record, false)
     }
 
     fn resume_membership_record(
         &self,
         record: crate::persistence::MembershipOutbox,
+        allow_historical_add: bool,
     ) -> Result<Option<MembershipRequestState>, ConversationCoordinatorError> {
         if record.status == MembershipOutboxStatus::Ready {
             return Ok(Some(MembershipRequestState::Ready(PreparedMembership {
@@ -1073,9 +1132,13 @@ impl ConversationCoordinator {
         if record.status != MembershipOutboxStatus::Applied {
             return Ok(None);
         }
-        let current = self.store.load_conversation(record.conversation_id)?;
-        if current.state != record.next_state {
-            return Ok(None);
+        if allow_historical_add {
+            self.store.verify_historical_applied_add(&record)?;
+        } else {
+            let current = self.store.load_conversation(record.conversation_id)?;
+            if current.state != record.next_state {
+                return Ok(None);
+            }
         }
         Ok(Some(MembershipRequestState::Applied(AcceptedMembership {
             operation_id: record.operation_id,
@@ -1133,17 +1196,27 @@ impl ConversationCoordinator {
         &self,
         operation_id: MembershipOperationId,
     ) -> Result<(), ConversationCoordinatorError> {
+        let initial = self.store.load_membership_outbox(operation_id)?;
+        let mut conversation = self.open_unlocked(initial.conversation_id)?;
         let pending = self.store.load_membership_outbox(operation_id)?;
-        let mut conversation = self.open_unlocked(pending.conversation_id)?;
+        if pending.status == MembershipOutboxStatus::Orphaned {
+            return if conversation.group.has_pending_membership_commit() {
+                Err(ConversationCoordinatorError::StateMismatch)
+            } else {
+                Ok(())
+            };
+        }
         if pending.status != MembershipOutboxStatus::Ready
             || conversation.group.state().epoch() != pending.parent_epoch
         {
             return Err(ConversationCoordinatorError::StateMismatch);
         }
-        conversation
-            .group
-            .reject_pending_commit()
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+        if conversation.group.has_pending_membership_commit() {
+            conversation
+                .group
+                .reject_pending_commit()
+                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+        }
         self.store.orphan_membership_outbox(operation_id)?;
         Ok(())
     }
@@ -1874,7 +1947,9 @@ pub(crate) mod tests {
         let proof = bob_client
             .create_join_proof(&bob_identity, invitation, alice_identity.public_key(), 50)
             .unwrap();
-        let add = alice_group.create_add_commit(proof, 50).unwrap();
+        let add = alice_group
+            .create_add_commit(proof, EnvelopeId::from_bytes([1; EnvelopeId::LENGTH]), 50)
+            .unwrap();
         let expected_state = add.next_state().clone();
         let welcome = MlsWelcome::from_bytes(add.welcome().unwrap().as_bytes()).unwrap();
         alice_group.accept_pending_commit().unwrap();
@@ -2043,7 +2118,12 @@ pub(crate) mod tests {
         let prepared = client.prepare_join_group(welcome).unwrap();
         coordinator
             .store
-            .checkpoint_pending_join_state(conversation_id, prepared.state(), receipt)
+            .checkpoint_pending_join_state(
+                conversation_id,
+                prepared.state(),
+                prepared.expected_commit_envelope_id().unwrap(),
+                receipt,
+            )
             .unwrap();
         if persist_group {
             prepared.persist().unwrap();
@@ -2225,6 +2305,98 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn membership_replay_head_reopens_after_later_local_policy_acceptance() {
+        let (root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let promoted = alice
+            .prepare_change_role(
+                conversation_id,
+                bob.device_id().unwrap(),
+                ConversationRole::Administrator,
+                1_900_000_000,
+            )
+            .unwrap();
+        let promoted = StoredRelayEnvelope::new(promoted.envelope, 1).unwrap();
+        alice.mark_membership_outbox_accepted(&promoted).unwrap();
+        bob.process_inbound_membership(conversation_id, &promoted, 60)
+            .unwrap();
+
+        let later = bob
+            .prepare_change_role(
+                conversation_id,
+                alice.device_id().unwrap(),
+                ConversationRole::Member,
+                1_900_000_000,
+            )
+            .unwrap();
+        let later = StoredRelayEnvelope::new(later.envelope, 2).unwrap();
+        bob.mark_membership_outbox_accepted(&later).unwrap();
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+        assert_eq!(bob.open(conversation_id).unwrap().group.epoch(), 3);
+
+        drop(alice);
+        drop(bob);
+        let reopened = open_coordinator(root.path(), "bob");
+        reopened.recover().unwrap();
+        let conversation = reopened.open(conversation_id).unwrap();
+        assert_eq!(conversation.replay_cursor, 1);
+        assert_eq!(conversation.group.epoch(), 3);
+    }
+
+    #[test]
+    fn join_replay_head_reopens_after_later_local_policy_acceptance() {
+        let root = tempfile::tempdir().unwrap();
+        let alice = open_coordinator(root.path(), "join-head-alice");
+        let bob = open_coordinator(root.path(), "join-head-bob");
+        let created = alice.create().unwrap();
+        let invitation = alice
+            .issue_invitation(
+                created.conversation_id,
+                bob.device_id().unwrap(),
+                ConversationRole::Administrator,
+                100,
+            )
+            .unwrap();
+        let proof = bob
+            .create_join_proof(
+                invitation.invitation,
+                invitation.routing_id,
+                invitation.issuer_public_key,
+                invitation.peer_bindings,
+                50,
+            )
+            .unwrap();
+        let add = alice
+            .prepare_add_member(created.conversation_id, proof, 50, 1_900_000_000)
+            .unwrap();
+        let receipt = StoredRelayEnvelope::new(add.envelope, 1).unwrap();
+        let accepted = alice.mark_membership_outbox_accepted(&receipt).unwrap();
+        let welcome = MlsWelcome::from_bytes(&accepted.welcome.unwrap()).unwrap();
+        bob.accept_welcome(created.conversation_id, &welcome, &receipt)
+            .unwrap();
+
+        let later = bob
+            .prepare_change_role(
+                created.conversation_id,
+                alice.device_id().unwrap(),
+                ConversationRole::Member,
+                1_900_000_000,
+            )
+            .unwrap();
+        let later = StoredRelayEnvelope::new(later.envelope, 2).unwrap();
+        bob.mark_membership_outbox_accepted(&later).unwrap();
+        assert_eq!(bob.replay_position(created.conversation_id).unwrap().1, 1);
+        assert_eq!(bob.open(created.conversation_id).unwrap().group.epoch(), 2);
+
+        drop(alice);
+        drop(bob);
+        let reopened = open_coordinator(root.path(), "join-head-bob");
+        reopened.recover().unwrap();
+        let conversation = reopened.open(created.conversation_id).unwrap();
+        assert_eq!(conversation.replay_cursor, 1);
+        assert_eq!(conversation.group.epoch(), 2);
+    }
+
+    #[test]
     fn explicit_orphan_rejects_pending_commit_before_hiding_journal() {
         let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
         let prepared = alice
@@ -2247,6 +2419,66 @@ pub(crate) mod tests {
                 .status,
             MembershipOutboxStatus::Orphaned
         );
+    }
+
+    #[test]
+    fn stale_epoch_orphan_allows_winning_same_parent_commit_replay() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let promoted = alice
+            .prepare_change_role(
+                conversation_id,
+                bob.device_id().unwrap(),
+                ConversationRole::Administrator,
+                1_900_000_000,
+            )
+            .unwrap();
+        let promoted = StoredRelayEnvelope::new(promoted.envelope, 1).unwrap();
+        alice.mark_membership_outbox_accepted(&promoted).unwrap();
+        bob.process_inbound_membership(conversation_id, &promoted, 60)
+            .unwrap();
+        alice
+            .process_inbound_membership(conversation_id, &promoted, 60)
+            .unwrap();
+
+        let stale = alice
+            .prepare_change_role(
+                conversation_id,
+                bob.device_id().unwrap(),
+                ConversationRole::Member,
+                1_900_000_000,
+            )
+            .unwrap();
+        let winning = bob
+            .prepare_change_role(
+                conversation_id,
+                alice.device_id().unwrap(),
+                ConversationRole::Member,
+                1_900_000_000,
+            )
+            .unwrap();
+        let winning = StoredRelayEnvelope::new(winning.envelope, 2).unwrap();
+        bob.mark_membership_outbox_accepted(&winning).unwrap();
+
+        {
+            let _operation = alice.operations.lock().unwrap();
+            let mut conversation = alice.open_unlocked(conversation_id).unwrap();
+            conversation.group.reject_pending_commit().unwrap();
+        }
+        alice.orphan_membership(stale.operation_id).unwrap();
+        assert_eq!(
+            alice
+                .store
+                .load_membership_outbox(stale.operation_id)
+                .unwrap()
+                .status,
+            MembershipOutboxStatus::Orphaned
+        );
+
+        let applied = alice
+            .process_inbound_membership(conversation_id, &winning, 60)
+            .unwrap();
+        assert_eq!(applied.epoch, 3);
+        assert_eq!(alice.replay_position(conversation_id).unwrap().1, 2);
     }
 
     #[test]
