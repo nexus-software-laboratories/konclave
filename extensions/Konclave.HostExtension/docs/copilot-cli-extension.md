@@ -5,11 +5,26 @@
 The generated extension is a Node.js process that joins the foreground Copilot CLI
 session with `@github/copilot-sdk/extension`. It starts from:
 
-- `joinSession({ tools: [], hooks: {} })`
-- no commands, tools, or hooks enabled by default
+- no extension-owned tools or hooks
+- one local stdio MCP server exposing the daemon's bounded Konclave tools
 - stderr-only diagnostics
 - explicit cleanup for event handlers and scheduled sends, plus SDK disconnect on OS
   termination signals
+
+The extension derives a stable, non-reversible profile identifier from the foreground
+Copilot session ID. Independent CLI sessions therefore run independent device
+profiles without sharing a lock, while a resumed session reopens its durable profile.
+The raw session ID is never passed to the daemon.
+
+The daemon command defaults to `KonclaveLocalDaemon` on Unix and
+`KonclaveLocalDaemon.exe` on Windows. `KONCLAVE_DAEMON_PATH` selects an exact
+installed binary. Optional `KONCLAVE_PROFILE_ROOT` and
+`KONCLAVE_WRAPPING_KEY_FILE` paths are forwarded; secret file contents and relay
+credentials never cross the extension boundary. For first-run relay provisioning,
+the extension also forwards `KONCLAVE_RELAY_ENDPOINT` and
+`KONCLAVE_RELAY_CREDENTIAL_FILE`. The latter is a path to a local file containing the
+canonical unpadded base64url bearer; the value itself is never placed in extension or
+MCP configuration.
 
 GitHub's extension contract reserves stdout for the JSON-RPC transport. The template
 therefore treats any stdout write as a bug.
@@ -21,7 +36,9 @@ CLI with `--experimental` or enable experimental mode in-session before plugin-l
 extensions will run.
 
 Extensions execute with the local user's privileges. Installing the plugin is
-equivalent to running trusted local code.
+equivalent to running trusted local code. The paved-path extension explicitly enables
+the daemon's write-capable MCP methods; the daemon itself remains read-only when
+started without `KONCLAVE_MCP_ALLOW_WRITE=true`.
 
 ## Build outputs
 

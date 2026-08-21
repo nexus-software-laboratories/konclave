@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export interface PromptMessage {
   prompt: string;
   attachments?: unknown[];
@@ -70,6 +72,16 @@ export interface TimerController {
 export interface JoinSessionConfig {
   tools: [];
   hooks: Record<string, never>;
+  mcpServers: Record<string, McpStdioServerConfig>;
+}
+
+export interface McpStdioServerConfig {
+  type: 'stdio';
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  tools: ['*'];
+  timeout: number;
 }
 
 export interface ExtensionState {
@@ -95,12 +107,11 @@ export interface BootExtensionOptions {
   joinSession: (config: JoinSessionConfig) => Promise<ExtensionSession>;
   processController: ProcessController;
   timers?: TimerController;
+  environment?: Readonly<Record<string, string | undefined>>;
+  platform?: NodeJS.Platform;
 }
 
-export const extensionJoinConfig: JoinSessionConfig = {
-  tools: [],
-  hooks: {},
-};
+const mcpToolTimeoutMs = 90_000;
 
 const extensionSignals: readonly ExtensionSignal[] = ['SIGINT', 'SIGTERM'];
 
@@ -172,12 +183,66 @@ export async function bootExtension(
   options: BootExtensionOptions,
 ): Promise<ExtensionController | null> {
   try {
-    const session = await options.joinSession(extensionJoinConfig);
+    const session = await options.joinSession(
+      createExtensionJoinConfig(
+        options.environment ?? process.env,
+        options.platform ?? process.platform,
+      ),
+    );
     return attachExtension(session, options.diagnostics, options.processController, options.timers);
   } catch (error) {
     options.diagnostics.error(`Failed to join Copilot session: ${formatError(error)}`);
     options.processController.setExitCode(1);
     return null;
+  }
+}
+
+export function createExtensionJoinConfig(
+  environment: Readonly<Record<string, string | undefined>>,
+  platform: NodeJS.Platform,
+): JoinSessionConfig {
+  const sessionId = environment.SESSION_ID?.trim();
+  if (!sessionId) {
+    throw new Error('SESSION_ID is required to derive the Konclave profile.');
+  }
+
+  const command =
+    environment.KONCLAVE_DAEMON_PATH?.trim() ||
+    (platform === 'win32' ? 'KonclaveLocalDaemon.exe' : 'KonclaveLocalDaemon');
+  const daemonEnvironment: Record<string, string> = {
+    KONCLAVE_PROFILE_ID: `session-${createHash('sha256').update(sessionId).digest('hex').slice(0, 24)}`,
+    KONCLAVE_MCP_ALLOW_WRITE: 'true',
+  };
+
+  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_PROFILE_ROOT');
+  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_WRAPPING_KEY_FILE');
+  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_RELAY_ENDPOINT');
+  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_RELAY_CREDENTIAL_FILE');
+
+  return {
+    tools: [],
+    hooks: {},
+    mcpServers: {
+      konclave: {
+        type: 'stdio',
+        command,
+        args: [],
+        env: daemonEnvironment,
+        tools: ['*'],
+        timeout: mcpToolTimeoutMs,
+      },
+    },
+  };
+}
+
+function copyNonEmptyEnvironment(
+  source: Readonly<Record<string, string | undefined>>,
+  destination: Record<string, string>,
+  name: string,
+): void {
+  const value = source[name]?.trim();
+  if (value) {
+    destination[name] = value;
   }
 }
 
