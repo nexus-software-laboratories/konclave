@@ -1,9 +1,10 @@
 use KonclaveDomainCore::{
-    AddMember, ChangeMemberRole, ConversationState, MAX_APPLICATION_MESSAGE_BYTES,
-    MAX_CONSUMED_INVITATIONS, MAX_MEMBERS, Member, MembershipAuthorization, MembershipChange,
-    RemoveMember,
+    AddMember, ChangeMemberRole, ConversationState, JoinProof, MAX_APPLICATION_MESSAGE_BYTES,
+    MAX_CONSUMED_INVITATIONS, MAX_MEMBERS, MAX_RELAY_PAYLOAD_BYTES, Member,
+    MembershipAuthorization, MembershipChange, RemoveMember,
 };
 
+use super::identity::{decode_join_proof, encode_join_proof};
 use crate::KonclaveProtocolError;
 use crate::v1::common::{
     conversation_id_from_wire, conversation_id_to_wire, credential_hash_from_bytes,
@@ -16,6 +17,28 @@ use crate::wire::v1 as wire;
 
 const STATE_CONTRACT: &str = "ConversationState";
 const CHANGE_CONTRACT: &str = "MembershipChange";
+const CONTROL_CONTRACT: &str = "MembershipControl";
+const COMMIT_BUNDLE_CONTRACT: &str = "MembershipCommitBundle";
+
+/// Opaque MLS application control plus its bound MLS Commit.
+pub struct MembershipCommitBundleBytes {
+    encrypted_control: Vec<u8>,
+    mls_commit: Vec<u8>,
+}
+
+impl MembershipCommitBundleBytes {
+    /// Returns the MLS application PrivateMessage containing membership context.
+    #[must_use]
+    pub fn encrypted_control(&self) -> &[u8] {
+        &self.encrypted_control
+    }
+
+    /// Returns the MLS Commit PrivateMessage.
+    #[must_use]
+    pub fn mls_commit(&self) -> &[u8] {
+        &self.mls_commit
+    }
+}
 
 /// Encodes application-authorized conversation membership state.
 ///
@@ -189,4 +212,137 @@ pub fn decode_membership_change(
         operation_id_from_wire(wire.operation_id)?,
         change,
     ))
+}
+
+/// Encodes membership authorization and optional add-member proof for MLS encryption.
+///
+/// These bytes contain membership plaintext and must be encrypted as an MLS
+/// application PrivateMessage before entering a relay envelope.
+///
+/// # Errors
+///
+/// Returns a protocol, domain, or size error.
+pub fn encode_membership_control(
+    authorization: &MembershipAuthorization,
+    join_proof: Option<&JoinProof>,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    let membership_change = encode_membership_change(authorization)?;
+    let join_proof = join_proof.map(encode_join_proof).transpose()?;
+    let wire = wire::MembershipControl {
+        membership_change: membership_change.into(),
+        join_proof: join_proof.unwrap_or_default().into(),
+    };
+    encode_bounded(&wire, MAX_APPLICATION_MESSAGE_BYTES, CONTROL_CONTRACT)
+}
+
+/// Decodes membership context after MLS application decryption.
+///
+/// Cryptographic sender authentication and transition authorization remain the
+/// caller's responsibility.
+///
+/// # Errors
+///
+/// Returns a malformed, missing-field, protocol, domain, or size error.
+pub fn decode_membership_control(
+    bytes: &[u8],
+) -> Result<(MembershipAuthorization, Option<JoinProof>), KonclaveProtocolError> {
+    let wire: wire::MembershipControl =
+        decode_bounded(bytes, MAX_APPLICATION_MESSAGE_BYTES, CONTROL_CONTRACT)?;
+    if wire.membership_change.is_empty() {
+        return Err(KonclaveProtocolError::MissingField {
+            field: "membership_control.membership_change",
+        });
+    }
+    let authorization = decode_membership_change(&wire.membership_change)?;
+    let join_proof = (!wire.join_proof.is_empty())
+        .then(|| decode_join_proof(&wire.join_proof))
+        .transpose()?;
+    Ok((authorization, join_proof))
+}
+
+/// Encodes an opaque encrypted control message and MLS Commit for relay transport.
+///
+/// # Errors
+///
+/// Returns a missing-field or aggregate relay-payload size error.
+pub fn encode_membership_commit_bundle(
+    encrypted_control: &[u8],
+    mls_commit: &[u8],
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    require_non_empty(
+        encrypted_control,
+        "membership_commit_bundle.encrypted_control",
+    )?;
+    require_non_empty(mls_commit, "membership_commit_bundle.mls_commit")?;
+    require_membership_commit_bundle_size(encrypted_control.len(), mls_commit.len())?;
+    let wire = wire::MembershipCommitBundle {
+        encrypted_control: encrypted_control.to_vec().into(),
+        mls_commit: mls_commit.to_vec().into(),
+    };
+    encode_bounded(&wire, MAX_RELAY_PAYLOAD_BYTES, COMMIT_BUNDLE_CONTRACT)
+}
+
+/// Decodes the opaque client-only framing carried by a relay envelope.
+///
+/// The returned MLS messages remain cryptographically untrusted until processed by
+/// `CryptographicCore`.
+///
+/// # Errors
+///
+/// Returns a malformed, missing-field, or aggregate relay-payload size error.
+pub fn decode_membership_commit_bundle(
+    bytes: &[u8],
+) -> Result<MembershipCommitBundleBytes, KonclaveProtocolError> {
+    let wire: wire::MembershipCommitBundle =
+        decode_bounded(bytes, MAX_RELAY_PAYLOAD_BYTES, COMMIT_BUNDLE_CONTRACT)?;
+    require_non_empty(
+        &wire.encrypted_control,
+        "membership_commit_bundle.encrypted_control",
+    )?;
+    require_non_empty(&wire.mls_commit, "membership_commit_bundle.mls_commit")?;
+    Ok(MembershipCommitBundleBytes {
+        encrypted_control: wire.encrypted_control.to_vec(),
+        mls_commit: wire.mls_commit.to_vec(),
+    })
+}
+
+fn require_membership_commit_bundle_size(
+    encrypted_control_length: usize,
+    mls_commit_length: usize,
+) -> Result<(), KonclaveProtocolError> {
+    let mut actual = 0_usize;
+    for length in [encrypted_control_length, mls_commit_length] {
+        if length > MAX_RELAY_PAYLOAD_BYTES {
+            return Err(KonclaveProtocolError::EncodedMessageTooLarge {
+                contract: COMMIT_BUNDLE_CONTRACT,
+                maximum: MAX_RELAY_PAYLOAD_BYTES,
+                actual: length,
+            });
+        }
+        actual = actual
+            .checked_add(1)
+            .and_then(|value| value.checked_add(prost::length_delimiter_len(length)))
+            .and_then(|value| value.checked_add(length))
+            .ok_or(KonclaveProtocolError::EncodedMessageTooLarge {
+                contract: COMMIT_BUNDLE_CONTRACT,
+                maximum: MAX_RELAY_PAYLOAD_BYTES,
+                actual: usize::MAX,
+            })?;
+    }
+    if actual > MAX_RELAY_PAYLOAD_BYTES {
+        return Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: COMMIT_BUNDLE_CONTRACT,
+            maximum: MAX_RELAY_PAYLOAD_BYTES,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn require_non_empty(bytes: &[u8], field: &'static str) -> Result<(), KonclaveProtocolError> {
+    if bytes.is_empty() {
+        Err(KonclaveProtocolError::MissingField { field })
+    } else {
+        Ok(())
+    }
 }

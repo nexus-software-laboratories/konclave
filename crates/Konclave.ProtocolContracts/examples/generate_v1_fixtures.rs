@@ -12,8 +12,8 @@ use KonclaveDomainCore::{
 use KonclaveProtocolContracts::v1::{
     encode_acknowledge_request, encode_application_message, encode_conversation_state,
     encode_device_credential_binding, encode_invitation, encode_join_proof,
-    encode_membership_change, encode_relay_envelope, encode_replay_page, encode_replay_request,
-    encode_stored_relay_envelope,
+    encode_membership_change, encode_membership_commit_bundle, encode_membership_control,
+    encode_relay_envelope, encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,6 +85,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &output,
         "membership-change.bin",
         encode_membership_change(&membership)?,
+    )?;
+    write(
+        &output,
+        "membership-control.bin",
+        encode_membership_control(
+            &membership,
+            Some(&JoinProof::new(invitation(1), credential(1), vec![10; 32])?),
+        )?,
+    )?;
+    write(
+        &output,
+        "membership-commit-bundle.bin",
+        encode_membership_commit_bundle(&[0x81; 32], &[0x82; 48])?,
     )?;
 
     let relay = relay_envelope(41);

@@ -13,8 +13,12 @@ import {
 } from '../src/identity.js';
 import {
   decodeConversationState,
+  decodeMembershipCommitBundle,
+  decodeMembershipControl,
   decodeMembershipChange,
   encodeConversationState,
+  encodeMembershipCommitBundle,
+  encodeMembershipControl,
   encodeMembershipChange,
 } from '../src/membership.js';
 import {
@@ -36,6 +40,7 @@ import {
   credential,
   invitation,
   joinProof,
+  membershipCommitBundle,
   membershipChange,
   relayEnvelope,
   replayPage,
@@ -87,6 +92,27 @@ const cases: ReadonlyArray<{
     expected: membershipChange(),
     name: 'membership-change.bin',
     roundTrip: (bytes) => encodeMembershipChange(decodeMembershipChange(bytes)),
+  },
+  {
+    decode: decodeMembershipControl,
+    expected: {
+      joinProof: joinProof(),
+      membershipChange: membershipChange(),
+    },
+    name: 'membership-control.bin',
+    roundTrip: (bytes) => {
+      const value = decodeMembershipControl(bytes);
+      return encodeMembershipControl(value.membershipChange, value.joinProof);
+    },
+  },
+  {
+    decode: decodeMembershipCommitBundle,
+    expected: membershipCommitBundle(),
+    name: 'membership-commit-bundle.bin',
+    roundTrip: (bytes) => {
+      const value = decodeMembershipCommitBundle(bytes);
+      return encodeMembershipCommitBundle(value.encryptedControl, value.mlsCommit);
+    },
   },
   {
     decode: decodeRelayEnvelope,

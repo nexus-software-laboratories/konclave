@@ -622,16 +622,10 @@ fn existing_member_can_validate_a_later_add_commit() {
         )
         .unwrap();
     let charlie_add = alice_group.create_add_commit(charlie_proof, 50).unwrap();
-    let proof_bytes = encode_join_proof(charlie_add.join_proof().unwrap()).unwrap();
-    let proof_for_bob = decode_join_proof(&proof_bytes).unwrap();
-    bob_group
-        .process_membership_commit(
-            charlie_add.commit(),
-            charlie_add.authorization().clone(),
-            Some(proof_for_bob),
-            50,
-        )
+    let applied = bob_group
+        .process_membership_bundle(&charlie_add.encode_bundle().unwrap(), 50)
         .unwrap();
+    assert_eq!(applied.authenticated_sender(), alice_identity.device_id());
     alice_group.accept_pending_commit().unwrap();
     let mut charlie_group = charlie_client
         .join_group(charlie_add.welcome().unwrap())

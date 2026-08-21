@@ -15,8 +15,9 @@ pub use identity::{
     encode_device_credential_binding, encode_invitation, encode_join_proof,
 };
 pub use membership::{
-    decode_conversation_state, decode_membership_change, encode_conversation_state,
-    encode_membership_change,
+    MembershipCommitBundleBytes, decode_conversation_state, decode_membership_change,
+    decode_membership_commit_bundle, decode_membership_control, encode_conversation_state,
+    encode_membership_change, encode_membership_commit_bundle, encode_membership_control,
 };
 pub use relay::{
     decode_acknowledge_request, decode_relay_envelope, decode_replay_page, decode_replay_request,

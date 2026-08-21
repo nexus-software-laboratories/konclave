@@ -2,17 +2,18 @@ use prost::Message;
 
 use KonclaveDomainCore::{
     KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES, MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS,
-    MAX_RELAY_ENVELOPE_BYTES, MAX_REPLAY_PAGE_SIZE,
+    MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_SIZE,
 };
 
 use super::{
     decode_acknowledge_request, decode_application_message, decode_conversation_state,
     decode_device_credential_binding, decode_invitation, decode_join_proof,
-    decode_membership_change, decode_relay_envelope, decode_replay_page, decode_replay_request,
-    decode_stored_relay_envelope, encode_acknowledge_request, encode_application_message,
-    encode_conversation_state, encode_device_credential_binding, encode_invitation,
-    encode_join_proof, encode_membership_change, encode_relay_envelope, encode_replay_page,
-    encode_replay_request, encode_stored_relay_envelope,
+    decode_membership_change, decode_membership_commit_bundle, decode_membership_control,
+    decode_relay_envelope, decode_replay_page, decode_replay_request, decode_stored_relay_envelope,
+    encode_acknowledge_request, encode_application_message, encode_conversation_state,
+    encode_device_credential_binding, encode_invitation, encode_join_proof,
+    encode_membership_change, encode_membership_commit_bundle, encode_membership_control,
+    encode_relay_envelope, encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
 };
 use crate::KonclaveProtocolError;
 use crate::wire::v1 as wire;
@@ -27,6 +28,10 @@ const CONVERSATION_STATE_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/conversation-state.bin");
 const MEMBERSHIP_CHANGE_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/membership-change.bin");
+const MEMBERSHIP_CONTROL_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/membership-control.bin");
+const MEMBERSHIP_COMMIT_BUNDLE_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/membership-commit-bundle.bin");
 const RELAY_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/protocol/v1/relay-envelope.bin");
 const STORED_RELAY_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/stored-relay-envelope.bin");
@@ -77,6 +82,19 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         .expect("fixture should encode"),
         MEMBERSHIP_CHANGE_FIXTURE
     );
+    let (authorization, proof) =
+        decode_membership_control(MEMBERSHIP_CONTROL_FIXTURE).expect("fixture should decode");
+    assert_eq!(
+        encode_membership_control(&authorization, proof.as_ref()).expect("fixture should encode"),
+        MEMBERSHIP_CONTROL_FIXTURE
+    );
+    let bundle = decode_membership_commit_bundle(MEMBERSHIP_COMMIT_BUNDLE_FIXTURE)
+        .expect("fixture should decode");
+    assert_eq!(
+        encode_membership_commit_bundle(bundle.encrypted_control(), bundle.mls_commit(),)
+            .expect("fixture should encode"),
+        MEMBERSHIP_COMMIT_BUNDLE_FIXTURE
+    );
     assert_eq!(
         encode_relay_envelope(
             &decode_relay_envelope(RELAY_FIXTURE).expect("fixture should decode")
@@ -112,6 +130,60 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         .expect("fixture should encode"),
         ACKNOWLEDGE_FIXTURE
     );
+}
+
+#[test]
+fn membership_control_and_commit_bundle_round_trip_canonical_bytes() {
+    let authorization = decode_membership_change(MEMBERSHIP_CHANGE_FIXTURE).unwrap();
+    let proof = decode_join_proof(JOIN_PROOF_FIXTURE).unwrap();
+    let control = encode_membership_control(&authorization, Some(&proof)).unwrap();
+    let (decoded_authorization, decoded_proof) = decode_membership_control(&control).unwrap();
+    assert_eq!(
+        encode_membership_change(&decoded_authorization).unwrap(),
+        MEMBERSHIP_CHANGE_FIXTURE
+    );
+    assert_eq!(
+        encode_join_proof(&decoded_proof.unwrap()).unwrap(),
+        JOIN_PROOF_FIXTURE
+    );
+
+    let encoded = encode_membership_commit_bundle(&[0x81; 32], &[0x82; 48]).unwrap();
+    let decoded = decode_membership_commit_bundle(&encoded).unwrap();
+    assert_eq!(decoded.encrypted_control(), &[0x81; 32]);
+    assert_eq!(decoded.mls_commit(), &[0x82; 48]);
+}
+
+#[test]
+fn membership_client_framing_rejects_missing_or_oversized_fields() {
+    let missing_control = wire::MembershipControl::default().encode_to_vec();
+    assert_eq!(
+        decode_membership_control(&missing_control).err(),
+        Some(KonclaveProtocolError::MissingField {
+            field: "membership_control.membership_change"
+        })
+    );
+    assert_eq!(
+        encode_membership_commit_bundle(&[], &[1]).err(),
+        Some(KonclaveProtocolError::MissingField {
+            field: "membership_commit_bundle.encrypted_control"
+        })
+    );
+    let oversized = vec![1; MAX_RELAY_PAYLOAD_BYTES + 1];
+    assert!(matches!(
+        encode_membership_commit_bundle(&oversized, &[1]),
+        Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "MembershipCommitBundle",
+            ..
+        })
+    ));
+    let aggregate_oversized = vec![1; MAX_RELAY_PAYLOAD_BYTES];
+    assert!(matches!(
+        encode_membership_commit_bundle(&aggregate_oversized, &[1]),
+        Err(KonclaveProtocolError::EncodedMessageTooLarge {
+            contract: "MembershipCommitBundle",
+            ..
+        })
+    ));
 }
 
 #[test]

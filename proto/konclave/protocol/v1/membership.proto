@@ -62,3 +62,19 @@ message MembershipChange {
     ChangeMemberRole change_role = 12;
   }
 }
+
+// Plaintext membership context encrypted as one MLS application PrivateMessage.
+message MembershipControl {
+  // Canonical MembershipChange bytes.
+  bytes membership_change = 1;
+  // Canonical JoinProof bytes. Present only for an add-member transition.
+  bytes join_proof = 2;
+}
+
+// Opaque relay payload pairing encrypted application control with its MLS Commit.
+message MembershipCommitBundle {
+  // MLS application PrivateMessage containing one MembershipControl.
+  bytes encrypted_control = 1;
+  // MLS Commit PrivateMessage bound to the control's authorization digest.
+  bytes mls_commit = 2;
+}

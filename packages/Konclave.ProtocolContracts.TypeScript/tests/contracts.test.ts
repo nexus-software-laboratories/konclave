@@ -28,8 +28,12 @@ import {
 } from '../src/identity.js';
 import {
   decodeConversationState,
+  decodeMembershipCommitBundle,
+  decodeMembershipControl,
   decodeMembershipChange,
   encodeConversationState,
+  encodeMembershipCommitBundle,
+  encodeMembershipControl,
   encodeMembershipChange,
 } from '../src/membership.js';
 import {
@@ -50,6 +54,7 @@ import {
   TextContentSchema,
 } from '../src/generated/konclave/protocol/v1/application_pb.js';
 import { DeviceCredentialBindingSchema } from '../src/generated/konclave/protocol/v1/identity_pb.js';
+import { MembershipControlSchema } from '../src/generated/konclave/protocol/v1/membership_pb.js';
 import { DeliveryClass } from '../src/generated/konclave/protocol/v1/relay_pb.js';
 import {
   acknowledgment,
@@ -241,6 +246,20 @@ describe('membership contracts', () => {
       const bytes = encodeMembershipChange(membershipChange(variant));
       expect(encodeMembershipChange(decodeMembershipChange(bytes))).toEqual(bytes);
     }
+
+    const control = encodeMembershipControl(membershipChange(), joinProof());
+    const decodedControl = decodeMembershipControl(control);
+    expect(
+      encodeMembershipControl(decodedControl.membershipChange, decodedControl.joinProof),
+    ).toEqual(control);
+    const controlWithoutProof = encodeMembershipControl(membershipChange('remove'));
+    expect(decodeMembershipControl(controlWithoutProof).joinProof).toBeUndefined();
+
+    const bundle = encodeMembershipCommitBundle(bytes(32, 0x81), bytes(48, 0x82));
+    const decodedBundle = decodeMembershipCommitBundle(bundle);
+    expect(
+      encodeMembershipCommitBundle(decodedBundle.encryptedControl, decodedBundle.mlsCommit),
+    ).toEqual(bundle);
   });
 
   it('rejects invalid state and absent transition variants', () => {
@@ -271,6 +290,21 @@ describe('membership contracts', () => {
     expectCode(
       () => encodeMembershipChange(membershipChange('none')),
       protocolErrorCodes.missingVariant,
+    );
+    expectCode(
+      () => encodeMembershipCommitBundle(new Uint8Array(), bytes(1, 1)),
+      protocolErrorCodes.missingField,
+    );
+    const missingControl = encodeBounded(
+      MembershipControlSchema,
+      create(MembershipControlSchema),
+      MAX_APPLICATION_MESSAGE_BYTES,
+      'MembershipControl',
+    );
+    expectCode(() => decodeMembershipControl(missingControl), protocolErrorCodes.missingField);
+    expectCode(
+      () => encodeMembershipCommitBundle(bytes(MAX_RELAY_PAYLOAD_BYTES, 1), bytes(1, 1)),
+      protocolErrorCodes.encodedMessageTooLarge,
     );
   });
 

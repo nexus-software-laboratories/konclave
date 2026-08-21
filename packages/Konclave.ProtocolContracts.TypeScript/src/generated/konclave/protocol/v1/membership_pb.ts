@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/membership.proto.
  */
 export const file_konclave_protocol_v1_membership: GenFile = /*@__PURE__*/
-  fileDesc("CiVrb25jbGF2ZS9wcm90b2NvbC92MS9tZW1iZXJzaGlwLnByb3RvEhRrb25jbGF2ZS5wcm90b2NvbC52MSKHAQoGTWVtYmVyEjEKCWRldmljZV9pZBgBIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkEjQKBHJvbGUYAiABKA4yJi5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25Sb2xlEhQKDGpvaW5lZF9lcG9jaBgDIAEoBCKNAgoRQ29udmVyc2F0aW9uU3RhdGUSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhI9Cg9jb252ZXJzYXRpb25faWQYAiABKAsyJC5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25JZBINCgVlcG9jaBgDIAEoBBItCgdtZW1iZXJzGAQgAygLMhwua29uY2xhdmUucHJvdG9jb2wudjEuTWVtYmVyEkMKF2NvbnN1bWVkX2ludml0YXRpb25faWRzGAUgAygLMiIua29uY2xhdmUucHJvdG9jb2wudjEuSW52aXRhdGlvbklkIiYKFU1lbWJlcnNoaXBPcGVyYXRpb25JZBINCgV2YWx1ZRgBIAEoDCLQAQoJQWRkTWVtYmVyEjEKCWRldmljZV9pZBgBIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkEjQKBHJvbGUYAiABKA4yJi5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25Sb2xlEjkKDWludml0YXRpb25faWQYAyABKAsyIi5rb25jbGF2ZS5wcm90b2NvbC52MS5JbnZpdGF0aW9uSWQSHwoXY3JlZGVudGlhbF9iaW5kaW5nX2hhc2gYBCABKAwiQQoMUmVtb3ZlTWVtYmVyEjEKCWRldmljZV9pZBgBIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkInsKEENoYW5nZU1lbWJlclJvbGUSMQoJZGV2aWNlX2lkGAEgASgLMh4ua29uY2xhdmUucHJvdG9jb2wudjEuRGV2aWNlSWQSNAoEcm9sZRgCIAEoDjImLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbnZlcnNhdGlvblJvbGUikQMKEE1lbWJlcnNoaXBDaGFuZ2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhI9Cg9jb252ZXJzYXRpb25faWQYAiABKAsyJC5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25JZBIUCgxwYXJlbnRfZXBvY2gYAyABKAQSQQoMb3BlcmF0aW9uX2lkGAQgASgLMisua29uY2xhdmUucHJvdG9jb2wudjEuTWVtYmVyc2hpcE9wZXJhdGlvbklkEi4KA2FkZBgKIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLkFkZE1lbWJlckgAEjQKBnJlbW92ZRgLIAEoCzIiLmtvbmNsYXZlLnByb3RvY29sLnYxLlJlbW92ZU1lbWJlckgAEj0KC2NoYW5nZV9yb2xlGAwgASgLMiYua29uY2xhdmUucHJvdG9jb2wudjEuQ2hhbmdlTWVtYmVyUm9sZUgAQggKBmNoYW5nZWIGcHJvdG8z", [file_konclave_protocol_v1_common]);
+  fileDesc("CiVrb25jbGF2ZS9wcm90b2NvbC92MS9tZW1iZXJzaGlwLnByb3RvEhRrb25jbGF2ZS5wcm90b2NvbC52MSKHAQoGTWVtYmVyEjEKCWRldmljZV9pZBgBIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkEjQKBHJvbGUYAiABKA4yJi5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25Sb2xlEhQKDGpvaW5lZF9lcG9jaBgDIAEoBCKNAgoRQ29udmVyc2F0aW9uU3RhdGUSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhI9Cg9jb252ZXJzYXRpb25faWQYAiABKAsyJC5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25JZBINCgVlcG9jaBgDIAEoBBItCgdtZW1iZXJzGAQgAygLMhwua29uY2xhdmUucHJvdG9jb2wudjEuTWVtYmVyEkMKF2NvbnN1bWVkX2ludml0YXRpb25faWRzGAUgAygLMiIua29uY2xhdmUucHJvdG9jb2wudjEuSW52aXRhdGlvbklkIiYKFU1lbWJlcnNoaXBPcGVyYXRpb25JZBINCgV2YWx1ZRgBIAEoDCLQAQoJQWRkTWVtYmVyEjEKCWRldmljZV9pZBgBIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkEjQKBHJvbGUYAiABKA4yJi5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25Sb2xlEjkKDWludml0YXRpb25faWQYAyABKAsyIi5rb25jbGF2ZS5wcm90b2NvbC52MS5JbnZpdGF0aW9uSWQSHwoXY3JlZGVudGlhbF9iaW5kaW5nX2hhc2gYBCABKAwiQQoMUmVtb3ZlTWVtYmVyEjEKCWRldmljZV9pZBgBIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkInsKEENoYW5nZU1lbWJlclJvbGUSMQoJZGV2aWNlX2lkGAEgASgLMh4ua29uY2xhdmUucHJvdG9jb2wudjEuRGV2aWNlSWQSNAoEcm9sZRgCIAEoDjImLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbnZlcnNhdGlvblJvbGUikQMKEE1lbWJlcnNoaXBDaGFuZ2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhI9Cg9jb252ZXJzYXRpb25faWQYAiABKAsyJC5rb25jbGF2ZS5wcm90b2NvbC52MS5Db252ZXJzYXRpb25JZBIUCgxwYXJlbnRfZXBvY2gYAyABKAQSQQoMb3BlcmF0aW9uX2lkGAQgASgLMisua29uY2xhdmUucHJvdG9jb2wudjEuTWVtYmVyc2hpcE9wZXJhdGlvbklkEi4KA2FkZBgKIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLkFkZE1lbWJlckgAEjQKBnJlbW92ZRgLIAEoCzIiLmtvbmNsYXZlLnByb3RvY29sLnYxLlJlbW92ZU1lbWJlckgAEj0KC2NoYW5nZV9yb2xlGAwgASgLMiYua29uY2xhdmUucHJvdG9jb2wudjEuQ2hhbmdlTWVtYmVyUm9sZUgAQggKBmNoYW5nZSJCChFNZW1iZXJzaGlwQ29udHJvbBIZChFtZW1iZXJzaGlwX2NoYW5nZRgBIAEoDBISCgpqb2luX3Byb29mGAIgASgMIkcKFk1lbWJlcnNoaXBDb21taXRCdW5kbGUSGQoRZW5jcnlwdGVkX2NvbnRyb2wYASABKAwSEgoKbWxzX2NvbW1pdBgCIAEoDGIGcHJvdG8z", [file_konclave_protocol_v1_common]);
 
 /**
  * Describes one device authorized in a conversation epoch.
@@ -244,4 +244,60 @@ export type MembershipChange = Message<"konclave.protocol.v1.MembershipChange"> 
  */
 export const MembershipChangeSchema: GenMessage<MembershipChange> = /*@__PURE__*/
   messageDesc(file_konclave_protocol_v1_membership, 6);
+
+/**
+ * Plaintext membership context encrypted as one MLS application PrivateMessage.
+ *
+ * @generated from message konclave.protocol.v1.MembershipControl
+ */
+export type MembershipControl = Message<"konclave.protocol.v1.MembershipControl"> & {
+  /**
+   * Canonical MembershipChange bytes.
+   *
+   * @generated from field: bytes membership_change = 1;
+   */
+  membershipChange: Uint8Array;
+
+  /**
+   * Canonical JoinProof bytes. Present only for an add-member transition.
+   *
+   * @generated from field: bytes join_proof = 2;
+   */
+  joinProof: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.MembershipControl.
+ * Use `create(MembershipControlSchema)` to create a new message.
+ */
+export const MembershipControlSchema: GenMessage<MembershipControl> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_membership, 7);
+
+/**
+ * Opaque relay payload pairing encrypted application control with its MLS Commit.
+ *
+ * @generated from message konclave.protocol.v1.MembershipCommitBundle
+ */
+export type MembershipCommitBundle = Message<"konclave.protocol.v1.MembershipCommitBundle"> & {
+  /**
+   * MLS application PrivateMessage containing one MembershipControl.
+   *
+   * @generated from field: bytes encrypted_control = 1;
+   */
+  encryptedControl: Uint8Array;
+
+  /**
+   * MLS Commit PrivateMessage bound to the control's authorization digest.
+   *
+   * @generated from field: bytes mls_commit = 2;
+   */
+  mlsCommit: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.MembershipCommitBundle.
+ * Use `create(MembershipCommitBundleSchema)` to create a new message.
+ */
+export const MembershipCommitBundleSchema: GenMessage<MembershipCommitBundle> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_membership, 8);
 

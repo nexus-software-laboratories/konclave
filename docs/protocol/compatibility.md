@@ -153,6 +153,12 @@ authenticated data contains only the domain-separated SHA-256 digest of the cano
 `MembershipChange` bytes so clients can reject a valid MLS Commit paired with a
 different application authorization without exposing membership data to the relay.
 
+The complete canonical `MembershipChange` and optional add-member `JoinProof` form a
+bounded `MembershipControl` payload encrypted as an MLS application PrivateMessage in
+the parent epoch. `MembershipCommitBundle` pairs that encrypted control message with
+the bound MLS Commit PrivateMessage. Both bundle fields are opaque to the relay, and
+their aggregate encoding must fit the normal relay payload bound.
+
 Clients verify the selected Commit, reject observed conflicts or stale proposals, and
 halt security-sensitive sending on an unresolved branch. Compare-and-set does not
 provide non-equivocation against a malicious relay; replacing this trust requires a
