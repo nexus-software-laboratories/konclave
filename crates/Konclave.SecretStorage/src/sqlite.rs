@@ -35,6 +35,15 @@ impl SealedSqliteMlsStorage {
             ),
         })
     }
+
+    /// Returns whether sealed MLS group state exists for the exact group identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-closed backend error when storage cannot be read or opened.
+    pub fn contains_group(&self, group_id: &[u8]) -> Result<bool, SecretStorageError> {
+        self.sealed.state(group_id).map(|state| state.is_some())
+    }
 }
 
 impl GroupStateStorage for SealedSqliteMlsStorage {
@@ -321,6 +330,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("mls.sqlite");
         let mut storage = SealedSqliteMlsStorage::open(&path, sealer()).unwrap();
+        assert!(!storage.contains_group(b"group").unwrap());
         storage
             .write(
                 GroupState {
@@ -334,6 +344,7 @@ mod tests {
                 vec![],
             )
             .unwrap();
+        assert!(storage.contains_group(b"group").unwrap());
         storage
             .insert(
                 b"package".to_vec(),
@@ -371,6 +382,7 @@ mod tests {
         drop(connection);
 
         let storage = SealedSqliteMlsStorage::open(&path, sealer()).unwrap();
+        assert!(storage.contains_group(b"group").unwrap());
         assert_eq!(
             storage.state(b"group").unwrap().unwrap().as_slice(),
             b"group-secret"

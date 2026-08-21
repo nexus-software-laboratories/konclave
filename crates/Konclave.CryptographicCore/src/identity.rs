@@ -1,7 +1,7 @@
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
-    Ed25519PublicKey, Ed25519Signature, Invitation, InvitationId, InvitationNonce, ProtocolVersion,
-    SignatureScheme,
+    Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
+    MessageId, ProtocolVersion, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -71,11 +71,50 @@ impl DeviceIdentity {
     ///
     /// Returns a provider error when secure randomness is unavailable.
     pub fn generate_conversation_id(&self) -> Result<ConversationId, KonclaveCryptographicError> {
+        Ok(ConversationId::from_slice(
+            &self.generate_identifier_bytes(ConversationId::LENGTH)?,
+        )?)
+    }
+
+    /// Generates a high-entropy opaque relay route.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when secure randomness is unavailable.
+    pub fn generate_routing_id(&self) -> Result<RoutingId, KonclaveCryptographicError> {
+        Ok(RoutingId::from_slice(
+            &self.generate_identifier_bytes(RoutingId::LENGTH)?,
+        )?)
+    }
+
+    /// Generates a high-entropy application-message identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when secure randomness is unavailable.
+    pub fn generate_message_id(&self) -> Result<MessageId, KonclaveCryptographicError> {
+        Ok(MessageId::from_slice(
+            &self.generate_identifier_bytes(MessageId::LENGTH)?,
+        )?)
+    }
+
+    /// Generates a high-entropy relay-envelope identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when secure randomness is unavailable.
+    pub fn generate_envelope_id(&self) -> Result<EnvelopeId, KonclaveCryptographicError> {
+        Ok(EnvelopeId::from_slice(
+            &self.generate_identifier_bytes(EnvelopeId::LENGTH)?,
+        )?)
+    }
+
+    fn generate_identifier_bytes(
+        &self,
+        length: usize,
+    ) -> Result<Vec<u8>, KonclaveCryptographicError> {
         let cipher_suite = cipher_suite(&self.provider)?;
-        Ok(ConversationId::from_slice(&random_bytes(
-            &cipher_suite,
-            ConversationId::LENGTH,
-        )?)?)
+        random_bytes(&cipher_suite, length)
     }
 
     /// Seals this device-root identity for one bounded local profile identifier.
@@ -745,6 +784,32 @@ mod tests {
                 &blob,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_generates_every_public_identifier_shape() {
+        let identity = DeviceIdentity::generate().unwrap();
+
+        assert_eq!(
+            identity
+                .generate_conversation_id()
+                .unwrap()
+                .as_bytes()
+                .len(),
+            ConversationId::LENGTH
+        );
+        assert_eq!(
+            identity.generate_routing_id().unwrap().as_bytes().len(),
+            RoutingId::LENGTH
+        );
+        assert_eq!(
+            identity.generate_message_id().unwrap().as_bytes().len(),
+            MessageId::LENGTH
+        );
+        assert_eq!(
+            identity.generate_envelope_id().unwrap().as_bytes().len(),
+            EnvelopeId::LENGTH
         );
     }
 

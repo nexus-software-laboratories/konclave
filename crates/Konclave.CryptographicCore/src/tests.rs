@@ -270,12 +270,13 @@ fn sealed_mls_state_recovers_pending_join_commit_ratchets_and_removal() {
             None,
         )
         .unwrap();
-    assert!(
+    assert_eq!(
         bob_group
             .decrypt_application_message(
                 &MlsApplicationMessage::from_bytes(&ciphertext_bytes).unwrap(),
             )
-            .is_err()
+            .err(),
+        Some(KonclaveCryptographicError::ApplicationMessageAlreadyProcessed)
     );
 
     let removal = alice_group

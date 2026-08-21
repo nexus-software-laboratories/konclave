@@ -2,14 +2,16 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use KonclaveCryptographicCore::DeviceIdentity;
+use KonclaveClientLibrary::RelayClient;
 use KonclaveSecretStorage::{
     ExternalWrappingKeyProvider, NativeWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
 };
 use anyhow::{Context, bail};
 use tokio::sync::watch;
 
-use crate::persistence::{LockedProfile, ProfileId, ProfileStore};
+use crate::application::ApplicationService;
+use crate::conversation::ConversationCoordinator;
+use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
 use crate::service::Service;
 
 pub async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
@@ -28,6 +30,11 @@ async fn run_with_capabilities<F>(profile: RuntimeProfile, shutdown: F) -> anyho
 where
     F: Future<Output = ()>,
 {
+    let mcp_server = crate::mcp::StdioServer::new(
+        profile.conversations.clone(),
+        profile.applications.clone(),
+        crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
+    );
     let _profile = profile;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let external_shutdown_tx = shutdown_tx.clone();
@@ -44,9 +51,7 @@ where
     let mcp_shutdown_tx = shutdown_tx.clone();
     let mcp_shutdown_rx = shutdown_rx.clone();
     let mcp_server = async move {
-        let result =
-            crate::mcp::run_stdio_server(crate::mcp::allow_all_authorization(), mcp_shutdown_rx)
-                .await;
+        let result = crate::mcp::run_stdio_server(mcp_server, mcp_shutdown_rx).await;
         let _ = mcp_shutdown_tx.send(true);
         result
     };
@@ -61,15 +66,16 @@ where
 }
 
 struct RuntimeProfile {
-    _store: ProfileStore,
-    _mls_storage: SealedSqliteMlsStorage,
-    _device: DeviceIdentity,
+    conversations: ConversationCoordinator,
+    applications: Option<ApplicationService<RelayClient>>,
+    allow_mcp_write: bool,
 }
 
 struct ProfileConfig {
     root: PathBuf,
     profile_id: ProfileId,
     wrapping_key_file: Option<PathBuf>,
+    allow_mcp_write: bool,
 }
 
 impl ProfileConfig {
@@ -88,11 +94,24 @@ impl ProfileConfig {
             Some(_) => bail!("KONCLAVE_WRAPPING_KEY_FILE cannot be empty"),
             None => None,
         };
+        let allow_mcp_write =
+            parse_mcp_allow_write(std::env::var_os("KONCLAVE_MCP_ALLOW_WRITE").as_deref())?;
         Ok(Self {
             root,
             profile_id,
             wrapping_key_file,
+            allow_mcp_write,
         })
+    }
+}
+
+fn parse_mcp_allow_write(value: Option<&std::ffi::OsStr>) -> anyhow::Result<bool> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None if value.is_none() => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some("0" | "false") => Ok(false),
+        Some(_) => bail!("KONCLAVE_MCP_ALLOW_WRITE must be true, false, 1, or 0"),
+        None => bail!("KONCLAVE_MCP_ALLOW_WRITE must be Unicode"),
     }
 }
 
@@ -110,10 +129,24 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
     let device = store
         .load_or_create_device()
         .context("loading daemon device identity")?;
+    let relay = match store.relay_configuration() {
+        Ok((endpoint, credential)) => Some(
+            RelayClient::new(endpoint, credential)
+                .context("creating authenticated relay client")?,
+        ),
+        Err(ProfileStoreError::RelayNotConfigured) => None,
+        Err(error) => return Err(error).context("loading relay configuration"),
+    };
+    let conversations = ConversationCoordinator::new(store, mls_storage, device);
+    conversations
+        .recover()
+        .context("recovering daemon conversations")?;
+    let applications =
+        relay.map(|transport| ApplicationService::new(conversations.clone(), transport));
     Ok(RuntimeProfile {
-        _store: store,
-        _mls_storage: mls_storage,
-        _device: device,
+        conversations,
+        applications,
+        allow_mcp_write: config.allow_mcp_write,
     })
 }
 
@@ -187,6 +220,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_write_policy_is_explicit_and_fail_closed() {
+        assert!(!parse_mcp_allow_write(None).unwrap());
+        assert!(parse_mcp_allow_write(Some(std::ffi::OsStr::new("true"))).unwrap());
+        assert!(!parse_mcp_allow_write(Some(std::ffi::OsStr::new("0"))).unwrap());
+        assert!(parse_mcp_allow_write(Some(std::ffi::OsStr::new("yes"))).is_err());
+    }
+
+    #[test]
     fn external_key_profile_initializes_and_reopens() {
         let directory = tempfile::tempdir().unwrap();
         let key_path = directory.path().join("wrapping.key");
@@ -196,13 +237,14 @@ mod tests {
             root: root.clone(),
             profile_id: ProfileId::parse("runtime-test").unwrap(),
             wrapping_key_file: Some(key_path.clone()),
+            allow_mcp_write: false,
         };
         let first = initialize_profile(config()).unwrap();
-        let first_device = first._device.device_id();
+        let first_device = first.conversations.device_id().unwrap();
         assert!(root.join("runtime-test").join("profile.sqlite").is_file());
         assert!(root.join("runtime-test").join("mls.sqlite").is_file());
         drop(first);
         let reopened = initialize_profile(config()).unwrap();
-        assert_eq!(reopened._device.device_id(), first_device);
+        assert_eq!(reopened.conversations.device_id().unwrap(), first_device);
     }
 }

@@ -34,6 +34,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 zeroize.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3.27.0"
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
@@ -41,6 +42,6 @@ tower = { version = "0.5.3", features = ["util"] }
 [features]
 default = ["rust-service-mcp", "rust-service-observability", "rust-service-sqlite", "rust-service-windows-service"]
 rust-service-sqlite = ["dep:rusqlite"]
-rust-service-mcp = ["dep:libc", "dep:rmcp", "dep:windows-sys"]
+rust-service-mcp = ["dep:libc", "dep:rmcp", "dep:serde", "dep:serde_json", "dep:windows-sys"]
 rust-service-observability = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing", "dep:tracing-opentelemetry", "dep:tracing-subscriber"]
 rust-service-windows-service = ["dep:windows-service"]

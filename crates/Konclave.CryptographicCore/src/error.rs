@@ -33,6 +33,10 @@ pub enum KonclaveCryptographicError {
     #[error("MLS operation failed during {operation}")]
     MlsFailure { operation: &'static str },
 
+    /// The receiver ratchet has already consumed this application generation.
+    #[error("MLS application message was already processed")]
+    ApplicationMessageAlreadyProcessed,
+
     /// A validated domain value could not be encoded for MLS authentication.
     #[error("protocol contract encoding failed")]
     ProtocolContractFailure,
@@ -126,6 +130,7 @@ impl KonclaveCryptographicError {
             Self::InvitationDeviceMismatch => "invitation_device_mismatch",
             Self::InvitationConversationMismatch => "invitation_conversation_mismatch",
             Self::MlsFailure { .. } => "mls_failure",
+            Self::ApplicationMessageAlreadyProcessed => "application_message_already_processed",
             Self::ProtocolContractFailure => "protocol_contract_failure",
             Self::SecretStorageFailure { .. } => "secret_storage_failure",
             Self::MlsMessageTooLarge { .. } => "mls_message_too_large",

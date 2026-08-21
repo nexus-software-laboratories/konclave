@@ -1,4 +1,8 @@
 #[allow(dead_code)]
+mod application;
+#[allow(dead_code)]
+mod conversation;
+#[allow(dead_code)]
 mod mcp;
 #[allow(dead_code)]
 mod observability;

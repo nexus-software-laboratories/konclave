@@ -105,6 +105,7 @@ dependencies = [
  "KonclaveProtocolContracts",
  "KonclaveSecretStorage",
  "anyhow",
+ "async-trait",
  "axum",
  "axum-server",
  "fs4",
