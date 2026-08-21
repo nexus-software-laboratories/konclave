@@ -61,6 +61,7 @@ protocol_major_u32 ||
 protocol_minor_u32 ||
 invitation_id[16] ||
 conversation_id[32] ||
+routing_id[32] (when present) ||
 expected_device_id[32] ||
 conversation_role_u8 ||
 expires_at_unix_seconds_u64 ||
@@ -68,10 +69,14 @@ nonce[32] ||
 issuer_device_id[32]
 ```
 
-`conversation_role_u8` is `1` for administrator and `2` for member. An invitation is
-expired when the current Unix time is greater than or equal to its expiration value.
-Cryptographic validity does not establish administrator authorization or single-use
-consumption; authenticated conversation policy enforces both.
+`routing_id` is the opaque relay route the invitee must persist for the joined
+conversation. Newly issued invitations always include it. Early unbound v1
+invitations omit those 32 bytes and remain decodable, but are not accepted by the
+daemon's join workflow. `conversation_role_u8` is `1` for administrator and `2` for
+member. An invitation is expired when the current Unix time is greater than or equal
+to its expiration value. Cryptographic validity does not establish administrator
+authorization or single-use consumption; authenticated conversation policy enforces
+both.
 
 ## MLS credential relationship
 

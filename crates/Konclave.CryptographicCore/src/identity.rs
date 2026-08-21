@@ -251,6 +251,7 @@ impl DeviceIdentity {
     pub fn issue_invitation(
         &self,
         conversation_id: ConversationId,
+        routing_id: KonclaveDomainCore::RoutingId,
         expected_device_id: DeviceId,
         role: ConversationRole,
         expires_at_unix_seconds: u64,
@@ -264,6 +265,7 @@ impl DeviceIdentity {
             ProtocolVersion::application_v1(),
             invitation_id,
             conversation_id,
+            Some(routing_id),
             expected_device_id,
             role,
             expires_at_unix_seconds,
@@ -277,6 +279,7 @@ impl DeviceIdentity {
             ProtocolVersion::application_v1(),
             invitation_id,
             conversation_id,
+            Some(routing_id),
             expected_device_id,
             role,
             expires_at_unix_seconds,
@@ -571,6 +574,7 @@ pub fn verify_invitation(
         invitation.version(),
         invitation.invitation_id(),
         invitation.conversation_id(),
+        invitation.routing_id(),
         invitation.expected_device_id(),
         invitation.role(),
         invitation.expires_at_unix_seconds(),
@@ -675,6 +679,7 @@ fn canonical_invitation(
     version: ProtocolVersion,
     invitation_id: InvitationId,
     conversation_id: ConversationId,
+    routing_id: Option<KonclaveDomainCore::RoutingId>,
     expected_device_id: DeviceId,
     role: ConversationRole,
     expires_at_unix_seconds: u64,
@@ -686,6 +691,9 @@ fn canonical_invitation(
     append_version(&mut output, version);
     output.extend_from_slice(invitation_id.as_bytes());
     output.extend_from_slice(conversation_id.as_bytes());
+    if let Some(routing_id) = routing_id {
+        output.extend_from_slice(routing_id.as_bytes());
+    }
     output.extend_from_slice(expected_device_id.as_bytes());
     output.push(role_code(role));
     output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
@@ -748,7 +756,7 @@ mod tests {
     const CREDENTIAL_SIGNATURE: &str = "e94d639344a2af53f8b155c6871d4528397df8a4b4aa1e83c46464f68c494d30e566a4c47e1fa18757eb8587026494d9f76b870ac387654b0ca1ad3550beb401";
     const CREDENTIAL_HASH: &str =
         "ee10d5432136d42fc389d49eb1c2c70cca03da8ccdfbf58d687eb34f81a28a47";
-    const INVITATION_SIGNATURE: &str = "c5a72e285813c1ed9c98f3f5dac6bec25945307be8b212806240cddeadc6bebf374d2087550a4954d18351cd9da7e2d00829dffc4e98c84e2fda030340f6d700";
+    const INVITATION_SIGNATURE: &str = "312b28a1b5d395e56e1f251a8e2f1f2d6d55eb8d68ca795ebbe98ba8669188d5a7430d1804a00c5a98474c0c3433df074b8737d0b9513be858dc3225aad76c07";
 
     fn sealer() -> SecretSealer {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([9; 32])).unwrap()
@@ -852,12 +860,14 @@ mod tests {
         );
 
         let invitation_id = InvitationId::from_bytes([0x33; InvitationId::LENGTH]);
+        let routing_id = RoutingId::from_bytes([0x66; RoutingId::LENGTH]);
         let expected_device_id = DeviceId::from_bytes([0x44; DeviceId::LENGTH]);
         let nonce = InvitationNonce::from_bytes([0x55; InvitationNonce::LENGTH]);
         let invitation_input = canonical_invitation(
             ProtocolVersion::application_v1(),
             invitation_id,
             conversation_id,
+            Some(routing_id),
             expected_device_id,
             ConversationRole::Member,
             1_800_000_000,

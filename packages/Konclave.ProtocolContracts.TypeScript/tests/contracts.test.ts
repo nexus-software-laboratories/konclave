@@ -215,6 +215,10 @@ describe('identity contracts', () => {
       protocolErrorCodes.invalidLength,
     );
     expectCode(
+      () => encodeInvitation(invitation({ routingLength: 31 })),
+      protocolErrorCodes.invalidLength,
+    );
+    expectCode(
       () => encodeInvitation(invitation({ role: ConversationRole.UNSPECIFIED })),
       protocolErrorCodes.unsupportedEnum,
     );

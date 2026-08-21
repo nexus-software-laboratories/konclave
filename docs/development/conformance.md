@@ -46,6 +46,16 @@ set hashes, conformance results, security-review disposition, and known limitati
 - verify provider and persistence adapters fail closed.
 - restart from sealed conversation signing material and MLS state across pending join,
   pending commit, application ratchet, and removed-device tombstone transitions;
+- restart Join and Membership replay heads after later local policy acceptance but
+  before the accepted operation's own relay echo;
+- reject a same-route, same-class, same-parent Commit receipt whose envelope identifier
+  differs from the identifier authenticated by the Welcome, and prove exact acceptance
+  across checkpoint and restart;
+- resume an exact historical add retry with its original Welcome and cursor after later
+  policy transitions;
+- terminalize ready application outbox rows atomically on self-removal, return a
+  permanent not-member retry result, perform no relay submission, and keep later exact
+  route replay healthy;
 
 ### Property and fuzz testing
 
@@ -65,6 +75,8 @@ crash or excessive-allocation case becomes a permanent regression input.
   invitation redemption;
 - test conflicting Commits, honest compare-and-set epoch serialization, and
   fail-closed behavior when a client observes a fork;
+- reject an N+2-first replay page without journal or MLS mutation, then accept the
+  exact N+1/N+2 page; reject cursor arithmetic overflow before mutation;
 - test authenticated WebSocket catch-up, live notification, disconnect, reconnect,
   missed-message replay, heartbeat failure, and notification-loss recovery;
 - document that an isolated split view cannot be detected under the initial trusted
@@ -101,6 +113,11 @@ sessions can:
 10. remove a device and prove it cannot decrypt a later message.
 
 The test records no plaintext or secrets in relay diagnostics.
+
+`multi_process_relay_e2e` exercises this milestone with two daemon child processes
+over the Community Relay HTTP API. It covers invitation/Welcome handoff, bidirectional
+messages, daemon disconnect and profile reopen, missed replay, duplicate suppression,
+removal, post-removal decryption failure, and post-removal send denial.
 
 ## Determinism
 

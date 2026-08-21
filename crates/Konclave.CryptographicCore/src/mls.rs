@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use KonclaveDomainCore::{
     AddMember, ConversationId, ConversationRole, ConversationState, DeviceCredentialBinding,
-    DeviceId, Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES, MAX_MLS_KEY_PACKAGE_BYTES,
-    MAX_RELAY_PAYLOAD_BYTES, Member, MembershipAuthorization, MembershipChange,
-    MembershipOperationId, ProtocolVersion, RemoveMember,
+    DeviceId, EnvelopeId, Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES,
+    MAX_MLS_KEY_PACKAGE_BYTES, MAX_RELAY_PAYLOAD_BYTES, Member, MembershipAuthorization,
+    MembershipChange, MembershipOperationId, ProtocolVersion, RemoveMember,
 };
 use KonclaveProtocolContracts::v1::{
     decode_conversation_state, decode_membership_commit_bundle, decode_membership_control,
@@ -67,6 +67,8 @@ const MEMBERSHIP_AUTH_DOMAIN: &[u8] = b"konclave-membership-authorization-v1\0";
 const CONVERSATION_STATE_DOMAIN: &[u8] = b"konclave-conversation-state-v1\0";
 const CONVERSATION_STATE_EXTENSION: ExtensionType = ExtensionType::new(0xff00);
 const CONVERSATION_STATE_DIGEST_EXTENSION: ExtensionType = ExtensionType::new(0xff01);
+const WELCOME_ENVELOPE_ID_EXTENSION: ExtensionType = ExtensionType::new(0xff02);
+const WELCOME_ENVELOPE_ID_VERSION: u8 = 1;
 
 #[derive(Clone)]
 enum KonclaveStorage {
@@ -473,9 +475,26 @@ impl MlsConversationClient {
     /// Returns a typed error when the Welcome, ciphersuite, roster, or state does
     /// not match this conversation.
     pub fn join_group(
-        mut self,
+        self,
         welcome: &MlsWelcome,
     ) -> Result<MlsConversation, KonclaveCryptographicError> {
+        self.prepare_join_group(welcome)?.persist()
+    }
+
+    /// Validates and constructs a joined group without persisting it.
+    ///
+    /// The caller durably checkpoints the authenticated state and public bindings,
+    /// then invokes [`PreparedJoinedConversation::persist`]. This closes the crash
+    /// window between Welcome processing and daemon profile publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the Welcome, ciphersuite, roster, or state does
+    /// not match this conversation.
+    pub fn prepare_join_group(
+        mut self,
+        welcome: &MlsWelcome,
+    ) -> Result<PreparedJoinedConversation, KonclaveCryptographicError> {
         let welcome_message =
             parse_mls_message(welcome.as_bytes(), "welcome", MAX_RELAY_PAYLOAD_BYTES)?;
         require_welcome_message(&welcome_message)?;
@@ -483,11 +502,13 @@ impl MlsConversationClient {
             .client
             .examine_welcome_message(&welcome_message)
             .map_err(|_| mls_failure("Welcome examination"))?;
-        let (mut group, member_info) = self
+        let (group, member_info) = self
             .client
             .join_group(None, &welcome_message, None)
             .map_err(|_| mls_failure("group join"))?;
         let state = authenticated_state_from_extensions(member_info.group_info_extensions())?;
+        let expected_commit_envelope_id =
+            authenticated_welcome_envelope_id(member_info.group_info_extensions())?;
         require_authenticated_state_digest(&group_info.group_context().extensions, &state)
             .map_err(|_| KonclaveCryptographicError::MembershipAuthorizationMismatch)?;
         let expectation = self
@@ -519,15 +540,51 @@ impl MlsConversationClient {
         }
         self.policy.set_state(state.clone())?;
         verify_group_state(&group, &state, &self.policy)?;
-        persist_group(&mut group, "joined group persistence")?;
-        Ok(MlsConversation {
-            group,
-            policy: self.policy,
-            state,
-            self_device_id: self.binding.device_id(),
-            pending_state: None,
-            removed: false,
+        Ok(PreparedJoinedConversation {
+            conversation: MlsConversation {
+                group,
+                policy: self.policy,
+                state,
+                self_device_id: self.binding.device_id(),
+                pending_state: None,
+                removed: false,
+            },
+            expected_commit_envelope_id,
         })
+    }
+}
+
+/// Validated Welcome result awaiting the daemon's durable profile checkpoint.
+pub struct PreparedJoinedConversation {
+    conversation: MlsConversation,
+    expected_commit_envelope_id: Option<EnvelopeId>,
+}
+
+impl PreparedJoinedConversation {
+    /// Returns the authenticated state carried by the Welcome.
+    #[must_use]
+    pub const fn state(&self) -> &ConversationState {
+        self.conversation.state()
+    }
+
+    /// Returns the relay envelope identifier authenticated by the Welcome.
+    ///
+    /// A missing value identifies a legacy unbound Welcome. Generic MLS callers may
+    /// inspect that compatibility state, while the daemon rejects it before profile
+    /// checkpointing because no exact relay Commit can be proven.
+    #[must_use]
+    pub const fn expected_commit_envelope_id(&self) -> Option<EnvelopeId> {
+        self.expected_commit_envelope_id
+    }
+
+    /// Persists the joined MLS group after its daemon checkpoint exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sealed MLS storage error.
+    pub fn persist(mut self) -> Result<MlsConversation, KonclaveCryptographicError> {
+        self.conversation.persist()?;
+        Ok(self.conversation)
     }
 }
 
@@ -546,6 +603,12 @@ impl MlsConversation {
     #[must_use]
     pub const fn state(&self) -> &ConversationState {
         &self.state
+    }
+
+    /// Returns whether sealed MLS state contains a locally pending membership Commit.
+    #[must_use]
+    pub fn has_pending_membership_commit(&self) -> bool {
+        self.group.has_pending_commit()
     }
 
     /// Returns the current MLS epoch.
@@ -584,6 +647,7 @@ impl MlsConversation {
     pub fn create_add_commit(
         &mut self,
         join_proof: JoinProof,
+        expected_commit_envelope_id: EnvelopeId,
         now_unix_seconds: u64,
     ) -> Result<OutboundMembershipCommit, KonclaveCryptographicError> {
         self.ensure_no_pending_commit()?;
@@ -616,7 +680,8 @@ impl MlsConversation {
         let key_package =
             validate_key_package(join_proof.mls_key_package(), join_proof.credential())?;
         let authenticated_data = membership_authenticated_data(&authorization)?;
-        let group_info_extensions = authenticated_state_extensions(&next_state)?;
+        let group_info_extensions =
+            authenticated_state_extensions(&next_state, expected_commit_envelope_id)?;
         let group_context_extensions = authenticated_state_digest_extensions(&next_state)?;
         self.policy.prepare(authorization.clone())?;
         let output = match self
@@ -2162,13 +2227,17 @@ fn membership_authenticated_data(
 
 fn authenticated_state_extensions(
     state: &ConversationState,
+    expected_commit_envelope_id: EnvelopeId,
 ) -> Result<ExtensionList, KonclaveCryptographicError> {
     let encoded = encode_conversation_state(state)
         .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?;
-    Ok(vec![mls_rs::Extension::new(
-        CONVERSATION_STATE_EXTENSION,
-        encoded,
-    )]
+    let mut envelope_binding = Vec::with_capacity(1 + EnvelopeId::LENGTH);
+    envelope_binding.push(WELCOME_ENVELOPE_ID_VERSION);
+    envelope_binding.extend_from_slice(expected_commit_envelope_id.as_bytes());
+    Ok(vec![
+        mls_rs::Extension::new(CONVERSATION_STATE_EXTENSION, encoded),
+        mls_rs::Extension::new(WELCOME_ENVELOPE_ID_EXTENSION, envelope_binding),
+    ]
     .into())
 }
 
@@ -2190,6 +2259,22 @@ fn authenticated_state_from_extensions(
         .ok_or(KonclaveCryptographicError::MissingAuthenticatedState)?;
     decode_conversation_state(&extension.extension_data)
         .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)
+}
+
+fn authenticated_welcome_envelope_id(
+    extensions: &ExtensionList,
+) -> Result<Option<EnvelopeId>, KonclaveCryptographicError> {
+    let Some(extension) = extensions.get(WELCOME_ENVELOPE_ID_EXTENSION) else {
+        return Ok(None);
+    };
+    if extension.extension_data.len() != 1 + EnvelopeId::LENGTH
+        || extension.extension_data[0] != WELCOME_ENVELOPE_ID_VERSION
+    {
+        return Err(KonclaveCryptographicError::ProtocolContractFailure);
+    }
+    EnvelopeId::from_slice(&extension.extension_data[1..])
+        .map(Some)
+        .map_err(Into::into)
 }
 
 fn require_authenticated_state_digest(
@@ -2259,10 +2344,20 @@ mod tests {
             authenticated_state_from_extensions(&ExtensionList::default()).unwrap_err(),
             KonclaveCryptographicError::MissingAuthenticatedState
         );
+        assert_eq!(
+            authenticated_welcome_envelope_id(&ExtensionList::default()).unwrap(),
+            None
+        );
         let state = decode_conversation_state(include_bytes!(
             "../../../fixtures/protocol/v1/conversation-state.bin"
         ))
         .unwrap();
+        let envelope_id = EnvelopeId::from_bytes([35; EnvelopeId::LENGTH]);
+        let extensions = authenticated_state_extensions(&state, envelope_id).unwrap();
+        assert_eq!(
+            authenticated_welcome_envelope_id(&extensions).unwrap(),
+            Some(envelope_id)
+        );
         assert_eq!(
             require_authenticated_state_digest(&ExtensionList::default(), &state).unwrap_err(),
             KonclaveCryptographicError::MissingAuthenticatedState

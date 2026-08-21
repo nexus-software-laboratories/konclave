@@ -76,6 +76,12 @@ const cases: ReadonlyArray<{
     roundTrip: (bytes) => encodeInvitation(decodeInvitation(bytes)),
   },
   {
+    decode: decodeInvitation,
+    expected: invitation({ routingLength: 32 }),
+    name: 'route-bound-invitation.bin',
+    roundTrip: (bytes) => encodeInvitation(decodeInvitation(bytes)),
+  },
+  {
     decode: decodeJoinProof,
     expected: joinProof(),
     name: 'join-proof.bin',

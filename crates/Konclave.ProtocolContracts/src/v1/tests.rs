@@ -23,6 +23,8 @@ const APPLICATION_FIXTURE: &[u8] =
 const CREDENTIAL_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/device-credential-binding.bin");
 const INVITATION_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/protocol/v1/invitation.bin");
+const ROUTE_BOUND_INVITATION_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/route-bound-invitation.bin");
 const JOIN_PROOF_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/protocol/v1/join-proof.bin");
 const CONVERSATION_STATE_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/conversation-state.bin");
@@ -62,6 +64,13 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         encode_invitation(&decode_invitation(INVITATION_FIXTURE).expect("fixture should decode"))
             .expect("fixture should encode"),
         INVITATION_FIXTURE
+    );
+    assert_eq!(
+        encode_invitation(
+            &decode_invitation(ROUTE_BOUND_INVITATION_FIXTURE).expect("fixture should decode")
+        )
+        .expect("fixture should encode"),
+        ROUTE_BOUND_INVITATION_FIXTURE
     );
     assert_eq!(
         encode_join_proof(&decode_join_proof(JOIN_PROOF_FIXTURE).expect("fixture should decode"))

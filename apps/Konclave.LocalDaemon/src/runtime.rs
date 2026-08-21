@@ -1,13 +1,15 @@
 use std::future::Future;
+use std::io::Read as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use KonclaveClientLibrary::RelayClient;
+use KonclaveClientLibrary::{RelayAccessCredential, RelayClient, RelayEndpoint};
 use KonclaveSecretStorage::{
     ExternalWrappingKeyProvider, NativeWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
 };
 use anyhow::{Context, bail};
 use tokio::sync::watch;
+use zeroize::Zeroizing;
 
 use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
@@ -75,7 +77,13 @@ struct ProfileConfig {
     root: PathBuf,
     profile_id: ProfileId,
     wrapping_key_file: Option<PathBuf>,
+    relay_provisioning: Option<RelayProvisioning>,
     allow_mcp_write: bool,
+}
+
+struct RelayProvisioning {
+    endpoint: RelayEndpoint,
+    credential_file: PathBuf,
 }
 
 impl ProfileConfig {
@@ -96,12 +104,41 @@ impl ProfileConfig {
         };
         let allow_mcp_write =
             parse_mcp_allow_write(std::env::var_os("KONCLAVE_MCP_ALLOW_WRITE").as_deref())?;
+        let relay_provisioning = Self::parse_relay_provisioning(
+            std::env::var_os("KONCLAVE_RELAY_ENDPOINT").as_deref(),
+            std::env::var_os("KONCLAVE_RELAY_CREDENTIAL_FILE").as_deref(),
+        )?;
         Ok(Self {
             root,
             profile_id,
             wrapping_key_file,
+            relay_provisioning,
             allow_mcp_write,
         })
+    }
+
+    fn parse_relay_provisioning(
+        endpoint: Option<&std::ffi::OsStr>,
+        credential_file: Option<&std::ffi::OsStr>,
+    ) -> anyhow::Result<Option<RelayProvisioning>> {
+        match (endpoint, credential_file) {
+            (None, None) => Ok(None),
+            (Some(endpoint), Some(credential_file))
+                if !endpoint.is_empty() && !credential_file.is_empty() =>
+            {
+                let endpoint = endpoint
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("KONCLAVE_RELAY_ENDPOINT must be Unicode"))?;
+                Ok(Some(RelayProvisioning {
+                    endpoint: RelayEndpoint::parse(endpoint)
+                        .context("validating KONCLAVE_RELAY_ENDPOINT")?,
+                    credential_file: PathBuf::from(credential_file),
+                }))
+            }
+            _ => bail!(
+                "KONCLAVE_RELAY_ENDPOINT and KONCLAVE_RELAY_CREDENTIAL_FILE must be set together"
+            ),
+        }
     }
 }
 
@@ -129,6 +166,7 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
     let device = store
         .load_or_create_device()
         .context("loading daemon device identity")?;
+    provision_relay_if_needed(&store, config.relay_provisioning.as_ref())?;
     let relay = match store.relay_configuration() {
         Ok((endpoint, credential)) => Some(
             RelayClient::new(endpoint, credential)
@@ -148,6 +186,54 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
         applications,
         allow_mcp_write: config.allow_mcp_write,
     })
+}
+
+fn provision_relay_if_needed(
+    store: &crate::persistence::ProfileStore,
+    provisioning: Option<&RelayProvisioning>,
+) -> anyhow::Result<()> {
+    let Some(provisioning) = provisioning else {
+        return Ok(());
+    };
+    match store.relay_configuration() {
+        Ok((endpoint, _credential)) => {
+            if endpoint.as_str() != provisioning.endpoint.as_str() {
+                bail!("configured relay endpoint does not match KONCLAVE_RELAY_ENDPOINT");
+            }
+            Ok(())
+        }
+        Err(ProfileStoreError::RelayNotConfigured) => {
+            let credential = read_relay_credential(&provisioning.credential_file)?;
+            store
+                .configure_relay(&provisioning.endpoint, &credential)
+                .context("persisting relay provisioning")
+        }
+        Err(error) => Err(error).context("loading relay configuration for provisioning"),
+    }
+}
+
+fn read_relay_credential(path: &std::path::Path) -> anyhow::Result<RelayAccessCredential> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening relay credential file {}", path.display()))?;
+    let mut value = Zeroizing::new(String::new());
+    file.by_ref()
+        .take(129)
+        .read_to_string(&mut value)
+        .context("reading relay credential file")?;
+    if value.is_empty() || value.len() > 128 {
+        bail!("relay credential file has an invalid length");
+    }
+    let trimmed_length = if value.ends_with("\r\n") {
+        value.len().checked_sub(2)
+    } else if value.ends_with('\n') {
+        value.len().checked_sub(1)
+    } else {
+        None
+    };
+    if let Some(trimmed_length) = trimmed_length {
+        value.truncate(trimmed_length);
+    }
+    RelayAccessCredential::from_base64(&value).context("parsing relay credential file")
 }
 
 fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
@@ -237,6 +323,7 @@ mod tests {
             root: root.clone(),
             profile_id: ProfileId::parse("runtime-test").unwrap(),
             wrapping_key_file: Some(key_path.clone()),
+            relay_provisioning: None,
             allow_mcp_write: false,
         };
         let first = initialize_profile(config()).unwrap();
@@ -246,5 +333,68 @@ mod tests {
         drop(first);
         let reopened = initialize_profile(config()).unwrap();
         assert_eq!(reopened.conversations.device_id().unwrap(), first_device);
+    }
+
+    #[test]
+    fn relay_provisioning_requires_endpoint_and_credential_file() {
+        let endpoint = std::ffi::OsStr::new("https://relay.example.test");
+        let credential = std::ffi::OsStr::new("relay.credential");
+        assert!(
+            ProfileConfig::parse_relay_provisioning(None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(ProfileConfig::parse_relay_provisioning(Some(endpoint), None).is_err());
+        assert!(ProfileConfig::parse_relay_provisioning(None, Some(credential)).is_err());
+        assert!(
+            ProfileConfig::parse_relay_provisioning(
+                Some(std::ffi::OsStr::new("http://relay.example.test")),
+                Some(credential)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relay_credential_file_is_bounded_and_canonical() {
+        let directory = tempfile::tempdir().unwrap();
+        let valid = directory.path().join("valid.credential");
+        let oversized = directory.path().join("oversized.credential");
+        std::fs::write(&valid, "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\r\n").unwrap();
+        std::fs::write(&oversized, "a".repeat(129)).unwrap();
+        assert!(read_relay_credential(&valid).is_ok());
+        assert!(read_relay_credential(&oversized).is_err());
+    }
+
+    #[test]
+    fn relay_provisioning_is_first_run_only_and_endpoint_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("wrapping.key");
+        let credential_path = directory.path().join("relay.credential");
+        let root = directory.path().join("profiles");
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        std::fs::write(
+            &credential_path,
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\n",
+        )
+        .unwrap();
+        let config = |endpoint: &str| ProfileConfig {
+            root: root.clone(),
+            profile_id: ProfileId::parse("relay-provisioning").unwrap(),
+            wrapping_key_file: Some(key_path.clone()),
+            relay_provisioning: Some(RelayProvisioning {
+                endpoint: RelayEndpoint::parse(endpoint).unwrap(),
+                credential_file: credential_path.clone(),
+            }),
+            allow_mcp_write: false,
+        };
+        let first = initialize_profile(config("https://relay.example.test")).unwrap();
+        assert!(first.applications.is_some());
+        drop(first);
+        std::fs::remove_file(&credential_path).unwrap();
+        let reopened = initialize_profile(config("https://relay.example.test")).unwrap();
+        assert!(reopened.applications.is_some());
+        drop(reopened);
+        assert!(initialize_profile(config("https://other.example.test")).is_err());
     }
 }

@@ -7,8 +7,8 @@ use crate::KonclaveProtocolError;
 use crate::v1::common::{
     decode_bounded, device_id_from_wire, device_id_to_wire, encode_bounded,
     invitation_id_from_wire, invitation_id_to_wire, nonce_from_bytes, nonce_to_bytes,
-    public_key_from_bytes, public_key_to_bytes, signature_from_bytes, signature_to_bytes,
-    version_from_wire, version_to_wire,
+    public_key_from_bytes, public_key_to_bytes, routing_id_from_wire, routing_id_to_wire,
+    signature_from_bytes, signature_to_bytes, version_from_wire, version_to_wire,
 };
 use crate::wire::v1 as wire;
 
@@ -164,6 +164,7 @@ fn invitation_to_wire(value: &Invitation) -> wire::Invitation {
         nonce: nonce_to_bytes(value.nonce()),
         issuer_device_id: Some(device_id_to_wire(value.issuer_device_id())),
         issuer_signature: signature_to_bytes(value.issuer_signature()),
+        routing_id: value.routing_id().map(routing_id_to_wire),
     }
 }
 
@@ -172,6 +173,9 @@ fn invitation_from_wire(wire: wire::Invitation) -> Result<Invitation, KonclavePr
         version_from_wire(wire.version, INVITATION_CONTRACT)?,
         invitation_id_from_wire(wire.invitation_id)?,
         super::common::conversation_id_from_wire(wire.conversation_id)?,
+        wire.routing_id
+            .map(|value| routing_id_from_wire(Some(value)))
+            .transpose()?,
         device_id_from_wire(wire.expected_device_id)?,
         super::common::role_from_wire(wire.role)?,
         wire.expires_at_unix_seconds,
