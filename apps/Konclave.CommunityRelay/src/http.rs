@@ -267,7 +267,7 @@ async fn submit(
 ) -> Response {
     let bytes = match read_protobuf(request, MAX_RELAY_ENVELOPE_BYTES).await {
         Ok(bytes) => bytes,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let outcome = match state.application.submit_encoded(principal, &bytes).await {
         Ok(outcome) => outcome,
@@ -294,7 +294,7 @@ async fn replay(
 ) -> Response {
     let bytes = match read_protobuf(request, MAX_RELAY_CONTROL_MESSAGE_BYTES).await {
         Ok(bytes) => bytes,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request = match decode_replay_request(&bytes) {
         Ok(request) => request,
@@ -314,7 +314,7 @@ async fn acknowledge(
 ) -> Response {
     let bytes = match read_protobuf(request, MAX_RELAY_CONTROL_MESSAGE_BYTES).await {
         Ok(bytes) => bytes,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request = match decode_acknowledge_request(&bytes) {
         Ok(request) => request,
@@ -335,7 +335,7 @@ async fn acknowledge(
     }
 }
 
-async fn read_protobuf(request: Request<Body>, maximum: usize) -> Result<Bytes, Response> {
+async fn read_protobuf(request: Request<Body>, maximum: usize) -> Result<Bytes, Box<Response>> {
     read_protobuf_with_timeout(request, maximum, REQUEST_BODY_TIMEOUT).await
 }
 
@@ -343,17 +343,17 @@ async fn read_protobuf_with_timeout(
     request: Request<Body>,
     maximum: usize,
     body_timeout: Duration,
-) -> Result<Bytes, Response> {
+) -> Result<Bytes, Box<Response>> {
     if request
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         != Some(PROTOBUF_MEDIA_TYPE)
     {
-        return Err(error_response(
+        return Err(Box::new(error_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_media_type",
-        ));
+        )));
     }
     let body = timeout(
         body_timeout,
@@ -361,18 +361,18 @@ async fn read_protobuf_with_timeout(
     )
     .await;
     match body {
-        Err(_) => Err(error_response(
+        Err(_) => Err(Box::new(error_response(
             StatusCode::REQUEST_TIMEOUT,
             "relay_request_timeout",
-        )),
-        Ok(Err(_)) => Err(error_response(
+        ))),
+        Ok(Err(_)) => Err(Box::new(error_response(
             StatusCode::BAD_REQUEST,
             "relay_request_body_invalid",
-        )),
-        Ok(Ok(bytes)) if bytes.len() > maximum => Err(error_response(
+        ))),
+        Ok(Ok(bytes)) if bytes.len() > maximum => Err(Box::new(error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             "encoded_message_too_large",
-        )),
+        ))),
         Ok(Ok(bytes)) => Ok(bytes),
     }
 }
