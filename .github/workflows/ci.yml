@@ -66,7 +66,7 @@ jobs:
     if: needs.validation-plan.outputs.scope == 'full'
     name: Build and test Rust workspace
     runs-on: [self-hosted, linux, x64, general-purpose]
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -85,7 +85,7 @@ jobs:
     if: needs.validation-plan.outputs.scope == 'full'
     name: Rust rustfmt + clippy
     runs-on: [self-hosted, linux, x64, general-purpose]
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
