@@ -1,0 +1,184 @@
+{
+  "$schema": "./protocol-release.schema.json",
+  "schemaVersion": 1,
+  "release": {
+    "tag": "protocol-v1.0.0-alpha.1",
+    "status": "prerelease",
+    "date": "2026-08-21"
+  },
+  "protocol": {
+    "protobufPackage": "konclave.protocol.v1",
+    "transportEndpointMajor": 1,
+    "relayEnvelope": "1.0",
+    "application": "1.0",
+    "mls": {
+      "standard": "RFC 9420",
+      "ciphersuite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      "extensions": ["0xff00", "0xff01", "0xff02"]
+    },
+    "hardLimits": {
+      "relayEnvelopeBytes": 1048576,
+      "relayPayloadBytes": 1047552,
+      "applicationMessageBytes": 262144,
+      "applicationTextBytes": 261120,
+      "replayPageBytes": 16777216,
+      "replayPageEnvelopes": 100,
+      "relayControlMessageBytes": 1024,
+      "activeDevices": 128,
+      "metadataFieldBytes": 1024,
+      "pendingLocalOperations": 32
+    }
+  },
+  "storage": {
+    "daemonProfileSchema": 9,
+    "mlsSchemaOwnership": "SealedSqliteMlsStorage owns and migrates mls.sqlite independently."
+  },
+  "dependencies": {
+    "securityCritical": [
+      { "name": "mls-rs", "version": "0.55.3" },
+      { "name": "mls-rs-core", "version": "0.27.0" },
+      { "name": "mls-rs-crypto-awslc", "version": "0.25.0" },
+      { "name": "prost", "version": "0.14.4" },
+      { "name": "reqwest", "version": "0.13.4" },
+      { "name": "rusqlite", "version": "0.32.1" },
+      { "name": "sha2", "version": "0.10.9" }
+    ],
+    "lockfiles": [
+      {
+        "path": "Cargo.lock",
+        "bytes": 111306,
+        "sha256": "3b2c6628518cf684ebf6ce2a6762cf0149ae666c5f2d37137f870de4a3813a4e"
+      },
+      {
+        "path": "fuzz/Cargo.lock",
+        "bytes": 30278,
+        "sha256": "d9e385e7ca1ac6e56300767441bb4ba2bdc6b0b99b21f96974206298878df94e"
+      },
+      {
+        "path": "packages/Konclave.ProtocolContracts.TypeScript/package-lock.json",
+        "bytes": 98082,
+        "sha256": "ce92a04276b5134447a35ae3459bb1a206e6347da0bd49f639671c32e52d264f"
+      },
+      {
+        "path": "apps/Konclave.AdminConsole/package-lock.json",
+        "bytes": 156733,
+        "sha256": "d206e083f37a5d8cc4d0114a3d222ff8793fca77677f592e697a5abaaa46b413"
+      },
+      {
+        "path": "extensions/Konclave.HostExtension/package-lock.json",
+        "bytes": 121278,
+        "sha256": "640949b303124d041968d46ca0969301de7c955f628ece0d5be45af0c824794c"
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "path": "fixtures/protocol/v1/acknowledge-request.bin",
+      "bytes": 38,
+      "sha256": "4a916b322d0af333cc657e200f2daa669af79887b8a8502efd1af87b83d2cf9f"
+    },
+    {
+      "path": "fixtures/protocol/v1/application-message.bin",
+      "bytes": 62,
+      "sha256": "9d1bf4649b3f47bba9124a91f3f22e879da3a928651b2558f9c2c09cbfdf8cdf"
+    },
+    {
+      "path": "fixtures/protocol/v1/conversation-state.bin",
+      "bytes": 164,
+      "sha256": "3c78dc0c93743ee53dcaa8737b7ed4e8c69004d831b4287a0faafdf44884bb58"
+    },
+    {
+      "path": "fixtures/protocol/v1/device-credential-binding.bin",
+      "bytes": 212,
+      "sha256": "8d9d93e470d0adccdc0298312304b9669e1102769bf69ecadac3453d75651ab3"
+    },
+    {
+      "path": "fixtures/protocol/v1/invitation.bin",
+      "bytes": 240,
+      "sha256": "cdca99b5057721c7f557b3fe2d04a5cd5ffb0e8b022790e592371612d9b65183"
+    },
+    {
+      "path": "fixtures/protocol/v1/join-proof.bin",
+      "bytes": 492,
+      "sha256": "edd36bc487fae333ab4acd701a999355e3897e9b7979ce79a08e0cc343a19539"
+    },
+    {
+      "path": "fixtures/protocol/v1/membership-change.bin",
+      "bytes": 156,
+      "sha256": "9f0025ac415b67df907e6f529554770bf3e14121fa435f68219097ad4be598db"
+    },
+    {
+      "path": "fixtures/protocol/v1/membership-commit-bundle.bin",
+      "bytes": 84,
+      "sha256": "409e5a3b8b234ba6b89b3f26864942ecb7c0a55256384824da8076fdd5001091"
+    },
+    {
+      "path": "fixtures/protocol/v1/membership-control.bin",
+      "bytes": 654,
+      "sha256": "3ae4f1b305a171f1ee4777064024cb277fd07abe84d88a809f916133e6622220"
+    },
+    {
+      "path": "fixtures/protocol/v1/relay-envelope.bin",
+      "bytes": 102,
+      "sha256": "561b793b22ce2d1ce8cda1b7066b1f7499b5ef6ed599915e3763c1bf4b84ec82"
+    },
+    {
+      "path": "fixtures/protocol/v1/replay-page.bin",
+      "bytes": 218,
+      "sha256": "643ff81ba25e4322e38825c0ccfe91d12c0884a8115b227222ed3eb64db5c01d"
+    },
+    {
+      "path": "fixtures/protocol/v1/replay-request.bin",
+      "bytes": 38,
+      "sha256": "2667f31090b525e67584cc7f876893b93df85ee10d8057f395091697f51af69e"
+    },
+    {
+      "path": "fixtures/protocol/v1/route-bound-invitation.bin",
+      "bytes": 276,
+      "sha256": "90056ccfe65c943ba009163085acec38fb7b9a26bdf71abcfbd56b9c74494600"
+    },
+    {
+      "path": "fixtures/protocol/v1/stored-relay-envelope.bin",
+      "bytes": 106,
+      "sha256": "259830618f14a86b64095792b32c781d5c0e419999fd8a3ff4935783841101c5"
+    }
+  ],
+  "conformance": {
+    "policy": "docs/development/conformance.md",
+    "pullRequests": [
+      { "number": 14, "runId": 32444693771, "status": "passed" },
+      { "number": 19, "runId": 32487702606, "status": "passed" },
+      { "number": 21, "runId": 32488928344, "status": "passed" },
+      { "number": 22, "runId": 32491373555, "status": "passed" },
+      { "number": 23, "runId": 32492734156, "status": "passed" }
+    ],
+    "suites": [
+      { "name": "Rust workspace build and tests", "status": "passed" },
+      { "name": "Rust formatting, Clippy, fuzz compile, and security dependency policy", "status": "passed" },
+      { "name": "TypeScript generation, contracts, fixtures, lint, formatting, and coverage", "status": "passed" },
+      { "name": "Community Relay OCI build and process smoke validation", "status": "passed" },
+      { "name": "Two-daemon encrypted relay vertical slice", "status": "passed" },
+      { "name": "Sealed journal migration and crash-recovery regressions", "status": "passed" }
+    ],
+    "securityReview": {
+      "disposition": "approved",
+      "independentThirdPartyAudit": false,
+      "scope": [
+        "MLS integration and durable state",
+        "identity, invitations, and membership authorization",
+        "relay opacity, authentication, and non-equivocation handling",
+        "daemon journals, replay authority, migration, and removal recovery",
+        "Copilot extension trust and credential boundaries"
+      ]
+    }
+  },
+  "knownLimitations": [
+    "The relay sequencer is trusted not to present isolated clients with conflicting histories; no transparency or gossip layer is included.",
+    "Key transparency and federation are not included.",
+    "Konclave has not received an independent third-party security audit.",
+    "Native Windows Service type checking and runtime execution are not part of the current PitCrew evidence.",
+    "Secure deletion depends on operating-system and storage behavior.",
+    "Attachment and large-object transfer protocols are deferred.",
+    "The private hosted control plane is not part of this public protocol release."
+  ]
+}

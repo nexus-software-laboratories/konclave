@@ -20,6 +20,9 @@ corresponding surfaces exist.
 
 A release records exact dependency versions, supported protocol versions, fixture
 set hashes, conformance results, security-review disposition, and known limitations.
+Machine-readable manifests live under `protocol/releases/` and are verified by
+`scripts/protocol/Test-ProtocolRelease.ps1`. A manifest becomes immutable when its
+declared protocol tag is created from the merged `main` commit.
 
 ## Required suites
 
