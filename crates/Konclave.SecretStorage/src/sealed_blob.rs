@@ -35,6 +35,10 @@ pub enum SecretRecordKind {
     ConversationCredentialBinding = 8,
     LocalApplicationMessage = 9,
     LocalOperation = 10,
+    RemoteEvent = 11,
+    RemoteEventDeliveryState = 12,
+    RemoteEventJournalHead = 13,
+    RemoteEventDeliveryPolicy = 14,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.

@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path,
-    [string]$ManifestPath = 'protocol/releases/protocol-v1.0.0-alpha.1.json'
+    [string]$ManifestPath = 'protocol/releases/protocol-v1.0.0-alpha.1.json',
+    [switch]$CurrentTree
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +48,52 @@ $manifest = $manifestJson | ConvertFrom-Json -Depth 100
 $expectedFileName = "$($manifest.release.tag).json"
 if ([IO.Path]::GetFileName($manifestFullPath) -cne $expectedFileName) {
     throw "Release tag and manifest filename differ: $expectedFileName"
+}
+
+if (-not $CurrentTree) {
+    $tag = [string]$manifest.release.tag
+    if ($tag -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$') {
+        throw 'Release tag is not safe for repository lookup.'
+    }
+    $tagRef = "refs/tags/$tag"
+    & git -C $ProjectRoot rev-parse --verify --quiet "$tagRef^{commit}" | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        & git -C $ProjectRoot diff --quiet $tagRef -- $ManifestPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Released protocol manifest differs from immutable tag $tag."
+        }
+        $snapshotRoot = Join-Path (
+            [IO.Path]::GetTempPath()
+        ) "konclave-protocol-release-$([Guid]::NewGuid().ToString('N'))"
+        $archivePath = "$snapshotRoot.tar"
+        New-Item -ItemType Directory -Path $snapshotRoot | Out-Null
+        try {
+            & git -C $ProjectRoot archive --format=tar "--output=$archivePath" $tagRef
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not archive immutable protocol tag $tag."
+            }
+            & tar -xf $archivePath -C $snapshotRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not extract immutable protocol tag $tag."
+            }
+            & $PSCommandPath `
+                -ProjectRoot $snapshotRoot `
+                -ManifestPath $ManifestPath `
+                -CurrentTree
+            return
+        }
+        finally {
+            if (Test-Path -LiteralPath $archivePath) {
+                Remove-Item -LiteralPath $archivePath -Force
+            }
+            if (Test-Path -LiteralPath $snapshotRoot) {
+                Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
+            }
+        }
+    }
+    if ($LASTEXITCODE -ne 1) {
+        throw "Could not determine whether protocol tag $tag exists."
+    }
 }
 
 foreach ($entry in $manifest.dependencies.lockfiles) {

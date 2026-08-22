@@ -10,9 +10,10 @@ use KonclaveCryptographicCore::{
     verify_device_credential_binding,
 };
 use KonclaveDomainCore::{
-    ApplicationMessage, ConversationId, ConversationState, DeliveryClass, DeviceCredentialBinding,
-    DeviceId, Ed25519PublicKey, EnvelopeId, Invitation, InvitationId, JoinProof, MAX_MEMBERS,
-    MembershipChange, MembershipOperationId, MessageId, RelayEnvelope, RoutingId,
+    AdapterConsumerId, AdapterLeaseId, ApplicationMessage, ConversationId, ConversationRole,
+    ConversationState, DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
+    EnvelopeId, Invitation, InvitationId, JoinProof, MAX_MEMBERS, MembershipChange,
+    MembershipOperationId, MessageId, NotificationId, RelayEnvelope, RoutingId,
     StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
@@ -29,7 +30,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 9;
+const PROFILE_SCHEMA_VERSION: u32 = 10;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -50,6 +51,24 @@ const PENDING_JOIN_RECORD_SCOPE: u8 = 10;
 const PENDING_JOIN_PROOF_RECORD_SCOPE: u8 = 11;
 const PENDING_JOIN_RECEIPT_RECORD_SCOPE: u8 = 12;
 const REPLAY_HEAD_RECORD_SCOPE: u8 = 13;
+const REMOTE_EVENT_RECORD_SCOPE: u8 = 14;
+const REMOTE_EVENT_STATE_RECORD_SCOPE: u8 = 15;
+const REMOTE_EVENT_RECORD_VERSION: u8 = 1;
+const REMOTE_EVENT_HEAD_RECORD_VERSION: u8 = 1;
+const REMOTE_EVENT_HEAD_RECORD_SCOPE: u8 = 16;
+const REMOTE_EVENT_POLICY_RECORD_VERSION: u8 = 1;
+const REMOTE_EVENT_POLICY_RECORD_SCOPE: u8 = 17;
+const REMOTE_EVENT_FLOOR_RECORD_SCOPE: u8 = 18;
+const MAX_REMOTE_EVENT_BATCH: usize = 50;
+const MAX_REMOTE_EVENT_BATCH_BYTES: usize = 1024 * 1024;
+const MAX_PENDING_REMOTE_EVENTS: usize = 1_024;
+const MAX_PENDING_REMOTE_EVENTS_PER_CONVERSATION: usize = 128;
+const MAX_PENDING_REMOTE_EVENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PENDING_REMOTE_EVENT_BYTES_PER_CONVERSATION: usize = 1024 * 1024;
+const MAX_REMOTE_EVENT_TERMINAL_RECORDS: usize = 256;
+const MAX_REMOTE_EVENT_RECORDS: usize =
+    MAX_PENDING_REMOTE_EVENTS + MAX_REMOTE_EVENT_TERMINAL_RECORDS;
+const MAX_ADAPTER_LEASE_MILLISECONDS: u64 = 5 * 60 * 1_000;
 const OUTBOX_TERMINAL_REASON_EXPIRED: i64 = 1;
 const OUTBOX_TERMINAL_REASON_REMOVED: i64 = 2;
 const PENDING_JOIN_CHECKPOINT_VERSION: u8 = 1;
@@ -80,6 +99,22 @@ type PendingJoinBlobs = (
 type MembershipRequestColumns = (Option<i64>, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 type ConversationMetadata = (Vec<u8>, i64, i64, i64, i64, Option<i64>);
 type OutboundApplicationMetadata = (Vec<u8>, i64, Option<i64>, Option<i64>);
+type RemoteEventStorageMetadata = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+    Option<i64>,
+    i64,
+    i64,
+);
 
 /// Portable, filesystem-safe local profile identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,6 +248,8 @@ impl LockedProfile {
             sealer: Arc::new(sealer),
             locked_profile: self,
         };
+        store.verify_remote_event_journal()?;
+        store.invalidate_remote_event_leases()?;
         store.migrate_legacy_history()?;
         Ok(store)
     }
@@ -230,6 +267,1458 @@ impl ProfileStore {
     #[must_use]
     pub(crate) fn mls_database_path(&self) -> PathBuf {
         self.locked_profile.mls_database_path()
+    }
+
+    /// Enables or mutes automatic adapter delivery for one conversation.
+    ///
+    /// Muting affects future remote events only. Relay replay and sealed history
+    /// continue independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-conversation or storage error.
+    pub(crate) fn set_adapter_delivery_enabled(
+        &self,
+        conversation_id: ConversationId,
+        enabled: bool,
+    ) -> Result<(), ProfileStoreError> {
+        let routing_id = self.conversation_routing_id(conversation_id)?;
+        let blob = self.seal_operation_record(
+            SecretRecordKind::RemoteEventDeliveryPolicy,
+            conversation_id,
+            routing_id,
+            REMOTE_EVENT_POLICY_RECORD_SCOPE,
+            conversation_id.as_bytes(),
+            &encode_remote_event_delivery_policy(enabled),
+        )?;
+        let changed = self
+            .lock()?
+            .execute(
+                "UPDATE daemon_conversation
+                 SET sealed_adapter_delivery_policy = ?1
+                 WHERE conversation_id = ?2",
+                params![blob.as_bytes(), conversation_id.as_bytes().as_slice()],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(ProfileStoreError::ConversationNotFound)
+        }
+    }
+
+    /// Acquires or renews the single active adapter consumer lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a lease-range, active-consumer, sequence, or storage error.
+    pub(crate) fn acquire_adapter_consumer(
+        &self,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        now_unix_milliseconds: u64,
+        expires_at_unix_milliseconds: u64,
+    ) -> Result<(), ProfileStoreError> {
+        validate_adapter_lease_window(now_unix_milliseconds, expires_at_unix_milliseconds)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        self.reclaim_expired_remote_events_in(&transaction, now_unix_milliseconds)?;
+        let existing: Option<(Vec<u8>, Vec<u8>, i64)> = transaction
+            .query_row(
+                "SELECT
+                    CASE WHEN length(consumer_id) = 16 THEN consumer_id END,
+                    CASE WHEN length(lease_id) = 16 THEN lease_id END,
+                    lease_expires_at_unix_milliseconds
+                 FROM daemon_adapter_consumer
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if let Some((existing_consumer, existing_lease, existing_expiry)) = existing {
+            let existing_consumer = AdapterConsumerId::from_slice(&existing_consumer)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            let existing_lease = AdapterLeaseId::from_slice(&existing_lease)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            let existing_expiry = from_sql_integer(existing_expiry)?;
+            if existing_expiry > now_unix_milliseconds
+                && (existing_consumer != consumer_id || existing_lease != lease_id)
+            {
+                return Err(ProfileStoreError::AdapterConsumerActive);
+            }
+            transaction
+                .execute(
+                    "DELETE FROM daemon_adapter_consumer WHERE singleton_id = 1",
+                    [],
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO daemon_adapter_consumer (
+                    singleton_id,
+                    consumer_id,
+                    lease_id,
+                    lease_expires_at_unix_milliseconds
+                 ) VALUES (1, ?1, ?2, ?3)",
+                params![
+                    consumer_id.as_bytes().as_slice(),
+                    lease_id.as_bytes().as_slice(),
+                    to_sql_integer(expires_at_unix_milliseconds)?
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    /// Releases the active consumer and makes its unacknowledged claims pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-lease or storage error.
+    pub(crate) fn release_adapter_consumer(
+        &self,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+    ) -> Result<(), ProfileStoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let active: Option<(Vec<u8>, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT
+                    CASE WHEN length(consumer_id) = 16 THEN consumer_id END,
+                    CASE WHEN length(lease_id) = 16 THEN lease_id END
+                 FROM daemon_adapter_consumer
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        match active {
+            None => return Ok(()),
+            Some((active_consumer, active_lease))
+                if active_consumer.as_slice() == consumer_id.as_bytes()
+                    && active_lease.as_slice() == lease_id.as_bytes() => {}
+            Some(_) => return Err(ProfileStoreError::InvalidAdapterLease),
+        }
+        let claimed_sequences = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT event_sequence
+                     FROM daemon_remote_event
+                     WHERE status = 2
+                       AND lease_consumer_id = ?1
+                       AND lease_id = ?2
+                     ORDER BY event_sequence",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(
+                    params![
+                        consumer_id.as_bytes().as_slice(),
+                        lease_id.as_bytes().as_slice()
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        for sequence in claimed_sequences {
+            let (event, state) =
+                self.load_remote_event_record_in(&transaction, from_sql_integer(sequence)?)?;
+            if state.status != RemoteEventStatus::Claimed
+                || state.consumer_id != Some(consumer_id)
+                || state.lease_id != Some(lease_id)
+            {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            self.store_remote_event_delivery_state_in(
+                &transaction,
+                &event,
+                &RemoteEventDeliveryState {
+                    status: RemoteEventStatus::Pending,
+                    consumer_id: None,
+                    lease_id: None,
+                    lease_generation: state.lease_generation,
+                    lease_expires_at_unix_milliseconds: None,
+                },
+            )?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM daemon_adapter_consumer
+                 WHERE singleton_id = 1 AND consumer_id = ?1 AND lease_id = ?2",
+                params![
+                    consumer_id.as_bytes().as_slice(),
+                    lease_id.as_bytes().as_slice()
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    /// Claims a bounded fair batch of pending remote events.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounds, stale-lease, malformed-record, protocol, or storage error.
+    pub(crate) fn claim_remote_events(
+        &self,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        now_unix_milliseconds: u64,
+        expires_at_unix_milliseconds: u64,
+        limit: usize,
+    ) -> Result<Vec<ClaimedRemoteEvent>, ProfileStoreError> {
+        if limit == 0 || limit > MAX_REMOTE_EVENT_BATCH {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        validate_adapter_lease_window(now_unix_milliseconds, expires_at_unix_milliseconds)?;
+        let claimed = {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction()
+                .map_err(|_| ProfileStoreError::Storage)?;
+            verify_active_adapter_consumer(
+                &transaction,
+                consumer_id,
+                lease_id,
+                now_unix_milliseconds,
+                expires_at_unix_milliseconds,
+            )?;
+            self.reclaim_expired_remote_events_in(&transaction, now_unix_milliseconds)?;
+            let candidates = {
+                let mut statement = transaction
+                    .prepare(
+                        "WITH ranked AS (
+                            SELECT
+                                e.event_sequence,
+                                CASE e.event_kind
+                                    WHEN 1 THEN length(i.sealed_message)
+                                    ELSE length(m.sealed_transition)
+                                END AS delivery_length,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY e.conversation_id
+                                    ORDER BY e.event_sequence
+                                ) AS conversation_rank
+                            FROM daemon_remote_event e
+                            LEFT JOIN daemon_inbox i
+                              ON i.conversation_id = e.conversation_id
+                             AND i.cursor = e.relay_cursor
+                             AND e.event_kind = 1
+                            LEFT JOIN daemon_membership_inbox m
+                              ON m.conversation_id = e.conversation_id
+                             AND m.cursor = e.relay_cursor
+                             AND e.event_kind BETWEEN 2 AND 5
+                            WHERE e.status = 1
+                         )
+                         SELECT event_sequence, delivery_length
+                         FROM ranked
+                         ORDER BY conversation_rank, event_sequence
+                         LIMIT ?1",
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                statement
+                    .query_map(
+                        params![
+                            i64::try_from(limit)
+                                .map_err(|_| ProfileStoreError::SequenceExhausted)?
+                        ],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ProfileStoreError::Storage)?
+            };
+            let mut selected = Vec::with_capacity(candidates.len());
+            let mut selected_bytes = 0_usize;
+            for (sequence, delivery_length) in candidates {
+                validate_blob_length(delivery_length)?;
+                let delivery_length =
+                    usize::try_from(delivery_length).map_err(|_| ProfileStoreError::CorruptData)?;
+                if selected_bytes
+                    .checked_add(delivery_length)
+                    .is_none_or(|total| total > MAX_REMOTE_EVENT_BATCH_BYTES)
+                {
+                    if selected.is_empty() {
+                        return Err(ProfileStoreError::RemoteEventCapacityExceeded);
+                    }
+                    break;
+                }
+                selected_bytes += delivery_length;
+                let sequence = from_sql_integer(sequence)?;
+                let (event, state) = self.load_remote_event_record_in(&transaction, sequence)?;
+                if state.status != RemoteEventStatus::Pending {
+                    return Err(ProfileStoreError::InvalidTransition);
+                }
+                let generation = state
+                    .lease_generation
+                    .checked_add(1)
+                    .ok_or(ProfileStoreError::SequenceExhausted)?;
+                self.store_remote_event_delivery_state_in(
+                    &transaction,
+                    &event,
+                    &RemoteEventDeliveryState {
+                        status: RemoteEventStatus::Claimed,
+                        consumer_id: Some(consumer_id),
+                        lease_id: Some(lease_id),
+                        lease_generation: generation,
+                        lease_expires_at_unix_milliseconds: Some(expires_at_unix_milliseconds),
+                    },
+                )?;
+                selected.push((sequence, generation));
+            }
+            transaction
+                .commit()
+                .map_err(|_| ProfileStoreError::Storage)?;
+            selected
+        };
+
+        claimed
+            .into_iter()
+            .map(|(sequence, generation)| {
+                Ok(ClaimedRemoteEvent {
+                    event: self.load_remote_event_by_sequence(sequence)?,
+                    lease_generation: generation,
+                })
+            })
+            .collect()
+    }
+
+    /// Acknowledges one event accepted by the active harness adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-event, stale-lease, sequence, or storage error.
+    pub(crate) fn acknowledge_remote_event(
+        &self,
+        notification_id: NotificationId,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        lease_generation: u64,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), ProfileStoreError> {
+        self.finish_remote_event_claim(
+            notification_id,
+            consumer_id,
+            lease_id,
+            lease_generation,
+            now_unix_milliseconds,
+            RemoteEventStatus::Acknowledged,
+        )
+    }
+
+    /// Releases one claimed event for later delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-event, stale-lease, sequence, or storage error.
+    pub(crate) fn release_remote_event(
+        &self,
+        notification_id: NotificationId,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        lease_generation: u64,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), ProfileStoreError> {
+        self.finish_remote_event_claim(
+            notification_id,
+            consumer_id,
+            lease_id,
+            lease_generation,
+            now_unix_milliseconds,
+            RemoteEventStatus::Pending,
+        )
+    }
+
+    /// Removes a bounded contiguous prefix of acknowledged or suppressed events.
+    ///
+    /// The sealed floor preserves sequence and chain integrity after terminal rows
+    /// are removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounds, malformed-record, sequence, or storage error.
+    pub(crate) fn prune_terminal_remote_events(
+        &self,
+        limit: usize,
+    ) -> Result<usize, ProfileStoreError> {
+        if limit == 0 || limit > MAX_REMOTE_EVENT_BATCH {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let pruned = self.prune_terminal_remote_events_in(&transaction, limit)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(pruned)
+    }
+
+    fn prune_terminal_remote_events_in(
+        &self,
+        connection: &Connection,
+        limit: usize,
+    ) -> Result<usize, ProfileStoreError> {
+        let current_floor = self.load_remote_event_floor_in(connection)?;
+        let floor_sequence = current_floor.as_ref().map_or(0, |value| value.sequence);
+        let sequences = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT event_sequence
+                     FROM daemon_remote_event
+                     WHERE event_sequence > ?1
+                     ORDER BY event_sequence
+                     LIMIT ?2",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(
+                    params![
+                        to_sql_integer(floor_sequence)?,
+                        i64::try_from(limit).map_err(|_| ProfileStoreError::SequenceExhausted)?
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        let mut previous_notification = current_floor.as_ref().map(|value| value.notification_id);
+        let mut terminal = Vec::with_capacity(sequences.len());
+        for sequence in sequences {
+            let sequence = from_sql_integer(sequence)?;
+            let (event, state) = self.load_remote_event_record_in(connection, sequence)?;
+            if event.sequence
+                != floor_sequence
+                    .checked_add(
+                        u64::try_from(terminal.len() + 1)
+                            .map_err(|_| ProfileStoreError::SequenceExhausted)?,
+                    )
+                    .ok_or(ProfileStoreError::SequenceExhausted)?
+                || event.previous_notification_id != previous_notification
+            {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            if !matches!(
+                state.status,
+                RemoteEventStatus::Acknowledged | RemoteEventStatus::Suppressed
+            ) {
+                break;
+            }
+            previous_notification = Some(event.notification_id);
+            terminal.push(event);
+        }
+        let Some(new_floor) = terminal.last() else {
+            return Ok(0);
+        };
+        let new_floor = RemoteEventHead {
+            sequence: new_floor.sequence,
+            notification_id: new_floor.notification_id,
+        };
+        let floor_blob = self.seal_remote_event_floor(&new_floor)?;
+        for event in &terminal {
+            let deleted = connection
+                .execute(
+                    "DELETE FROM daemon_remote_event
+                     WHERE event_sequence = ?1 AND notification_id = ?2",
+                    params![
+                        to_sql_integer(event.sequence)?,
+                        event.notification_id.as_bytes().as_slice()
+                    ],
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if deleted != 1 {
+                return Err(ProfileStoreError::InvalidTransition);
+            }
+        }
+        let updated = connection
+            .execute(
+                "UPDATE daemon_profile
+                 SET remote_event_floor_sequence = ?1,
+                     sealed_remote_event_floor = ?2
+                 WHERE singleton_id = 1 AND remote_event_floor_sequence = ?3",
+                params![
+                    to_sql_integer(new_floor.sequence)?,
+                    floor_blob.as_bytes(),
+                    to_sql_integer(floor_sequence)?
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if updated != 1 {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        Ok(terminal.len())
+    }
+
+    fn prune_excess_terminal_remote_events_in(
+        &self,
+        connection: &Connection,
+    ) -> Result<(), ProfileStoreError> {
+        let terminal_count: i64 = connection
+            .query_row(
+                "SELECT count(*)
+                 FROM daemon_remote_event
+                 WHERE status IN (3, 4)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let terminal_count =
+            usize::try_from(terminal_count).map_err(|_| ProfileStoreError::CorruptData)?;
+        let excess = terminal_count.saturating_sub(MAX_REMOTE_EVENT_TERMINAL_RECORDS);
+        if excess > 0 {
+            self.prune_terminal_remote_events_in(connection, excess.min(MAX_REMOTE_EVENT_BATCH))?;
+        }
+        Ok(())
+    }
+
+    fn finish_remote_event_claim(
+        &self,
+        notification_id: NotificationId,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        lease_generation: u64,
+        now_unix_milliseconds: u64,
+        target: RemoteEventStatus,
+    ) -> Result<(), ProfileStoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let sequence: Option<i64> = transaction
+            .query_row(
+                "SELECT event_sequence
+                 FROM daemon_remote_event
+                 WHERE notification_id = ?1",
+                params![notification_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let (event, state) = self.load_remote_event_record_in(
+            &transaction,
+            from_sql_integer(sequence.ok_or(ProfileStoreError::OperationNotFound)?)?,
+        )?;
+        if event.notification_id != notification_id {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        if state.status == RemoteEventStatus::Acknowledged
+            && target == RemoteEventStatus::Acknowledged
+        {
+            return Ok(());
+        }
+        if state.status == RemoteEventStatus::Pending && target == RemoteEventStatus::Pending {
+            return Ok(());
+        }
+        if state.status != RemoteEventStatus::Claimed
+            || state.consumer_id != Some(consumer_id)
+            || state.lease_id != Some(lease_id)
+            || state.lease_generation != lease_generation
+            || state
+                .lease_expires_at_unix_milliseconds
+                .is_none_or(|expiry| expiry <= now_unix_milliseconds)
+        {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        verify_active_adapter_consumer_now(
+            &transaction,
+            consumer_id,
+            lease_id,
+            now_unix_milliseconds,
+        )?;
+        self.store_remote_event_delivery_state_in(
+            &transaction,
+            &event,
+            &RemoteEventDeliveryState {
+                status: target,
+                consumer_id: None,
+                lease_id: None,
+                lease_generation,
+                lease_expires_at_unix_milliseconds: None,
+            },
+        )?;
+        if target == RemoteEventStatus::Acknowledged {
+            self.prune_excess_terminal_remote_events_in(&transaction)?;
+        }
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    fn verify_remote_event_journal(&self) -> Result<(), ProfileStoreError> {
+        let connection = self.lock()?;
+        let (next_sequence, head) = self.load_remote_event_head_in(&connection)?;
+        let floor = self.load_remote_event_floor_in(&connection)?;
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM daemon_remote_event", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let count = from_sql_integer(count)?;
+        if next_sequence == 1 {
+            return if head.is_none() && floor.is_none() && count == 0 {
+                Ok(())
+            } else {
+                Err(ProfileStoreError::CorruptData)
+            };
+        }
+        let head = head.ok_or(ProfileStoreError::CorruptData)?;
+        let floor_sequence = floor.as_ref().map_or(0, |value| value.sequence);
+        if floor_sequence > head.sequence
+            || head.sequence.checked_add(1) != Some(next_sequence)
+            || count != head.sequence - floor_sequence
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        if head.sequence == floor_sequence {
+            if floor.as_ref().map(|value| value.notification_id) != Some(head.notification_id) {
+                return Err(ProfileStoreError::CorruptData);
+            }
+        } else {
+            let stored_notification: Option<Vec<u8>> = connection
+                .query_row(
+                    "SELECT CASE WHEN length(notification_id) = 16 THEN notification_id END
+                     FROM daemon_remote_event
+                     WHERE event_sequence = ?1",
+                    params![to_sql_integer(head.sequence)?],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if stored_notification.as_deref() != Some(head.notification_id.as_bytes()) {
+                return Err(ProfileStoreError::CorruptData);
+            }
+        }
+        drop(connection);
+        let mut after_sequence = floor_sequence;
+        let mut previous_notification = floor.map(|value| value.notification_id);
+        loop {
+            let sequences = {
+                let connection = self.lock()?;
+                let mut statement = connection
+                    .prepare(
+                        "SELECT event_sequence
+                         FROM daemon_remote_event
+                         WHERE event_sequence > ?1
+                         ORDER BY event_sequence
+                         LIMIT ?2",
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                statement
+                    .query_map(
+                        params![
+                            to_sql_integer(after_sequence)?,
+                            i64::try_from(MAX_MESSAGE_PAGE_SIZE)
+                                .map_err(|_| ProfileStoreError::SequenceExhausted)?
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ProfileStoreError::Storage)?
+            };
+            if sequences.is_empty() {
+                break;
+            }
+            for sequence in &sequences {
+                let sequence = from_sql_integer(*sequence)?;
+                let record = {
+                    let connection = self.lock()?;
+                    self.load_remote_event_record_in(&connection, sequence)?.0
+                };
+                if after_sequence.checked_add(1) != Some(sequence)
+                    || record.previous_notification_id != previous_notification
+                {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                self.load_remote_event_by_sequence(sequence)?;
+                after_sequence = sequence;
+                previous_notification = Some(record.notification_id);
+            }
+        }
+        if after_sequence != head.sequence || previous_notification != Some(head.notification_id) {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(())
+    }
+
+    fn load_remote_event_head_in(
+        &self,
+        connection: &Connection,
+    ) -> Result<(u64, Option<RemoteEventHead>), ProfileStoreError> {
+        let (next_sequence, head_length): (i64, Option<i64>) = connection
+            .query_row(
+                "SELECT next_remote_event_sequence, length(sealed_remote_event_head)
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let next_sequence = from_sql_integer(next_sequence)?;
+        let Some(head_length) = head_length else {
+            return Ok((next_sequence, None));
+        };
+        validate_blob_length(head_length)?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_remote_event_head
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if bytes.len()
+            != usize::try_from(head_length).map_err(|_| ProfileStoreError::CorruptData)?
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let blob = SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
+        let plaintext = self
+            .sealer
+            .open(
+                &remote_event_head_record_context(&self.locked_profile.profile_id)?,
+                &blob,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let head = decode_remote_event_head(&plaintext)?;
+        if head.sequence.checked_add(1) != Some(next_sequence) {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok((next_sequence, Some(head)))
+    }
+
+    fn seal_remote_event_head(
+        &self,
+        head: &RemoteEventHead,
+    ) -> Result<SealedBlob, ProfileStoreError> {
+        self.sealer
+            .seal(
+                &remote_event_head_record_context(&self.locked_profile.profile_id)?,
+                &encode_remote_event_head(head),
+            )
+            .map_err(|_| ProfileStoreError::Storage)
+    }
+
+    fn load_remote_event_floor_in(
+        &self,
+        connection: &Connection,
+    ) -> Result<Option<RemoteEventHead>, ProfileStoreError> {
+        let (floor_sequence, floor_length): (i64, Option<i64>) = connection
+            .query_row(
+                "SELECT remote_event_floor_sequence, length(sealed_remote_event_floor)
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let floor_sequence = from_sql_integer(floor_sequence)?;
+        let Some(floor_length) = floor_length else {
+            return if floor_sequence == 0 {
+                Ok(None)
+            } else {
+                Err(ProfileStoreError::CorruptData)
+            };
+        };
+        if floor_sequence == 0 {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        validate_blob_length(floor_length)?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_remote_event_floor
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if bytes.len()
+            != usize::try_from(floor_length).map_err(|_| ProfileStoreError::CorruptData)?
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let blob = SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
+        let plaintext = self
+            .sealer
+            .open(
+                &remote_event_floor_record_context(&self.locked_profile.profile_id)?,
+                &blob,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let floor = decode_remote_event_head(&plaintext)?;
+        if floor.sequence != floor_sequence {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(Some(floor))
+    }
+
+    fn seal_remote_event_floor(
+        &self,
+        floor: &RemoteEventHead,
+    ) -> Result<SealedBlob, ProfileStoreError> {
+        self.sealer
+            .seal(
+                &remote_event_floor_record_context(&self.locked_profile.profile_id)?,
+                &encode_remote_event_head(floor),
+            )
+            .map_err(|_| ProfileStoreError::Storage)
+    }
+
+    fn invalidate_remote_event_leases(&self) -> Result<(), ProfileStoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let sequences = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT event_sequence
+                     FROM daemon_remote_event
+                     WHERE status = 2
+                     ORDER BY event_sequence",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        for sequence in sequences {
+            let (event, state) =
+                self.load_remote_event_record_in(&transaction, from_sql_integer(sequence)?)?;
+            if state.status != RemoteEventStatus::Claimed {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            self.store_remote_event_delivery_state_in(
+                &transaction,
+                &event,
+                &RemoteEventDeliveryState {
+                    status: RemoteEventStatus::Pending,
+                    consumer_id: None,
+                    lease_id: None,
+                    lease_generation: state.lease_generation,
+                    lease_expires_at_unix_milliseconds: None,
+                },
+            )?;
+        }
+        transaction
+            .execute("DELETE FROM daemon_adapter_consumer", [])
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    fn load_remote_event_by_sequence(
+        &self,
+        sequence: u64,
+    ) -> Result<RemoteEvent, ProfileStoreError> {
+        let (record, _) = {
+            let connection = self.lock()?;
+            self.load_remote_event_record_in(&connection, sequence)?
+        };
+        let notification_id = record.notification_id;
+        let conversation_id = record.conversation_id;
+        let relay_cursor = record.relay_cursor;
+        let kind = record.kind;
+        let sender = record.sender;
+        let source_identifier = record.source_identifier;
+
+        let payload = match kind {
+            RemoteEventKind::ApplicationMessage => {
+                let message_id = MessageId::from_slice(&source_identifier)
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+                let message = self.load_message_at(conversation_id, relay_cursor)?;
+                if message.sender != sender || message.message.message_id() != message_id {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                RemoteEventPayload::ApplicationMessage(message.message)
+            }
+            RemoteEventKind::MemberAdded
+            | RemoteEventKind::MemberRemoved
+            | RemoteEventKind::MemberRoleChanged
+            | RemoteEventKind::LocalAccessRemoved => {
+                let operation_id = MembershipOperationId::from_slice(&source_identifier)
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+                let transition =
+                    match self.membership_inbox_operation(conversation_id, relay_cursor)? {
+                        MembershipInboxOperation::Complete(transition) => transition,
+                        _ => return Err(ProfileStoreError::CorruptData),
+                    };
+                if transition.sender != sender || transition.operation_id != operation_id {
+                    return Err(ProfileStoreError::CorruptData);
+                }
+                let (authorization, _) = decode_membership_control(&transition.control)
+                    .map_err(|_| ProfileStoreError::Protocol)?;
+                match (kind, authorization.change()) {
+                    (RemoteEventKind::MemberAdded, MembershipChange::Add(change)) => {
+                        RemoteEventPayload::MemberAdded {
+                            device_id: change.device_id(),
+                            role: change.role(),
+                        }
+                    }
+                    (RemoteEventKind::MemberRemoved, MembershipChange::Remove(change)) => {
+                        RemoteEventPayload::MemberRemoved {
+                            device_id: change.device_id(),
+                        }
+                    }
+                    (RemoteEventKind::MemberRoleChanged, MembershipChange::ChangeRole(change)) => {
+                        RemoteEventPayload::MemberRoleChanged {
+                            device_id: change.device_id(),
+                            role: change.role(),
+                        }
+                    }
+                    (RemoteEventKind::LocalAccessRemoved, MembershipChange::Remove(change)) => {
+                        RemoteEventPayload::LocalAccessRemoved {
+                            device_id: change.device_id(),
+                        }
+                    }
+                    _ => return Err(ProfileStoreError::CorruptData),
+                }
+            }
+        };
+        Ok(RemoteEvent {
+            sequence,
+            notification_id,
+            conversation_id,
+            relay_cursor,
+            sender,
+            payload,
+        })
+    }
+
+    fn load_remote_event_record_in(
+        &self,
+        connection: &Connection,
+        sequence: u64,
+    ) -> Result<(RemoteEventRecord, RemoteEventDeliveryState), ProfileStoreError> {
+        let metadata: Option<RemoteEventStorageMetadata> = connection
+            .query_row(
+                "SELECT
+                    CASE WHEN length(e.notification_id) = 16 THEN e.notification_id END,
+                    CASE WHEN length(e.conversation_id) = 32 THEN e.conversation_id END,
+                    CASE WHEN length(c.routing_id) = 32 THEN c.routing_id END,
+                    e.relay_cursor,
+                    e.event_kind,
+                    e.status,
+                    CASE WHEN length(e.sender_device_id) = 32 THEN e.sender_device_id END,
+                    CASE WHEN length(e.source_identifier) = 16 THEN e.source_identifier END,
+                    CASE
+                        WHEN e.lease_consumer_id IS NULL THEN NULL
+                        WHEN length(e.lease_consumer_id) = 16 THEN e.lease_consumer_id
+                    END,
+                    CASE
+                        WHEN e.lease_id IS NULL THEN NULL
+                        WHEN length(e.lease_id) = 16 THEN e.lease_id
+                    END,
+                    e.lease_generation,
+                    e.lease_expires_at_unix_milliseconds,
+                    length(e.sealed_event),
+                    length(e.sealed_delivery_state)
+                 FROM daemon_remote_event e
+                 JOIN daemon_conversation c USING (conversation_id)
+                 WHERE e.event_sequence = ?1",
+                params![to_sql_integer(sequence)?],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let (
+            notification_id,
+            conversation_id,
+            routing_id,
+            relay_cursor,
+            kind,
+            status,
+            sender,
+            source_identifier,
+            lease_consumer_id,
+            lease_id,
+            lease_generation,
+            lease_expires_at,
+            event_length,
+            state_length,
+        ) = metadata.ok_or(ProfileStoreError::OperationNotFound)?;
+        validate_blob_length(event_length)?;
+        validate_blob_length(state_length)?;
+        let (sealed_event, sealed_state): (Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT sealed_event, sealed_delivery_state
+                 FROM daemon_remote_event
+                 WHERE event_sequence = ?1",
+                params![to_sql_integer(sequence)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if sealed_event.len()
+            != usize::try_from(event_length).map_err(|_| ProfileStoreError::CorruptData)?
+            || sealed_state.len()
+                != usize::try_from(state_length).map_err(|_| ProfileStoreError::CorruptData)?
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let notification_id = NotificationId::from_slice(&notification_id)
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let conversation_id = ConversationId::from_slice(&conversation_id)
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let routing_id =
+            RoutingId::from_slice(&routing_id).map_err(|_| ProfileStoreError::CorruptData)?;
+        let sender = DeviceId::from_slice(&sender).map_err(|_| ProfileStoreError::CorruptData)?;
+        let source_identifier: [u8; 16] = source_identifier
+            .try_into()
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let event_plaintext = self.open_operation_record(
+            SecretRecordKind::RemoteEvent,
+            conversation_id,
+            routing_id,
+            REMOTE_EVENT_RECORD_SCOPE,
+            notification_id.as_bytes(),
+            sealed_event,
+        )?;
+        let event = decode_remote_event_record(conversation_id, &event_plaintext)?;
+        let state_plaintext = self.open_operation_record(
+            SecretRecordKind::RemoteEventDeliveryState,
+            conversation_id,
+            routing_id,
+            REMOTE_EVENT_STATE_RECORD_SCOPE,
+            notification_id.as_bytes(),
+            sealed_state,
+        )?;
+        let delivery_state = decode_remote_event_delivery_state(&state_plaintext)?;
+        let column_status = remote_event_status(status)?;
+        let column_consumer = lease_consumer_id
+            .map(|value| {
+                AdapterConsumerId::from_slice(&value).map_err(|_| ProfileStoreError::CorruptData)
+            })
+            .transpose()?;
+        let column_lease = lease_id
+            .map(|value| {
+                AdapterLeaseId::from_slice(&value).map_err(|_| ProfileStoreError::CorruptData)
+            })
+            .transpose()?;
+        let column_expiry = lease_expires_at.map(from_sql_integer).transpose()?;
+        if event.sequence != sequence
+            || event.notification_id != notification_id
+            || event.conversation_id != conversation_id
+            || event.routing_id != routing_id
+            || event.relay_cursor != from_sql_integer(relay_cursor)?
+            || event.kind != remote_event_kind(kind)?
+            || event.sender != sender
+            || event.source_identifier != source_identifier
+            || delivery_state.status != column_status
+            || delivery_state.consumer_id != column_consumer
+            || delivery_state.lease_id != column_lease
+            || delivery_state.lease_generation != from_sql_integer(lease_generation)?
+            || delivery_state.lease_expires_at_unix_milliseconds != column_expiry
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok((event, delivery_state))
+    }
+
+    fn store_remote_event_delivery_state_in(
+        &self,
+        connection: &Connection,
+        event: &RemoteEventRecord,
+        state: &RemoteEventDeliveryState,
+    ) -> Result<(), ProfileStoreError> {
+        let plaintext = encode_remote_event_delivery_state(state)?;
+        let sealed = self.seal_operation_record(
+            SecretRecordKind::RemoteEventDeliveryState,
+            event.conversation_id,
+            event.routing_id,
+            REMOTE_EVENT_STATE_RECORD_SCOPE,
+            event.notification_id.as_bytes(),
+            &plaintext,
+        )?;
+        let changed = connection
+            .execute(
+                "UPDATE daemon_remote_event
+                 SET status = ?1,
+                     sealed_delivery_state = ?2,
+                     lease_consumer_id = ?3,
+                     lease_id = ?4,
+                     lease_generation = ?5,
+                     lease_expires_at_unix_milliseconds = ?6
+                 WHERE event_sequence = ?7",
+                params![
+                    state.status as i64,
+                    sealed.as_bytes(),
+                    state.consumer_id.map(|value| value.into_bytes().to_vec()),
+                    state.lease_id.map(|value| value.into_bytes().to_vec()),
+                    to_sql_integer(state.lease_generation)?,
+                    state
+                        .lease_expires_at_unix_milliseconds
+                        .map(to_sql_integer)
+                        .transpose()?,
+                    to_sql_integer(event.sequence)?
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(ProfileStoreError::InvalidTransition)
+        }
+    }
+
+    fn reclaim_expired_remote_events_in(
+        &self,
+        connection: &Connection,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), ProfileStoreError> {
+        let sequences = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT event_sequence
+                     FROM daemon_remote_event
+                     WHERE status = 2
+                       AND lease_expires_at_unix_milliseconds <= ?1
+                     ORDER BY event_sequence",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(params![to_sql_integer(now_unix_milliseconds)?], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        for sequence in sequences {
+            let (event, state) =
+                self.load_remote_event_record_in(connection, from_sql_integer(sequence)?)?;
+            if state.status != RemoteEventStatus::Claimed {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            self.store_remote_event_delivery_state_in(
+                connection,
+                &event,
+                &RemoteEventDeliveryState {
+                    status: RemoteEventStatus::Pending,
+                    consumer_id: None,
+                    lease_id: None,
+                    lease_generation: state.lease_generation,
+                    lease_expires_at_unix_milliseconds: None,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn adapter_delivery_enabled_in(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+    ) -> Result<bool, ProfileStoreError> {
+        let length: Option<i64> = connection
+            .query_row(
+                "SELECT length(sealed_adapter_delivery_policy)
+                 FROM daemon_conversation
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?
+            .ok_or(ProfileStoreError::ConversationNotFound)?;
+        let Some(length) = length else {
+            return Ok(false);
+        };
+        validate_blob_length(length)?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_adapter_delivery_policy
+                 FROM daemon_conversation
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if bytes.len() != usize::try_from(length).map_err(|_| ProfileStoreError::CorruptData)? {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let plaintext = self.open_operation_record(
+            SecretRecordKind::RemoteEventDeliveryPolicy,
+            conversation_id,
+            routing_id,
+            REMOTE_EVENT_POLICY_RECORD_SCOPE,
+            conversation_id.as_bytes(),
+            bytes,
+        )?;
+        decode_remote_event_delivery_policy(&plaintext)
+    }
+
+    fn remote_event_delivery_length_in(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        relay_cursor: u64,
+        kind: RemoteEventKind,
+    ) -> Result<usize, ProfileStoreError> {
+        let length: Option<i64> = connection
+            .query_row(
+                "SELECT CASE ?1
+                    WHEN 1 THEN (
+                        SELECT length(sealed_message)
+                        FROM daemon_inbox
+                        WHERE conversation_id = ?2 AND cursor = ?3
+                    )
+                    ELSE (
+                        SELECT length(sealed_transition)
+                        FROM daemon_membership_inbox
+                        WHERE conversation_id = ?2 AND cursor = ?3
+                    )
+                 END",
+                params![
+                    kind as i64,
+                    conversation_id.as_bytes().as_slice(),
+                    to_sql_integer(relay_cursor)?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let length = length.ok_or(ProfileStoreError::CorruptData)?;
+        validate_blob_length(length)?;
+        usize::try_from(length).map_err(|_| ProfileStoreError::CorruptData)
+    }
+
+    fn pending_remote_event_bytes_in(
+        &self,
+        connection: &Connection,
+        conversation_id: Option<ConversationId>,
+    ) -> Result<usize, ProfileStoreError> {
+        let bytes: i64 = connection
+            .query_row(
+                "SELECT COALESCE(SUM(
+                    CASE e.event_kind
+                        WHEN 1 THEN length(i.sealed_message)
+                        ELSE length(m.sealed_transition)
+                    END
+                 ), 0)
+                 FROM daemon_remote_event e
+                 LEFT JOIN daemon_inbox i
+                   ON i.conversation_id = e.conversation_id
+                  AND i.cursor = e.relay_cursor
+                  AND e.event_kind = 1
+                 LEFT JOIN daemon_membership_inbox m
+                   ON m.conversation_id = e.conversation_id
+                  AND m.cursor = e.relay_cursor
+                  AND e.event_kind BETWEEN 2 AND 5
+                 WHERE e.status IN (1, 2)
+                   AND (?1 IS NULL OR e.conversation_id = ?1)",
+                params![conversation_id.map(|value| value.into_bytes().to_vec())],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        usize::try_from(bytes).map_err(|_| ProfileStoreError::CorruptData)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "authenticated remote-event identity remains explicit"
+    )]
+    fn insert_remote_event_in(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        relay_cursor: u64,
+        notification_id: NotificationId,
+        kind: RemoteEventKind,
+        sender: DeviceId,
+        self_device_id: DeviceId,
+        source_identifier: [u8; 16],
+    ) -> Result<(), ProfileStoreError> {
+        if sender == self_device_id {
+            return Ok(());
+        }
+        self.prune_excess_terminal_remote_events_in(connection)?;
+        let total_events: i64 = connection
+            .query_row("SELECT count(*) FROM daemon_remote_event", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if usize::try_from(total_events)
+            .ok()
+            .is_none_or(|count| count >= MAX_REMOTE_EVENT_RECORDS)
+        {
+            return Err(ProfileStoreError::RemoteEventCapacityExceeded);
+        }
+        let status = if self.adapter_delivery_enabled_in(connection, conversation_id, routing_id)? {
+            RemoteEventStatus::Pending
+        } else {
+            RemoteEventStatus::Suppressed
+        };
+        if status == RemoteEventStatus::Pending {
+            let delivery_length = self.remote_event_delivery_length_in(
+                connection,
+                conversation_id,
+                relay_cursor,
+                kind,
+            )?;
+            let profile_pending: i64 = connection
+                .query_row(
+                    "SELECT count(*)
+                     FROM daemon_remote_event
+                     WHERE status IN (1, 2)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            let conversation_pending: i64 = connection
+                .query_row(
+                    "SELECT count(*)
+                     FROM daemon_remote_event
+                     WHERE conversation_id = ?1 AND status IN (1, 2)",
+                    params![conversation_id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            let profile_pending_bytes = self.pending_remote_event_bytes_in(connection, None)?;
+            let conversation_pending_bytes =
+                self.pending_remote_event_bytes_in(connection, Some(conversation_id))?;
+            if usize::try_from(profile_pending)
+                .ok()
+                .is_none_or(|count| count >= MAX_PENDING_REMOTE_EVENTS)
+                || usize::try_from(conversation_pending)
+                    .ok()
+                    .is_none_or(|count| count >= MAX_PENDING_REMOTE_EVENTS_PER_CONVERSATION)
+                || profile_pending_bytes
+                    .checked_add(delivery_length)
+                    .is_none_or(|bytes| bytes > MAX_PENDING_REMOTE_EVENT_BYTES)
+                || conversation_pending_bytes
+                    .checked_add(delivery_length)
+                    .is_none_or(|bytes| bytes > MAX_PENDING_REMOTE_EVENT_BYTES_PER_CONVERSATION)
+            {
+                return Err(ProfileStoreError::RemoteEventCapacityExceeded);
+            }
+        }
+        let (sequence, previous_head) = self.load_remote_event_head_in(connection)?;
+        if (sequence == 1) != previous_head.is_none() {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(ProfileStoreError::SequenceExhausted)?;
+        let event = RemoteEventRecord {
+            sequence,
+            notification_id,
+            conversation_id,
+            routing_id,
+            relay_cursor,
+            kind,
+            sender,
+            source_identifier,
+            previous_notification_id: previous_head.as_ref().map(|head| head.notification_id),
+        };
+        let event_blob = self.seal_operation_record(
+            SecretRecordKind::RemoteEvent,
+            conversation_id,
+            routing_id,
+            REMOTE_EVENT_RECORD_SCOPE,
+            notification_id.as_bytes(),
+            &encode_remote_event_record(&event),
+        )?;
+        let delivery_state = RemoteEventDeliveryState {
+            status,
+            consumer_id: None,
+            lease_id: None,
+            lease_generation: 0,
+            lease_expires_at_unix_milliseconds: None,
+        };
+        let state_blob = self.seal_operation_record(
+            SecretRecordKind::RemoteEventDeliveryState,
+            conversation_id,
+            routing_id,
+            REMOTE_EVENT_STATE_RECORD_SCOPE,
+            notification_id.as_bytes(),
+            &encode_remote_event_delivery_state(&delivery_state)?,
+        )?;
+        let head_blob = self.seal_remote_event_head(&RemoteEventHead {
+            sequence,
+            notification_id,
+        })?;
+        connection
+            .execute(
+                "INSERT INTO daemon_remote_event (
+                    event_sequence,
+                    notification_id,
+                    conversation_id,
+                    relay_cursor,
+                    event_kind,
+                    status,
+                    sender_device_id,
+                    source_identifier,
+                    sealed_event,
+                    sealed_delivery_state,
+                    lease_consumer_id,
+                    lease_id,
+                    lease_generation,
+                    lease_expires_at_unix_milliseconds
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, 0, NULL)",
+                params![
+                    to_sql_integer(sequence)?,
+                    notification_id.as_bytes().as_slice(),
+                    conversation_id.as_bytes().as_slice(),
+                    to_sql_integer(relay_cursor)?,
+                    kind as i64,
+                    status as i64,
+                    sender.as_bytes().as_slice(),
+                    source_identifier.as_slice(),
+                    event_blob.as_bytes(),
+                    state_blob.as_bytes()
+                ],
+            )
+            .map_err(map_operation_insert_error)?;
+        let updated = connection
+            .execute(
+                "UPDATE daemon_profile
+                 SET next_remote_event_sequence = ?1,
+                     sealed_remote_event_head = ?2
+                 WHERE singleton_id = 1 AND next_remote_event_sequence = ?3",
+                params![
+                    to_sql_integer(next_sequence)?,
+                    head_blob.as_bytes(),
+                    to_sql_integer(sequence)?
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if updated != 1 {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
+        if status == RemoteEventStatus::Suppressed {
+            self.prune_excess_terminal_remote_events_in(connection)?;
+        }
+        Ok(())
     }
 
     fn migrate_legacy_history(&self) -> Result<(), ProfileStoreError> {
@@ -2980,10 +4469,24 @@ impl ProfileStore {
     /// # Errors
     ///
     /// Returns a cursor, transition, sealing, protocol, credential, or storage error.
+    #[cfg(test)]
     pub(crate) fn complete_membership_inbox(
         &self,
         conversation_id: ConversationId,
         cursor: u64,
+    ) -> Result<u64, ProfileStoreError> {
+        self.complete_membership_inbox_with_notification(
+            conversation_id,
+            cursor,
+            NotificationId::from_bytes([u8::try_from(cursor).unwrap_or(0); NotificationId::LENGTH]),
+        )
+    }
+
+    pub(crate) fn complete_membership_inbox_with_notification(
+        &self,
+        conversation_id: ConversationId,
+        cursor: u64,
+        notification_id: NotificationId,
     ) -> Result<u64, ProfileStoreError> {
         let operation = self.membership_inbox_operation(conversation_id, cursor)?;
         let already_complete = matches!(operation, MembershipInboxOperation::Complete(_));
@@ -3067,6 +4570,20 @@ impl ProfileStore {
         if current_cursor.checked_add(1) != Some(cursor) {
             return Err(ProfileStoreError::CursorGap);
         }
+        let (authorization, _) = decode_membership_control(&transition.control)
+            .map_err(|_| ProfileStoreError::Protocol)?;
+        if authorization.operation_id() != transition.operation_id {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let self_device_id = current.signing_material.binding().device_id();
+        let event_kind = match authorization.change() {
+            MembershipChange::Add(_) => RemoteEventKind::MemberAdded,
+            MembershipChange::Remove(change) if change.device_id() == self_device_id => {
+                RemoteEventKind::LocalAccessRemoved
+            }
+            MembershipChange::Remove(_) => RemoteEventKind::MemberRemoved,
+            MembershipChange::ChangeRole(_) => RemoteEventKind::MemberRoleChanged,
+        };
         let replay_head = self.seal_replay_head(
             conversation_id,
             transition.stored.envelope().routing_id(),
@@ -3076,6 +4593,17 @@ impl ProfileStore {
             &transition.next_state,
             &transition.next_state,
             transition.stored.envelope(),
+        )?;
+        self.insert_remote_event_in(
+            &transaction,
+            conversation_id,
+            transition.stored.envelope().routing_id(),
+            cursor,
+            notification_id,
+            event_kind,
+            transition.sender,
+            self_device_id,
+            transition.operation_id.into_bytes(),
         )?;
         transaction
             .execute(
@@ -3166,7 +4694,11 @@ impl ProfileStore {
             &outbox.next_state,
             &bindings,
         )?;
-        self.complete_membership_inbox(outbox.conversation_id, stored.cursor())?;
+        self.complete_membership_inbox_with_notification(
+            outbox.conversation_id,
+            stored.cursor(),
+            NotificationId::from_bytes(stored.envelope().envelope_id().into_bytes()),
+        )?;
         Ok(outbox.operation_id)
     }
 
@@ -3603,10 +5135,24 @@ impl ProfileStore {
     ///
     /// Returns a cursor gap, sender-counter regression, transition, sequence, or
     /// storage error.
+    #[cfg(test)]
     pub(crate) fn complete_inbox(
         &self,
         conversation_id: ConversationId,
         cursor: u64,
+    ) -> Result<u64, ProfileStoreError> {
+        self.complete_inbox_with_notification(
+            conversation_id,
+            cursor,
+            NotificationId::from_bytes([u8::try_from(cursor).unwrap_or(0); NotificationId::LENGTH]),
+        )
+    }
+
+    pub(crate) fn complete_inbox_with_notification(
+        &self,
+        conversation_id: ConversationId,
+        cursor: u64,
+        notification_id: NotificationId,
     ) -> Result<u64, ProfileStoreError> {
         let conversation = self.load_conversation(conversation_id)?;
         let message = self.load_message_at(conversation_id, cursor)?;
@@ -3703,6 +5249,17 @@ impl ProfileStore {
         )? {
             return Err(ProfileStoreError::CorruptData);
         }
+        self.insert_remote_event_in(
+            &transaction,
+            conversation_id,
+            conversation.routing_id,
+            cursor,
+            notification_id,
+            RemoteEventKind::ApplicationMessage,
+            message.sender,
+            conversation.signing_material.binding().device_id(),
+            message.message.message_id().into_bytes(),
+        )?;
         let changed = transaction
             .execute(
                 "UPDATE daemon_inbox SET status = 3
@@ -5902,6 +7459,39 @@ struct HistoryRecord {
     complete: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteEventStatus {
+    Pending = 1,
+    Claimed = 2,
+    Acknowledged = 3,
+    Suppressed = 4,
+}
+
+struct RemoteEventRecord {
+    sequence: u64,
+    notification_id: NotificationId,
+    conversation_id: ConversationId,
+    routing_id: RoutingId,
+    relay_cursor: u64,
+    kind: RemoteEventKind,
+    sender: DeviceId,
+    source_identifier: [u8; 16],
+    previous_notification_id: Option<NotificationId>,
+}
+
+struct RemoteEventDeliveryState {
+    status: RemoteEventStatus,
+    consumer_id: Option<AdapterConsumerId>,
+    lease_id: Option<AdapterLeaseId>,
+    lease_generation: u64,
+    lease_expires_at_unix_milliseconds: Option<u64>,
+}
+
+struct RemoteEventHead {
+    sequence: u64,
+    notification_id: NotificationId,
+}
+
 pub(crate) struct StoredApplicationMessage {
     pub cursor: u64,
     pub envelope_id: EnvelopeId,
@@ -5928,6 +7518,47 @@ pub(crate) struct StoredHistoryMessage {
 pub(crate) struct HistoryPage {
     pub(crate) messages: Vec<StoredHistoryMessage>,
     pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteEventKind {
+    ApplicationMessage = 1,
+    MemberAdded = 2,
+    MemberRemoved = 3,
+    MemberRoleChanged = 4,
+    LocalAccessRemoved = 5,
+}
+
+pub(crate) enum RemoteEventPayload {
+    ApplicationMessage(ApplicationMessage),
+    MemberAdded {
+        device_id: DeviceId,
+        role: ConversationRole,
+    },
+    MemberRemoved {
+        device_id: DeviceId,
+    },
+    MemberRoleChanged {
+        device_id: DeviceId,
+        role: ConversationRole,
+    },
+    LocalAccessRemoved {
+        device_id: DeviceId,
+    },
+}
+
+pub(crate) struct RemoteEvent {
+    pub(crate) sequence: u64,
+    pub(crate) notification_id: NotificationId,
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) relay_cursor: u64,
+    pub(crate) sender: DeviceId,
+    pub(crate) payload: RemoteEventPayload,
+}
+
+pub(crate) struct ClaimedRemoteEvent {
+    pub(crate) event: RemoteEvent,
+    pub(crate) lease_generation: u64,
 }
 
 pub(crate) enum PendingInbox {
@@ -6008,6 +7639,12 @@ pub(crate) enum ProfileStoreError {
     OutboxCapacityExceeded,
     #[error("local inbox reached its incomplete-operation limit")]
     InboxCapacityExceeded,
+    #[error("local remote-event journal reached its pending-operation limit")]
+    RemoteEventCapacityExceeded,
+    #[error("another local adapter consumer owns the profile")]
+    AdapterConsumerActive,
+    #[error("local adapter lease is missing, expired, or stale")]
+    InvalidAdapterLease,
 }
 
 fn validate_v2_outbound_migration(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -6040,28 +7677,36 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
-        8 => return initialize_outbox_removed_terminal_schema(connection),
+        9 => return initialize_remote_event_schema(connection),
+        8 => {
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
+        }
         7 => {
             initialize_outbox_terminal_schema(connection)?;
-            return initialize_outbox_removed_terminal_schema(connection);
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
         }
         6 => {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
-            return initialize_outbox_removed_terminal_schema(connection);
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
         }
         5 => {
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
-            return initialize_outbox_removed_terminal_schema(connection);
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
         }
         4 => {
             initialize_pending_join_schema(connection)?;
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
-            return initialize_outbox_removed_terminal_schema(connection);
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
         }
         3 => {
             initialize_membership_outbox_schema(connection)?;
@@ -6069,7 +7714,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
-            return initialize_outbox_removed_terminal_schema(connection);
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
         }
         2 => {
             initialize_message_history_schema(connection)?;
@@ -6078,7 +7724,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
-            return initialize_outbox_removed_terminal_schema(connection);
+            initialize_outbox_removed_terminal_schema(connection)?;
+            return initialize_remote_event_schema(connection);
         }
         0 => connection
             .execute_batch(
@@ -6224,7 +7871,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
     initialize_pending_join_receipt_schema(connection)?;
     initialize_replay_head_schema(connection)?;
     initialize_outbox_terminal_schema(connection)?;
-    initialize_outbox_removed_terminal_schema(connection)
+    initialize_outbox_removed_terminal_schema(connection)?;
+    initialize_remote_event_schema(connection)
 }
 
 fn initialize_message_history_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -6509,6 +8157,82 @@ fn initialize_outbox_removed_terminal_schema(
     }
 }
 
+fn initialize_remote_event_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
+    connection
+        .execute_batch(
+            "BEGIN;
+             ALTER TABLE daemon_conversation
+                ADD COLUMN sealed_adapter_delivery_policy BLOB;
+             ALTER TABLE daemon_profile
+                ADD COLUMN next_remote_event_sequence INTEGER NOT NULL DEFAULT 1
+                CHECK (next_remote_event_sequence >= 1);
+             ALTER TABLE daemon_profile
+                ADD COLUMN sealed_remote_event_head BLOB;
+             ALTER TABLE daemon_profile
+                ADD COLUMN remote_event_floor_sequence INTEGER NOT NULL DEFAULT 0
+                CHECK (remote_event_floor_sequence >= 0);
+             ALTER TABLE daemon_profile
+                ADD COLUMN sealed_remote_event_floor BLOB;
+             CREATE TABLE daemon_remote_event (
+                event_sequence INTEGER PRIMARY KEY AUTOINCREMENT
+                    CHECK (event_sequence >= 1),
+                notification_id BLOB NOT NULL UNIQUE
+                    CHECK (length(notification_id) = 16),
+                conversation_id BLOB NOT NULL,
+                relay_cursor INTEGER NOT NULL CHECK (relay_cursor >= 1),
+                event_kind INTEGER NOT NULL CHECK (event_kind BETWEEN 1 AND 5),
+                status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 4),
+                sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 32),
+                source_identifier BLOB NOT NULL CHECK (length(source_identifier) = 16),
+                sealed_event BLOB NOT NULL,
+                sealed_delivery_state BLOB NOT NULL,
+                lease_consumer_id BLOB,
+                lease_id BLOB,
+                lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+                lease_expires_at_unix_milliseconds INTEGER,
+                FOREIGN KEY (conversation_id)
+                    REFERENCES daemon_conversation(conversation_id)
+                    ON DELETE CASCADE,
+                UNIQUE (conversation_id, relay_cursor),
+                CHECK (
+                    (status = 1
+                        AND lease_consumer_id IS NULL
+                        AND lease_id IS NULL
+                        AND lease_expires_at_unix_milliseconds IS NULL)
+                    OR
+                    (status = 2
+                        AND lease_consumer_id IS NOT NULL
+                        AND length(lease_consumer_id) = 16
+                        AND lease_id IS NOT NULL
+                        AND length(lease_id) = 16
+                        AND lease_generation >= 1
+                        AND lease_expires_at_unix_milliseconds IS NOT NULL
+                        AND lease_expires_at_unix_milliseconds >= 1)
+                    OR
+                    (status IN (3, 4)
+                        AND lease_consumer_id IS NULL
+                        AND lease_id IS NULL
+                        AND lease_expires_at_unix_milliseconds IS NULL)
+                )
+             );
+             CREATE INDEX daemon_remote_event_pending_idx
+                ON daemon_remote_event(status, event_sequence)
+                WHERE status = 1;
+             CREATE INDEX daemon_remote_event_conversation_idx
+                ON daemon_remote_event(conversation_id, status, event_sequence);
+             CREATE TABLE daemon_adapter_consumer (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                consumer_id BLOB NOT NULL CHECK (length(consumer_id) = 16),
+                lease_id BLOB NOT NULL CHECK (length(lease_id) = 16),
+                lease_expires_at_unix_milliseconds INTEGER NOT NULL
+                    CHECK (lease_expires_at_unix_milliseconds >= 1)
+             );
+             PRAGMA user_version = 10;
+             COMMIT;",
+        )
+        .map_err(|_| ProfileStoreError::Storage)
+}
+
 fn validate_bindings(
     state: &ConversationState,
     self_binding: &DeviceCredentialBinding,
@@ -6539,6 +8263,215 @@ fn validate_bindings(
         return Err(ProfileStoreError::ConversationMismatch);
     }
     Ok(())
+}
+
+fn encode_remote_event_record(record: &RemoteEventRecord) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(
+        1 + 8
+            + NotificationId::LENGTH
+            + ConversationId::LENGTH
+            + RoutingId::LENGTH
+            + 8
+            + 1
+            + DeviceId::LENGTH
+            + 16
+            + 1
+            + NotificationId::LENGTH,
+    );
+    bytes.push(REMOTE_EVENT_RECORD_VERSION);
+    bytes.extend_from_slice(&record.sequence.to_be_bytes());
+    bytes.extend_from_slice(record.notification_id.as_bytes());
+    bytes.extend_from_slice(record.conversation_id.as_bytes());
+    bytes.extend_from_slice(record.routing_id.as_bytes());
+    bytes.extend_from_slice(&record.relay_cursor.to_be_bytes());
+    bytes.push(record.kind as u8);
+    bytes.extend_from_slice(record.sender.as_bytes());
+    bytes.extend_from_slice(&record.source_identifier);
+    match record.previous_notification_id {
+        Some(previous) => {
+            bytes.push(1);
+            bytes.extend_from_slice(previous.as_bytes());
+        }
+        None => {
+            bytes.push(0);
+            bytes.extend_from_slice(&[0; NotificationId::LENGTH]);
+        }
+    }
+    bytes
+}
+
+fn encode_remote_event_head(head: &RemoteEventHead) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(1 + 8 + NotificationId::LENGTH);
+    bytes.push(REMOTE_EVENT_HEAD_RECORD_VERSION);
+    bytes.extend_from_slice(&head.sequence.to_be_bytes());
+    bytes.extend_from_slice(head.notification_id.as_bytes());
+    bytes
+}
+
+fn decode_remote_event_head(bytes: &[u8]) -> Result<RemoteEventHead, ProfileStoreError> {
+    const NOTIFICATION_START: usize = 1 + 8;
+    const RECORD_LENGTH: usize = NOTIFICATION_START + NotificationId::LENGTH;
+    if bytes.len() != RECORD_LENGTH || bytes[0] != REMOTE_EVENT_HEAD_RECORD_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(RemoteEventHead {
+        sequence: decode_positive_u64(&bytes[1..NOTIFICATION_START])?,
+        notification_id: NotificationId::from_slice(&bytes[NOTIFICATION_START..])
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+    })
+}
+
+fn encode_remote_event_delivery_policy(enabled: bool) -> [u8; 2] {
+    [
+        REMOTE_EVENT_POLICY_RECORD_VERSION,
+        if enabled { 1 } else { 0 },
+    ]
+}
+
+fn decode_remote_event_delivery_policy(bytes: &[u8]) -> Result<bool, ProfileStoreError> {
+    match bytes {
+        [REMOTE_EVENT_POLICY_RECORD_VERSION, 0] => Ok(false),
+        [REMOTE_EVENT_POLICY_RECORD_VERSION, 1] => Ok(true),
+        _ => Err(ProfileStoreError::CorruptData),
+    }
+}
+
+fn decode_remote_event_record(
+    conversation_id: ConversationId,
+    bytes: &[u8],
+) -> Result<RemoteEventRecord, ProfileStoreError> {
+    const SEQUENCE_START: usize = 1;
+    const NOTIFICATION_START: usize = SEQUENCE_START + 8;
+    const CONVERSATION_START: usize = NOTIFICATION_START + NotificationId::LENGTH;
+    const ROUTING_START: usize = CONVERSATION_START + ConversationId::LENGTH;
+    const CURSOR_START: usize = ROUTING_START + RoutingId::LENGTH;
+    const KIND_START: usize = CURSOR_START + 8;
+    const SENDER_START: usize = KIND_START + 1;
+    const SOURCE_START: usize = SENDER_START + DeviceId::LENGTH;
+    const PREVIOUS_FLAG: usize = SOURCE_START + 16;
+    const PREVIOUS_START: usize = PREVIOUS_FLAG + 1;
+    const RECORD_LENGTH: usize = PREVIOUS_START + NotificationId::LENGTH;
+    if bytes.len() != RECORD_LENGTH || bytes[0] != REMOTE_EVENT_RECORD_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let stored_conversation = ConversationId::from_slice(&bytes[CONVERSATION_START..ROUTING_START])
+        .map_err(|_| ProfileStoreError::CorruptData)?;
+    if stored_conversation != conversation_id {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(RemoteEventRecord {
+        sequence: decode_u64(&bytes[SEQUENCE_START..NOTIFICATION_START])?,
+        notification_id: NotificationId::from_slice(&bytes[NOTIFICATION_START..CONVERSATION_START])
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+        conversation_id,
+        routing_id: RoutingId::from_slice(&bytes[ROUTING_START..CURSOR_START])
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+        relay_cursor: decode_positive_u64(&bytes[CURSOR_START..KIND_START])?,
+        kind: remote_event_kind(i64::from(bytes[KIND_START]))?,
+        sender: DeviceId::from_slice(&bytes[SENDER_START..SOURCE_START])
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+        source_identifier: bytes[SOURCE_START..PREVIOUS_FLAG]
+            .try_into()
+            .map_err(|_| ProfileStoreError::CorruptData)?,
+        previous_notification_id: match bytes[PREVIOUS_FLAG] {
+            0 if bytes[PREVIOUS_START..].iter().all(|byte| *byte == 0) => None,
+            1 => Some(
+                NotificationId::from_slice(&bytes[PREVIOUS_START..])
+                    .map_err(|_| ProfileStoreError::CorruptData)?,
+            ),
+            _ => return Err(ProfileStoreError::CorruptData),
+        },
+    })
+}
+
+fn encode_remote_event_delivery_state(
+    state: &RemoteEventDeliveryState,
+) -> Result<Vec<u8>, ProfileStoreError> {
+    let mut bytes = Vec::with_capacity(1 + 1 + 8 + 1 + 16 + 16 + 8);
+    bytes.push(REMOTE_EVENT_RECORD_VERSION);
+    bytes.push(state.status as u8);
+    bytes.extend_from_slice(&state.lease_generation.to_be_bytes());
+    match (
+        state.consumer_id,
+        state.lease_id,
+        state.lease_expires_at_unix_milliseconds,
+    ) {
+        (None, None, None)
+            if matches!(
+                state.status,
+                RemoteEventStatus::Pending
+                    | RemoteEventStatus::Acknowledged
+                    | RemoteEventStatus::Suppressed
+            ) =>
+        {
+            bytes.push(0);
+        }
+        (Some(consumer_id), Some(lease_id), Some(expires_at))
+            if state.status == RemoteEventStatus::Claimed
+                && state.lease_generation >= 1
+                && expires_at >= 1 =>
+        {
+            bytes.push(1);
+            bytes.extend_from_slice(consumer_id.as_bytes());
+            bytes.extend_from_slice(lease_id.as_bytes());
+            bytes.extend_from_slice(&expires_at.to_be_bytes());
+        }
+        _ => return Err(ProfileStoreError::InvalidTransition),
+    }
+    Ok(bytes)
+}
+
+fn decode_remote_event_delivery_state(
+    bytes: &[u8],
+) -> Result<RemoteEventDeliveryState, ProfileStoreError> {
+    const HEADER_LENGTH: usize = 1 + 1 + 8 + 1;
+    const CLAIMED_LENGTH: usize =
+        HEADER_LENGTH + AdapterConsumerId::LENGTH + AdapterLeaseId::LENGTH + 8;
+    if bytes.len() < HEADER_LENGTH || bytes[0] != REMOTE_EVENT_RECORD_VERSION {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let status = remote_event_status(i64::from(bytes[1]))?;
+    let lease_generation = decode_u64(&bytes[2..10])?;
+    match bytes[10] {
+        0 if bytes.len() == HEADER_LENGTH
+            && matches!(
+                status,
+                RemoteEventStatus::Pending
+                    | RemoteEventStatus::Acknowledged
+                    | RemoteEventStatus::Suppressed
+            ) =>
+        {
+            Ok(RemoteEventDeliveryState {
+                status,
+                consumer_id: None,
+                lease_id: None,
+                lease_generation,
+                lease_expires_at_unix_milliseconds: None,
+            })
+        }
+        1 if bytes.len() == CLAIMED_LENGTH && status == RemoteEventStatus::Claimed => {
+            let consumer_end = HEADER_LENGTH + AdapterConsumerId::LENGTH;
+            let lease_end = consumer_end + AdapterLeaseId::LENGTH;
+            let expires_at = decode_positive_u64(&bytes[lease_end..CLAIMED_LENGTH])?;
+            if lease_generation == 0 {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            Ok(RemoteEventDeliveryState {
+                status,
+                consumer_id: Some(
+                    AdapterConsumerId::from_slice(&bytes[HEADER_LENGTH..consumer_end])
+                        .map_err(|_| ProfileStoreError::CorruptData)?,
+                ),
+                lease_id: Some(
+                    AdapterLeaseId::from_slice(&bytes[consumer_end..lease_end])
+                        .map_err(|_| ProfileStoreError::CorruptData)?,
+                ),
+                lease_generation,
+                lease_expires_at_unix_milliseconds: Some(expires_at),
+            })
+        }
+        _ => Err(ProfileStoreError::CorruptData),
+    }
 }
 
 fn encode_outbox_record(
@@ -7502,6 +9435,34 @@ fn operation_record_context(
     SecretRecordContext::new(kind, identifier).map_err(|_| ProfileStoreError::Storage)
 }
 
+fn remote_event_head_record_context(
+    profile_id: &ProfileId,
+) -> Result<SecretRecordContext, ProfileStoreError> {
+    let mut identifier = Vec::with_capacity(2 + profile_id.as_bytes().len());
+    identifier.push(
+        u8::try_from(profile_id.as_bytes().len())
+            .map_err(|_| ProfileStoreError::InvalidProfileId)?,
+    );
+    identifier.extend_from_slice(profile_id.as_bytes());
+    identifier.push(REMOTE_EVENT_HEAD_RECORD_SCOPE);
+    SecretRecordContext::new(SecretRecordKind::RemoteEventJournalHead, identifier)
+        .map_err(|_| ProfileStoreError::Storage)
+}
+
+fn remote_event_floor_record_context(
+    profile_id: &ProfileId,
+) -> Result<SecretRecordContext, ProfileStoreError> {
+    let mut identifier = Vec::with_capacity(2 + profile_id.as_bytes().len());
+    identifier.push(
+        u8::try_from(profile_id.as_bytes().len())
+            .map_err(|_| ProfileStoreError::InvalidProfileId)?,
+    );
+    identifier.extend_from_slice(profile_id.as_bytes());
+    identifier.push(REMOTE_EVENT_FLOOR_RECORD_SCOPE);
+    SecretRecordContext::new(SecretRecordKind::RemoteEventJournalHead, identifier)
+        .map_err(|_| ProfileStoreError::Storage)
+}
+
 fn sender_counter_record_context(
     profile_id: &ProfileId,
     conversation_id: ConversationId,
@@ -7522,6 +9483,103 @@ fn sender_counter_record_context(
     identifier.extend_from_slice(&epoch.to_be_bytes());
     SecretRecordContext::new(SecretRecordKind::LocalOperation, identifier)
         .map_err(|_| ProfileStoreError::Storage)
+}
+
+fn remote_event_kind(value: i64) -> Result<RemoteEventKind, ProfileStoreError> {
+    match value {
+        1 => Ok(RemoteEventKind::ApplicationMessage),
+        2 => Ok(RemoteEventKind::MemberAdded),
+        3 => Ok(RemoteEventKind::MemberRemoved),
+        4 => Ok(RemoteEventKind::MemberRoleChanged),
+        5 => Ok(RemoteEventKind::LocalAccessRemoved),
+        _ => Err(ProfileStoreError::CorruptData),
+    }
+}
+
+fn remote_event_status(value: i64) -> Result<RemoteEventStatus, ProfileStoreError> {
+    match value {
+        1 => Ok(RemoteEventStatus::Pending),
+        2 => Ok(RemoteEventStatus::Claimed),
+        3 => Ok(RemoteEventStatus::Acknowledged),
+        4 => Ok(RemoteEventStatus::Suppressed),
+        _ => Err(ProfileStoreError::CorruptData),
+    }
+}
+
+fn validate_adapter_lease_window(
+    now_unix_milliseconds: u64,
+    expires_at_unix_milliseconds: u64,
+) -> Result<(), ProfileStoreError> {
+    if expires_at_unix_milliseconds <= now_unix_milliseconds
+        || expires_at_unix_milliseconds
+            .checked_sub(now_unix_milliseconds)
+            .is_none_or(|duration| duration > MAX_ADAPTER_LEASE_MILLISECONDS)
+    {
+        return Err(ProfileStoreError::InvalidAdapterLease);
+    }
+    Ok(())
+}
+
+fn verify_active_adapter_consumer(
+    connection: &Connection,
+    consumer_id: AdapterConsumerId,
+    lease_id: AdapterLeaseId,
+    now_unix_milliseconds: u64,
+    requested_expiry: u64,
+) -> Result<(), ProfileStoreError> {
+    validate_adapter_lease_window(now_unix_milliseconds, requested_expiry)?;
+    let active: Option<(Vec<u8>, Vec<u8>, i64)> = connection
+        .query_row(
+            "SELECT
+                CASE WHEN length(consumer_id) = 16 THEN consumer_id END,
+                CASE WHEN length(lease_id) = 16 THEN lease_id END,
+                lease_expires_at_unix_milliseconds
+             FROM daemon_adapter_consumer
+             WHERE singleton_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| ProfileStoreError::Storage)?;
+    let (active_consumer, active_lease, active_expiry) =
+        active.ok_or(ProfileStoreError::InvalidAdapterLease)?;
+    if active_consumer.as_slice() != consumer_id.as_bytes()
+        || active_lease.as_slice() != lease_id.as_bytes()
+        || from_sql_integer(active_expiry)? <= now_unix_milliseconds
+        || requested_expiry > from_sql_integer(active_expiry)?
+    {
+        return Err(ProfileStoreError::InvalidAdapterLease);
+    }
+    Ok(())
+}
+
+fn verify_active_adapter_consumer_now(
+    connection: &Connection,
+    consumer_id: AdapterConsumerId,
+    lease_id: AdapterLeaseId,
+    now_unix_milliseconds: u64,
+) -> Result<(), ProfileStoreError> {
+    let active_expiry: Option<i64> = connection
+        .query_row(
+            "SELECT lease_expires_at_unix_milliseconds
+             FROM daemon_adapter_consumer
+             WHERE singleton_id = 1 AND consumer_id = ?1 AND lease_id = ?2",
+            params![
+                consumer_id.as_bytes().as_slice(),
+                lease_id.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ProfileStoreError::Storage)?;
+    if active_expiry
+        .map(from_sql_integer)
+        .transpose()?
+        .is_none_or(|expiry| expiry <= now_unix_milliseconds)
+    {
+        return Err(ProfileStoreError::InvalidAdapterLease);
+    }
+    Ok(())
 }
 
 fn validate_blob_length(length: i64) -> Result<(), ProfileStoreError> {
@@ -7570,8 +9628,8 @@ mod tests {
     use std::process::Command;
 
     use KonclaveDomainCore::{
-        ApplicationContent, ChangeMemberRole, ConversationRole, Member, MembershipAuthorization,
-        MembershipChange, ProtocolVersion,
+        ApplicationContent, ChangeMemberRole, ConversationRole, MAX_TEXT_BODY_BYTES, Member,
+        MembershipAuthorization, MembershipChange, ProtocolVersion, RemoveMember,
     };
     use KonclaveProtocolContracts::v1::encode_membership_control;
     use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
@@ -7627,6 +9685,126 @@ mod tests {
             routing_id,
             device_id: identity.device_id(),
         }
+    }
+
+    fn remote_membership_fixture(name: &str) -> (ConversationFixture, DeviceId) {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse(name).unwrap();
+        let store = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let local = store.load_or_create_device().unwrap();
+        let remote = DeviceIdentity::generate().unwrap();
+        let conversation_id = remote.generate_conversation_id().unwrap();
+        let local_material = local
+            .create_conversation_signing_material(conversation_id)
+            .unwrap();
+        let remote_material = remote
+            .create_conversation_signing_material(conversation_id)
+            .unwrap();
+        let state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            conversation_id,
+            0,
+            vec![
+                Member::new(remote.device_id(), ConversationRole::Administrator, 0),
+                Member::new(local.device_id(), ConversationRole::Member, 0),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let routing_id = RoutingId::from_bytes([19; RoutingId::LENGTH]);
+        store
+            .insert_conversation(
+                routing_id,
+                &local_material,
+                &state,
+                &[
+                    remote_material.binding().clone(),
+                    local_material.binding().clone(),
+                ],
+            )
+            .unwrap();
+        (
+            ConversationFixture {
+                root,
+                profile_id,
+                store,
+                conversation_id,
+                routing_id,
+                device_id: local.device_id(),
+            },
+            remote.device_id(),
+        )
+    }
+
+    fn complete_remote_membership_event(
+        fixture: &ConversationFixture,
+        sender: DeviceId,
+        identifier: u8,
+        change: MembershipChange,
+    ) {
+        let current = fixture
+            .store
+            .load_conversation(fixture.conversation_id)
+            .unwrap();
+        let operation_id =
+            MembershipOperationId::from_bytes([identifier; MembershipOperationId::LENGTH]);
+        let authorization = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            fixture.conversation_id,
+            current.state.epoch(),
+            operation_id,
+            change,
+        );
+        let next_state = current
+            .state
+            .apply_membership_authorization(sender, &authorization, current.state.epoch() + 1)
+            .unwrap();
+        let control = encode_membership_control(&authorization, None).unwrap();
+        let envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            fixture.routing_id,
+            EnvelopeId::from_bytes([identifier; EnvelopeId::LENGTH]),
+            DeliveryClass::GroupCommit,
+            Some(current.state.epoch()),
+            1_900_000_000,
+            vec![identifier],
+        )
+        .unwrap();
+        let stored = StoredRelayEnvelope::new(envelope, 1).unwrap();
+        fixture
+            .store
+            .record_membership_inbox_envelope(&stored)
+            .unwrap();
+        let bindings = current
+            .bindings
+            .iter()
+            .map(VerifiedDeviceCredentialBinding::binding)
+            .cloned()
+            .collect::<Vec<_>>();
+        fixture
+            .store
+            .save_membership_inbox_transition(
+                fixture.conversation_id,
+                1,
+                sender,
+                current.state.epoch(),
+                operation_id,
+                &control,
+                &next_state,
+                &bindings,
+            )
+            .unwrap();
+        fixture
+            .store
+            .complete_membership_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([identifier; NotificationId::LENGTH]),
+            )
+            .unwrap();
     }
 
     fn application_message(id: u8, sender_counter: u64, text: &str) -> ApplicationMessage {
@@ -7744,6 +9922,54 @@ mod tests {
             .unwrap();
     }
 
+    fn stage_remote_inbox_message(
+        fixture: &ConversationFixture,
+        cursor: u64,
+        identifier: u8,
+        sender: DeviceId,
+        sender_counter: u64,
+    ) -> ApplicationMessage {
+        stage_remote_inbox_for(
+            &fixture.store,
+            fixture.conversation_id,
+            fixture.routing_id,
+            cursor,
+            identifier,
+            sender,
+            sender_counter,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "remote inbox identity remains explicit in persistence tests"
+    )]
+    fn stage_remote_inbox_for(
+        store: &ProfileStore,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        cursor: u64,
+        identifier: u8,
+        sender: DeviceId,
+        sender_counter: u64,
+    ) -> ApplicationMessage {
+        let envelope = StoredRelayEnvelope::new(
+            relay_envelope(routing_id, identifier, &[identifier]),
+            cursor,
+        )
+        .unwrap();
+        store.record_inbox_envelope(&envelope).unwrap();
+        let message = application_message(
+            identifier.wrapping_add(100),
+            sender_counter,
+            &format!("remote-message-{identifier}"),
+        );
+        store
+            .save_inbox_message(conversation_id, cursor, sender, 0, &message)
+            .unwrap();
+        message
+    }
+
     fn create_v1_profile_database(path: &Path) {
         let connection = Connection::open(path).unwrap();
         connection
@@ -7831,6 +10057,7 @@ mod tests {
     }
 
     fn downgrade_v9_to_v8(connection: &Connection) {
+        downgrade_v10_to_v9(connection);
         connection
             .execute_batch(
                 "ALTER TABLE daemon_outbox RENAME TO daemon_outbox_v9;
@@ -7887,6 +10114,21 @@ mod tests {
                  CREATE INDEX daemon_outbox_status_idx
                     ON daemon_outbox(status, conversation_id, sender_counter);
                  PRAGMA user_version = 8;",
+            )
+            .unwrap();
+    }
+
+    fn downgrade_v10_to_v9(connection: &Connection) {
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_adapter_consumer;
+                 DROP TABLE daemon_remote_event;
+                 ALTER TABLE daemon_conversation DROP COLUMN sealed_adapter_delivery_policy;
+                 ALTER TABLE daemon_profile DROP COLUMN sealed_remote_event_floor;
+                 ALTER TABLE daemon_profile DROP COLUMN remote_event_floor_sequence;
+                 ALTER TABLE daemon_profile DROP COLUMN sealed_remote_event_head;
+                 ALTER TABLE daemon_profile DROP COLUMN next_remote_event_sequence;
+                 PRAGMA user_version = 9;",
             )
             .unwrap();
     }
@@ -10054,7 +12296,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v1_to_v9_transactionally() {
+    fn profile_schema_migrates_v1_to_v10_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration-test").unwrap();
         let locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
@@ -10092,7 +12334,91 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v2_to_v9() {
+    fn profile_schema_migrates_v9_to_v10_remote_event_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("remote-event-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_v10_to_v9(&connection);
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let connection = store.lock().unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let event_table: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'daemon_remote_event'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let consumer_table: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'daemon_adapter_consumer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert_eq!(event_table, 1);
+        assert_eq!(consumer_table, 1);
+    }
+
+    #[test]
+    fn failed_v10_remote_event_migration_preserves_v9_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("remote-event-migration-rollback").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_v10_to_v9(&connection);
+        connection
+            .execute("CREATE TABLE daemon_remote_event (sentinel INTEGER)", [])
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let event_columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_remote_event')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 9);
+        assert_eq!(event_columns, 1);
+    }
+
+    #[test]
+    fn profile_schema_migrates_v2_to_v10() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("message-history-migration").unwrap();
         let database_path = {
@@ -10252,7 +12578,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v3_to_v9_membership_journal() {
+    fn profile_schema_migrates_v3_to_v10_membership_journal() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("membership-migration").unwrap();
         let database_path = {
@@ -10300,7 +12626,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v6_to_v9_with_replay_heads() {
+    fn profile_schema_migrates_v6_to_v10_with_replay_heads() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("replay-head-migration").unwrap();
         let database_path = {
@@ -10411,7 +12737,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v7_to_v9_outbox_terminal_reasons() {
+    fn profile_schema_migrates_v7_to_v10_outbox_terminal_reasons() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-terminal-migration").unwrap();
         let database_path = {
@@ -10449,7 +12775,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v8_to_v9_removed_terminal_reason() {
+    fn profile_schema_migrates_v8_to_v10_removed_terminal_reason() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-removed-migration").unwrap();
         let database_path = {
@@ -10560,7 +12886,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v5_to_v9_join_receipts() {
+    fn profile_schema_migrates_v5_to_v10_join_receipts() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("join-receipt-migration").unwrap();
         let database_path = {
@@ -10652,7 +12978,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v4_to_v9_pending_joins() {
+    fn profile_schema_migrates_v4_to_v10_pending_joins() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("pending-join-migration").unwrap();
         let database_path = {
@@ -10959,6 +13285,713 @@ mod tests {
         assert_eq!(
             store.load_conversation(conversation_id).err(),
             Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn remote_events_are_suppressed_while_muted_and_claimed_after_enablement() {
+        let fixture = conversation_fixture("remote-event-delivery");
+        let remote_sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
+        let first = stage_remote_inbox_message(&fixture, 1, 1, remote_sender, 1);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([1; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .acquire_adapter_consumer(
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                1_000,
+                2_000,
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .claim_remote_events(
+                    AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                    AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                    1_000,
+                    1_500,
+                    10,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let suppressed = fixture.store.load_remote_event_by_sequence(1).unwrap();
+        assert_eq!(
+            suppressed.notification_id,
+            NotificationId::from_bytes([1; 16])
+        );
+        assert!(matches!(
+            suppressed.payload,
+            RemoteEventPayload::ApplicationMessage(ref message)
+                if application_messages_equal(message, &first).unwrap()
+        ));
+
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        let second = stage_remote_inbox_message(&fixture, 2, 2, remote_sender, 2);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                2,
+                NotificationId::from_bytes([2; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        let claimed = fixture
+            .store
+            .claim_remote_events(
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                1_000,
+                1_500,
+                10,
+            )
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].event.sequence, 2);
+        assert_eq!(
+            claimed[0].event.notification_id,
+            NotificationId::from_bytes([2; NotificationId::LENGTH])
+        );
+        assert!(matches!(
+            claimed[0].event.payload,
+            RemoteEventPayload::ApplicationMessage(ref message)
+                if application_messages_equal(message, &second).unwrap()
+        ));
+        fixture
+            .store
+            .acknowledge_remote_event(
+                claimed[0].event.notification_id,
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                claimed[0].lease_generation,
+                1_100,
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .claim_remote_events(
+                    AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                    AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                    1_100,
+                    1_500,
+                    10,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        fixture
+            .store
+            .acknowledge_remote_event(
+                claimed[0].event.notification_id,
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                claimed[0].lease_generation,
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(fixture.store.prune_terminal_remote_events(10).unwrap(), 2);
+        assert_eq!(
+            fixture.store.load_remote_event_by_sequence(1).err(),
+            Some(ProfileStoreError::OperationNotFound)
+        );
+        stage_remote_inbox_message(&fixture, 3, 3, remote_sender, 3);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                3,
+                NotificationId::from_bytes([3; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        let after_prune = fixture
+            .store
+            .claim_remote_events(
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                1_200,
+                1_400,
+                10,
+            )
+            .unwrap();
+        assert_eq!(after_prune.len(), 1);
+        assert_eq!(after_prune[0].event.sequence, 3);
+        let ConversationFixture {
+            root,
+            profile_id,
+            store,
+            ..
+        } = fixture;
+        drop(store);
+        LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+    }
+
+    #[test]
+    fn remote_event_leases_expire_and_reject_stale_acknowledgment() {
+        let fixture = conversation_fixture("remote-event-lease");
+        let first_consumer = AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]);
+        let first_lease = AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]);
+        let second_consumer = AdapterConsumerId::from_bytes([2; AdapterConsumerId::LENGTH]);
+        let second_lease = AdapterLeaseId::from_bytes([2; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        stage_remote_inbox_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+        );
+        let notification_id = NotificationId::from_bytes([1; NotificationId::LENGTH]);
+        fixture
+            .store
+            .complete_inbox_with_notification(fixture.conversation_id, 1, notification_id)
+            .unwrap();
+        fixture
+            .store
+            .acquire_adapter_consumer(first_consumer, first_lease, 1_000, 2_000)
+            .unwrap();
+        let first_claim = fixture
+            .store
+            .claim_remote_events(first_consumer, first_lease, 1_000, 1_500, 1)
+            .unwrap();
+        assert_eq!(first_claim.len(), 1);
+        assert_eq!(
+            fixture
+                .store
+                .acquire_adapter_consumer(second_consumer, second_lease, 1_600, 2_100,),
+            Err(ProfileStoreError::AdapterConsumerActive)
+        );
+        fixture
+            .store
+            .acquire_adapter_consumer(second_consumer, second_lease, 2_000, 2_500)
+            .unwrap();
+        let second_claim = fixture
+            .store
+            .claim_remote_events(second_consumer, second_lease, 2_000, 2_400, 1)
+            .unwrap();
+        assert_eq!(second_claim.len(), 1);
+        assert_eq!(second_claim[0].event.notification_id, notification_id);
+        assert_eq!(second_claim[0].lease_generation, 2);
+        assert_eq!(
+            fixture.store.acknowledge_remote_event(
+                notification_id,
+                first_consumer,
+                first_lease,
+                first_claim[0].lease_generation,
+                2_000,
+            ),
+            Err(ProfileStoreError::InvalidAdapterLease)
+        );
+        fixture
+            .store
+            .release_remote_event(
+                notification_id,
+                second_consumer,
+                second_lease,
+                second_claim[0].lease_generation,
+                2_100,
+            )
+            .unwrap();
+        let third_claim = fixture
+            .store
+            .claim_remote_events(second_consumer, second_lease, 2_100, 2_400, 1)
+            .unwrap();
+        assert_eq!(third_claim.len(), 1);
+        assert_eq!(third_claim[0].lease_generation, 3);
+        fixture
+            .store
+            .acknowledge_remote_event(
+                notification_id,
+                second_consumer,
+                second_lease,
+                third_claim[0].lease_generation,
+                2_200,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn remote_event_claims_are_recovered_after_daemon_restart() {
+        let fixture = conversation_fixture("remote-event-restart");
+        let conversation_id = fixture.conversation_id;
+        fixture
+            .store
+            .set_adapter_delivery_enabled(conversation_id, true)
+            .unwrap();
+        stage_remote_inbox_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+        );
+        let notification_id = NotificationId::from_bytes([1; NotificationId::LENGTH]);
+        fixture
+            .store
+            .complete_inbox_with_notification(conversation_id, 1, notification_id)
+            .unwrap();
+        fixture
+            .store
+            .acquire_adapter_consumer(
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                1_000,
+                2_000,
+            )
+            .unwrap();
+        let first = fixture
+            .store
+            .claim_remote_events(
+                AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]),
+                1_000,
+                1_500,
+                1,
+            )
+            .unwrap();
+        assert_eq!(first[0].lease_generation, 1);
+
+        let ConversationFixture {
+            root,
+            profile_id,
+            store,
+            ..
+        } = fixture;
+        drop(store);
+        let reopened = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let consumer = AdapterConsumerId::from_bytes([2; AdapterConsumerId::LENGTH]);
+        let lease = AdapterLeaseId::from_bytes([2; AdapterLeaseId::LENGTH]);
+        reopened
+            .acquire_adapter_consumer(consumer, lease, 2_000, 2_500)
+            .unwrap();
+        let recovered = reopened
+            .claim_remote_events(consumer, lease, 2_000, 2_400, 1)
+            .unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].event.notification_id, notification_id);
+        assert_eq!(recovered[0].lease_generation, 2);
+    }
+
+    #[test]
+    fn remote_event_state_and_journal_deletion_tampering_fail_closed() {
+        let fixture = conversation_fixture("remote-event-tampering");
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        stage_remote_inbox_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+        );
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([1; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_remote_event SET status = 3 WHERE event_sequence = 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.load_remote_event_by_sequence(1).err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_remote_event SET status = 1 WHERE event_sequence = 1",
+                [],
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM daemon_remote_event WHERE event_sequence = 1",
+                [],
+            )
+            .unwrap();
+
+        let ConversationFixture {
+            root,
+            profile_id,
+            store,
+            ..
+        } = fixture;
+        drop(store);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn local_application_echoes_do_not_create_remote_events() {
+        let fixture = conversation_fixture("remote-event-local-echo");
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        stage_inbox_message(&fixture, 1, 1, 0, 1);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([1; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        let (count, next_sequence): (i64, i64) = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM daemon_remote_event),
+                    next_remote_event_sequence
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(next_sequence, 1);
+    }
+
+    #[test]
+    fn remote_event_delivery_policy_tampering_cannot_enable_delivery() {
+        let fixture = conversation_fixture("remote-event-policy-tampering");
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_conversation
+                 SET sealed_adapter_delivery_policy =
+                     zeroblob(length(sealed_adapter_delivery_policy))
+                 WHERE conversation_id = ?1",
+                params![fixture.conversation_id.as_bytes().as_slice()],
+            )
+            .unwrap();
+        stage_remote_inbox_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+        );
+        assert_eq!(
+            fixture.store.complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([1; NotificationId::LENGTH]),
+            ),
+            Err(ProfileStoreError::CorruptData)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .replay_cursor,
+            0
+        );
+    }
+
+    #[test]
+    fn remote_membership_events_preserve_role_and_self_removal_semantics() {
+        let (role_fixture, remote_administrator) = remote_membership_fixture("remote-role-event");
+        role_fixture
+            .store
+            .set_adapter_delivery_enabled(role_fixture.conversation_id, true)
+            .unwrap();
+        complete_remote_membership_event(
+            &role_fixture,
+            remote_administrator,
+            31,
+            MembershipChange::ChangeRole(ChangeMemberRole::new(
+                role_fixture.device_id,
+                ConversationRole::Administrator,
+            )),
+        );
+        let role_event = role_fixture.store.load_remote_event_by_sequence(1).unwrap();
+        assert_eq!(role_event.sender, remote_administrator);
+        assert!(matches!(
+            role_event.payload,
+            RemoteEventPayload::MemberRoleChanged {
+                device_id,
+                role: ConversationRole::Administrator
+            } if device_id == role_fixture.device_id
+        ));
+
+        let (remove_fixture, remote_administrator) =
+            remote_membership_fixture("remote-removal-event");
+        remove_fixture
+            .store
+            .set_adapter_delivery_enabled(remove_fixture.conversation_id, true)
+            .unwrap();
+        complete_remote_membership_event(
+            &remove_fixture,
+            remote_administrator,
+            32,
+            MembershipChange::Remove(RemoveMember::new(remove_fixture.device_id)),
+        );
+        let removal_event = remove_fixture
+            .store
+            .load_remote_event_by_sequence(1)
+            .unwrap();
+        assert!(matches!(
+            removal_event.payload,
+            RemoteEventPayload::LocalAccessRemoved { device_id }
+                if device_id == remove_fixture.device_id
+        ));
+    }
+
+    #[test]
+    fn remote_event_capacity_backpressures_before_advancing_replay() {
+        let fixture = conversation_fixture("remote-event-capacity");
+        let remote_sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        for cursor in 1..=MAX_PENDING_REMOTE_EVENTS_PER_CONVERSATION {
+            let identifier = u8::try_from(cursor).unwrap();
+            stage_remote_inbox_message(
+                &fixture,
+                u64::try_from(cursor).unwrap(),
+                identifier,
+                remote_sender,
+                u64::try_from(cursor).unwrap(),
+            );
+            fixture
+                .store
+                .complete_inbox_with_notification(
+                    fixture.conversation_id,
+                    u64::try_from(cursor).unwrap(),
+                    NotificationId::from_bytes([identifier; NotificationId::LENGTH]),
+                )
+                .unwrap();
+        }
+        let blocked_cursor = MAX_PENDING_REMOTE_EVENTS_PER_CONVERSATION + 1;
+        let identifier = u8::try_from(blocked_cursor).unwrap();
+        stage_remote_inbox_message(
+            &fixture,
+            u64::try_from(blocked_cursor).unwrap(),
+            identifier,
+            remote_sender,
+            u64::try_from(blocked_cursor).unwrap(),
+        );
+        assert_eq!(
+            fixture.store.complete_inbox_with_notification(
+                fixture.conversation_id,
+                u64::try_from(blocked_cursor).unwrap(),
+                NotificationId::from_bytes([identifier; NotificationId::LENGTH]),
+            ),
+            Err(ProfileStoreError::RemoteEventCapacityExceeded)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .replay_cursor,
+            u64::try_from(MAX_PENDING_REMOTE_EVENTS_PER_CONVERSATION).unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_event_byte_capacity_backpressures_below_the_count_limit() {
+        let fixture = conversation_fixture("remote-event-byte-capacity");
+        let remote_sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
+        let body = "x".repeat(MAX_TEXT_BODY_BYTES);
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        let mut completed = 0_u64;
+        let mut blocked = false;
+        for cursor in 1_u64..=10 {
+            let identifier = u8::try_from(cursor).unwrap();
+            let envelope = StoredRelayEnvelope::new(
+                relay_envelope(fixture.routing_id, identifier, &[identifier]),
+                cursor,
+            )
+            .unwrap();
+            fixture.store.record_inbox_envelope(&envelope).unwrap();
+            let message = ApplicationMessage::new(
+                ProtocolVersion::application_v1(),
+                MessageId::from_bytes([identifier; MessageId::LENGTH]),
+                cursor,
+                1_700_000_000_000,
+                None,
+                ApplicationContent::text(&body).unwrap(),
+            )
+            .unwrap();
+            fixture
+                .store
+                .save_inbox_message(fixture.conversation_id, cursor, remote_sender, 0, &message)
+                .unwrap();
+            match fixture.store.complete_inbox_with_notification(
+                fixture.conversation_id,
+                cursor,
+                NotificationId::from_bytes([identifier; NotificationId::LENGTH]),
+            ) {
+                Ok(_) => completed = cursor,
+                Err(ProfileStoreError::RemoteEventCapacityExceeded) => {
+                    blocked = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected completion error: {error}"),
+            }
+        }
+        assert!(blocked);
+        assert!(completed > 0);
+        assert!(completed < u64::try_from(MAX_PENDING_REMOTE_EVENTS_PER_CONVERSATION).unwrap());
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .replay_cursor,
+            completed
+        );
+    }
+
+    #[test]
+    fn remote_event_claims_are_fair_between_conversations() {
+        let fixture = conversation_fixture("remote-event-fairness");
+        let identity = fixture.store.load_or_create_device().unwrap();
+        let second_conversation = identity.generate_conversation_id().unwrap();
+        let second_routing = RoutingId::from_bytes([20; RoutingId::LENGTH]);
+        let second_material = identity
+            .create_conversation_signing_material(second_conversation)
+            .unwrap();
+        let second_state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            second_conversation,
+            0,
+            vec![Member::new(
+                identity.device_id(),
+                ConversationRole::Administrator,
+                0,
+            )],
+            vec![],
+        )
+        .unwrap();
+        fixture
+            .store
+            .insert_conversation(
+                second_routing,
+                &second_material,
+                &second_state,
+                &[second_material.binding().clone()],
+            )
+            .unwrap();
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        fixture
+            .store
+            .set_adapter_delivery_enabled(second_conversation, true)
+            .unwrap();
+        let remote_sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
+
+        stage_remote_inbox_message(&fixture, 1, 1, remote_sender, 1);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([1; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        stage_remote_inbox_message(&fixture, 2, 2, remote_sender, 2);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                2,
+                NotificationId::from_bytes([2; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        stage_remote_inbox_for(
+            &fixture.store,
+            second_conversation,
+            second_routing,
+            1,
+            3,
+            remote_sender,
+            1,
+        );
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                second_conversation,
+                1,
+                NotificationId::from_bytes([3; NotificationId::LENGTH]),
+            )
+            .unwrap();
+
+        let consumer = AdapterConsumerId::from_bytes([1; AdapterConsumerId::LENGTH]);
+        let lease = AdapterLeaseId::from_bytes([1; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer, lease, 1_000, 2_000)
+            .unwrap();
+        let claimed = fixture
+            .store
+            .claim_remote_events(consumer, lease, 1_000, 1_500, 3)
+            .unwrap();
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|event| event.event.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 2]
         );
     }
 
