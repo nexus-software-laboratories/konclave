@@ -64,10 +64,13 @@ $env:KONCLAVE_ADAPTER_PROBE_CLIENT='node'; npm --prefix ./extensions/Konclave.Ho
 Production work must add Rust-to-Node Windows named-pipe coverage before the local
 adapter transport is considered complete.
 
-The capability appears only in adapter and daemon process memory. The probe passes it
-through process environment without writing or logging it. A production contract
-must additionally zeroize secret buffers, bound concurrent peers, use versioned
-frames, and apply the claim lease defined by the adapter-boundary ADR.
+The probe passes its capability through process environment without writing or
+logging it. That is sufficient to test transport behavior but is not the selected
+Copilot launch contract: Copilot owns the MCP child, so a raw environment value would
+transit harness session configuration. ADR 0005 instead selects an owner-protected
+ephemeral capability file whose path, not contents, is supplied to the daemon.
+Production must also zeroize secret buffers, bound concurrent peers, use versioned
+frames, and apply the claim lease defined by that ADR.
 
 ## Decision
 

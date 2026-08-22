@@ -40,6 +40,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0005-harness-neutral-adapter-boundary.md",
+        "title": "ADR 0005: Harness-neutral adapter boundary",
+        "section": "Architecture",
+        "order": 60,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

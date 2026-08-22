@@ -9,6 +9,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0002: Seal local secrets with explicit platform or operator key custody](../adr/adr-0002-sealed-local-secret-custody.md)
 - [ADR 0003: Keep relay authentication deployment-provided with a hashed bearer-token adapter](../adr/adr-0003-relay-transport-authentication.md)
 - [ADR 0004: Use locked split-schema profile storage with sealed crash journals](../adr/adr-0004-daemon-profile-journal.md)
+- [ADR 0005: Separate harness delivery from the daemon through an outbound local adapter channel](../adr/adr-0005-harness-neutral-adapter-boundary.md)
 
 ## When to write one
 

@@ -11,10 +11,12 @@ evidence that implementations honor both.
 - device root private keys and per-conversation MLS private keys;
 - MLS epoch secrets, resumption secrets, and persisted group state;
 - invitation capabilities and local authorization credentials;
+- ephemeral local adapter capabilities and authenticated delivery leases;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;
 - local daemon control and decrypted history.
+- remote-event ordering, acknowledgment, mute, and suppression state.
 
 ## Components and trust boundaries
 
@@ -30,7 +32,30 @@ untrusted even when they originate on the same machine.
 Harnesses and extensions are adapters, not cryptographic endpoints. They may request
 authorized operations and receive application results, but they never receive raw
 identity keys, MLS secrets, provider state, or storage encryption keys. Model-produced
-tool arguments are validated like hostile network input.
+tool arguments are validated like hostile network input. An authorized adapter
+necessarily receives plaintext selected for its harness and can disclose that
+plaintext if compromised.
+
+### Local adapter channel
+
+An adapter owns an operating-system local endpoint and an owner-protected ephemeral
+capability file. It passes the endpoint and capability-file path to the daemon child.
+The daemon validates and reads that file without following links or reparse points,
+then connects outward and mutually authenticates the profile and adapter before
+serving a neutral wait, claim, and acknowledgment API. The endpoint is not a TCP
+listener and is never reachable from the network.
+
+Endpoint names and capability-file paths are not credentials. Unix filesystem
+permissions and Windows named-pipe access policy reduce local exposure, while a
+256-bit capability and versioned challenge-response provide peer authentication.
+The capability file exists only for the lifetime of the adapter endpoint and is
+never copied into harness session configuration, profile persistence, or logs. A
+failed or absent adapter cannot cause an unauthenticated fallback.
+
+The adapter-delivery journal is independent of relay cursors. Relay acknowledgment
+means the daemon durably processed an envelope; adapter acknowledgment means a
+harness accepted one bounded notification. Neither means that a model completed or
+obeyed a turn.
 
 ### Community relay
 
@@ -71,9 +96,14 @@ Konclave considers:
 - a malicious or compromised current group member;
 - a stale or downgraded client;
 - a local unprivileged process attempting unauthorized daemon operations;
+- a local process attempting endpoint discovery, squatting, cross-profile attachment,
+  capability replay, or stale lease acknowledgment;
 - an attacker with offline access to persisted files;
 - malformed, oversized, or adversarial protocol input;
 - model output attempting to misuse daemon tools;
+- a group member attempting prompt injection, wake-up abuse, or agent-to-agent loops;
+- a crashed or malicious adapter attempting to lose, duplicate, reorder, or
+  acknowledge another consumer's notifications;
 - compromise of one endpoint's active keys and memory.
 
 ## Security goals
@@ -115,6 +145,18 @@ Only the daemon handles raw secret material. Relay and adapter interfaces expose
 minimum data required for their role. Logs and telemetry contain bounded,
 allowlisted metadata only.
 
+### Harness delivery integrity
+
+Remote events are sealed and ordered before relay acknowledgment. Adapter claims use
+bounded leases distinct from relay progress. A harness accepts at-least-once delivery:
+a crash before acknowledgment may repeat one stable notification identifier but
+cannot silently erase the event.
+
+Adapters safety-frame peer content as untrusted collaborator data. Peer text never
+gains system, developer, permission, or tool authority. Automatic delivery is
+explicitly enabled per conversation, bounded by wake budgets, and limited to one
+outstanding synthetic turn.
+
 ### Version integrity
 
 Peers negotiate supported Konclave and MLS versions. Unsupported versions and empty
@@ -140,6 +182,16 @@ the mutually supported maximum.
 | Offline database theft | Sealed secret blobs; no plaintext-key fallback |
 | Secret disclosure through diagnostics | No `Debug`, serialization, logs, telemetry, panic text, or snapshots containing keys/plaintext |
 | Malicious model/tool input | Schema validation, local authorization, bounded values, and explicit user-controlled policy |
+| Local adapter impersonation | Adapter-owned random endpoint, exclusive owner-protected capability file, strict ownership/link validation, mutually authenticated challenge-response, profile binding, and zeroized capability buffers |
+| Capability-file substitution | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, profile-bound proofs, exact-path cleanup, and no unauthenticated fallback |
+| Endpoint squatting after adapter failure | Adapter creates the endpoint before daemon launch; mutual proof prevents a replacement endpoint from authenticating; stale endpoints fail closed |
+| Delivery cursor or lease tampering | Sealed profile-global event state, consumer-bound lease identifiers and generations, checked expiry, idempotent acknowledgment, and stale-ack rejection |
+| Adapter crash before harness delivery | Pending or expired claim is reclaimed without advancing adapter acknowledgment |
+| Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
+| Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, no automatic tool execution, and explicit send operations |
+| Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |
+| Agent-to-agent feedback loop | Authenticated sender classification, local-echo suppression, stable notification identifiers, and no send side effect from receipt alone |
+| Adapter backlog exhaustion | Hard count/byte bounds, terminal suppression while muted, replay backpressure before enabled events would be dropped, and visible degraded state |
 | Dependency/provider compromise | Exact versions, supply-chain review, upstream advisories, isolated adapter, and replaceable provider boundary |
 
 ## Explicit non-goals and limitations
@@ -147,6 +199,8 @@ the mutually supported maximum.
 - Konclave cannot keep plaintext secret from a device compromised while plaintext or
   active keys are available.
 - An authorized member can copy or disclose plaintext it legitimately receives.
+- An authorized or compromised harness adapter can copy or disclose plaintext
+  delivered to that harness.
 - Konclave cannot guarantee availability against a malicious relay or network.
 - The initial protocol cannot guarantee consistent membership against a relay that
   equivocates between isolated clients.
@@ -156,6 +210,15 @@ the mutually supported maximum.
 - The first release does not provide key transparency or federation.
 - Secure deletion depends on operating-system and storage behavior and cannot be
   proven for every physical medium.
+- Exactly-once delivery into a harness is not provided. A crash after harness
+  acceptance but before daemon acknowledgment may create a duplicate notification.
+- No automatic harness delivery occurs while its adapter is absent. Enabled backlog
+  may eventually pause relay replay rather than be dropped.
+- Root, administrator, process-injection, or same-account active-memory compromise can
+  obtain the ephemeral local adapter capability and is outside the local
+  confidentiality guarantee.
+- Peer content is delivered as untrusted data; Konclave cannot prevent a model from
+  making a poor decision after correctly receiving that data.
 - MLS conformance and library tests do not constitute an independent security audit
   of Konclave.
 
