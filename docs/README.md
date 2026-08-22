@@ -30,6 +30,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Opaque relay storage](development/relay-storage.md)
 - [Outbound relay client](development/relay-client.md)
 - [Daemon profiles and recovery](development/daemon-profiles.md)
+- [Harness-neutral adapter transport spike](development/adapter-transport-spike.md)
 - [Repository controls](development/repository-controls.md)
 - [PitCrew CI](development/pitcrew-ci.md)
 

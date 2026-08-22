@@ -17,6 +17,8 @@
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
     "package": "node scripts/package-plugin.mjs",
+    "spike:adapter-transport": "node spikes/adapter-transport-probe.mjs",
+    "spike:sdk-proxy": "node spikes/sdk-tool-proxy-probe.mjs",
     "test": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run compile && npm run package && npm run verify:package",
     "version": "node scripts/sync-version.mjs && git add plugin.json",
     "verify:package": "node scripts/verify-package.mjs"
