@@ -1,0 +1,6 @@
+{
+  "name": "konclave-sdk-proxy-probe",
+  "description": "Executable evidence for Copilot extension-owned tool handlers",
+  "version": "0.0.0",
+  "extensions": "extensions/"
+}

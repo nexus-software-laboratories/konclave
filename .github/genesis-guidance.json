@@ -124,6 +124,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/adapter-transport-spike.md",
+        "title": "Harness-neutral adapter transport spike",
+        "section": "Development",
+        "order": 31,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",
