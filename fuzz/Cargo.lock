@@ -9,6 +9,7 @@ dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
  "KonclaveSecretStorage",
+ "aws-lc-rs",
  "mls-rs",
  "mls-rs-core",
  "mls-rs-crypto-awslc",

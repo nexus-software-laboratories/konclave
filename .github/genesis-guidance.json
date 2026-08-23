@@ -138,6 +138,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/adapter-channel-authentication.md",
+        "title": "Adapter channel authentication",
+        "section": "Development",
+        "order": 32,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",

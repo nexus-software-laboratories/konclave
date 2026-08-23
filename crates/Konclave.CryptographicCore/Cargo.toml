@@ -9,6 +9,7 @@ rust-version = "1.85"
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
 KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false, features = ["sqlite"] }
+aws-lc-rs.workspace = true
 mls-rs.workspace = true
 mls-rs-core.workspace = true
 mls-rs-crypto-awslc.workspace = true
