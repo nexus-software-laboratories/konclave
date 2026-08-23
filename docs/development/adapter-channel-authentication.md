@@ -56,6 +56,22 @@ challenge, capability, identifier, or path.
 The primitive comes from the project's vetted provider through
 `KonclaveCryptographicCore::HmacSha256Key`. Neither side authors a new primitive.
 
+## Bounded framing
+
+Every message is a four-byte big-endian length header followed by that many payload
+bytes. A declared length is validated against the applicable limit before any buffer
+is reserved, so a peer cannot force a large allocation with a header it never
+satisfies. A zero-length frame is rejected.
+
+Frames accepted before both proofs verify are limited to 1 KiB; authenticated frames
+are limited to 1 MiB. Keeping the pre-authentication limit far lower means an
+unauthenticated peer cannot make the process reserve an event-sized buffer.
+
+Handshake payloads begin with a one-byte message tag. Fields are read at exact
+offsets and the payload must end precisely at the last field, so an unknown tag, an
+unimplemented version, a truncated field, an identifier length beyond the payload, a
+non-UTF-8 identifier, and trailing bytes all fail before any value is used.
+
 ## Cross-language parity
 
 `fixtures/adapter/v1/auth-transcript.json` holds the canonical vectors: inputs, the
