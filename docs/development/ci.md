@@ -17,8 +17,12 @@ Named PitCrew profiles advertise `linux`, `x64`, and the profile label without
 the broad `self-hosted` label. The default `general-purpose` profile retains
 GitHub's default labels.
 
-Superseding CI revisions queue instead of cancelling an active run, so a build
-backend can complete its mandatory cleanup before shared state is reused.
+Validation is grouped per pull request rather than per branch. Under
+`pull_request_target`, `github.ref` resolves to the base branch, so keying
+concurrency on it alone places every open pull request in one group. GitHub keeps
+only one pending run per group, so a third request cancels another pull request's
+queued validation. Superseded revisions of the same pull request queue rather than
+cancel, so a run already producing required checks finishes and reports.
 
 ## Fork boundary
 
