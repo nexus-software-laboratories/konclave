@@ -25,8 +25,8 @@ pub use frame::{
     decode_frame_length, encode_frame,
 };
 pub use handshake::{
-    AuthenticatedChannel, HANDSHAKE_TIMEOUT, SequentialChallenges, complete_adapter_handshake,
-    complete_daemon_handshake,
+    AuthenticatedChannel, HANDSHAKE_TIMEOUT, OsChallenges, SequentialChallenges,
+    complete_adapter_handshake, complete_daemon_handshake,
 };
 pub use transcript::{
     ADAPTER_PROTOCOL_VERSION, AuthChallenge, AuthTranscript, CHALLENGE_LENGTH,

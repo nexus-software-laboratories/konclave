@@ -1,3 +1,4 @@
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use aws_lc_rs::{constant_time, hmac};
 use zeroize::Zeroize;
 
@@ -5,6 +6,20 @@ use crate::KonclaveCryptographicError;
 
 /// Length in bytes of an HMAC-SHA-256 authentication tag.
 pub const HMAC_SHA256_TAG_LENGTH: usize = 32;
+
+/// Fills `buffer` with operating-system random bytes from the vetted provider.
+///
+/// # Errors
+///
+/// Returns [`KonclaveCryptographicError::ProviderFailure`] when the system random
+/// source is unavailable.
+pub fn fill_random(buffer: &mut [u8]) -> Result<(), KonclaveCryptographicError> {
+    SystemRandom::new()
+        .fill(buffer)
+        .map_err(|_| KonclaveCryptographicError::ProviderFailure {
+            operation: "system random",
+        })
+}
 
 /// A keyed HMAC-SHA-256 authenticator over the project's vetted provider.
 ///
