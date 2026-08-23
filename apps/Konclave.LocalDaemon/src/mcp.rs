@@ -1217,7 +1217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_delivery_starts_muted_and_survives_a_round_trip() {
+    async fn creating_a_conversation_enables_delivery_and_muting_round_trips() {
         let root = tempfile::tempdir().unwrap();
         let health = DeliveryHealth::default();
         health.set_watched_conversations(2);
@@ -1262,41 +1262,11 @@ mod tests {
             .unwrap()
             .structured_content
             .unwrap();
-        assert_eq!(muted["auto_delivery_enabled"].as_bool(), Some(false));
+        assert_eq!(muted["auto_delivery_enabled"].as_bool(), Some(true));
         assert_eq!(muted["watched_conversations"].as_u64(), Some(2));
         assert_eq!(muted["delivery_degraded"].as_bool(), Some(true));
         assert_eq!(muted["pending_events"].as_u64(), Some(0));
         assert_eq!(muted["claimed_events"].as_u64(), Some(0));
-
-        let enabled = client
-            .call_tool(
-                CallToolRequestParams::new("set_auto_delivery").with_arguments(
-                    json!({"conversation_id": conversation_id, "enabled": true})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                ),
-            )
-            .await
-            .unwrap()
-            .structured_content
-            .unwrap();
-        assert_eq!(enabled["auto_delivery_enabled"].as_bool(), Some(true));
-
-        let observed = client
-            .call_tool(
-                CallToolRequestParams::new("delivery_status").with_arguments(
-                    json!({"conversation_id": conversation_id})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                ),
-            )
-            .await
-            .unwrap()
-            .structured_content
-            .unwrap();
-        assert_eq!(observed["auto_delivery_enabled"].as_bool(), Some(true));
 
         let remuted = client
             .call_tool(
@@ -1312,6 +1282,21 @@ mod tests {
             .structured_content
             .unwrap();
         assert_eq!(remuted["auto_delivery_enabled"].as_bool(), Some(false));
+
+        let reenabled = client
+            .call_tool(
+                CallToolRequestParams::new("set_auto_delivery").with_arguments(
+                    json!({"conversation_id": conversation_id, "enabled": true})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(reenabled["auto_delivery_enabled"].as_bool(), Some(true));
 
         let global = client
             .call_tool(CallToolRequestParams::new("delivery_status"))

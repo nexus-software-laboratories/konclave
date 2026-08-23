@@ -202,16 +202,20 @@ async fn join_conversation(
     conversation_id
 }
 
-async fn enable_delivery(client: &RunningService<RoleClient, TestClient>, conversation_id: &str) {
+async fn set_delivery(
+    client: &RunningService<RoleClient, TestClient>,
+    conversation_id: &str,
+    enabled: bool,
+) {
     let status = structured(
         call(
             client,
             "set_auto_delivery",
-            json!({"conversation_id": conversation_id, "enabled": true}),
+            json!({"conversation_id": conversation_id, "enabled": enabled}),
         )
         .await,
     );
-    assert_eq!(status["auto_delivery_enabled"].as_bool(), Some(true));
+    assert_eq!(status["auto_delivery_enabled"].as_bool(), Some(enabled));
 }
 
 async fn send(
@@ -251,9 +255,9 @@ async fn two_sessions_exchange_a_contract_change_without_a_sync_prompt() {
     let mut alice_session = alice_host.accept().await;
     let mut bob_session = bob_host.accept().await;
 
+    // Neither side opts in. Creating and joining already asked for these messages, so
+    // a configuration step here would be a step a real session could forget.
     let conversation_id = join_conversation(&alice, &bob).await;
-    enable_delivery(&alice, &conversation_id).await;
-    enable_delivery(&bob, &conversation_id).await;
 
     send(
         &alice,
@@ -318,7 +322,6 @@ async fn a_burst_arrives_as_one_bounded_batch() {
     let mut bob_session = bob_host.accept().await;
 
     let conversation_id = join_conversation(&alice, &bob).await;
-    enable_delivery(&bob, &conversation_id).await;
 
     for index in 0..6_u8 {
         let message_id = format!("{:02x}", index).repeat(16);
@@ -382,7 +385,6 @@ async fn an_abandoned_claim_is_redelivered_with_the_same_stable_identifier() {
     let mut bob_session = bob_host.accept().await;
 
     let conversation_id = join_conversation(&alice, &bob).await;
-    enable_delivery(&bob, &conversation_id).await;
     send(
         &alice,
         &conversation_id,
@@ -459,7 +461,7 @@ async fn muting_suppresses_delivery_while_replay_continues() {
     let mut bob_session = bob_host.accept().await;
 
     let conversation_id = join_conversation(&alice, &bob).await;
-    let muted = structured(
+    let joined = structured(
         call(
             &bob,
             "delivery_status",
@@ -468,10 +470,11 @@ async fn muting_suppresses_delivery_while_replay_continues() {
         .await,
     );
     assert_eq!(
-        muted["auto_delivery_enabled"].as_bool(),
-        Some(false),
-        "a conversation must start muted"
+        joined["auto_delivery_enabled"].as_bool(),
+        Some(true),
+        "joining a conversation must be enough to start receiving it"
     );
+    set_delivery(&bob, &conversation_id, false).await;
 
     send(
         &alice,
@@ -488,7 +491,7 @@ async fn muting_suppresses_delivery_while_replay_continues() {
         "a muted conversation must not deliver into a session"
     );
 
-    enable_delivery(&bob, &conversation_id).await;
+    set_delivery(&bob, &conversation_id, true).await;
     send(
         &alice,
         &conversation_id,
