@@ -53,12 +53,10 @@
       ]
     },
     {
-      "id": "linux-x64-image-builder",
-      "source": "project",
+      "id": "ubuntu-latest-hosted",
+      "source": "github-hosted",
       "labels": [
-        "linux",
-        "x64",
-        "image-builder"
+        "ubuntu-latest"
       ],
       "jobs": [
         "community-relay-container-ci"
