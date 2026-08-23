@@ -1,5 +1,5 @@
 ---
-applyTo: "crates/Konclave.ProtocolContracts/**/*.rs,crates/Konclave.CryptographicCore/**/*.rs,crates/Konclave.SecretStorage/**/*.rs,crates/Konclave.DomainCore/**/*.rs,crates/Konclave.ClientLibrary/**/*.rs,apps/Konclave.LocalDaemon/**/*.rs,apps/Konclave.CommunityRelay/**/*.rs,extensions/Konclave.HostExtension/**/*.{ts,tsx},packages/Konclave.ProtocolContracts.TypeScript/**/*.{ts,tsx},**/*.proto,fuzz/**"
+applyTo: "crates/Konclave.AdapterTransport/**/*.rs,crates/Konclave.ProtocolContracts/**/*.rs,crates/Konclave.CryptographicCore/**/*.rs,crates/Konclave.SecretStorage/**/*.rs,crates/Konclave.DomainCore/**/*.rs,crates/Konclave.ClientLibrary/**/*.rs,apps/Konclave.LocalDaemon/**/*.rs,apps/Konclave.CommunityRelay/**/*.rs,extensions/Konclave.HostExtension/**/*.{ts,tsx},packages/Konclave.ProtocolContracts.TypeScript/**/*.{ts,tsx},**/*.proto,fixtures/adapter/**,fuzz/**"
 scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter boundaries"
 ---
 

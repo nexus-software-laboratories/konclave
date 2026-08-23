@@ -1,0 +1,25 @@
+{
+  "$comment": "Canonical adapter channel authentication vectors. Every implementation of the local adapter contract, in any language, must reproduce these bytes exactly. Values are lowercase hex.",
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "profile": "alice",
+  "consumer": "01HQ8Z3K",
+  "launchCapability": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+  "adapterChallenge": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "daemonChallenge": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+  "encodedTranscript": "00010005616c696365000830314851385a334b000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+  "daemonProof": "7c63fc59e692cffcf8cae87b537461040abcd43ded577e582b9778e399147c14",
+  "adapterProof": "198063e3bcb911f3194e795715c928a745361335cd35bdaed7824eb46cd2b131",
+  "proofDomains": {
+    "daemon": "konclave.adapter.v1.proof.daemon",
+    "adapter": "konclave.adapter.v1.proof.client"
+  },
+  "encodingLayout": [
+    "protocol version as two big-endian bytes",
+    "profile length as two big-endian bytes, then the profile bytes",
+    "consumer length as two big-endian bytes, then the consumer bytes",
+    "the adapter challenge, exactly 32 bytes",
+    "the daemon challenge, exactly 32 bytes"
+  ],
+  "proofLayout": "HMAC-SHA-256 over the 32-byte role domain followed by the encoded transcript, keyed by the launch capability"
+}
