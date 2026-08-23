@@ -1,9 +1,8 @@
+mod support;
+
 use std::path::Path;
 use std::process::Stdio;
 
-use KonclaveCommunityRelay::access::StaticRelayAccess;
-use KonclaveCommunityRelay::application::RelayApplication;
-use KonclaveCommunityRelay::http::{HttpState, router};
 use KonclaveRelayCore::RelayPrincipalId;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -12,108 +11,19 @@ use rmcp::service::RunningService;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::{Value, json};
-use tempfile::TempDir;
+use support::TestRelay;
 use tokio::process::Command;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+
+/// How many times history is re-read before a message is declared missing.
+///
+/// Covers relay round trip plus one watch reconnect without making a real failure
+/// wait out a long timeout.
+const HISTORY_POLL_ATTEMPTS: usize = 60;
 
 #[derive(Clone, Default)]
 struct TestClient;
 
 impl ClientHandler for TestClient {}
-
-struct TestRelay {
-    _directory: TempDir,
-    endpoint: String,
-    shutdown: watch::Sender<bool>,
-    server: JoinHandle<()>,
-}
-
-impl TestRelay {
-    async fn start(token: [u8; RelayPrincipalId::LENGTH]) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let access_path = directory.path().join("access.json");
-        let principal = RelayPrincipalId::from_access_token(&token);
-        std::fs::write(
-            &access_path,
-            serde_json::to_vec(&json!({
-                "version": 1,
-                "principals": [{
-                    "principal": URL_SAFE_NO_PAD.encode(principal.as_bytes()),
-                    "grants": [{
-                        "route": "*",
-                        "permissions": ["send", "replay", "acknowledge"]
-                    }]
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let access = StaticRelayAccess::load(&access_path).unwrap();
-        let application =
-            RelayApplication::connect(&directory.path().join("relay.sqlite"), access.clone())
-                .await
-                .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (shutdown, mut shutdown_rx) = watch::channel(false);
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                router(
-                    HttpState::new("daemon-e2e", application),
-                    access,
-                    shutdown_rx.clone(),
-                ),
-            )
-            .with_graceful_shutdown(async move {
-                while !*shutdown_rx.borrow() {
-                    if shutdown_rx.changed().await.is_err() {
-                        break;
-                    }
-                }
-            })
-            .await
-            .unwrap();
-        });
-        Self {
-            _directory: directory,
-            endpoint: format!("http://{address}"),
-            shutdown,
-            server,
-        }
-    }
-
-    async fn stop(self) {
-        self.shutdown.send(true).unwrap();
-        timeout(Duration::from_secs(2), self.server)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    fn assert_opaque(&self, sentinels: &[&[u8]]) {
-        for entry in std::fs::read_dir(self._directory.path()).unwrap() {
-            let path = entry.unwrap().path();
-            if !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("relay.sqlite"))
-            {
-                continue;
-            }
-            let bytes = std::fs::read(path).unwrap();
-            for sentinel in sentinels {
-                assert!(
-                    !bytes
-                        .windows(sentinel.len())
-                        .any(|window| window == *sentinel)
-                );
-            }
-        }
-    }
-}
 
 async fn connect_daemon(
     profile_root: &Path,
@@ -158,6 +68,45 @@ async fn call(
     client.call_tool(parameters).await.unwrap()
 }
 
+/// Waits until one message is readable from a profile's durable history.
+///
+/// The watch supervisor and an explicit sync both consume the same relay stream, so
+/// which one processes an envelope first is a race. History is the property that
+/// matters and it does not depend on who won, so the test asserts on that instead.
+async fn await_history(
+    client: &RunningService<RoleClient, TestClient>,
+    conversation_id: &str,
+    text: &str,
+) {
+    for _ in 0..HISTORY_POLL_ATTEMPTS {
+        // Syncing first covers the case where nothing else has consumed the stream.
+        let _ = call(
+            client,
+            "sync_messages",
+            json!({"conversation_id": conversation_id}),
+        )
+        .await;
+        let history = structured(
+            call(
+                client,
+                "read_messages",
+                json!({"conversation_id": conversation_id, "limit": 100}),
+            )
+            .await,
+        );
+        if history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["text"] == text)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    panic!("{text:?} never reached durable history");
+}
+
 fn structured(result: rmcp::model::CallToolResult) -> Value {
     assert_ne!(result.is_error, Some(true), "{:?}", result.content);
     result.structured_content.unwrap()
@@ -176,12 +125,12 @@ async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
         format!("{}\n", URL_SAFE_NO_PAD.encode(token)),
     )
     .unwrap();
-    let relay = TestRelay::start(token).await;
+    let relay = TestRelay::start(token, "daemon-e2e").await;
     let mut alice = connect_daemon(
         &profile_root,
         "alice",
         &wrapping_key_file,
-        &relay.endpoint,
+        relay.endpoint(),
         &relay_credential_file,
     )
     .await;
@@ -189,7 +138,7 @@ async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
         &profile_root,
         "bob",
         &wrapping_key_file,
-        &relay.endpoint,
+        relay.endpoint(),
         &relay_credential_file,
     )
     .await;
@@ -268,15 +217,7 @@ async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
         .await,
     );
     assert_eq!(sent["cursor"], 2);
-    let bob_messages = structured(
-        call(
-            &bob,
-            "sync_messages",
-            json!({"conversation_id": conversation_id}),
-        )
-        .await,
-    );
-    assert_eq!(bob_messages["messages"][0]["text"], "hello from alice");
+    await_history(&bob, conversation_id, "hello from alice").await;
 
     let reply = structured(
         call(
@@ -291,21 +232,7 @@ async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
         .await,
     );
     assert_eq!(reply["cursor"], 3);
-    let alice_messages = structured(
-        call(
-            &alice,
-            "sync_messages",
-            json!({"conversation_id": conversation_id}),
-        )
-        .await,
-    );
-    assert!(
-        alice_messages["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["text"] == "hello from bob")
-    );
+    await_history(&alice, conversation_id, "hello from bob").await;
 
     bob.close().await.unwrap();
     structured(
@@ -324,25 +251,11 @@ async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
         &profile_root,
         "bob",
         &wrapping_key_file,
-        &relay.endpoint,
+        relay.endpoint(),
         &relay_credential_file,
     )
     .await;
-    let replayed = structured(
-        call(
-            &bob,
-            "sync_messages",
-            json!({"conversation_id": conversation_id}),
-        )
-        .await,
-    );
-    assert!(
-        replayed["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["text"] == "missed while offline")
-    );
+    await_history(&bob, conversation_id, "missed while offline").await;
     let duplicate = structured(
         call(
             &bob,
