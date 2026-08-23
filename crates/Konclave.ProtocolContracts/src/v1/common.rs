@@ -1,7 +1,8 @@
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceId, Ed25519PublicKey,
     Ed25519Signature, EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError,
-    MAX_PROTOBUF_TOP_LEVEL_FIELDS, MembershipOperationId, MessageId, ProtocolVersion, RoutingId,
+    MAX_PROTOBUF_TOP_LEVEL_FIELDS, MembershipOperationId, MessageId, PairingId, ProtocolVersion,
+    RoutingId,
 };
 use prost::Message;
 use prost::bytes::Buf;
@@ -170,6 +171,13 @@ id_conversion!(
     InvitationId,
     InvitationId,
     "invitation_id"
+);
+id_conversion!(
+    pairing_id_to_wire,
+    pairing_id_from_wire,
+    PairingId,
+    PairingId,
+    "pairing_id"
 );
 id_conversion!(
     routing_id_to_wire,

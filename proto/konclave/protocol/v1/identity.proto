@@ -49,3 +49,22 @@ message JoinProof {
   // Bounded to 64 KiB by protocol v1 validation.
   bytes mls_key_package = 3;
 }
+
+// A joiner's signed request to be enrolled in a conversation it cannot yet name.
+//
+// The device root public key is carried so a verifier re-derives device_id from it.
+// An offer therefore authenticates against nothing but itself, which is what lets an
+// inviter that has never seen the device decide. No conversation appears here, because
+// an offer travels in a capability that may be moved around before anyone approves it.
+message PairingOffer {
+  ProtocolVersion version = 1;
+  PairingId pairing_id = 2;
+  DeviceId device_id = 3;
+  // Exactly 32 bytes for Ed25519 in protocol v1.
+  bytes device_root_public_key = 4;
+  // The role the joiner asks for. The inviter decides the role it actually grants.
+  ConversationRole requested_role = 5;
+  uint64 expires_at_unix_seconds = 6;
+  // Exactly 64 bytes for Ed25519 in protocol v1.
+  bytes device_signature = 7;
+}
