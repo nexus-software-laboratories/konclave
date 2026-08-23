@@ -1,29 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${RUNNER_TEMP:?RUNNER_TEMP is required.}"
-: "${BUILDKIT_TLS_DIR:?BUILDKIT_TLS_DIR is required.}"
-: "${CONTAINER_VALIDATION_ROOT:?CONTAINER_VALIDATION_ROOT is required.}"
+# Removes the self-hosted BuildKit backend's job-private state.
+#
+# Cleanup is unconditional because the decoded client key material is job-private, so
+# it must not survive the job even when validation failed.
 
-runner_temp="$(realpath -m -- "$RUNNER_TEMP")"
-declare -a targets=("$BUILDKIT_TLS_DIR" "$CONTAINER_VALIDATION_ROOT")
+script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-for target in "${targets[@]}"; do
-    resolved="$(realpath -m -- "$target")"
-    case "$resolved" in
-        "$runner_temp"/*) ;;
-        *)
-            echo '::error::Refusing to remove image-builder state outside RUNNER_TEMP.'
-            exit 1
-            ;;
-    esac
-done
-
-rm -rf -- "${targets[@]}"
-
-for target in "${targets[@]}"; do
-    if [ -e "$target" ]; then
-        echo '::error::Image-builder job state remains after cleanup.'
-        exit 1
-    fi
-done
+bash "$script_directory/Cleanup-JobPrivatePaths.sh" \
+    BUILDKIT_TLS_DIR \
+    CONTAINER_VALIDATION_ROOT
