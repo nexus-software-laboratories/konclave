@@ -33,6 +33,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Daemon profiles and recovery](development/daemon-profiles.md)
 - [Harness-neutral adapter transport spike](development/adapter-transport-spike.md)
 - [Adapter channel authentication](development/adapter-channel-authentication.md)
+- [Copilot delivery safety](development/copilot-delivery-safety.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 

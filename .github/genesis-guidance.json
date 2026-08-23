@@ -145,6 +145,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/copilot-delivery-safety.md",
+        "title": "Copilot delivery safety",
+        "section": "Development",
+        "order": 33,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",
