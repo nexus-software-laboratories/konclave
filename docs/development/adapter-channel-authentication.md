@@ -149,6 +149,13 @@ A delivered event carries the authenticated sender, conversation, kind, and stab
 notification identifier as separate fields, so an adapter can frame peer text as
 untrusted without parsing it for routing information.
 
+Status reports pending and claimed counts from the journal, and watched-conversation
+count and degraded state from the watch supervisor. The supervisor owns that truth and
+the adapter channel only reads it, so status cannot disagree with the supervisor about
+what is actually being watched. Delivery is reported degraded while a watch is
+reconnecting or backpressured, so an adapter can surface that instead of appearing
+idle while work is stalled.
+
 ## Daemon lifecycle
 
 The adapter channel runs for the life of the daemon. Missing configuration is not an
