@@ -286,6 +286,39 @@ full envelope and assigning its cursor atomically reconciles a still-ready outbo
 accepted, including the response-lost case, so a stable retry returns the original
 accepted result and one message appears exactly once in cursor order after reconnect.
 
+## Relay watch supervision
+
+When a relay is configured, the daemon service root discovers durable conversations
+in bounded pages and owns one authenticated watch worker for each conversation where
+the local device remains a member. The initial MVP bounds one profile to 32
+simultaneous watched conversations and fails visibly rather than silently leaving an
+additional conversation unsynchronized.
+
+A worker opens from the durable replay cursor and keeps the WebSocket session alive
+after the relay's empty initial confirmation page. Every later page passes through
+the same contiguous preflight, sealed journal, MLS persistence, remote-event
+creation, cursor advancement, and relay acknowledgment path used by explicit replay.
+Membership removal of the local device ends that conversation's worker.
+
+Relay acknowledgment records route retention, not local delivery. It is monotonic and
+shared by every principal-authorized reader of a route, so a concurrent session, or an
+acknowledgment that outlived a crash before the local cursor was committed, can leave
+the relay ahead of this profile. A worker therefore re-sends its durable cursor on
+every connection and accepts an effective cursor at or ahead of the requested one. A
+regressed cursor or a rewritten route still fails as an invalid relay response.
+
+Timeouts, transport unavailability, ordinary watch closure, server failures,
+rate-limiting, and heartbeat timeout reconnect with bounded exponential backoff from
+one to 30 seconds plus conversation-stable jitter. Authorization, protocol,
+cryptographic, persistence-integrity, and invalid-response failures are permanent:
+the worker returns them to the service root, which signals coordinated daemon
+shutdown instead of hiding a corrupt or unauthorized state.
+
+The manager rescans every 30 seconds, including immediately on startup, so newly
+created and joined conversations acquire workers without an agent polling tool.
+Workers, retry timers, discovery, and shutdown are all owned. Graceful shutdown waits
+up to five seconds and aborts an overdue supervisor rather than detaching it.
+
 ## MCP application tools
 
 The stdio daemon exposes `get_identity`, bounded conversation/message tools, and the
@@ -317,4 +350,6 @@ membership mutation, send, sync, and watch operations. Invalid values fail start
 the daemon never infers write permission from a model request.
 
 `watch_messages` owns one cancellable WebSocket session and returns after one replay
-page. Agents repeat the bounded call rather than creating a detached polling task.
+page. It remains an explicit diagnostic/manual operation, as does `sync_messages`;
+normal background synchronization is owned by the daemon service and requires no
+agent polling loop.

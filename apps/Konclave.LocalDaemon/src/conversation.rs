@@ -61,6 +61,24 @@ impl ConversationCoordinator {
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)
     }
 
+    /// Returns whether the local profile remains a member of one stored conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile or state-lock error.
+    pub(crate) fn is_local_member(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ConversationCoordinatorError> {
+        let self_device_id = self.device_id()?;
+        Ok(self
+            .store
+            .load_conversation(conversation_id)?
+            .state
+            .member(self_device_id)
+            .is_some())
+    }
+
     fn generate_notification_id(&self) -> Result<NotificationId, ConversationCoordinatorError> {
         self.device
             .lock()
