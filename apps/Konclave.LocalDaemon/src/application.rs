@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
 use KonclaveCryptographicCore::MlsWelcome;
@@ -9,6 +10,7 @@ use KonclaveDomainCore::{
 };
 use KonclaveProtocolContracts::v1::{decode_join_proof, encode_join_proof};
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::conversation::{
     AcceptedMembership, ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
@@ -48,12 +50,27 @@ pub(crate) struct ReplayBatch {
     pub(crate) has_more: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WatchConnectionExit {
+    Shutdown,
+    LocalMemberRemoved,
+}
+
 /// Async relay composition over synchronous sealed conversation state.
-#[derive(Clone)]
 pub(crate) struct ApplicationService<T> {
     conversations: ConversationCoordinator,
     transport: Arc<T>,
     submissions: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl<T> Clone for ApplicationService<T> {
+    fn clone(&self) -> Self {
+        Self {
+            conversations: self.conversations.clone(),
+            transport: Arc::clone(&self.transport),
+            submissions: Arc::clone(&self.submissions),
+        }
+    }
 }
 
 impl<T> ApplicationService<T>
@@ -382,6 +399,103 @@ where
         }
     }
 
+    /// Processes every page from one authenticated watch connection until shutdown,
+    /// local removal, or a transport failure.
+    ///
+    /// Empty initial pages confirm the connection and do not end the watch. Relay
+    /// acknowledgment still follows durable local processing for every non-empty page.
+    ///
+    /// # Errors
+    ///
+    /// Returns a task, clock, request, relay, conversation, or response-integrity
+    /// error. The owning supervisor classifies reconnectable transport failures.
+    pub(crate) async fn watch_connection_until(
+        &self,
+        conversation_id: ConversationId,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<WatchConnectionExit, ApplicationServiceError> {
+        self.watch_connection_until_observed(conversation_id, shutdown, |_| {})
+            .await
+    }
+
+    async fn watch_connection_until_observed<F>(
+        &self,
+        conversation_id: ConversationId,
+        mut shutdown: watch::Receiver<bool>,
+        mut observe_page: F,
+    ) -> Result<WatchConnectionExit, ApplicationServiceError>
+    where
+        F: FnMut(&ReplayPage),
+    {
+        if !self.is_local_member(conversation_id).await? {
+            return Ok(WatchConnectionExit::LocalMemberRemoved);
+        }
+        let (request, routing_id, mut after_cursor) =
+            self.replay_request(conversation_id, 100).await?;
+        self.acknowledge_cursor(routing_id, after_cursor).await?;
+        let mut watch_session = self.transport.connect_watch(request).await?;
+        loop {
+            let page = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        watch_session.close().await?;
+                        return Ok(WatchConnectionExit::Shutdown);
+                    }
+                    continue;
+                }
+                page = watch_session.next_page() => page?,
+            };
+            observe_page(&page);
+            let next_cursor = page.next_cursor();
+            self.process_page(
+                conversation_id,
+                routing_id,
+                after_cursor,
+                page,
+                current_unix_seconds()?,
+            )
+            .await?;
+            after_cursor = next_cursor;
+            if !self.is_local_member(conversation_id).await? {
+                watch_session.close().await?;
+                return Ok(WatchConnectionExit::LocalMemberRemoved);
+            }
+        }
+    }
+
+    /// Lists one bounded page of durable conversation identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a blocking-task or profile-store error.
+    pub(crate) async fn conversation_page(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<ConversationId>, ApplicationServiceError> {
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || conversations.conversation_ids(after, limit))
+            .await
+            .map_err(|_| ApplicationServiceError::Task)?
+            .map_err(Into::into)
+    }
+
+    /// Returns whether the local profile remains a conversation member.
+    ///
+    /// # Errors
+    ///
+    /// Returns a blocking-task, profile-store, or state-lock error.
+    pub(crate) async fn is_local_member(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ApplicationServiceError> {
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || conversations.is_local_member(conversation_id))
+            .await
+            .map_err(|_| ApplicationServiceError::Task)?
+            .map_err(Into::into)
+    }
+
     async fn replay_request(
         &self,
         conversation_id: ConversationId,
@@ -395,6 +509,20 @@ where
         let request = ReplayRequest::new(routing_id, after_cursor, limit)
             .map_err(|_| ApplicationServiceError::Protocol)?;
         Ok((request, routing_id, after_cursor))
+    }
+
+    async fn acknowledge_cursor(
+        &self,
+        routing_id: KonclaveDomainCore::RoutingId,
+        cursor: u64,
+    ) -> Result<(), ApplicationServiceError> {
+        if cursor == 0 {
+            return Ok(());
+        }
+        let acknowledgment = AcknowledgeRequest::new(routing_id, cursor)
+            .map_err(|_| ApplicationServiceError::Protocol)?;
+        let effective = self.transport.acknowledge(acknowledgment).await?;
+        validate_acknowledgment(acknowledgment, effective)
     }
 
     async fn process_page(
@@ -440,9 +568,7 @@ where
             let acknowledgment = AcknowledgeRequest::new(routing_id, last_cursor)
                 .map_err(|_| ApplicationServiceError::Protocol)?;
             let effective = self.transport.acknowledge(acknowledgment).await?;
-            if effective != acknowledgment {
-                return Err(ApplicationServiceError::InvalidRelayResponse);
-            }
+            validate_acknowledgment(acknowledgment, effective)?;
         }
         Ok(ReplayBatch { messages, has_more })
     }
@@ -612,6 +738,23 @@ where
     }
 }
 
+/// Accepts a relay acknowledgment whose effective cursor is at or ahead of the
+/// requested cursor.
+///
+/// Relay retention state is monotonic and shared by every principal-authorized reader
+/// of a route, so a concurrent reader or an acknowledgment that outlived a crash can
+/// already have advanced it. Only a regressed cursor or a rewritten route contradicts
+/// the relay contract.
+fn validate_acknowledgment(
+    requested: AcknowledgeRequest,
+    effective: AcknowledgeRequest,
+) -> Result<(), ApplicationServiceError> {
+    if effective.routing_id() != requested.routing_id() || effective.cursor() < requested.cursor() {
+        return Err(ApplicationServiceError::InvalidRelayResponse);
+    }
+    Ok(())
+}
+
 fn validate_replay_page(
     after_cursor: u64,
     page: &ReplayPage,
@@ -666,6 +809,17 @@ pub(crate) enum ApplicationServiceError {
     OutboundRemoved,
     #[error("relay response does not match the requested operation")]
     InvalidRelayResponse,
+    #[error("system time is unavailable")]
+    SystemTimeUnavailable,
+    #[error("watchable conversation capacity is exceeded")]
+    WatchCapacityExceeded,
+}
+
+fn current_unix_seconds() -> Result<u64, ApplicationServiceError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| ApplicationServiceError::SystemTimeUnavailable)
 }
 
 #[cfg(test)]
@@ -675,15 +829,27 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use KonclaveClientLibrary::RelayWatchSession;
+    use KonclaveClientLibrary::{
+        RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
+    };
+    use KonclaveCommunityRelay::access::StaticRelayAccess;
+    use KonclaveCommunityRelay::application::RelayApplication;
+    use KonclaveCommunityRelay::http::{HttpState, router};
     use KonclaveDomainCore::{
         AcknowledgeRequest, ApplicationContent, DeliveryClass, EnvelopeId, ProtocolVersion,
         RelayEnvelope, ReplayPage, ReplayRequest,
     };
+    use KonclaveRelayCore::RelayPrincipalId;
     use KonclaveSecretStorage::{
         ExternalWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
     };
     use async_trait::async_trait;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use serde_json::json;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::conversation::tests::{invited_coordinators, paired_coordinators};
@@ -692,11 +858,121 @@ mod tests {
     struct RecordingRelay {
         cursor: AtomicU64,
         fail_submit: AtomicBool,
+        fail_acknowledgment: AtomicBool,
         lose_submit_response: AtomicBool,
         envelopes: Mutex<Vec<StoredRelayEnvelope>>,
         replay_pages: Mutex<VecDeque<ReplayPage>>,
         replay_requests: Mutex<Vec<ReplayRequest>>,
         acknowledgments: Mutex<Vec<AcknowledgeRequest>>,
+        acknowledged_high_water: Mutex<Vec<(KonclaveDomainCore::RoutingId, u64)>>,
+    }
+
+    struct TestRelay {
+        _directory: tempfile::TempDir,
+        endpoint: String,
+        shutdown: watch::Sender<bool>,
+        server: JoinHandle<()>,
+    }
+
+    impl TestRelay {
+        async fn start(token: [u8; RelayPrincipalId::LENGTH]) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let access_path = directory.path().join("access.json");
+            let principal = RelayPrincipalId::from_access_token(&token);
+            std::fs::write(
+                &access_path,
+                serde_json::to_vec(&json!({
+                    "version": 1,
+                    "principals": [{
+                        "principal": URL_SAFE_NO_PAD.encode(principal.as_bytes()),
+                        "grants": [{
+                            "route": "*",
+                            "permissions": ["send", "replay", "acknowledge"]
+                        }]
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let access = StaticRelayAccess::load(&access_path).unwrap();
+            let application =
+                RelayApplication::connect(&directory.path().join("relay.sqlite"), access.clone())
+                    .await
+                    .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (shutdown, mut shutdown_rx) = watch::channel(false);
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    router(
+                        HttpState::new("watch-supervisor-test", application),
+                        access,
+                        shutdown_rx.clone(),
+                    ),
+                )
+                .with_graceful_shutdown(async move {
+                    while !*shutdown_rx.borrow() {
+                        if shutdown_rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            });
+            Self {
+                _directory: directory,
+                endpoint: format!("http://{address}"),
+                shutdown,
+                server,
+            }
+        }
+
+        async fn stop(self) {
+            self.shutdown.send(true).unwrap();
+            timeout(Duration::from_secs(2), self.server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    struct ObservingRelay {
+        inner: RelayClient,
+        acknowledged: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    #[async_trait]
+    impl RelayTransport for ObservingRelay {
+        async fn submit(
+            &self,
+            envelope: &KonclaveDomainCore::RelayEnvelope,
+        ) -> Result<StoredRelayEnvelope, KonclaveClientError> {
+            self.inner.submit(envelope).await
+        }
+
+        async fn replay(&self, request: ReplayRequest) -> Result<ReplayPage, KonclaveClientError> {
+            self.inner.replay(request).await
+        }
+
+        async fn acknowledge(
+            &self,
+            request: AcknowledgeRequest,
+        ) -> Result<AcknowledgeRequest, KonclaveClientError> {
+            let acknowledged = self.inner.acknowledge(request).await?;
+            if let Some(sender) = self.acknowledged.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+            Ok(acknowledged)
+        }
+
+        async fn connect_watch(
+            &self,
+            request: ReplayRequest,
+        ) -> Result<RelayWatchSession, KonclaveClientError> {
+            self.inner.connect_watch(request).await
+        }
     }
 
     impl RecordingRelay {
@@ -704,11 +980,13 @@ mod tests {
             Self {
                 cursor: AtomicU64::new(0),
                 fail_submit: AtomicBool::new(fail_submit),
+                fail_acknowledgment: AtomicBool::new(false),
                 lose_submit_response: AtomicBool::new(false),
                 envelopes: Mutex::new(Vec::new()),
                 replay_pages: Mutex::new(VecDeque::new()),
                 replay_requests: Mutex::new(Vec::new()),
                 acknowledgments: Mutex::new(Vec::new()),
+                acknowledged_high_water: Mutex::new(Vec::new()),
             }
         }
 
@@ -718,6 +996,40 @@ mod tests {
 
         fn lose_next_submit_response(&self) {
             self.lose_submit_response.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_next_acknowledgment(&self) {
+            self.fail_acknowledgment.store(true, Ordering::SeqCst);
+        }
+
+        /// Raises the route's retention high-water mark the way a concurrent
+        /// principal-authorized reader would.
+        fn advance_acknowledgment(&self, routing_id: KonclaveDomainCore::RoutingId, cursor: u64) {
+            Self::raise(
+                &mut self.acknowledged_high_water.lock().unwrap(),
+                routing_id,
+                cursor,
+            );
+        }
+
+        fn raise(
+            high_water: &mut Vec<(KonclaveDomainCore::RoutingId, u64)>,
+            routing_id: KonclaveDomainCore::RoutingId,
+            cursor: u64,
+        ) -> u64 {
+            match high_water
+                .iter_mut()
+                .find(|(route, _)| *route == routing_id)
+            {
+                Some((_, effective)) => {
+                    *effective = (*effective).max(cursor);
+                    *effective
+                }
+                None => {
+                    high_water.push((routing_id, cursor));
+                    cursor
+                }
+            }
         }
     }
 
@@ -756,8 +1068,17 @@ mod tests {
             &self,
             request: AcknowledgeRequest,
         ) -> Result<AcknowledgeRequest, KonclaveClientError> {
+            if self.fail_acknowledgment.swap(false, Ordering::SeqCst) {
+                return Err(KonclaveClientError::TransportUnavailable);
+            }
             self.acknowledgments.lock().unwrap().push(request);
-            Ok(request)
+            let effective = Self::raise(
+                &mut self.acknowledged_high_water.lock().unwrap(),
+                request.routing_id(),
+                request.cursor(),
+            );
+            AcknowledgeRequest::new(request.routing_id(), effective)
+                .map_err(|_| KonclaveClientError::InvalidResponse)
         }
 
         async fn connect_watch(
@@ -1357,6 +1678,170 @@ mod tests {
                 KonclaveClientError::TransportUnavailable
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn continuous_watch_survives_empty_initial_page_and_processes_later_message() {
+        let token = [7_u8; RelayAccessCredential::LENGTH];
+        let relay = TestRelay::start(token).await;
+        let (_root, alice, bob, conversation_id, alice_device_id) = paired_coordinators();
+        let alice_transport = RelayClient::new(
+            RelayEndpoint::parse(&relay.endpoint).unwrap(),
+            RelayAccessCredential::from_bytes(token),
+        )
+        .unwrap();
+        let bob_transport = RelayClient::new(
+            RelayEndpoint::parse(&relay.endpoint).unwrap(),
+            RelayAccessCredential::from_bytes(token),
+        )
+        .unwrap();
+        let (empty_page_tx, empty_page_rx) = oneshot::channel();
+        let (acknowledged_tx, acknowledged_rx) = oneshot::channel();
+        let bob_service = ApplicationService::new(
+            bob,
+            ObservingRelay {
+                inner: bob_transport,
+                acknowledged: Mutex::new(Some(acknowledged_tx)),
+            },
+        );
+        let alice_service = ApplicationService::new(alice, alice_transport);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let watch_service = bob_service.clone();
+        let mut empty_page_tx = Some(empty_page_tx);
+        let watcher = tokio::spawn(async move {
+            watch_service
+                .watch_connection_until_observed(conversation_id, shutdown_rx, move |page| {
+                    if page.envelopes().is_empty()
+                        && page.next_cursor() == 0
+                        && let Some(sender) = empty_page_tx.take()
+                    {
+                        let _ = sender.send(());
+                    }
+                })
+                .await
+        });
+
+        timeout(Duration::from_secs(2), empty_page_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        alice_service
+            .send(request(conversation_id, "arrived after empty watch page"))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), acknowledged_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let history = bob_service.read(conversation_id, 0, 10).await.unwrap();
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(history.messages[0].sender, alice_device_id);
+        assert!(matches!(
+            history.messages[0].message.content(),
+            ApplicationContent::Text(body) if body == "arrived after empty watch page"
+        ));
+        shutdown_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), watcher)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            WatchConnectionExit::Shutdown
+        );
+        relay.stop().await;
+    }
+
+    #[tokio::test]
+    async fn watch_reconnect_retries_acknowledgment_after_local_completion() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let prepared = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::text("ack retry").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let stored = StoredRelayEnvelope::new(prepared.envelope.clone(), 1).unwrap();
+        let service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
+        service.transport.fail_next_acknowledgment();
+
+        assert!(matches!(
+            service
+                .replay_once(conversation_id, 100, 1_800_000_000)
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        assert!(matches!(
+            service
+                .watch_connection_until(conversation_id, shutdown_rx)
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(
+            service.transport.acknowledgments.lock().unwrap().as_slice(),
+            &[AcknowledgeRequest::new(prepared.envelope.routing_id(), 1).unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_accepts_a_retention_cursor_another_session_already_advanced() {
+        let (_root, alice, bob, conversation_id, _alice_device_id) = paired_coordinators();
+        let prepared = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::text("shared route").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let routing_id = prepared.envelope.routing_id();
+        let stored = StoredRelayEnvelope::new(prepared.envelope.clone(), 1).unwrap();
+        let service = ApplicationService::new(bob.clone(), RecordingRelay::new(false));
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![stored], 1, false).unwrap());
+        service
+            .replay_once(conversation_id, 100, 1_800_000_000)
+            .await
+            .unwrap();
+        assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+        service.transport.advance_acknowledgment(routing_id, 2);
+
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let exit = service
+            .watch_connection_until(conversation_id, shutdown_rx)
+            .await;
+
+        assert!(
+            matches!(
+                exit,
+                Err(ApplicationServiceError::Relay(
+                    KonclaveClientError::TransportUnavailable
+                ))
+            ),
+            "reconnect must reach the transport instead of failing acknowledgment: {exit:?}"
+        );
+        assert_eq!(
+            service.transport.acknowledgments.lock().unwrap().as_slice(),
+            &[
+                AcknowledgeRequest::new(routing_id, 1).unwrap(),
+                AcknowledgeRequest::new(routing_id, 1).unwrap()
+            ]
+        );
     }
 
     #[tokio::test]
