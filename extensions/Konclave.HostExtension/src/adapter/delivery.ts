@@ -58,6 +58,13 @@ export interface DeliveryCoordinator {
   markIdle(): Promise<void>;
   /** Reports that the session became active, so nothing may be injected. */
   markActive(): void;
+  /**
+   * Attempts a delivery without changing the idle state.
+   *
+   * Newly claimed work must not itself make a busy session look idle, so claiming and
+   * idle observation stay separate inputs.
+   */
+  flush(): Promise<void>;
   /** Number of claimed events waiting for an idle session. */
   readonly pending: number;
   /** Whether a synthetic turn is currently outstanding. */
@@ -223,6 +230,9 @@ export function createDeliveryCoordinator(
     },
     markActive() {
       idle = false;
+    },
+    async flush() {
+      await deliver();
     },
     get pending() {
       return queue.length;

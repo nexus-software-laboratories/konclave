@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
 
+import {
+  createAdapterRendezvous,
+  listenForDaemon,
+  type AdapterRendezvous,
+} from './adapter/channel.js';
+import { createDeliveryCoordinator } from './adapter/delivery.js';
+import { startDeliveryRuntime, type AdapterIntegration } from './adapter/runtime.js';
+
 export interface PromptMessage {
   prompt: string;
   attachments?: unknown[];
@@ -99,7 +107,21 @@ export interface ExtensionController {
   readonly session: ExtensionSession;
   readonly state: ExtensionState;
   schedulePromptSend(message: string | PromptMessage, delayMs?: number): () => void;
+  /**
+   * Binds a delivery coordinator to session activity.
+   *
+   * Idle observation lives here because the controller already owns the session event
+   * subscriptions; duplicating them in the adapter would risk the two disagreeing
+   * about whether the session is busy.
+   */
+  attachDelivery(coordinator: DeliveryBinding, dispose: () => void): void;
   dispose(reason?: string): void;
+}
+
+/** The delivery behaviour the controller drives from session activity. */
+export interface DeliveryBinding {
+  markIdle(): Promise<void>;
+  markActive(): void;
 }
 
 export interface BootExtensionOptions {
@@ -109,7 +131,25 @@ export interface BootExtensionOptions {
   timers?: TimerController;
   environment?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
+  /**
+   * Adapter hosting used to receive remote events.
+   *
+   * Absent, the extension mounts the daemon and serves tools without a delivery
+   * channel, which is what keeps this entry point testable without a socket. The
+   * composition root supplies the real integration.
+   */
+  adapter?: AdapterIntegration;
 }
+
+/** The adapter hosting used in production. */
+export const nodeAdapterIntegration: AdapterIntegration = {
+  createRendezvous(platform) {
+    return createAdapterRendezvous(platform);
+  },
+  listen(rendezvous, platform) {
+    return listenForDaemon(rendezvous, platform);
+  },
+};
 
 const mcpToolTimeoutMs = 90_000;
 
@@ -182,37 +222,121 @@ function normalizeDelay(delayMs: number | undefined): number {
 export async function bootExtension(
   options: BootExtensionOptions,
 ): Promise<ExtensionController | null> {
+  const platform = options.platform ?? process.platform;
+  const environment = options.environment ?? process.env;
+  let rendezvous: AdapterRendezvous | null = null;
+
   try {
+    // The rendezvous exists before the daemon child starts, because the daemon
+    // connects outward to it during its own startup and cannot wait for one to
+    // appear later.
+    rendezvous = options.adapter ? await options.adapter.createRendezvous(platform) : null;
     const session = await options.joinSession(
-      createExtensionJoinConfig(
-        options.environment ?? process.env,
-        options.platform ?? process.platform,
-      ),
+      createExtensionJoinConfig(environment, platform, rendezvous),
     );
-    return attachExtension(session, options.diagnostics, options.processController, options.timers);
+    const controller = attachExtension(
+      session,
+      options.diagnostics,
+      options.processController,
+      options.timers,
+    );
+
+    if (options.adapter && rendezvous) {
+      attachAdapterDelivery(
+        controller,
+        options.adapter,
+        rendezvous,
+        deriveProfileId(environment),
+        options.diagnostics,
+        platform,
+      );
+    }
+
+    return controller;
   } catch (error) {
+    await rendezvous?.dispose();
     options.diagnostics.error(`Failed to join Copilot session: ${formatError(error)}`);
     options.processController.setExitCode(1);
     return null;
   }
 }
 
-export function createExtensionJoinConfig(
-  environment: Readonly<Record<string, string | undefined>>,
+/**
+ * Runs the delivery channel beside the session without blocking startup.
+ *
+ * A daemon that never connects must not prevent the extension from serving tools, so
+ * the channel is established in the background and its failures are diagnostics
+ * rather than startup errors.
+ */
+function attachAdapterDelivery(
+  controller: ExtensionController,
+  adapter: AdapterIntegration,
+  rendezvous: AdapterRendezvous,
+  profileId: string,
+  diagnostics: Diagnostics,
   platform: NodeJS.Platform,
-): JoinSessionConfig {
+): void {
+  void (async () => {
+    try {
+      const listener = await adapter.listen(rendezvous, platform);
+      const channel = await listener.accept(profileId);
+      const coordinator = createDeliveryCoordinator({
+        channel,
+        session: controller.session,
+        diagnostics,
+      });
+      const runtime = startDeliveryRuntime({ channel, coordinator, diagnostics });
+      // Disposal stops the claim loop first. Closing the channel underneath a running
+      // loop would surface as a claim failure rather than an orderly stop.
+      controller.attachDelivery(coordinator, () => {
+        runtime.stop();
+        channel.close();
+        void listener.close();
+        void rendezvous.dispose();
+      });
+      await runtime.completed;
+    } catch (error) {
+      diagnostics.error(`Konclave delivery channel unavailable: ${formatError(error)}`);
+      await rendezvous.dispose();
+    }
+  })();
+}
+
+/**
+ * Derives the profile identifier a session owns.
+ *
+ * The daemon and the delivery channel must agree on this value, so it is computed
+ * once here rather than independently on each side.
+ */
+export function deriveProfileId(environment: Readonly<Record<string, string | undefined>>): string {
   const sessionId = environment.SESSION_ID?.trim();
   if (!sessionId) {
     throw new Error('SESSION_ID is required to derive the Konclave profile.');
   }
 
+  return `session-${createHash('sha256').update(sessionId).digest('hex').slice(0, 24)}`;
+}
+
+export function createExtensionJoinConfig(
+  environment: Readonly<Record<string, string | undefined>>,
+  platform: NodeJS.Platform,
+  rendezvous: AdapterRendezvous | null = null,
+): JoinSessionConfig {
   const command =
     environment.KONCLAVE_DAEMON_PATH?.trim() ||
     (platform === 'win32' ? 'KonclaveLocalDaemon.exe' : 'KonclaveLocalDaemon');
   const daemonEnvironment: Record<string, string> = {
-    KONCLAVE_PROFILE_ID: `session-${createHash('sha256').update(sessionId).digest('hex').slice(0, 24)}`,
+    KONCLAVE_PROFILE_ID: deriveProfileId(environment),
     KONCLAVE_MCP_ALLOW_WRITE: 'true',
   };
+
+  if (rendezvous) {
+    // All three are supplied together; the daemon rejects a partial set rather than
+    // running without a delivery channel.
+    daemonEnvironment.KONCLAVE_ADAPTER_ENDPOINT = rendezvous.endpoint;
+    daemonEnvironment.KONCLAVE_ADAPTER_CAPABILITY_FILE = rendezvous.capabilityFile;
+    daemonEnvironment.KONCLAVE_ADAPTER_CONSUMER_ID = rendezvous.consumerId;
+  }
 
   copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_PROFILE_ROOT');
   copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_WRAPPING_KEY_FILE');
@@ -256,6 +380,8 @@ function attachExtension(
   const pendingTimers = new Set<TimerHandle>();
   const unsubscriptions: Array<() => void> = [];
   const signalHandlers = new Map<ExtensionSignal, () => void>();
+  const deliveryDisposals: Array<() => void> = [];
+  let delivery: DeliveryBinding | null = null;
   let disposed = false;
 
   const cancelTimer = (handle: TimerHandle) => {
@@ -270,6 +396,10 @@ function attachExtension(
     }
 
     disposed = true;
+    delivery = null;
+    while (deliveryDisposals.length > 0) {
+      deliveryDisposals.pop()?.();
+    }
     for (const handle of pendingTimers) {
       timers.clearTimeout(handle);
     }
@@ -310,6 +440,14 @@ function attachExtension(
         cancelTimer(handle);
       };
     },
+    attachDelivery(coordinator, disposeDelivery) {
+      if (disposed) {
+        disposeDelivery();
+        return;
+      }
+      delivery = coordinator;
+      deliveryDisposals.push(disposeDelivery);
+    },
     dispose() {
       dispose();
     },
@@ -319,6 +457,7 @@ function attachExtension(
     session.on('assistant.message', (event) => {
       const assistantEvent = event as AssistantMessageEvent;
       state.lastAssistantMessageId = assistantEvent.data.messageId;
+      delivery?.markActive();
     }),
   );
   unsubscriptions.push(
@@ -334,6 +473,9 @@ function attachExtension(
       const idleEvent = event as SessionIdleEvent;
       state.lastIdleAt = idleEvent.timestamp;
       state.lastIdleWasAborted = Boolean(idleEvent.data.aborted);
+      void delivery?.markIdle().catch((error: unknown) => {
+        diagnostics.error(`Konclave delivery failed after idle: ${formatError(error)}`);
+      });
     }),
   );
   unsubscriptions.push(
