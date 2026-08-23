@@ -159,6 +159,21 @@ pub(crate) async fn attach_adapter(
     .await
     .context("authenticating the adapter channel")?;
 
+    acquire_attachment(config, store, channel, now_unix_milliseconds)
+}
+
+/// Claims the profile's single consumer lease for an already authenticated channel.
+///
+/// # Errors
+///
+/// Returns a lease or clock error. An active lease held by a different consumer fails
+/// closed rather than displacing it.
+fn acquire_attachment(
+    config: &AdapterLaunchConfig,
+    store: &ProfileStore,
+    channel: AuthenticatedChannel,
+    now_unix_milliseconds: u64,
+) -> anyhow::Result<AdapterAttachment> {
     let lease_id = generate_lease_id().context("generating an adapter lease identifier")?;
     let expires_at = now_unix_milliseconds
         .checked_add(
@@ -180,6 +195,107 @@ pub(crate) async fn attach_adapter(
         consumer_id: config.consumer_id(),
         lease_id,
     })
+}
+
+/// Runs the adapter channel for the life of the daemon.
+///
+/// Missing configuration is not an error: the daemon still serves MCP and still
+/// recovers relay state. A configured adapter that is unreachable or that rejects
+/// authentication is retried with bounded backoff rather than taking the daemon down,
+/// because losing the harness connection must not stop relay processing. There is no
+/// fallback to an unauthenticated channel.
+pub(crate) async fn run_adapter_channel(
+    store: std::sync::Arc<ProfileStore>,
+    profile: &str,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let config = match AdapterLaunchConfig::from_environment() {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(error) => {
+            // A malformed set is reported once and then left alone; retrying cannot
+            // repair the environment of a running process.
+            eprintln!("Adapter configuration rejected: {error:#}");
+            return;
+        }
+    };
+
+    let clock = SystemUnixClock;
+    let mut failures: u32 = 0;
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        match attach_and_serve(&config, profile, &store, &clock, shutdown.clone()).await {
+            Ok(()) => failures = 0,
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                eprintln!(
+                    "Adapter channel unavailable (attempt {failures}): {}",
+                    adapter_error_code(&error)
+                );
+            }
+        }
+        if *shutdown.borrow() {
+            return;
+        }
+        let delay = adapter_retry_delay(failures);
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+async fn attach_and_serve(
+    config: &AdapterLaunchConfig,
+    profile: &str,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let capability = config.read_capability()?;
+    let mut connection = connect_adapter_endpoint(config.endpoint()).await?;
+    let channel = complete_daemon_handshake(
+        &mut connection,
+        profile,
+        &capability,
+        &mut OsChallenges::new(),
+    )
+    .await?;
+
+    let now = clock.now_unix_milliseconds();
+    let attachment = acquire_attachment(config, store, channel, now)?;
+    let result = serve_adapter(&mut connection, &attachment, store, clock, shutdown).await;
+    // The lease is released on every exit path so a restarting adapter is not made to
+    // wait out an expiry window that no live consumer owns.
+    let _ = attachment.release(store);
+    result.map_err(Into::into)
+}
+
+/// Backoff between adapter attachment attempts.
+///
+/// The first retry is quick because the common case is an adapter that has not
+/// finished creating its endpoint yet. Repeated failure backs off to avoid spinning
+/// against a permanently absent or misconfigured adapter.
+fn adapter_retry_delay(failures: u32) -> Duration {
+    const MAXIMUM: Duration = Duration::from_secs(30);
+    let exponent = failures.saturating_sub(1).min(5);
+    Duration::from_millis(250)
+        .saturating_mul(1_u32 << exponent)
+        .min(MAXIMUM)
+}
+
+fn adapter_error_code(error: &anyhow::Error) -> String {
+    error.downcast_ref::<AdapterTransportError>().map_or_else(
+        || "adapter_unavailable".to_string(),
+        |error| error.code().to_string(),
+    )
 }
 
 fn generate_lease_id() -> anyhow::Result<AdapterLeaseId> {
@@ -556,7 +672,7 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
 
-        fn store(root: &Path) -> ProfileStore {
+        pub(super) fn store(root: &Path) -> ProfileStore {
             let locked = LockedProfile::acquire(root, ProfileId::parse(PROFILE).unwrap()).unwrap();
             let sealer =
                 SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32]))
@@ -804,6 +920,39 @@ mod tests {
                     .unwrap();
             AdapterResponse::decode(&payload).unwrap()
         }
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_starts_quickly() {
+        use super::adapter_retry_delay;
+
+        assert_eq!(
+            adapter_retry_delay(1),
+            std::time::Duration::from_millis(250)
+        );
+        assert!(adapter_retry_delay(2) > adapter_retry_delay(1));
+        for failures in 1..64 {
+            assert!(
+                adapter_retry_delay(failures) <= std::time::Duration::from_secs(30),
+                "retry delay must stay bounded at {failures} failures"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_adapter_channel_returns_without_blocking_the_daemon() {
+        // No launch variables are set, so the channel must be a no-op rather than
+        // retrying forever and keeping the daemon's join alive.
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(unix::store(root.path()));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::run_adapter_channel(store, "alice", shutdown_rx),
+        )
+        .await
+        .expect("an unconfigured adapter channel must return immediately");
     }
 
     #[test]

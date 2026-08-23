@@ -149,6 +149,19 @@ A delivered event carries the authenticated sender, conversation, kind, and stab
 notification identifier as separate fields, so an adapter can frame peer text as
 untrusted without parsing it for routing information.
 
+## Daemon lifecycle
+
+The adapter channel runs for the life of the daemon. Missing configuration is not an
+error: the daemon still serves MCP and still recovers relay state. A configured
+adapter that is unreachable or that rejects authentication is retried with bounded
+backoff rather than taking the daemon down, because losing the harness connection
+must not stop relay processing. There is no fallback to an unauthenticated channel.
+
+The first retry is quick, because the common case is an adapter that has not finished
+creating its endpoint yet; repeated failure backs off to a ceiling so a permanently
+absent adapter cannot spin. The lease is released on every exit path, so a restarting
+adapter is not made to wait out an expiry window that no live consumer owns.
+
 ## Cross-language parity
 
 `fixtures/adapter/v1/auth-transcript.json` holds the canonical vectors: inputs, the
