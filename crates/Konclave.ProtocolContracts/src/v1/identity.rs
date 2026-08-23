@@ -1,20 +1,22 @@
 use KonclaveDomainCore::{
     DeviceCredentialBinding, Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES,
-    MAX_MLS_KEY_PACKAGE_BYTES, SignatureScheme,
+    MAX_MLS_KEY_PACKAGE_BYTES, PairingOffer, SignatureScheme,
 };
 
 use crate::KonclaveProtocolError;
 use crate::v1::common::{
     decode_bounded, device_id_from_wire, device_id_to_wire, encode_bounded,
     invitation_id_from_wire, invitation_id_to_wire, nonce_from_bytes, nonce_to_bytes,
-    public_key_from_bytes, public_key_to_bytes, routing_id_from_wire, routing_id_to_wire,
-    signature_from_bytes, signature_to_bytes, version_from_wire, version_to_wire,
+    pairing_id_from_wire, pairing_id_to_wire, public_key_from_bytes, public_key_to_bytes,
+    role_from_wire, role_to_wire, routing_id_from_wire, routing_id_to_wire, signature_from_bytes,
+    signature_to_bytes, version_from_wire, version_to_wire,
 };
 use crate::wire::v1 as wire;
 
 const CREDENTIAL_CONTRACT: &str = "DeviceCredentialBinding";
 const INVITATION_CONTRACT: &str = "Invitation";
 const JOIN_PROOF_CONTRACT: &str = "JoinProof";
+const PAIRING_OFFER_CONTRACT: &str = "PairingOffer";
 
 /// Encodes a public device credential binding.
 ///
@@ -68,6 +70,59 @@ pub fn encode_invitation(value: &Invitation) -> Result<Vec<u8>, KonclaveProtocol
 pub fn decode_invitation(bytes: &[u8]) -> Result<Invitation, KonclaveProtocolError> {
     let wire = decode_bounded(bytes, MAX_APPLICATION_MESSAGE_BYTES, INVITATION_CONTRACT)?;
     invitation_from_wire(wire)
+}
+
+/// Encodes a pairing offer.
+///
+/// # Errors
+///
+/// Returns a size error when the encoded offer exceeds the v1 application limit.
+pub fn encode_pairing_offer(value: &PairingOffer) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &pairing_offer_to_wire(value),
+        MAX_APPLICATION_MESSAGE_BYTES,
+        PAIRING_OFFER_CONTRACT,
+    )
+}
+
+/// Decodes and shape-validates a pairing offer.
+///
+/// This function does not verify the device signature or current expiration. An offer
+/// that decodes is still an unauthenticated claim until the cryptographic core has
+/// re-derived its device identity from its own key.
+///
+/// # Errors
+///
+/// Returns a typed protocol or domain validation error.
+pub fn decode_pairing_offer(bytes: &[u8]) -> Result<PairingOffer, KonclaveProtocolError> {
+    let wire = decode_bounded(bytes, MAX_APPLICATION_MESSAGE_BYTES, PAIRING_OFFER_CONTRACT)?;
+    pairing_offer_from_wire(wire)
+}
+
+fn pairing_offer_to_wire(value: &PairingOffer) -> wire::PairingOffer {
+    wire::PairingOffer {
+        version: Some(version_to_wire(value.version())),
+        pairing_id: Some(pairing_id_to_wire(value.pairing_id())),
+        device_id: Some(device_id_to_wire(value.device_id())),
+        device_root_public_key: public_key_to_bytes(value.device_root_public_key()),
+        requested_role: role_to_wire(value.requested_role()),
+        expires_at_unix_seconds: value.expires_at_unix_seconds(),
+        device_signature: signature_to_bytes(value.device_signature()),
+    }
+}
+
+fn pairing_offer_from_wire(
+    value: wire::PairingOffer,
+) -> Result<PairingOffer, KonclaveProtocolError> {
+    Ok(PairingOffer::new(
+        version_from_wire(value.version, PAIRING_OFFER_CONTRACT)?,
+        pairing_id_from_wire(value.pairing_id)?,
+        device_id_from_wire(value.device_id)?,
+        public_key_from_bytes(&value.device_root_public_key)?,
+        role_from_wire(value.requested_role)?,
+        value.expires_at_unix_seconds,
+        signature_from_bytes(&value.device_signature)?,
+    )?)
 }
 
 /// Encodes a join proof.

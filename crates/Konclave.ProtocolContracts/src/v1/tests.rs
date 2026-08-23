@@ -9,11 +9,12 @@ use super::{
     decode_acknowledge_request, decode_application_message, decode_conversation_state,
     decode_device_credential_binding, decode_invitation, decode_join_proof,
     decode_membership_change, decode_membership_commit_bundle, decode_membership_control,
-    decode_relay_envelope, decode_replay_page, decode_replay_request, decode_stored_relay_envelope,
-    encode_acknowledge_request, encode_application_message, encode_conversation_state,
-    encode_device_credential_binding, encode_invitation, encode_join_proof,
-    encode_membership_change, encode_membership_commit_bundle, encode_membership_control,
-    encode_relay_envelope, encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
+    decode_pairing_offer, decode_relay_envelope, decode_replay_page, decode_replay_request,
+    decode_stored_relay_envelope, encode_acknowledge_request, encode_application_message,
+    encode_conversation_state, encode_device_credential_binding, encode_invitation,
+    encode_join_proof, encode_membership_change, encode_membership_commit_bundle,
+    encode_membership_control, encode_pairing_offer, encode_relay_envelope, encode_replay_page,
+    encode_replay_request, encode_stored_relay_envelope,
 };
 use crate::KonclaveProtocolError;
 use crate::wire::v1 as wire;
@@ -368,4 +369,85 @@ fn repeated_collections_are_bounded_before_message_materialization() {
         decode_conversation_state(&[0x7b, 0x7c]),
         Err(KonclaveProtocolError::Decode { .. })
     ));
+}
+
+fn pairing_offer_fixture() -> KonclaveDomainCore::PairingOffer {
+    KonclaveDomainCore::PairingOffer::new(
+        KonclaveDomainCore::ProtocolVersion::application_v1(),
+        KonclaveDomainCore::PairingId::from_bytes([3; KonclaveDomainCore::PairingId::LENGTH]),
+        KonclaveDomainCore::DeviceId::from_bytes([4; KonclaveDomainCore::DeviceId::LENGTH]),
+        KonclaveDomainCore::Ed25519PublicKey::from_bytes([5; 32]),
+        KonclaveDomainCore::ConversationRole::Member,
+        1_700_000_000,
+        KonclaveDomainCore::Ed25519Signature::from_bytes([6; 64]),
+    )
+    .unwrap()
+}
+
+#[test]
+fn pairing_offer_round_trips() {
+    let offer = pairing_offer_fixture();
+    let decoded = decode_pairing_offer(&encode_pairing_offer(&offer).unwrap()).unwrap();
+
+    assert_eq!(decoded.version(), offer.version());
+    assert_eq!(decoded.pairing_id(), offer.pairing_id());
+    assert_eq!(decoded.device_id(), offer.device_id());
+    assert_eq!(
+        decoded.device_root_public_key(),
+        offer.device_root_public_key()
+    );
+    assert_eq!(decoded.requested_role(), offer.requested_role());
+    assert_eq!(
+        decoded.expires_at_unix_seconds(),
+        offer.expires_at_unix_seconds()
+    );
+    assert_eq!(decoded.device_signature(), offer.device_signature());
+}
+
+#[test]
+fn pairing_offer_decoding_rejects_malformed_shapes() {
+    let mut wire = wire::PairingOffer {
+        version: None,
+        ..pairing_offer_wire()
+    };
+    assert!(decode_pairing_offer(&wire.encode_to_vec()).is_err());
+
+    wire = wire::PairingOffer {
+        pairing_id: None,
+        ..pairing_offer_wire()
+    };
+    assert!(decode_pairing_offer(&wire.encode_to_vec()).is_err());
+
+    // A wrong-length key or signature must fail here rather than reaching verification
+    // as a value that only looks like a key.
+    wire = wire::PairingOffer {
+        device_root_public_key: prost::bytes::Bytes::from_static(&[7; 31]),
+        ..pairing_offer_wire()
+    };
+    assert!(decode_pairing_offer(&wire.encode_to_vec()).is_err());
+
+    wire = wire::PairingOffer {
+        device_signature: prost::bytes::Bytes::from_static(&[7; 63]),
+        ..pairing_offer_wire()
+    };
+    assert!(decode_pairing_offer(&wire.encode_to_vec()).is_err());
+
+    // Zero is not a role and must not decode as one.
+    wire = wire::PairingOffer {
+        requested_role: 0,
+        ..pairing_offer_wire()
+    };
+    assert!(decode_pairing_offer(&wire.encode_to_vec()).is_err());
+
+    // An offer that never expires is not a bounded capability.
+    wire = wire::PairingOffer {
+        expires_at_unix_seconds: 0,
+        ..pairing_offer_wire()
+    };
+    assert!(decode_pairing_offer(&wire.encode_to_vec()).is_err());
+}
+
+fn pairing_offer_wire() -> wire::PairingOffer {
+    let encoded = encode_pairing_offer(&pairing_offer_fixture()).unwrap();
+    wire::PairingOffer::decode(encoded.as_slice()).unwrap()
 }

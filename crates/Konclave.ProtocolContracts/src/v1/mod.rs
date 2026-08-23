@@ -11,8 +11,8 @@ mod tests;
 
 pub use application::{decode_application_message, encode_application_message};
 pub use identity::{
-    decode_device_credential_binding, decode_invitation, decode_join_proof,
-    encode_device_credential_binding, encode_invitation, encode_join_proof,
+    decode_device_credential_binding, decode_invitation, decode_join_proof, decode_pairing_offer,
+    encode_device_credential_binding, encode_invitation, encode_join_proof, encode_pairing_offer,
 };
 pub use membership::{
     MembershipCommitBundleBytes, decode_conversation_state, decode_membership_change,
