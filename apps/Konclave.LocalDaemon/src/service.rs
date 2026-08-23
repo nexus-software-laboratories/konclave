@@ -11,6 +11,7 @@ use tokio::time::{self, MissedTickBehavior, timeout};
 
 use crate::application::{ApplicationService, ApplicationServiceError, WatchConnectionExit};
 use crate::conversation::ConversationCoordinatorError;
+use crate::health::DeliveryHealth;
 use crate::persistence::ProfileStoreError;
 
 const CONVERSATION_PAGE_SIZE: usize = 100;
@@ -42,6 +43,7 @@ impl SupervisorConfig {
 pub(crate) struct Service<T> {
     applications: Option<ApplicationService<T>>,
     config: SupervisorConfig,
+    health: DeliveryHealth,
 }
 
 impl<T> Service<T>
@@ -52,10 +54,12 @@ where
     pub(crate) fn new(
         applications: Option<ApplicationService<T>>,
         discovery_interval: Duration,
+        health: DeliveryHealth,
     ) -> Self {
         Self {
             applications,
             config: SupervisorConfig::production(discovery_interval),
+            health,
         }
     }
 
@@ -71,7 +75,12 @@ where
         F: Future<Output = ()>,
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut worker = tokio::spawn(run_supervisor(self.applications, self.config, shutdown_rx));
+        let mut worker = tokio::spawn(run_supervisor(
+            self.applications,
+            self.config,
+            self.health.clone(),
+            shutdown_rx,
+        ));
         tokio::pin!(shutdown);
 
         tokio::select! {
@@ -101,6 +110,7 @@ where
 async fn run_supervisor<T>(
     applications: Option<ApplicationService<T>>,
     config: SupervisorConfig,
+    health: DeliveryHealth,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()>
 where
@@ -128,6 +138,7 @@ where
                     .context("relay watch worker set ended unexpectedly")?
                     .context("joining relay watch worker")?;
                 active.remove(&conversation_id);
+                health.set_watched_conversations(active.len());
                 match result? {
                     WatchConnectionExit::Shutdown | WatchConnectionExit::LocalMemberRemoved => {}
                 }
@@ -141,6 +152,7 @@ where
                     if active.insert(conversation_id) {
                         let applications = applications.clone();
                         let shutdown = shutdown.clone();
+                        let health = health.clone();
                         workers.spawn(async move {
                             (
                                 conversation_id,
@@ -148,12 +160,14 @@ where
                                     applications,
                                     conversation_id,
                                     config,
+                                    health,
                                     shutdown,
                                 ).await,
                             )
                         });
                     }
                 }
+                health.set_watched_conversations(active.len());
             }
         }
     }
@@ -204,6 +218,7 @@ async fn run_watch_worker<T>(
     applications: ApplicationService<T>,
     conversation_id: ConversationId,
     config: SupervisorConfig,
+    health: DeliveryHealth,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<WatchConnectionExit, ApplicationServiceError>
 where
@@ -218,9 +233,15 @@ where
             .watch_connection_until(conversation_id, shutdown.clone())
             .await
         {
-            Ok(exit) => return Ok(exit),
+            Ok(exit) => {
+                health.set_degraded(false);
+                return Ok(exit);
+            }
             Err(error) if is_transient_watch_error(&error) => {
                 failures = failures.saturating_add(1);
+                // Reconnecting or backpressured delivery is reported so an adapter can
+                // surface the state instead of appearing idle while work is stalled.
+                health.set_degraded(true);
                 let delay = retry_delay(conversation_id, failures, config);
                 tracing::warn!(
                     error_code = transient_watch_error_code(&error),
@@ -320,6 +341,7 @@ mod tests {
 
     use super::*;
     use crate::conversation::ConversationCoordinator;
+    use crate::health::DeliveryHealth;
     use crate::persistence::{LockedProfile, ProfileId};
 
     struct FailingWatchRelay {
@@ -413,6 +435,7 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(1),
                 maximum_conversations: 2,
             },
+            health: DeliveryHealth::default(),
         };
         service.run_until(async {}).await.unwrap();
     }
@@ -437,6 +460,7 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(1),
                 maximum_conversations: 0,
             },
+            health: DeliveryHealth::default(),
         };
 
         let error = timeout(
@@ -474,6 +498,7 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(1),
                 maximum_conversations: 2,
             },
+            health: DeliveryHealth::default(),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(service.run_until(async move {
@@ -506,6 +531,7 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(5),
                 maximum_conversations: 2,
             },
+            health: DeliveryHealth::default(),
         };
 
         let error = timeout(
@@ -544,6 +570,7 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(1),
                 maximum_conversations: 2,
             },
+            health: DeliveryHealth::default(),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(service.run_until(async move {

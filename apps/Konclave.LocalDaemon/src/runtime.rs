@@ -39,6 +39,8 @@ where
     );
     let service_applications = profile.applications.clone();
     let adapter_store = profile.conversations.store();
+    let health = crate::health::DeliveryHealth::default();
+    let adapter_health = health.clone();
     let adapter_profile = profile.profile_id.clone();
     let _profile = profile;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -63,7 +65,7 @@ where
     let service_shutdown_tx = shutdown_tx.clone();
     let service_shutdown_rx = shutdown_rx.clone();
     let service = async move {
-        let result = Service::new(service_applications, Duration::from_secs(30))
+        let result = Service::new(service_applications, Duration::from_secs(30), health)
             .run_until(wait_for_shutdown(service_shutdown_rx))
             .await;
         let _ = service_shutdown_tx.send(true);
@@ -72,8 +74,13 @@ where
 
     let adapter_shutdown_rx = shutdown_rx.clone();
     let adapter = async move {
-        crate::adapter::run_adapter_channel(adapter_store, &adapter_profile, adapter_shutdown_rx)
-            .await;
+        crate::adapter::run_adapter_channel(
+            adapter_store,
+            &adapter_profile,
+            adapter_health,
+            adapter_shutdown_rx,
+        )
+        .await;
         anyhow::Result::<()>::Ok(())
     };
 

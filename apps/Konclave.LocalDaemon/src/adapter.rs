@@ -12,6 +12,7 @@ use anyhow::{Context, bail};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
+use crate::health::DeliveryHealth;
 use crate::persistence::{ClaimedRemoteEvent, ProfileStore, ProfileStoreError, RemoteEventPayload};
 
 /// How often the daemon re-checks for eligible work inside a bounded wait.
@@ -207,6 +208,7 @@ fn acquire_attachment(
 pub(crate) async fn run_adapter_channel(
     store: std::sync::Arc<ProfileStore>,
     profile: &str,
+    health: DeliveryHealth,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let config = match AdapterLaunchConfig::from_environment() {
@@ -226,7 +228,7 @@ pub(crate) async fn run_adapter_channel(
         if *shutdown.borrow() {
             return;
         }
-        match attach_and_serve(&config, profile, &store, &clock, shutdown.clone()).await {
+        match attach_and_serve(&config, profile, &store, &clock, &health, shutdown.clone()).await {
             Ok(()) => failures = 0,
             Err(error) => {
                 failures = failures.saturating_add(1);
@@ -257,6 +259,7 @@ async fn attach_and_serve(
     profile: &str,
     store: &ProfileStore,
     clock: &dyn UnixClock,
+    health: &DeliveryHealth,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let capability = config.read_capability()?;
@@ -271,7 +274,7 @@ async fn attach_and_serve(
 
     let now = clock.now_unix_milliseconds();
     let attachment = acquire_attachment(config, store, channel, now)?;
-    let result = serve_adapter(&mut connection, &attachment, store, clock, shutdown).await;
+    let result = serve_adapter(&mut connection, &attachment, store, clock, health, shutdown).await;
     // The lease is released on every exit path so a restarting adapter is not made to
     // wait out an expiry window that no live consumer owns.
     let _ = attachment.release(store);
@@ -319,6 +322,7 @@ pub(crate) async fn serve_adapter<S>(
     attachment: &AdapterAttachment,
     store: &ProfileStore,
     clock: &dyn UnixClock,
+    health: &DeliveryHealth,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), AdapterTransportError>
 where
@@ -341,7 +345,9 @@ where
         };
 
         let response = match AdapterRequest::decode(&payload) {
-            Ok(request) => handle_request(request, attachment, store, clock, &mut shutdown).await,
+            Ok(request) => {
+                handle_request(request, attachment, store, clock, health, &mut shutdown).await
+            }
             // A malformed request is answered rather than silently dropped so the
             // adapter learns its frame was rejected instead of waiting forever.
             Err(error) => AdapterResponse::Failure {
@@ -377,6 +383,7 @@ async fn handle_request(
     attachment: &AdapterAttachment,
     store: &ProfileStore,
     clock: &dyn UnixClock,
+    health: &DeliveryHealth,
     shutdown: &mut watch::Receiver<bool>,
 ) -> AdapterResponse {
     match request {
@@ -419,8 +426,8 @@ async fn handle_request(
             Ok((pending_events, claimed_events)) => AdapterResponse::Status(AdapterStatus {
                 pending_events,
                 claimed_events,
-                watched_conversations: 0,
-                delivery_degraded: false,
+                watched_conversations: health.watched_conversations(),
+                delivery_degraded: health.is_degraded(),
             }),
             Err(error) => failure(error),
         },
@@ -624,6 +631,7 @@ mod tests {
             AdapterAttachment, AdapterLaunchConfig, UnixClock, attach_adapter, generate_lease_id,
             serve_adapter,
         };
+        use crate::health::DeliveryHealth;
         use crate::persistence::{LockedProfile, ProfileId, ProfileStore};
 
         const PROFILE: &str = "alice";
@@ -830,13 +838,25 @@ mod tests {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let served = tokio::spawn(async move {
                 let clock = FixedClock(NOW);
-                let _ =
-                    serve_adapter(&mut connection, &attachment, &store, &clock, shutdown_rx).await;
+                let health = DeliveryHealth::default();
+                health.set_watched_conversations(2);
+                let _ = serve_adapter(
+                    &mut connection,
+                    &attachment,
+                    &store,
+                    &clock,
+                    &health,
+                    shutdown_rx,
+                )
+                .await;
             });
 
             assert_eq!(
                 exchange(&mut adapter_stream, AdapterRequest::Status).await,
-                AdapterResponse::Status(AdapterStatus::default())
+                AdapterResponse::Status(AdapterStatus {
+                    watched_conversations: 2,
+                    ..AdapterStatus::default()
+                })
             );
 
             // No events exist, so a bounded wait must expire with an empty batch
@@ -949,7 +969,12 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            super::run_adapter_channel(store, "alice", shutdown_rx),
+            super::run_adapter_channel(
+                store,
+                "alice",
+                super::DeliveryHealth::default(),
+                shutdown_rx,
+            ),
         )
         .await
         .expect("an unconfigured adapter channel must return immediately");
