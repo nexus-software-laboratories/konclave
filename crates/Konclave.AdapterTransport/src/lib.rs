@@ -9,12 +9,16 @@
 //! knows about a specific agent harness, so every adapter shares one contract.
 
 mod capability;
+mod endpoint;
 mod error;
 mod frame;
 mod handshake;
 mod transcript;
 
 pub use capability::LaunchCapability;
+pub use endpoint::{
+    AdapterConnection, AdapterEndpoint, MAX_ENDPOINT_LENGTH, connect_adapter_endpoint,
+};
 pub use error::AdapterTransportError;
 pub use frame::{
     FRAME_HEADER_LENGTH, HandshakeMessage, MAX_AUTHENTICATED_FRAME_BYTES, MAX_PREAUTH_FRAME_BYTES,

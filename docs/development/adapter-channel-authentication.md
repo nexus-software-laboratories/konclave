@@ -72,6 +72,21 @@ offsets and the payload must end precisely at the last field, so an unknown tag,
 unimplemented version, a truncated field, an identifier length beyond the payload, a
 non-UTF-8 identifier, and trailing bytes all fail before any value is used.
 
+## Local endpoint
+
+The adapter creates the rendezvous point inside an owner-only private directory: a
+Unix domain socket, or a named pipe on Windows. The daemon connects outward to it and
+never opens a listener, so the device exposes no inbound socket. The random endpoint
+name is defense in depth; the launch capability is the authentication.
+
+A launch-provided endpoint is bounded and validated before it reaches a platform
+call. It must be non-empty, within the platform's practical path or name limit, free
+of NUL, absolute on Unix, and a named-pipe name on Windows.
+
+Connection failures report one bounded code and never include the endpoint value,
+because the path encodes an adapter-private directory name. A stale path left behind
+by an adapter that exited without cleanup fails the same way as an absent one.
+
 ## Handshake exchange
 
 The adapter opens with its version, consumer instance, and challenge. The daemon
