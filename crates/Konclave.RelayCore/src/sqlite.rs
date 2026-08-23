@@ -368,19 +368,20 @@ async fn allocate_cursor(
         .fetch_optional(&mut **transaction)
         .await
         .map_err(|_| storage_failure("Proposal compare-and-set"))?,
-        DeliveryClass::KeyPackage | DeliveryClass::Welcome | DeliveryClass::GroupApplication => {
-            sqlx::query_scalar(
-                "UPDATE relay_route
+        DeliveryClass::KeyPackage
+        | DeliveryClass::Welcome
+        | DeliveryClass::GroupApplication
+        | DeliveryClass::Pairing => sqlx::query_scalar(
+            "UPDATE relay_route
                  SET next_cursor = next_cursor + 1
                  WHERE routing_id = ?1 AND next_cursor < ?2
                  RETURNING next_cursor - 1",
-            )
-            .bind(envelope.routing_id().as_bytes().as_slice())
-            .bind(i64::MAX)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|_| storage_failure("cursor allocation"))?
-        }
+        )
+        .bind(envelope.routing_id().as_bytes().as_slice())
+        .bind(i64::MAX)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("cursor allocation"))?,
     };
     match cursor.map(from_sql_integer).transpose()? {
         Some(cursor) => Ok(cursor),
@@ -518,6 +519,7 @@ const fn delivery_class_to_sql(value: DeliveryClass) -> i64 {
         DeliveryClass::GroupProposal => 3,
         DeliveryClass::GroupCommit => 4,
         DeliveryClass::GroupApplication => 5,
+        DeliveryClass::Pairing => 6,
     }
 }
 
@@ -528,6 +530,7 @@ fn delivery_class_from_sql(value: i64) -> Result<DeliveryClass, RelayError> {
         3 => Ok(DeliveryClass::GroupProposal),
         4 => Ok(DeliveryClass::GroupCommit),
         5 => Ok(DeliveryClass::GroupApplication),
+        6 => Ok(DeliveryClass::Pairing),
         _ => Err(RelayError::InvalidStoredData),
     }
 }
