@@ -65,5 +65,8 @@ requires client-side secrets (`BUILDKIT_CLIENT_CA_PEM_B64`,
 `scripts/ci/Initialize-JobPrivatePaths.sh` and
 `scripts/ci/Cleanup-JobPrivatePaths.sh` declare and remove job-private
 directories for either backend and refuse any target outside `RUNNER_TEMP`.
+`scripts/ci/Initialize-ImageBuilderPaths.sh` and
+`scripts/ci/Cleanup-ImageBuilder.sh` are the self-hosted backend's named entry
+points over those helpers.
 
 Docker-based validation must not run on developer workstations.
