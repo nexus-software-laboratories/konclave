@@ -38,6 +38,8 @@ where
         crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
     );
     let service_applications = profile.applications.clone();
+    let adapter_store = profile.conversations.store();
+    let adapter_profile = profile.profile_id.clone();
     let _profile = profile;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let external_shutdown_tx = shutdown_tx.clone();
@@ -68,7 +70,14 @@ where
         result
     };
 
-    tokio::try_join!(service, mcp_server, external_shutdown)?;
+    let adapter_shutdown_rx = shutdown_rx.clone();
+    let adapter = async move {
+        crate::adapter::run_adapter_channel(adapter_store, &adapter_profile, adapter_shutdown_rx)
+            .await;
+        anyhow::Result::<()>::Ok(())
+    };
+
+    tokio::try_join!(service, mcp_server, adapter, external_shutdown)?;
 
     Ok(())
 }
@@ -77,6 +86,7 @@ struct RuntimeProfile {
     conversations: ConversationCoordinator,
     applications: Option<ApplicationService<RelayClient>>,
     allow_mcp_write: bool,
+    profile_id: String,
 }
 
 struct ProfileConfig {
@@ -191,6 +201,7 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
         conversations,
         applications,
         allow_mcp_write: config.allow_mcp_write,
+        profile_id: config.profile_id.as_str().to_string(),
     })
 }
 

@@ -66,6 +66,15 @@ impl ConversationCoordinator {
     /// # Errors
     ///
     /// Returns a profile or state-lock error.
+    /// Returns the sealed profile store this coordinator owns.
+    ///
+    /// The adapter channel needs remote-event and lease operations without taking a
+    /// dependency on conversation or MLS behaviour, so it borrows the same store
+    /// rather than duplicating one.
+    pub(crate) fn store(&self) -> Arc<ProfileStore> {
+        self.store.clone()
+    }
+
     pub(crate) fn is_local_member(
         &self,
         conversation_id: ConversationId,
