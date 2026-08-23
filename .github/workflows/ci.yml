@@ -21,8 +21,13 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # BuildKit cleanup must finish before a newer revision can reuse the daemon.
+  # Under pull_request_target, github.ref resolves to the base branch, so keying on
+  # it alone puts every open pull request in one group. GitHub keeps only one pending
+  # run per group, so a third request silently cancels another pull request's queued
+  # validation.
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Superseded revisions queue rather than cancel, so a run that is already producing
+  # required checks finishes and reports.
   cancel-in-progress: false
 
 jobs:
