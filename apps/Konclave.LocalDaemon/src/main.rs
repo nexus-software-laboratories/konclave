@@ -27,31 +27,33 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> anyhow::Result<()> {
-    runtime::run_until(wait_for_process_shutdown()).await
+    // Signal dispositions are installed before any profile work because opening a
+    // profile generates identity material and can outlast an early stop request. A
+    // signal arriving before registration would terminate the process under its
+    // default disposition, skipping coordinated shutdown entirely.
+    let shutdown = register_process_shutdown()?;
+    runtime::run_until(shutdown).await
 }
 
-async fn wait_for_process_shutdown() {
-    if let Err(error) = wait_for_process_signal().await {
-        eprintln!("Shutdown signal failed: {error:#}");
-    }
-}
+#[cfg(unix)]
+fn register_process_shutdown() -> anyhow::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
 
-async fn wait_for_process_signal() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .context("registering SIGTERM handler")?;
+    let mut terminate = signal(SignalKind::terminate()).context("registering SIGTERM handler")?;
+    let mut interrupt = signal(SignalKind::interrupt()).context("registering SIGINT handler")?;
+    Ok(async move {
         tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                result.context("waiting for Ctrl+C")?;
-            }
             _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
         }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.context("waiting for Ctrl+C")
-    }
+    })
+}
+
+#[cfg(not(unix))]
+fn register_process_shutdown() -> anyhow::Result<impl Future<Output = ()>> {
+    Ok(async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("Shutdown signal failed: {error:#}");
+        }
+    })
 }
