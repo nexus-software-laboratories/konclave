@@ -56,6 +56,7 @@ impl ConversationCoordinator {
     /// The watch supervisor also rediscovers on a timer, so this only removes the
     /// delay before a brand new conversation starts delivering. A missed signal
     /// therefore degrades latency rather than correctness.
+    ///
     pub(crate) fn membership_changed(&self) -> Arc<tokio::sync::Notify> {
         self.membership_changed.clone()
     }
@@ -187,6 +188,11 @@ impl ConversationCoordinator {
         self.store
             .insert_conversation(routing_id, &signing_material, &state, &[binding])?;
         let conversation = self.open_unlocked(conversation_id)?;
+        // Creating a conversation is the explicit act that asks for its messages.
+        // Requiring a separate opt-in would leave a session silently undelivered
+        // whenever it forgot the extra step, which is the failure this exists to fix.
+        self.store
+            .set_adapter_delivery_enabled(conversation_id, true)?;
         self.membership_changed.notify_one();
         Ok(conversation.summary())
     }
@@ -757,6 +763,9 @@ impl ConversationCoordinator {
             Ok(()) | Err(ProfileStoreError::OperationNotFound) => {}
             Err(error) => return Err(error.into()),
         }
+        // Joining is the same explicit act as creating, so delivery starts here too.
+        self.store
+            .set_adapter_delivery_enabled(conversation_id, true)?;
         self.membership_changed.notify_one();
         Ok(ConversationSummary {
             conversation_id,

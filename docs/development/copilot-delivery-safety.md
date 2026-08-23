@@ -42,21 +42,27 @@ releases the claim, so the event stays reclaimable rather than being lost. A cra
 between acceptance and acknowledgment may redeliver the same stable notification
 identifier, which the contract permits and the identifier makes recognizable.
 
-## Delivery is off until it is asked for
+## Delivery follows an explicit join
 
-A conversation delivers nothing until automatic delivery is explicitly enabled for it.
-A conversation with no recorded policy reads as muted, so an unattended session cannot
-start waking on peer traffic because a conversation happened to exist.
+Creating or joining a conversation is what turns delivery on for it. Nothing else
+does. A conversation that this profile did not explicitly create or join delivers
+nothing, so peer content cannot start entering a session because a conversation
+happened to exist in storage.
 
-Two daemon tools control and observe this. `set_auto_delivery` enables or mutes one
-conversation and is write-authorized, because it changes whether peer content can enter
-a session. `delivery_status` is read-authorized and reports queued and in-flight event
-counts, how many conversations currently have a live watch worker, whether delivery is
-degraded, and — when a conversation is named — whether that conversation is muted.
+That choice is deliberate. Requiring a separate opt-in call after joining would leave
+a session silently undelivered every time it forgot the extra step, which is the
+failure this project exists to remove.
+
+Two daemon tools control and observe this afterwards. `set_auto_delivery` mutes or
+re-enables one conversation and is write-authorized, because it decides whether peer
+content can enter a session. `delivery_status` is read-authorized and reports queued
+and in-flight event counts, how many conversations currently have a live watch worker,
+whether delivery is degraded, and — when a conversation is named — whether that
+conversation is muted.
 
 Muting suppresses delivery for as long as it is set. A message that arrives while a
-conversation is muted is never delivered into a session, and enabling delivery later
-does not replay it — it applies to what arrives afterwards. The message remains
+conversation is muted is never delivered into a session, and re-enabling delivery
+later does not replay it — it applies to what arrives afterwards. The message remains
 ordinary readable history, so nothing is lost; it simply never woke a session.
 
 ## Bursts and wake budgets
