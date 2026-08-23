@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage"]
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage"]
 
 [workspace.dependencies]
 async-trait = "0.1.92"
@@ -18,6 +18,7 @@ prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustix = { version = "1.1.4", default-features = false, features = ["process", "std"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.10.9"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls"], default-features = false }

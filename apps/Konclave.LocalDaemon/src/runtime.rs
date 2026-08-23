@@ -37,6 +37,7 @@ where
         profile.applications.clone(),
         crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
     );
+    let service_applications = profile.applications.clone();
     let _profile = profile;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let external_shutdown_tx = shutdown_tx.clone();
@@ -57,12 +58,17 @@ where
         let _ = mcp_shutdown_tx.send(true);
         result
     };
+    let service_shutdown_tx = shutdown_tx.clone();
+    let service_shutdown_rx = shutdown_rx.clone();
+    let service = async move {
+        let result = Service::new(service_applications, Duration::from_secs(30))
+            .run_until(wait_for_shutdown(service_shutdown_rx))
+            .await;
+        let _ = service_shutdown_tx.send(true);
+        result
+    };
 
-    tokio::try_join!(
-        Service::new(Duration::from_secs(30)).run_until(wait_for_shutdown(shutdown_rx.clone())),
-        mcp_server,
-        external_shutdown
-    )?;
+    tokio::try_join!(service, mcp_server, external_shutdown)?;
 
     Ok(())
 }

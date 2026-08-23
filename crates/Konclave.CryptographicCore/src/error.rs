@@ -113,6 +113,10 @@ pub enum KonclaveCryptographicError {
     #[error("cryptographic authorization state is unavailable")]
     AuthorizationStateUnavailable,
 
+    /// Key material presented for a keyed operation is unusable.
+    #[error("keyed authentication material is invalid")]
+    InvalidKeyMaterial,
+
     /// Domain validation rejected a cryptographic input or result.
     #[error(transparent)]
     Domain(#[from] KonclaveDomainError),
@@ -149,6 +153,7 @@ impl KonclaveCryptographicError {
             Self::MissingAuthenticatedState => "missing_authenticated_state",
             Self::RosterMismatch => "mls_roster_mismatch",
             Self::AuthorizationStateUnavailable => "authorization_state_unavailable",
+            Self::InvalidKeyMaterial => "invalid_key_material",
             Self::Domain(error) => error.code(),
         }
     }
