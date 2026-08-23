@@ -1,8 +1,8 @@
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeviceCredentialBinding, Ed25519PublicKey, EnvelopeId, Invitation, InvitationNonce, Member,
-    MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId, ProtocolVersion,
-    RemoveMember, RoutingId, SignatureScheme,
+    MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId, PairingId,
+    PairingOffer, ProtocolVersion, RemoveMember, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
@@ -13,7 +13,7 @@ use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SealedSqliteMlsStorage,
 use crate::{
     ConversationSigningMaterial, DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage,
     MlsCommit, MlsConversationClient, MlsWelcome, verify_device_credential_binding,
-    verify_invitation,
+    verify_invitation, verify_pairing_offer,
 };
 
 fn conversation_id(value: u8) -> ConversationId {
@@ -706,4 +706,119 @@ fn existing_member_can_validate_a_later_add_commit() {
     assert_eq!(alice_group.epoch(), 3);
     assert_eq!(bob_group.epoch(), 3);
     assert_eq!(charlie_group.epoch(), 3);
+}
+
+const PAIRING_EXPIRY: u64 = 2_000;
+const BEFORE_PAIRING_EXPIRY: u64 = 1_000;
+
+fn pairing_id(value: u8) -> PairingId {
+    PairingId::from_bytes([value; PairingId::LENGTH])
+}
+
+#[test]
+fn a_pairing_offer_authenticates_without_prior_knowledge_of_the_device() {
+    let joiner = DeviceIdentity::generate().unwrap();
+    let offer = joiner
+        .offer_pairing(pairing_id(1), ConversationRole::Member, PAIRING_EXPIRY)
+        .unwrap();
+
+    // Nothing about the joiner is supplied to verification. The offer stands on its
+    // own key, which is what lets an inviter that has never seen this device decide.
+    verify_pairing_offer(&offer, BEFORE_PAIRING_EXPIRY).unwrap();
+    assert_eq!(offer.device_id(), joiner.device_id());
+    assert_eq!(offer.pairing_id(), pairing_id(1));
+    assert_eq!(offer.requested_role(), ConversationRole::Member);
+}
+
+#[test]
+fn a_pairing_offer_claiming_another_device_is_rejected() {
+    let joiner = DeviceIdentity::generate().unwrap();
+    let other = DeviceIdentity::generate().unwrap();
+    let authentic = joiner
+        .offer_pairing(pairing_id(2), ConversationRole::Member, PAIRING_EXPIRY)
+        .unwrap();
+
+    // The signature is real and the key is real, but the offer names someone else.
+    // Accepting it would let any device be enrolled under any identity it names.
+    let impersonating = PairingOffer::new(
+        authentic.version(),
+        authentic.pairing_id(),
+        other.device_id(),
+        authentic.device_root_public_key(),
+        authentic.requested_role(),
+        authentic.expires_at_unix_seconds(),
+        authentic.device_signature(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        verify_pairing_offer(&impersonating, BEFORE_PAIRING_EXPIRY),
+        Err(KonclaveCryptographicError::InvalidInvitationSignature)
+    ));
+}
+
+#[test]
+fn a_pairing_offer_is_bound_to_its_exchange_role_and_window() {
+    let joiner = DeviceIdentity::generate().unwrap();
+    let offer = joiner
+        .offer_pairing(pairing_id(3), ConversationRole::Member, PAIRING_EXPIRY)
+        .unwrap();
+
+    // Every signed field is load bearing: moving an offer to another exchange, or
+    // upgrading the role it asks for, must invalidate it.
+    for tampered in [
+        PairingOffer::new(
+            offer.version(),
+            pairing_id(4),
+            offer.device_id(),
+            offer.device_root_public_key(),
+            offer.requested_role(),
+            offer.expires_at_unix_seconds(),
+            offer.device_signature(),
+        )
+        .unwrap(),
+        PairingOffer::new(
+            offer.version(),
+            offer.pairing_id(),
+            offer.device_id(),
+            offer.device_root_public_key(),
+            ConversationRole::Administrator,
+            offer.expires_at_unix_seconds(),
+            offer.device_signature(),
+        )
+        .unwrap(),
+        PairingOffer::new(
+            offer.version(),
+            offer.pairing_id(),
+            offer.device_id(),
+            offer.device_root_public_key(),
+            offer.requested_role(),
+            offer.expires_at_unix_seconds() + 1,
+            offer.device_signature(),
+        )
+        .unwrap(),
+    ] {
+        assert!(matches!(
+            verify_pairing_offer(&tampered, BEFORE_PAIRING_EXPIRY),
+            Err(KonclaveCryptographicError::InvalidInvitationSignature)
+        ));
+    }
+
+    assert!(matches!(
+        verify_pairing_offer(&offer, PAIRING_EXPIRY),
+        Err(KonclaveCryptographicError::ExpiredInvitation)
+    ));
+}
+
+#[test]
+fn a_pairing_offer_discloses_no_conversation() {
+    let joiner = DeviceIdentity::generate().unwrap();
+    let offer = joiner
+        .offer_pairing(pairing_id(5), ConversationRole::Member, PAIRING_EXPIRY)
+        .unwrap();
+
+    // An offer travels in a capability a human may paste around before anyone has
+    // approved anything, so it must not name a conversation the joiner is not yet in.
+    let rendered = format!("{offer:?}");
+    assert!(!rendered.contains("conversation"), "{rendered}");
 }

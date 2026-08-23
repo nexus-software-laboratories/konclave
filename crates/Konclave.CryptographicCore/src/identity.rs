@@ -1,7 +1,7 @@
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
     Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
-    MessageId, NotificationId, ProtocolVersion, RoutingId, SignatureScheme,
+    MessageId, NotificationId, PairingOffer, ProtocolVersion, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -19,6 +19,7 @@ const DEVICE_ID_DOMAIN: &[u8] = b"konclave-device-id-v1\0";
 const CREDENTIAL_DOMAIN: &[u8] = b"konclave-device-credential-binding-v1\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] = b"konclave-device-credential-binding-hash-v1\0";
 const INVITATION_DOMAIN: &[u8] = b"konclave-invitation-v1\0";
+const PAIRING_OFFER_DOMAIN: &[u8] = b"konclave-pairing-offer-v1\0";
 const DEVICE_IDENTITY_MAGIC: &[u8; 4] = b"KDI1";
 const CONVERSATION_SIGNING_MAGIC: &[u8; 4] = b"KCS1";
 
@@ -296,6 +297,45 @@ impl DeviceIdentity {
             expires_at_unix_seconds,
             nonce,
             self.device_id,
+            Ed25519Signature::from_slice(&signature)?,
+        )?)
+    }
+
+    /// Signs a pairing offer this device is asking to be enrolled through.
+    ///
+    /// The offer carries this device's root public key, and verification re-derives
+    /// the device identity from it, so a verifier that has never seen this device can
+    /// still establish that the claimed identity follows from the signing key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or provider error when the expiry is invalid, randomness
+    /// generation fails, or the offer cannot be signed.
+    pub fn offer_pairing(
+        &self,
+        pairing_id: KonclaveDomainCore::PairingId,
+        requested_role: ConversationRole,
+        expires_at_unix_seconds: u64,
+    ) -> Result<PairingOffer, KonclaveCryptographicError> {
+        let cipher_suite = cipher_suite(&self.provider)?;
+        let canonical = canonical_pairing_offer(
+            ProtocolVersion::application_v1(),
+            pairing_id,
+            self.device_id,
+            self.public_key,
+            requested_role,
+            expires_at_unix_seconds,
+        );
+        let signature = cipher_suite
+            .sign(&self.secret_key, &canonical)
+            .map_err(|_| provider_failure("pairing offer signature"))?;
+        Ok(PairingOffer::new(
+            ProtocolVersion::application_v1(),
+            pairing_id,
+            self.device_id,
+            self.public_key,
+            requested_role,
+            expires_at_unix_seconds,
             Ed25519Signature::from_slice(&signature)?,
         )?)
     }
@@ -602,6 +642,47 @@ pub fn verify_invitation(
         .map_err(|_| KonclaveCryptographicError::InvalidInvitationSignature)
 }
 
+/// Verifies a pairing offer without any prior knowledge of the offering device.
+///
+/// The claimed device identity is re-derived from the offer's own public key, so an
+/// offer that names one device while being signed by another is rejected rather than
+/// being accepted as whatever it says it is. That, plus the expiry, is the whole
+/// authenticity claim an offer makes; it says nothing about who the device belongs to.
+///
+/// # Errors
+///
+/// Returns a typed validation error when the version, claimed identity, expiry, or
+/// signature does not hold.
+pub fn verify_pairing_offer(
+    offer: &PairingOffer,
+    now_unix_seconds: u64,
+) -> Result<(), KonclaveCryptographicError> {
+    if offer.version() != ProtocolVersion::application_v1() {
+        return Err(KonclaveCryptographicError::InvalidInvitationSignature);
+    }
+    let provider = configured_provider();
+    let cipher_suite = cipher_suite(&provider)?;
+    let derived = derive_device_id_with_suite(&cipher_suite, offer.device_root_public_key())?;
+    if derived != offer.device_id() {
+        return Err(KonclaveCryptographicError::InvalidInvitationSignature);
+    }
+    if offer.expires_at_unix_seconds() <= now_unix_seconds {
+        return Err(KonclaveCryptographicError::ExpiredInvitation);
+    }
+    let canonical = canonical_pairing_offer(
+        offer.version(),
+        offer.pairing_id(),
+        offer.device_id(),
+        offer.device_root_public_key(),
+        offer.requested_role(),
+        offer.expires_at_unix_seconds(),
+    );
+    let public_key = SignaturePublicKey::new_slice(offer.device_root_public_key().as_bytes());
+    cipher_suite
+        .verify(&public_key, offer.device_signature().as_bytes(), &canonical)
+        .map_err(|_| KonclaveCryptographicError::InvalidInvitationSignature)
+}
+
 pub(crate) fn configured_provider() -> AwsLcCryptoProvider {
     AwsLcCryptoProvider::with_enabled_cipher_suites(vec![CIPHER_SUITE])
 }
@@ -710,6 +791,25 @@ fn canonical_invitation(
     output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
     output.extend_from_slice(nonce.as_bytes());
     output.extend_from_slice(issuer_device_id.as_bytes());
+    output
+}
+
+fn canonical_pairing_offer(
+    version: ProtocolVersion,
+    pairing_id: KonclaveDomainCore::PairingId,
+    device_id: DeviceId,
+    device_root_public_key: Ed25519PublicKey,
+    requested_role: ConversationRole,
+    expires_at_unix_seconds: u64,
+) -> Vec<u8> {
+    let mut output = Vec::with_capacity(128);
+    output.extend_from_slice(PAIRING_OFFER_DOMAIN);
+    append_version(&mut output, version);
+    output.extend_from_slice(pairing_id.as_bytes());
+    output.extend_from_slice(device_id.as_bytes());
+    output.extend_from_slice(device_root_public_key.as_bytes());
+    output.push(role_code(requested_role));
+    output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
     output
 }
 
