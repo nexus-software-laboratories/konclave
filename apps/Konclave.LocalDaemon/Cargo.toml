@@ -7,11 +7,13 @@ rust-version = "1.88"
 
 [dependencies]
 KonclaveClientLibrary = { path = "../../crates/Konclave.ClientLibrary" }
+KonclaveAdapterTransport = { path = "../../crates/Konclave.AdapterTransport" }
 KonclaveCryptographicCore = { path = "../../crates/Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../../crates/Konclave.ProtocolContracts" }
 KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
 anyhow = "1.0.104"
+base64.workspace = true
 fs4.workspace = true
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 axum = { version = "0.8.9", features = ["http1", "json", "matched-path", "tokio", "ws"], optional = true }

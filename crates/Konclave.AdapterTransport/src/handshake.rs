@@ -242,9 +242,9 @@ where
 
 /// A deterministic challenge source for tests and conformance vectors.
 ///
-/// Production callers supply an operating-system random source. A fixed sequence here
-/// keeps handshake tests reproducible without weakening the production path, and the
-/// source still refuses to repeat a challenge within one process.
+/// Production callers use [`OsChallenges`]. A fixed sequence here keeps handshake
+/// tests reproducible without weakening the production path, and the source still
+/// refuses to repeat a challenge within one process.
 #[derive(Debug, Default)]
 pub struct SequentialChallenges {
     issued: u64,
@@ -267,5 +267,71 @@ impl ChallengeSource for SequentialChallenges {
         let mut challenge = [0_u8; CHALLENGE_LENGTH];
         challenge[..8].copy_from_slice(&self.issued.to_be_bytes());
         Ok(challenge)
+    }
+}
+
+/// The production challenge source.
+///
+/// Each challenge is operating-system random material with a monotonic counter in its
+/// trailing bytes. The randomness makes a challenge unpredictable, and the counter
+/// makes repetition within one process structurally impossible without retaining
+/// every value ever issued.
+#[derive(Debug, Default)]
+pub struct OsChallenges {
+    issued: u64,
+}
+
+impl OsChallenges {
+    /// Creates a source that starts from the first challenge.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { issued: 0 }
+    }
+}
+
+impl ChallengeSource for OsChallenges {
+    fn next_challenge(&mut self) -> Result<[u8; CHALLENGE_LENGTH], AdapterTransportError> {
+        self.issued = self
+            .issued
+            .checked_add(1)
+            .ok_or(AdapterTransportError::ChallengeExhausted)?;
+        let mut challenge = [0_u8; CHALLENGE_LENGTH];
+        KonclaveCryptographicCore::fill_random(&mut challenge)
+            .map_err(|_| AdapterTransportError::ChallengeExhausted)?;
+        let counter = self.issued.to_be_bytes();
+        challenge[CHALLENGE_LENGTH - counter.len()..].copy_from_slice(&counter);
+        Ok(challenge)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::OsChallenges;
+    use crate::ChallengeSource;
+
+    #[test]
+    fn operating_system_challenges_never_repeat_and_are_not_sequential() {
+        let mut source = OsChallenges::new();
+        let mut seen = HashSet::new();
+        let mut previous = None;
+        for _ in 0..256 {
+            let challenge = source.next_challenge().unwrap();
+            assert!(
+                seen.insert(challenge),
+                "challenge repeated within one process"
+            );
+            if let Some(previous) = previous {
+                assert_ne!(
+                    challenge, previous,
+                    "consecutive challenges must not be identical"
+                );
+            }
+            // The leading bytes carry randomness rather than the counter, so an
+            // observer cannot predict the next challenge from the previous one.
+            assert_ne!(challenge[..8], [0_u8; 8]);
+            previous = Some(challenge);
+        }
     }
 }

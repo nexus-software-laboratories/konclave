@@ -110,6 +110,20 @@ Challenges come from a caller-supplied source, so the operating-system random so
 stays outside this crate and the contract can be exercised deterministically without a
 test-only branch in the production path.
 
+## Consumer lease
+
+An attachment takes the profile's single adapter consumer lease only after both
+proofs verify, so an unauthenticated peer can never displace a healthy consumer by
+attaching first. A second consumer fails closed rather than taking over, and
+releasing frees the lease immediately instead of waiting for expiry.
+
+The daemon reads its launch configuration from `KONCLAVE_ADAPTER_ENDPOINT`,
+`KONCLAVE_ADAPTER_CAPABILITY_FILE`, and `KONCLAVE_ADAPTER_CONSUMER_ID`. All three are
+supplied together or not at all: a partial set is a mistake rather than a request to
+run without an adapter, so it fails at startup instead of silently leaving
+conversations undelivered. Absent configuration leaves MCP and relay recovery
+untouched.
+
 ## Cross-language parity
 
 `fixtures/adapter/v1/auth-transcript.json` holds the canonical vectors: inputs, the

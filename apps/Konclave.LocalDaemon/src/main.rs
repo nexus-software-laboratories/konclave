@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+mod adapter;
+#[allow(dead_code)]
 mod application;
 #[allow(dead_code)]
 mod conversation;

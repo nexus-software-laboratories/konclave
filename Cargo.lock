@@ -113,6 +113,7 @@ dependencies = [
 name = "KonclaveLocalDaemon"
 version = "0.1.0"
 dependencies = [
+ "KonclaveAdapterTransport",
  "KonclaveClientLibrary",
  "KonclaveCommunityRelay",
  "KonclaveCryptographicCore",
