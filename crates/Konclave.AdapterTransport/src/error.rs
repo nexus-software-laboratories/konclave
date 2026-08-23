@@ -48,6 +48,10 @@ pub enum AdapterTransportError {
     #[error("adapter endpoint is unavailable")]
     EndpointUnavailable,
 
+    /// A request or response value falls outside its declared bound.
+    #[error("adapter request is outside its bound")]
+    RequestOutOfBounds,
+
     /// A bounded identifier was empty, oversized, or not printable ASCII.
     #[error("adapter {field} identifier is invalid")]
     InvalidIdentifier { field: &'static str },
@@ -92,6 +96,7 @@ impl AdapterTransportError {
             Self::ChallengeExhausted => "adapter_challenge_exhausted",
             Self::InvalidEndpoint => "adapter_invalid_endpoint",
             Self::EndpointUnavailable => "adapter_endpoint_unavailable",
+            Self::RequestOutOfBounds => "adapter_request_out_of_bounds",
             Self::InvalidIdentifier { .. } => "adapter_invalid_identifier",
             Self::UnusableCapabilityFile => "adapter_unusable_capability_file",
             Self::CapabilityFileNotOwnerProtected => "adapter_capability_not_owner_protected",

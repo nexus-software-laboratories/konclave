@@ -13,6 +13,7 @@ mod endpoint;
 mod error;
 mod frame;
 mod handshake;
+mod session;
 mod transcript;
 
 pub use capability::LaunchCapability;
@@ -26,7 +27,12 @@ pub use frame::{
 };
 pub use handshake::{
     AuthenticatedChannel, HANDSHAKE_TIMEOUT, OsChallenges, SequentialChallenges,
-    complete_adapter_handshake, complete_daemon_handshake,
+    complete_adapter_handshake, complete_daemon_handshake, read_frame, write_frame,
+};
+pub use session::{
+    AdapterRequest, AdapterResponse, AdapterStatus, DeliveredEvent, DeliveredPayload,
+    DeliveredRole, MAX_CLAIM_BATCH, MAX_EVENT_TEXT_BYTES, MAX_WAIT_MILLISECONDS,
+    NOTIFICATION_ID_LENGTH, ROUTED_ID_LENGTH,
 };
 pub use transcript::{
     ADAPTER_PROTOCOL_VERSION, AuthChallenge, AuthTranscript, CHALLENGE_LENGTH,

@@ -2,13 +2,24 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use KonclaveAdapterTransport::{
-    AdapterEndpoint, AdapterTransportError, AuthenticatedChannel, LaunchCapability, OsChallenges,
-    complete_daemon_handshake, connect_adapter_endpoint,
+    AdapterEndpoint, AdapterRequest, AdapterResponse, AdapterStatus, AdapterTransportError,
+    AuthenticatedChannel, DeliveredEvent, DeliveredPayload, DeliveredRole, LaunchCapability,
+    MAX_AUTHENTICATED_FRAME_BYTES, OsChallenges, complete_daemon_handshake,
+    connect_adapter_endpoint, read_frame, write_frame,
 };
-use KonclaveDomainCore::{AdapterConsumerId, AdapterLeaseId};
+use KonclaveDomainCore::{AdapterConsumerId, AdapterLeaseId, ConversationRole, NotificationId};
 use anyhow::{Context, bail};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::watch;
 
-use crate::persistence::{ProfileStore, ProfileStoreError};
+use crate::persistence::{ClaimedRemoteEvent, ProfileStore, ProfileStoreError, RemoteEventPayload};
+
+/// How often the daemon re-checks for eligible work inside a bounded wait.
+///
+/// The journal has no change notification, so a wait polls. The interval is short
+/// enough that delivery latency stays well below a conversational turn and long
+/// enough that an idle profile does not spin.
+const CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long an acquired consumer lease stays valid without renewal.
 ///
@@ -177,6 +188,270 @@ fn generate_lease_id() -> anyhow::Result<AdapterLeaseId> {
     Ok(AdapterLeaseId::from_bytes(bytes))
 }
 
+/// Serves adapter requests on an authenticated channel until shutdown or disconnect.
+///
+/// Every failure is answered with a stable code rather than closing the channel, so a
+/// recoverable mistake such as a stale lease does not force the adapter to
+/// reauthenticate. Closing is reserved for a peer that leaves or violates framing.
+///
+/// # Errors
+///
+/// Returns a transport error when the channel ends abnormally. A clean disconnect and
+/// a shutdown both return `Ok`.
+pub(crate) async fn serve_adapter<S>(
+    stream: &mut S,
+    attachment: &AdapterAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), AdapterTransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let payload = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+                continue;
+            }
+            payload = read_frame(stream, MAX_AUTHENTICATED_FRAME_BYTES) => match payload {
+                Ok(payload) => payload,
+                Err(AdapterTransportError::ChannelClosed) => return Ok(()),
+                Err(error) => return Err(error),
+            },
+        };
+
+        let response = match AdapterRequest::decode(&payload) {
+            Ok(request) => handle_request(request, attachment, store, clock, &mut shutdown).await,
+            // A malformed request is answered rather than silently dropped so the
+            // adapter learns its frame was rejected instead of waiting forever.
+            Err(error) => AdapterResponse::Failure {
+                code: error.code().to_string(),
+            },
+        };
+
+        let encoded = response.encode()?;
+        write_frame(stream, &encoded, MAX_AUTHENTICATED_FRAME_BYTES).await?;
+    }
+}
+
+/// Supplies the current wall clock, so lease windows are testable without sleeping.
+pub(crate) trait UnixClock: Send + Sync {
+    fn now_unix_milliseconds(&self) -> u64;
+}
+
+/// The production clock.
+pub(crate) struct SystemUnixClock;
+
+impl UnixClock for SystemUnixClock {
+    fn now_unix_milliseconds(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+}
+
+async fn handle_request(
+    request: AdapterRequest,
+    attachment: &AdapterAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    shutdown: &mut watch::Receiver<bool>,
+) -> AdapterResponse {
+    match request {
+        AdapterRequest::WaitAndClaim {
+            max_events,
+            wait_milliseconds,
+        } => wait_and_claim(
+            attachment,
+            store,
+            clock,
+            shutdown,
+            max_events,
+            wait_milliseconds,
+        )
+        .await
+        .unwrap_or_else(failure),
+        AdapterRequest::Acknowledge {
+            notification_id,
+            lease_generation,
+        } => finish_claim(
+            attachment,
+            store,
+            clock,
+            notification_id,
+            lease_generation,
+            true,
+        ),
+        AdapterRequest::Release {
+            notification_id,
+            lease_generation,
+        } => finish_claim(
+            attachment,
+            store,
+            clock,
+            notification_id,
+            lease_generation,
+            false,
+        ),
+        AdapterRequest::Status => match store.remote_event_counts() {
+            Ok((pending_events, claimed_events)) => AdapterResponse::Status(AdapterStatus {
+                pending_events,
+                claimed_events,
+                watched_conversations: 0,
+                delivery_degraded: false,
+            }),
+            Err(error) => failure(error),
+        },
+    }
+}
+
+async fn wait_and_claim(
+    attachment: &AdapterAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    shutdown: &mut watch::Receiver<bool>,
+    max_events: u16,
+    wait_milliseconds: u32,
+) -> Result<AdapterResponse, ProfileStoreError> {
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(u64::from(wait_milliseconds));
+    loop {
+        let now = clock.now_unix_milliseconds();
+        let expires_at = now
+            .saturating_add(u64::try_from(CONSUMER_LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
+        let claimed = store.claim_remote_events(
+            attachment.consumer_id,
+            attachment.lease_id,
+            now,
+            expires_at,
+            usize::from(max_events),
+        )?;
+        if !claimed.is_empty() {
+            return Ok(AdapterResponse::Batch(
+                claimed.into_iter().map(deliver).collect(),
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // An expired wait is not an event, so the empty batch tells the adapter
+            // to reissue rather than reporting work that does not exist.
+            return Ok(AdapterResponse::Batch(Vec::new()));
+        }
+        let poll = tokio::time::sleep(
+            CLAIM_POLL_INTERVAL
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        );
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(AdapterResponse::Batch(Vec::new()));
+                }
+            }
+            () = poll => {}
+        }
+    }
+}
+
+fn finish_claim(
+    attachment: &AdapterAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    notification_id: [u8; 16],
+    lease_generation: u64,
+    acknowledge: bool,
+) -> AdapterResponse {
+    let notification_id = NotificationId::from_bytes(notification_id);
+    let now = clock.now_unix_milliseconds();
+    let outcome = if acknowledge {
+        store.acknowledge_remote_event(
+            notification_id,
+            attachment.consumer_id,
+            attachment.lease_id,
+            lease_generation,
+            now,
+        )
+    } else {
+        store.release_remote_event(
+            notification_id,
+            attachment.consumer_id,
+            attachment.lease_id,
+            lease_generation,
+            now,
+        )
+    };
+    outcome.map_or_else(failure, |()| AdapterResponse::Accepted)
+}
+
+fn failure(error: ProfileStoreError) -> AdapterResponse {
+    AdapterResponse::Failure {
+        code: adapter_failure_code(&error).to_string(),
+    }
+}
+
+/// Maps a store failure to a stable adapter-facing code.
+///
+/// Only conditions an adapter can act on are distinguished. Everything else collapses
+/// to one code, so internal storage state never becomes an adapter-visible signal.
+const fn adapter_failure_code(error: &ProfileStoreError) -> &'static str {
+    match error {
+        ProfileStoreError::InvalidAdapterLease => "adapter_stale_lease",
+        ProfileStoreError::AdapterConsumerActive => "adapter_consumer_active",
+        ProfileStoreError::RemoteEventCapacityExceeded => "adapter_capacity_exceeded",
+        ProfileStoreError::InvalidTransition => "adapter_invalid_transition",
+        ProfileStoreError::OperationNotFound => "adapter_unknown_notification",
+        _ => "adapter_internal_error",
+    }
+}
+
+fn deliver(claimed: ClaimedRemoteEvent) -> DeliveredEvent {
+    let event = claimed.event;
+    DeliveredEvent {
+        notification_id: *event.notification_id.as_bytes(),
+        lease_generation: claimed.lease_generation,
+        sequence: event.sequence,
+        conversation: *event.conversation_id.as_bytes(),
+        sender: *event.sender.as_bytes(),
+        relay_cursor: event.relay_cursor,
+        payload: match event.payload {
+            RemoteEventPayload::ApplicationMessage(message) => {
+                let KonclaveDomainCore::ApplicationContent::Text(text) = message.content();
+                DeliveredPayload::ApplicationText(text.clone())
+            }
+            RemoteEventPayload::MemberAdded { device_id, role } => DeliveredPayload::MemberAdded {
+                device: *device_id.as_bytes(),
+                role: deliver_role(role),
+            },
+            RemoteEventPayload::MemberRemoved { device_id } => DeliveredPayload::MemberRemoved {
+                device: *device_id.as_bytes(),
+            },
+            RemoteEventPayload::MemberRoleChanged { device_id, role } => {
+                DeliveredPayload::MemberRoleChanged {
+                    device: *device_id.as_bytes(),
+                    role: deliver_role(role),
+                }
+            }
+            RemoteEventPayload::LocalAccessRemoved { device_id } => {
+                DeliveredPayload::LocalAccessRemoved {
+                    device: *device_id.as_bytes(),
+                }
+            }
+        },
+    }
+}
+
+const fn deliver_role(role: ConversationRole) -> DeliveredRole {
+    match role {
+        ConversationRole::Administrator => DeliveredRole::Administrator,
+        ConversationRole::Member => DeliveredRole::Member,
+    }
+}
+
 fn parse_consumer_id(value: &str) -> anyhow::Result<AdapterConsumerId> {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -220,14 +495,19 @@ mod tests {
         use std::path::{Path, PathBuf};
 
         use KonclaveAdapterTransport::{
-            AdapterEndpoint, LaunchCapability, SequentialChallenges, complete_adapter_handshake,
+            AdapterEndpoint, AdapterRequest, AdapterResponse, AdapterStatus, LaunchCapability,
+            MAX_AUTHENTICATED_FRAME_BYTES, SequentialChallenges, complete_adapter_handshake,
+            complete_daemon_handshake,
         };
         use KonclaveDomainCore::AdapterConsumerId;
         use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        use super::super::{AdapterLaunchConfig, attach_adapter};
+        use super::super::{
+            AdapterAttachment, AdapterLaunchConfig, UnixClock, attach_adapter, generate_lease_id,
+            serve_adapter,
+        };
         use crate::persistence::{LockedProfile, ProfileId, ProfileStore};
 
         const PROFILE: &str = "alice";
@@ -260,10 +540,14 @@ mod tests {
 
             fn config(&self, consumer: [u8; AdapterConsumerId::LENGTH]) -> AdapterLaunchConfig {
                 AdapterLaunchConfig {
-                    endpoint: AdapterEndpoint::parse(self.socket.to_str().unwrap()).unwrap(),
+                    endpoint: self.endpoint(),
                     capability_file: self.capability_file.clone(),
                     consumer_id: AdapterConsumerId::from_bytes(consumer),
                 }
+            }
+
+            fn endpoint(&self) -> AdapterEndpoint {
+                AdapterEndpoint::parse(self.socket.to_str().unwrap()).unwrap()
             }
         }
 
@@ -375,6 +659,150 @@ mod tests {
                 .await
                 .unwrap();
             adapter.abort();
+        }
+
+        #[tokio::test]
+        async fn the_session_serves_status_and_bounded_waits() {
+            let root = tempfile::tempdir().unwrap();
+            let store = store(root.path());
+            let rendezvous = Rendezvous::new();
+            let listener = tokio::net::UnixListener::bind(&rendezvous.socket).unwrap();
+
+            // The adapter side keeps its stream so it can issue session requests.
+            let adapter = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                complete_adapter_handshake(
+                    &mut stream,
+                    PROFILE,
+                    "consumer",
+                    &LaunchCapability::from_bytes([9_u8; LaunchCapability::LENGTH]),
+                    &mut SequentialChallenges::new(),
+                )
+                .await
+                .unwrap();
+                stream
+            });
+
+            let mut connection =
+                KonclaveAdapterTransport::connect_adapter_endpoint(&rendezvous.endpoint())
+                    .await
+                    .unwrap();
+            let channel = complete_daemon_handshake(
+                &mut connection,
+                PROFILE,
+                &LaunchCapability::from_bytes([9_u8; LaunchCapability::LENGTH]),
+                &mut SequentialChallenges::new(),
+            )
+            .await
+            .unwrap();
+            let mut adapter_stream = adapter.await.unwrap();
+
+            let attachment = AdapterAttachment {
+                channel,
+                consumer_id: AdapterConsumerId::from_bytes([1; 16]),
+                lease_id: generate_lease_id().unwrap(),
+            };
+            store
+                .acquire_adapter_consumer(
+                    attachment.consumer_id,
+                    attachment.lease_id,
+                    NOW,
+                    NOW + 60_000,
+                )
+                .unwrap();
+
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let served = tokio::spawn(async move {
+                let clock = FixedClock(NOW);
+                let _ =
+                    serve_adapter(&mut connection, &attachment, &store, &clock, shutdown_rx).await;
+            });
+
+            assert_eq!(
+                exchange(&mut adapter_stream, AdapterRequest::Status).await,
+                AdapterResponse::Status(AdapterStatus::default())
+            );
+
+            // No events exist, so a bounded wait must expire with an empty batch
+            // rather than blocking the adapter forever.
+            assert_eq!(
+                exchange(
+                    &mut adapter_stream,
+                    AdapterRequest::WaitAndClaim {
+                        max_events: 5,
+                        wait_milliseconds: 50,
+                    }
+                )
+                .await,
+                AdapterResponse::Batch(Vec::new())
+            );
+
+            // An unknown notification is answered with a stable code instead of
+            // closing the channel, so the adapter need not reauthenticate.
+            assert_eq!(
+                exchange(
+                    &mut adapter_stream,
+                    AdapterRequest::Acknowledge {
+                        notification_id: [7; 16],
+                        lease_generation: 99,
+                    }
+                )
+                .await,
+                AdapterResponse::Failure {
+                    code: "adapter_unknown_notification".to_string()
+                }
+            );
+
+            // A malformed frame is answered rather than dropped.
+            KonclaveAdapterTransport::write_frame(
+                &mut adapter_stream,
+                &[99, 0, 0],
+                MAX_AUTHENTICATED_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                read_response(&mut adapter_stream).await,
+                AdapterResponse::Failure {
+                    code: "adapter_unknown_message_kind".to_string()
+                }
+            );
+
+            shutdown_tx.send(true).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), served)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        struct FixedClock(u64);
+
+        impl UnixClock for FixedClock {
+            fn now_unix_milliseconds(&self) -> u64 {
+                self.0
+            }
+        }
+
+        async fn exchange(
+            stream: &mut tokio::net::UnixStream,
+            request: AdapterRequest,
+        ) -> AdapterResponse {
+            KonclaveAdapterTransport::write_frame(
+                stream,
+                &request.encode(),
+                MAX_AUTHENTICATED_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+            read_response(stream).await
+        }
+
+        async fn read_response(stream: &mut tokio::net::UnixStream) -> AdapterResponse {
+            let payload =
+                KonclaveAdapterTransport::read_frame(stream, MAX_AUTHENTICATED_FRAME_BYTES)
+                    .await
+                    .unwrap();
+            AdapterResponse::decode(&payload).unwrap()
         }
     }
 

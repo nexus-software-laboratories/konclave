@@ -615,6 +615,36 @@ impl ProfileStore {
         )
     }
 
+    /// Counts pending and claimed remote events for bounded status reporting.
+    ///
+    /// Terminal records are excluded because they represent completed work rather
+    /// than a backlog an adapter can act on.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or range error.
+    pub(crate) fn remote_event_counts(&self) -> Result<(u32, u32), ProfileStoreError> {
+        let connection = self.lock()?;
+        let pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM daemon_remote_event WHERE status = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let claimed: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM daemon_remote_event WHERE status = 2",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok((
+            u32::try_from(pending).map_err(|_| ProfileStoreError::CorruptData)?,
+            u32::try_from(claimed).map_err(|_| ProfileStoreError::CorruptData)?,
+        ))
+    }
+
     /// Releases one claimed event for later delivery.
     ///
     /// # Errors

@@ -208,18 +208,58 @@ async fn read_message<S>(stream: &mut S) -> Result<HandshakeMessage, AdapterTran
 where
     S: AsyncRead + Unpin,
 {
+    let payload = read_frame(stream, MAX_PREAUTH_FRAME_BYTES).await?;
+    HandshakeMessage::decode(&payload)
+}
+
+/// Reads one length-prefixed frame, refusing a declared length above `limit`.
+///
+/// # Errors
+///
+/// Returns [`AdapterTransportError::ChannelClosed`] when the peer stops,
+/// [`AdapterTransportError::FrameTooLarge`] when the declared length exceeds `limit`,
+/// or [`AdapterTransportError::MalformedFrame`] for a zero length.
+pub async fn read_frame<S>(stream: &mut S, limit: usize) -> Result<Vec<u8>, AdapterTransportError>
+where
+    S: AsyncRead + Unpin,
+{
     let mut header = [0_u8; FRAME_HEADER_LENGTH];
     stream
         .read_exact(&mut header)
         .await
         .map_err(|_| AdapterTransportError::ChannelClosed)?;
-    let length = decode_frame_length(header, MAX_PREAUTH_FRAME_BYTES)?;
+    let length = decode_frame_length(header, limit)?;
     let mut payload = vec![0_u8; length];
     stream
         .read_exact(&mut payload)
         .await
         .map_err(|_| AdapterTransportError::ChannelClosed)?;
-    HandshakeMessage::decode(&payload)
+    Ok(payload)
+}
+
+/// Writes one length-prefixed frame, refusing a payload above `limit`.
+///
+/// # Errors
+///
+/// Returns [`AdapterTransportError::FrameTooLarge`] when the payload exceeds `limit`
+/// or [`AdapterTransportError::ChannelClosed`] when the peer stops.
+pub async fn write_frame<S>(
+    stream: &mut S,
+    payload: &[u8],
+    limit: usize,
+) -> Result<(), AdapterTransportError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let frame = encode_frame(payload, limit)?;
+    stream
+        .write_all(&frame)
+        .await
+        .map_err(|_| AdapterTransportError::ChannelClosed)?;
+    stream
+        .flush()
+        .await
+        .map_err(|_| AdapterTransportError::ChannelClosed)
 }
 
 async fn write_message<S>(
@@ -229,15 +269,7 @@ async fn write_message<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    let frame = encode_frame(&message.encode(), MAX_PREAUTH_FRAME_BYTES)?;
-    stream
-        .write_all(&frame)
-        .await
-        .map_err(|_| AdapterTransportError::ChannelClosed)?;
-    stream
-        .flush()
-        .await
-        .map_err(|_| AdapterTransportError::ChannelClosed)
+    write_frame(stream, &message.encode(), MAX_PREAUTH_FRAME_BYTES).await
 }
 
 /// A deterministic challenge source for tests and conformance vectors.
