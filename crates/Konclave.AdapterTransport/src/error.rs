@@ -40,6 +40,14 @@ pub enum AdapterTransportError {
     #[error("adapter challenge source is exhausted")]
     ChallengeExhausted,
 
+    /// The launch-provided endpoint is empty, oversized, or not a local endpoint.
+    #[error("adapter endpoint is invalid")]
+    InvalidEndpoint,
+
+    /// The adapter endpoint could not be reached.
+    #[error("adapter endpoint is unavailable")]
+    EndpointUnavailable,
+
     /// A bounded identifier was empty, oversized, or not printable ASCII.
     #[error("adapter {field} identifier is invalid")]
     InvalidIdentifier { field: &'static str },
@@ -82,6 +90,8 @@ impl AdapterTransportError {
             Self::HandshakeTimeout => "adapter_handshake_timeout",
             Self::ChannelClosed => "adapter_channel_closed",
             Self::ChallengeExhausted => "adapter_challenge_exhausted",
+            Self::InvalidEndpoint => "adapter_invalid_endpoint",
+            Self::EndpointUnavailable => "adapter_endpoint_unavailable",
             Self::InvalidIdentifier { .. } => "adapter_invalid_identifier",
             Self::UnusableCapabilityFile => "adapter_unusable_capability_file",
             Self::CapabilityFileNotOwnerProtected => "adapter_capability_not_owner_protected",
