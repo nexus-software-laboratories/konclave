@@ -21,7 +21,11 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 
 use crate::application::{ApplicationService, SendApplicationRequest, SentMembership};
-use crate::conversation::{ConversationCoordinator, ConversationSummary, ProcessedApplication};
+use crate::conversation::{
+    ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
+    ProcessedApplication,
+};
+use crate::health::DeliveryHealth;
 use crate::persistence::{MessageDirection, StoredHistoryMessage};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -172,10 +176,31 @@ struct MessageListResult {
     has_more: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SetAutoDeliveryRequest {
+    conversation_id: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DeliveryStatusRequest {
+    conversation_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DeliveryStatusResult {
+    pending_events: u32,
+    claimed_events: u32,
+    watched_conversations: u32,
+    delivery_degraded: bool,
+    auto_delivery_enabled: Option<bool>,
+}
+
 #[derive(Clone)]
 pub(crate) struct StdioServer {
     conversations: ConversationCoordinator,
     applications: Option<ApplicationService<RelayClient>>,
+    health: DeliveryHealth,
     authorize: AuthorizationHook,
     tool_router: ToolRouter<Self>,
 }
@@ -185,14 +210,79 @@ impl StdioServer {
     pub(crate) fn new(
         conversations: ConversationCoordinator,
         applications: Option<ApplicationService<RelayClient>>,
+        health: DeliveryHealth,
         authorize: AuthorizationHook,
     ) -> Self {
         Self {
             conversations,
             applications,
+            health,
             authorize,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(
+        name = "set_auto_delivery",
+        description = "Enable or mute automatic delivery of remote events for one conversation."
+    )]
+    async fn set_auto_delivery(
+        &self,
+        Parameters(request): Parameters<SetAutoDeliveryRequest>,
+    ) -> Result<Json<DeliveryStatusResult>, String> {
+        self.authorize("set_auto_delivery")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let conversations = self.conversations.clone();
+        let enabled = request.enabled;
+        tokio::task::spawn_blocking(move || {
+            conversations.set_adapter_delivery_enabled(conversation_id, enabled)
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+        self.delivery_status_for(Some(conversation_id)).await
+    }
+
+    #[tool(
+        name = "delivery_status",
+        description = "Report automatic delivery health, and one conversation's mute state when given."
+    )]
+    async fn delivery_status(
+        &self,
+        Parameters(request): Parameters<DeliveryStatusRequest>,
+    ) -> Result<Json<DeliveryStatusResult>, String> {
+        self.authorize("delivery_status")?;
+        let conversation_id = request
+            .conversation_id
+            .as_deref()
+            .map(parse_conversation_id)
+            .transpose()?;
+        self.delivery_status_for(conversation_id).await
+    }
+
+    async fn delivery_status_for(
+        &self,
+        conversation_id: Option<ConversationId>,
+    ) -> Result<Json<DeliveryStatusResult>, String> {
+        let conversations = self.conversations.clone();
+        let (counts, enabled) = tokio::task::spawn_blocking(move || {
+            let counts = conversations.remote_event_counts()?;
+            let enabled = conversation_id
+                .map(|identifier| conversations.adapter_delivery_enabled(identifier))
+                .transpose()?;
+            Ok::<_, ConversationCoordinatorError>((counts, enabled))
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+
+        Ok(Json(DeliveryStatusResult {
+            pending_events: counts.0,
+            claimed_events: counts.1,
+            watched_conversations: self.health.watched_conversations(),
+            delivery_degraded: self.health.is_degraded(),
+            auto_delivery_enabled: enabled,
+        }))
     }
 
     #[tool(
@@ -613,7 +703,8 @@ impl ServerHandler for StdioServer {
 #[must_use]
 pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook {
     Arc::new(move |context| match context.method {
-        "initialize" | "get_identity" | "list_conversations" | "read_messages" => Ok(()),
+        "initialize" | "get_identity" | "list_conversations" | "read_messages"
+        | "delivery_status" => Ok(()),
         "create_conversation"
         | "create_invitation"
         | "create_join_proof"
@@ -623,6 +714,7 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "change_member_role"
         | "send_message"
         | "sync_messages"
+        | "set_auto_delivery"
         | "watch_messages"
             if allow_write =>
         {
@@ -949,8 +1041,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuthorizationContext, AuthorizationHook, StdioServer, ensure_stdout_safe_diagnostics,
-        local_stdio_authorization,
+        AuthorizationContext, AuthorizationHook, DeliveryHealth, StdioServer,
+        ensure_stdout_safe_diagnostics, local_stdio_authorization,
     };
     use crate::conversation::ProcessedApplication;
     use crate::conversation::tests::open_coordinator;
@@ -1012,6 +1104,25 @@ mod tests {
     }
 
     #[test]
+    fn delivery_status_reads_without_write_but_muting_requires_write() {
+        let read_only = local_stdio_authorization(false);
+        read_only(AuthorizationContext {
+            method: "delivery_status",
+        })
+        .unwrap();
+        assert!(
+            read_only(AuthorizationContext {
+                method: "set_auto_delivery",
+            })
+            .is_err()
+        );
+        local_stdio_authorization(true)(AuthorizationContext {
+            method: "set_auto_delivery",
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn stdout_is_rejected_for_diagnostics() {
         let error = ensure_stdout_safe_diagnostics("stdout").unwrap_err();
         assert!(error.to_string().contains("stdout"));
@@ -1048,6 +1159,7 @@ mod tests {
         let server_state = StdioServer::new(
             open_coordinator(root.path(), "mcp-test"),
             None,
+            DeliveryHealth::default(),
             local_stdio_authorization(true),
         );
         let (server_transport, client_transport) = tokio::io::duplex(4096);
@@ -1099,6 +1211,115 @@ mod tests {
             listed["conversation_ids"][0].as_str(),
             Some(conversation_id)
         );
+
+        client.close().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_delivery_starts_muted_and_survives_a_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let health = DeliveryHealth::default();
+        health.set_watched_conversations(2);
+        health.set_degraded(true);
+        let server_state = StdioServer::new(
+            open_coordinator(root.path(), "mcp-delivery"),
+            None,
+            health,
+            local_stdio_authorization(true),
+        );
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let _root = root;
+            server_state
+                .serve(server_transport)
+                .await
+                .unwrap()
+                .waiting()
+                .await
+                .unwrap();
+        });
+        let mut client = TestClient.serve(client_transport).await.unwrap();
+
+        let created = client
+            .call_tool(CallToolRequestParams::new("create_conversation"))
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let conversation_id = created["conversation_id"].as_str().unwrap().to_owned();
+
+        let muted = client
+            .call_tool(
+                CallToolRequestParams::new("delivery_status").with_arguments(
+                    json!({"conversation_id": conversation_id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(muted["auto_delivery_enabled"].as_bool(), Some(false));
+        assert_eq!(muted["watched_conversations"].as_u64(), Some(2));
+        assert_eq!(muted["delivery_degraded"].as_bool(), Some(true));
+        assert_eq!(muted["pending_events"].as_u64(), Some(0));
+        assert_eq!(muted["claimed_events"].as_u64(), Some(0));
+
+        let enabled = client
+            .call_tool(
+                CallToolRequestParams::new("set_auto_delivery").with_arguments(
+                    json!({"conversation_id": conversation_id, "enabled": true})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(enabled["auto_delivery_enabled"].as_bool(), Some(true));
+
+        let observed = client
+            .call_tool(
+                CallToolRequestParams::new("delivery_status").with_arguments(
+                    json!({"conversation_id": conversation_id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(observed["auto_delivery_enabled"].as_bool(), Some(true));
+
+        let remuted = client
+            .call_tool(
+                CallToolRequestParams::new("set_auto_delivery").with_arguments(
+                    json!({"conversation_id": conversation_id, "enabled": false})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(remuted["auto_delivery_enabled"].as_bool(), Some(false));
+
+        let global = client
+            .call_tool(CallToolRequestParams::new("delivery_status"))
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert!(global["auto_delivery_enabled"].is_null());
 
         client.close().await.unwrap();
         server.await.unwrap();

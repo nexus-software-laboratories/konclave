@@ -1463,6 +1463,22 @@ impl ProfileStore {
         Ok(())
     }
 
+    /// Reports whether automatic delivery is enabled for one conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-conversation, integrity, or storage error. A conversation
+    /// with no policy record reads as muted, so a profile migrated from an earlier
+    /// schema never begins delivering without an explicit decision.
+    pub(crate) fn adapter_delivery_enabled(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ProfileStoreError> {
+        let routing_id = self.conversation_routing_id(conversation_id)?;
+        let connection = self.lock()?;
+        self.adapter_delivery_enabled_in(&connection, conversation_id, routing_id)
+    }
+
     fn adapter_delivery_enabled_in(
         &self,
         connection: &Connection,
