@@ -49,12 +49,46 @@ does not run the image.
 
 ### Hosted backend
 
-`scripts/ci/Validate-HostedContainerImage.sh` creates a job-scoped
+`scripts/ci/Validate-HostedContainerImage.sh` creates a run-scoped
 `docker-container` buildx builder, exports an OCI archive without provenance or
 SBOM attestations, and asserts the archive.
-`scripts/ci/Cleanup-HostedContainerImage.sh` removes the builder, its cache,
-and the job-private archive directory unconditionally, so no Docker state
-survives a job.
+
+### Bounded local Docker validation
+
+Container validation may run on a machine that holds unrelated Docker state, so
+cleanup is exact rather than broad. Nothing prunes, matches wildcards, or
+removes by age.
+
+`scripts/ci/container-validation.lib.sh` derives a run identity that no
+concurrent run can produce — the CI run and attempt numbers, or the process
+identifier locally, plus random bytes — and every resource the run creates is
+named from that identity and labelled `dev.konclave.validation.run`. That is
+what makes two concurrent runs safe: neither can reuse the other's builder, and
+neither can remove it.
+
+Exporting to an OCI archive means no validation image enters the engine image
+store at all, so the usual source of accumulation does not arise.
+
+Cleanup asserts both halves of the contract and fails the job on either:
+
+- nothing labelled for this run survived;
+- nothing that existed in the pre-run baseline disappeared.
+
+The second matters more than the first. A leak is recoverable; deleting a
+developer's unrelated container is not.
+
+`scripts/ci/Test-ContainerValidationCleanup.sh` proves this against a real
+engine before anything is built. It creates a sentinel that must survive, a
+second run's resources that must be left alone, and its own resources that must
+be removed, then plants a deliberate leak to confirm the residue check actually
+fails rather than passing silently. Reading the scripts cannot establish that,
+because the failure mode is a filter that matches more than intended.
+
+**One resource is deliberately not removed.** Bootstrapping a `docker-container`
+builder pulls a BuildKit image into the engine. It is shared infrastructure
+rather than validation output, and removing it would destroy a cache the machine
+may be using for other work, so it is left in place. Every Konclave-owned image,
+builder, container, network, and volume returns to baseline.
 
 ### Self-hosted BuildKit backend
 
