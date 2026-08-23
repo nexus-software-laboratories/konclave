@@ -122,16 +122,21 @@ where
     };
     let mut ticker = time::interval(config.discovery_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Rediscovering only on the timer would leave a brand new conversation silent
+    // for most of one interval, which is exactly the moment two sessions are waiting
+    // on each other. The timer still runs, so a missed signal costs latency only.
+    let joined = applications.membership_changed();
     let mut workers = JoinSet::new();
     let mut active = HashSet::new();
 
     loop {
-        tokio::select! {
+        let discover = tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
                 }
+                false
             }
             result = workers.join_next(), if !workers.is_empty() => {
                 let (conversation_id, result) = result
@@ -142,33 +147,37 @@ where
                 match result? {
                     WatchConnectionExit::Shutdown | WatchConnectionExit::LocalMemberRemoved => {}
                 }
+                false
             }
-            _ = ticker.tick() => {
-                let conversations = discover_watchable_conversations(
-                    &applications,
-                    config.maximum_conversations,
-                ).await?;
-                for conversation_id in conversations {
-                    if active.insert(conversation_id) {
-                        let applications = applications.clone();
-                        let shutdown = shutdown.clone();
-                        let health = health.clone();
-                        workers.spawn(async move {
-                            (
+            () = joined.notified() => true,
+            _ = ticker.tick() => true,
+        };
+
+        if discover {
+            let conversations =
+                discover_watchable_conversations(&applications, config.maximum_conversations)
+                    .await?;
+            for conversation_id in conversations {
+                if active.insert(conversation_id) {
+                    let applications = applications.clone();
+                    let shutdown = shutdown.clone();
+                    let health = health.clone();
+                    workers.spawn(async move {
+                        (
+                            conversation_id,
+                            run_watch_worker(
+                                applications,
                                 conversation_id,
-                                run_watch_worker(
-                                    applications,
-                                    conversation_id,
-                                    config,
-                                    health,
-                                    shutdown,
-                                ).await,
+                                config,
+                                health,
+                                shutdown,
                             )
-                        });
-                    }
+                            .await,
+                        )
+                    });
                 }
-                health.set_watched_conversations(active.len());
             }
+            health.set_watched_conversations(active.len());
         }
     }
 
@@ -582,6 +591,50 @@ mod tests {
         coordinator.create().unwrap();
         time::advance(Duration::from_secs(1)).await;
         attempt_rx.recv().await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_conversation_is_watched_without_waiting_for_the_next_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "watch-prompt");
+        let (attempt_tx, mut attempt_rx) = mpsc::channel(2);
+        let applications = ApplicationService::new(
+            coordinator.clone(),
+            FailingWatchRelay {
+                attempts: attempt_tx,
+            },
+        );
+        let service = Service {
+            applications: Some(applications),
+            config: SupervisorConfig {
+                // Far longer than the test will run, so reaching the relay proves the
+                // join signal woke discovery rather than the periodic sweep.
+                discovery_interval: Duration::from_secs(3_600),
+                retry_initial: Duration::from_secs(10),
+                retry_maximum: Duration::from_secs(10),
+                shutdown_timeout: Duration::from_secs(1),
+                maximum_conversations: 2,
+            },
+            health: DeliveryHealth::default(),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(service.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::task::yield_now().await;
+        assert!(attempt_rx.try_recv().is_err());
+        coordinator.create().unwrap();
+        timeout(Duration::from_secs(5), attempt_rx.recv())
+            .await
+            .expect("a new conversation must be watched promptly")
+            .unwrap();
         shutdown_tx.send(()).unwrap();
         timeout(Duration::from_secs(1), handle)
             .await

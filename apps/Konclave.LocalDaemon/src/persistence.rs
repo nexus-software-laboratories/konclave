@@ -486,7 +486,10 @@ impl ProfileStore {
             let transaction = connection
                 .transaction()
                 .map_err(|_| ProfileStoreError::Storage)?;
-            verify_active_adapter_consumer(
+            // A claim is the adapter's proof of life, so it renews the lease it
+            // already holds. Without this the lease would lapse at its attach-time
+            // expiry and delivery would stop mid-conversation.
+            renew_active_adapter_lease(
                 &transaction,
                 consumer_id,
                 lease_id,
@@ -9566,7 +9569,11 @@ fn validate_adapter_lease_window(
     Ok(())
 }
 
-fn verify_active_adapter_consumer(
+/// Confirms the caller still holds the live consumer lease and extends it.
+///
+/// An expired lease is never renewed and a different consumer is never admitted, so
+/// renewal cannot take back a lease that expiry has already made available.
+fn renew_active_adapter_lease(
     connection: &Connection,
     consumer_id: AdapterConsumerId,
     lease_id: AdapterLeaseId,
@@ -9592,9 +9599,22 @@ fn verify_active_adapter_consumer(
     if active_consumer.as_slice() != consumer_id.as_bytes()
         || active_lease.as_slice() != lease_id.as_bytes()
         || from_sql_integer(active_expiry)? <= now_unix_milliseconds
-        || requested_expiry > from_sql_integer(active_expiry)?
     {
         return Err(ProfileStoreError::InvalidAdapterLease);
+    }
+    if requested_expiry > from_sql_integer(active_expiry)? {
+        connection
+            .execute(
+                "UPDATE daemon_adapter_consumer
+                 SET lease_expires_at_unix_milliseconds = ?1
+                 WHERE singleton_id = 1 AND consumer_id = ?2 AND lease_id = ?3",
+                params![
+                    to_sql_integer(requested_expiry)?,
+                    consumer_id.as_bytes().as_slice(),
+                    lease_id.as_bytes().as_slice()
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
     }
     Ok(())
 }
@@ -13332,6 +13352,58 @@ mod tests {
             store.load_conversation(conversation_id).err(),
             Some(ProfileStoreError::CorruptData)
         );
+    }
+
+    #[test]
+    fn a_claim_renews_the_lease_it_already_holds() {
+        // The daemon attaches once and then claims repeatedly, always asking for a
+        // full window from the current instant. Before renewal existed, the second
+        // request exceeded the attach-time expiry and every claim after attachment
+        // failed as stale, which stopped delivery entirely.
+        let fixture = conversation_fixture("adapter-lease-renewal");
+        let consumer = AdapterConsumerId::from_bytes([9; AdapterConsumerId::LENGTH]);
+        let lease = AdapterLeaseId::from_bytes([9; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer, lease, 1_000, 61_000)
+            .unwrap();
+
+        fixture
+            .store
+            .claim_remote_events(consumer, lease, 5_000, 65_000, 1)
+            .expect("an active consumer must be able to extend its own lease");
+
+        stage_remote_inbox_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+        );
+        let notification_id = NotificationId::from_bytes([9; NotificationId::LENGTH]);
+        fixture
+            .store
+            .complete_inbox_with_notification(fixture.conversation_id, 1, notification_id)
+            .unwrap();
+        let claimed = fixture
+            .store
+            .claim_remote_events(consumer, lease, 62_000, 122_000, 1)
+            .expect("a renewed lease must remain usable past its original expiry");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].event.notification_id, notification_id);
+
+        // Renewal is not a way back in: a lease that already lapsed stays lapsed.
+        let lapsed = AdapterLeaseId::from_bytes([10; AdapterLeaseId::LENGTH]);
+        assert!(matches!(
+            fixture
+                .store
+                .claim_remote_events(consumer, lapsed, 62_000, 122_000, 1),
+            Err(ProfileStoreError::InvalidAdapterLease)
+        ));
     }
 
     #[test]

@@ -54,8 +54,10 @@ a session. `delivery_status` is read-authorized and reports queued and in-flight
 counts, how many conversations currently have a live watch worker, whether delivery is
 degraded, and — when a conversation is named — whether that conversation is muted.
 
-Muting suppresses delivery; it never acknowledges undelivered work. Events queue while
-muted and are claimable once delivery is enabled again.
+Muting suppresses delivery for as long as it is set. A message that arrives while a
+conversation is muted is never delivered into a session, and enabling delivery later
+does not replay it — it applies to what arrives afterwards. The message remains
+ordinary readable history, so nothing is lost; it simply never woke a session.
 
 ## Bursts and wake budgets
 

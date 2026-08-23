@@ -63,6 +63,13 @@ pub(crate) struct ApplicationService<T> {
     submissions: Arc<tokio::sync::Mutex<()>>,
 }
 
+impl<T> ApplicationService<T> {
+    /// Signals when this profile joins a conversation it was not previously in.
+    pub(crate) fn membership_changed(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.conversations.membership_changed()
+    }
+}
+
 impl<T> Clone for ApplicationService<T> {
     fn clone(&self) -> Self {
         Self {

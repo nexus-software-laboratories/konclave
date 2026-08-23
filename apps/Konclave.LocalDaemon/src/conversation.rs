@@ -32,6 +32,7 @@ pub(crate) struct ConversationCoordinator {
     mls_storage: SealedSqliteMlsStorage,
     device: Arc<Mutex<DeviceIdentity>>,
     operations: Arc<Mutex<()>>,
+    membership_changed: Arc<tokio::sync::Notify>,
 }
 
 impl ConversationCoordinator {
@@ -46,7 +47,17 @@ impl ConversationCoordinator {
             mls_storage,
             device: Arc::new(Mutex::new(device)),
             operations: Arc::new(Mutex::new(())),
+            membership_changed: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Signals when this profile joins a conversation it was not previously in.
+    ///
+    /// The watch supervisor also rediscovers on a timer, so this only removes the
+    /// delay before a brand new conversation starts delivering. A missed signal
+    /// therefore degrades latency rather than correctness.
+    pub(crate) fn membership_changed(&self) -> Arc<tokio::sync::Notify> {
+        self.membership_changed.clone()
     }
 
     /// Returns the local device identity without exposing key material.
@@ -176,6 +187,7 @@ impl ConversationCoordinator {
         self.store
             .insert_conversation(routing_id, &signing_material, &state, &[binding])?;
         let conversation = self.open_unlocked(conversation_id)?;
+        self.membership_changed.notify_one();
         Ok(conversation.summary())
     }
 
@@ -745,6 +757,7 @@ impl ConversationCoordinator {
             Ok(()) | Err(ProfileStoreError::OperationNotFound) => {}
             Err(error) => return Err(error.into()),
         }
+        self.membership_changed.notify_one();
         Ok(ConversationSummary {
             conversation_id,
             routing_id: pending.routing_id,
