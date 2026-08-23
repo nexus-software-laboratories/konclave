@@ -124,6 +124,31 @@ run without an adapter, so it fails at startup instead of silently leaving
 conversations undelivered. Absent configuration leaves MCP and relay recovery
 untouched.
 
+## Session operations
+
+After both proofs verify, the adapter issues bounded requests on the same channel:
+wait-and-claim, acknowledge, release, and status. Authenticated frames use the larger
+limit; the pre-authentication limit no longer applies.
+
+Wait-and-claim bounds both the batch size and the wait. An expired wait answers with
+an empty batch, which is distinguishable from an applied transition on the wire, so an
+adapter reissues rather than treating it as work. The daemon has no journal change
+notification yet, so a wait polls at a fixed short interval: low enough that delivery
+latency stays well under a conversational turn, high enough that an idle profile does
+not spin.
+
+A recoverable failure is answered with a stable code rather than closing the channel,
+so a stale lease or an unknown notification does not force the adapter to
+reauthenticate. Codes are bounded lowercase identifiers, and only conditions an
+adapter can act on are distinguished; everything else collapses to one code so
+internal storage state never becomes an adapter-visible signal. A malformed frame is
+answered rather than dropped, so the adapter learns its frame was rejected instead of
+waiting forever.
+
+A delivered event carries the authenticated sender, conversation, kind, and stable
+notification identifier as separate fields, so an adapter can frame peer text as
+untrusted without parsing it for routing information.
+
 ## Cross-language parity
 
 `fixtures/adapter/v1/auth-transcript.json` holds the canonical vectors: inputs, the
