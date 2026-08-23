@@ -79,6 +79,14 @@ Unix domain socket, or a named pipe on Windows. The daemon connects outward to i
 never opens a listener, so the device exposes no inbound socket. The random endpoint
 name is defense in depth; the launch capability is the authentication.
 
+The capability file is created with owner-only permission before the value is written,
+so the capability is never briefly readable by another account. Disposal clears the
+in-memory copy and removes the private directory by exact path.
+
+On Windows the endpoint is a named pipe, whose access is governed by the process token
+rather than by file permissions, so it deliberately does not live inside the private
+directory and no directory mode is applied to it.
+
 A launch-provided endpoint is bounded and validated before it reaches a platform
 call. It must be non-empty, within the platform's practical path or name limit, free
 of NUL, absolute on Unix, and a named-pipe name on Windows.
