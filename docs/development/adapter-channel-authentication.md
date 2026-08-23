@@ -171,11 +171,21 @@ adapter is not made to wait out an expiry window that no live consumer owns.
 
 ## Cross-language parity
 
-`fixtures/adapter/v1/auth-transcript.json` holds the canonical vectors: inputs, the
-encoded transcript, and both proofs. Any implementation of this contract, in any
-language, must reproduce those bytes exactly.
+`fixtures/adapter/v1/auth-transcript.json` holds the canonical authentication
+vectors: inputs, the encoded transcript, and both proofs.
+`fixtures/adapter/v1/session-operations.json` holds the handshake message payloads,
+every request and response encoding, every delivered event kind, and the bounds each
+side enforces. Any implementation of this contract, in any language, must reproduce
+those bytes exactly.
 
-`crates/Konclave.AdapterTransport/tests/shared_vectors.rs` verifies the Rust
-implementation against that fixture as data rather than restating the bytes, so a
-change to the layout or a proof domain fails before it can silently desynchronize a
-non-Rust adapter.
+Both implementations are pinned to the fixtures as data rather than restating the
+bytes, so a change to a layout, a proof domain, or a bound fails on both sides instead
+of silently desynchronizing one of them:
+
+- `crates/Konclave.AdapterTransport/tests/shared_vectors.rs` and
+  `shared_session_vectors.rs` for the daemon; and
+- `extensions/Konclave.HostExtension/tests/adapter-transcript.test.ts` and
+  `adapter-session.test.ts` for the Copilot extension.
+
+Proofs produced by the daemon verify in the extension, and the extension decodes every
+event kind the daemon emits.
