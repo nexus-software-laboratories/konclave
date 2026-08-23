@@ -98,6 +98,12 @@ define_fixed_bytes!(
     "invitation_id"
 );
 define_fixed_bytes!(
+    /// Identifier for one pairing exchange between two devices.
+    PairingId,
+    16,
+    "pairing_id"
+);
+define_fixed_bytes!(
     /// Opaque identifier used only for relay routing.
     RoutingId,
     32,

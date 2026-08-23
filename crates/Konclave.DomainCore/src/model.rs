@@ -5,7 +5,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
-    MessageId, RoutingId,
+    MessageId, PairingId, RoutingId,
 };
 
 /// Current Konclave application protocol major version.
@@ -278,6 +278,109 @@ impl Invitation {
     #[must_use]
     pub const fn issuer_signature(&self) -> Ed25519Signature {
         self.issuer_signature
+    }
+}
+
+/// A joiner's signed request to be added to a conversation it cannot yet name.
+///
+/// This is deliberately not a [`DeviceCredentialBinding`]. That binding is scoped to a
+/// conversation, and a joiner does not learn the conversation until an invitation
+/// arrives, so it cannot exist this early. An offer instead carries the device root key
+/// that a verifier re-derives the claimed device identity from, which makes the offer
+/// self-authenticating without any prior knowledge of the device.
+///
+/// Signing an offer commits the joiner to one pairing exchange and one role for a
+/// bounded window. Nothing here identifies a conversation, so an offer discloses no
+/// membership.
+///
+/// The pairing identifier is the freshness value. A separate nonce would add nothing:
+/// it is already random per exchange and already covered by the signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairingOffer {
+    version: ProtocolVersion,
+    pairing_id: PairingId,
+    device_id: DeviceId,
+    device_root_public_key: Ed25519PublicKey,
+    requested_role: ConversationRole,
+    expires_at_unix_seconds: u64,
+    device_signature: Ed25519Signature,
+}
+
+impl PairingOffer {
+    /// Creates a pairing offer with a positive expiration timestamp.
+    ///
+    /// The signature is not verified here. Use the cryptographic core's verification,
+    /// which re-derives the device identity from the public key and rejects an offer
+    /// whose claimed identity does not follow from its own key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KonclaveDomainError::ZeroValue`] when `expires_at_unix_seconds` is
+    /// zero.
+    pub fn new(
+        version: ProtocolVersion,
+        pairing_id: PairingId,
+        device_id: DeviceId,
+        device_root_public_key: Ed25519PublicKey,
+        requested_role: ConversationRole,
+        expires_at_unix_seconds: u64,
+        device_signature: Ed25519Signature,
+    ) -> Result<Self, KonclaveDomainError> {
+        require_positive(expires_at_unix_seconds, "expires_at_unix_seconds")?;
+        Ok(Self {
+            version,
+            pairing_id,
+            device_id,
+            device_root_public_key,
+            requested_role,
+            expires_at_unix_seconds,
+            device_signature,
+        })
+    }
+
+    /// Returns the protocol version.
+    #[must_use]
+    pub const fn version(&self) -> ProtocolVersion {
+        self.version
+    }
+
+    /// Returns the pairing exchange this offer belongs to.
+    #[must_use]
+    pub const fn pairing_id(&self) -> PairingId {
+        self.pairing_id
+    }
+
+    /// Returns the device that signed the offer.
+    #[must_use]
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+
+    /// Returns the device root key the claimed identity derives from.
+    #[must_use]
+    pub const fn device_root_public_key(&self) -> Ed25519PublicKey {
+        self.device_root_public_key
+    }
+
+    /// Returns the role the joiner asks for.
+    ///
+    /// This is a request. The inviter decides the granted role when it issues the
+    /// invitation, so a joiner cannot elevate itself by asking.
+    #[must_use]
+    pub const fn requested_role(&self) -> ConversationRole {
+        self.requested_role
+    }
+
+    /// Returns the absolute expiration timestamp.
+    #[must_use]
+    pub const fn expires_at_unix_seconds(&self) -> u64 {
+        self.expires_at_unix_seconds
+    }
+
+    /// Returns the device signature over the canonical offer.
+    #[must_use]
+    pub const fn device_signature(&self) -> Ed25519Signature {
+        self.device_signature
     }
 }
 

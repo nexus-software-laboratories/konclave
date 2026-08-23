@@ -236,6 +236,13 @@ pub async fn join_conversation(inviter: &DaemonClient, joiner: &DaemonClient) ->
 mod daemon_fixture {
     use std::process::Stdio;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// How many times a killed daemon is probed before the test gives up on it.
+    ///
+    /// Generous enough to survive a loaded machine and short enough that a process
+    /// which genuinely will not die reports that rather than hanging the suite.
+    const EXIT_POLL_ATTEMPTS: usize = 200;
 
     use KonclaveRelayCore::RelayPrincipalId;
     use base64::Engine as _;
@@ -403,10 +410,14 @@ mod daemon_fixture {
             self.service.close().await.unwrap();
         }
 
-        /// Kills the daemon without letting it release anything.
+        /// Kills the daemon and waits for the process to actually be gone.
         ///
         /// A graceful close releases the consumer lease and settles claims, which is
         /// the opposite of the crash the recovery tests need to model.
+        ///
+        /// The wait matters: the signal call returns once the signal is delivered, not
+        /// once the process has exited, so restarting immediately would race the dying
+        /// process for the profile lock and fail for a reason the test is not about.
         pub async fn kill(self) {
             let process_id = self
                 .process_id
@@ -417,9 +428,24 @@ mod daemon_fixture {
                 .status()
                 .expect("sending a kill signal must succeed");
             assert!(killed.success(), "the daemon process must be killable");
-            // Dropping the client afterwards tears down a transport whose peer is
-            // already gone, which is exactly what a real crash leaves behind.
+            // Dropping the client tears down a transport whose peer is already gone,
+            // which is what a real crash leaves behind. It also reaps the child, which
+            // is what makes the liveness probe below become false.
             drop(self.service);
+            for _ in 0..EXIT_POLL_ATTEMPTS {
+                let alive = std::process::Command::new("kill")
+                    .arg("-0")
+                    .arg(process_id.to_string())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                if !alive {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the daemon process did not exit after being killed");
         }
     }
 }
