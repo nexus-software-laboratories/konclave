@@ -72,6 +72,29 @@ offsets and the payload must end precisely at the last field, so an unknown tag,
 unimplemented version, a truncated field, an identifier length beyond the payload, a
 non-UTF-8 identifier, and trailing bytes all fail before any value is used.
 
+## Handshake exchange
+
+The adapter opens with its version, consumer instance, and challenge. The daemon
+answers with its profile, its own challenge, and its proof. The adapter verifies that
+proof and returns its own, which the daemon verifies before serving any request.
+
+The daemon compares the profile it was launched for against the value both sides
+authenticate, so a capability belonging to another profile cannot attach. The adapter
+performs the mirror check and rejects a daemon answering for a profile it did not
+launch.
+
+The whole exchange is bounded by a single timeout rather than each individual read, so
+a peer that connects and then stalls cannot hold a task and buffer indefinitely. A
+closed channel fails rather than hanging, and a valid message arriving out of order is
+rejected.
+
+Because each channel contributes fresh challenges, a proof captured from one channel
+does not authenticate another even under the same capability.
+
+Challenges come from a caller-supplied source, so the operating-system random source
+stays outside this crate and the contract can be exercised deterministically without a
+test-only branch in the production path.
+
 ## Cross-language parity
 
 `fixtures/adapter/v1/auth-transcript.json` holds the canonical vectors: inputs, the

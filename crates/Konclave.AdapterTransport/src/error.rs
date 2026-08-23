@@ -20,6 +20,26 @@ pub enum AdapterTransportError {
     #[error("adapter message kind is unknown")]
     UnknownMessageKind,
 
+    /// A valid message arrived out of handshake order.
+    #[error("adapter message arrived out of order")]
+    UnexpectedMessage,
+
+    /// The peer answered for a profile this channel was not launched for.
+    #[error("adapter channel profile does not match")]
+    ProfileMismatch,
+
+    /// The peer did not finish the handshake within its bound.
+    #[error("adapter handshake did not complete in time")]
+    HandshakeTimeout,
+
+    /// The channel ended before the handshake completed.
+    #[error("adapter channel closed")]
+    ChannelClosed,
+
+    /// The challenge source cannot issue another non-repeating value.
+    #[error("adapter challenge source is exhausted")]
+    ChallengeExhausted,
+
     /// A bounded identifier was empty, oversized, or not printable ASCII.
     #[error("adapter {field} identifier is invalid")]
     InvalidIdentifier { field: &'static str },
@@ -57,6 +77,11 @@ impl AdapterTransportError {
             Self::FrameTooLarge => "adapter_frame_too_large",
             Self::MalformedFrame => "adapter_malformed_frame",
             Self::UnknownMessageKind => "adapter_unknown_message_kind",
+            Self::UnexpectedMessage => "adapter_unexpected_message",
+            Self::ProfileMismatch => "adapter_profile_mismatch",
+            Self::HandshakeTimeout => "adapter_handshake_timeout",
+            Self::ChannelClosed => "adapter_channel_closed",
+            Self::ChallengeExhausted => "adapter_challenge_exhausted",
             Self::InvalidIdentifier { .. } => "adapter_invalid_identifier",
             Self::UnusableCapabilityFile => "adapter_unusable_capability_file",
             Self::CapabilityFileNotOwnerProtected => "adapter_capability_not_owner_protected",
