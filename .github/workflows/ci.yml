@@ -141,8 +141,6 @@ jobs:
     # and never depends on self-hosted image-builder availability.
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env:
-      CONTAINER_VALIDATION_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

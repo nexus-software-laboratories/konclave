@@ -7,7 +7,6 @@ if [ "$#" -ne 2 ]; then
 fi
 
 : "${CONTAINER_VALIDATION_ROOT:?CONTAINER_VALIDATION_ROOT is required.}"
-: "${CONTAINER_VALIDATION_RUN_ID:?CONTAINER_VALIDATION_RUN_ID is required.}"
 : "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required.}"
 : "${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is required.}"
 
@@ -17,7 +16,14 @@ script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ci/container-validation.lib.sh
 . "$script_directory/container-validation.lib.sh"
 
-builder="$(container_validation_builder_name "$CONTAINER_VALIDATION_RUN_ID")"
+# The identity is derived rather than required. Under pull_request_target the workflow
+# comes from the default branch while these scripts come from the pull request, so a
+# script that demanded a newly introduced variable could never be merged.
+run_identity="$(container_validation_run_identity)"
+builder="$(container_validation_builder_name "$run_identity")"
+if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'CONTAINER_VALIDATION_RUN_ID=%s\n' "$run_identity" >>"$GITHUB_ENV"
+fi
 
 application_root="$(container_image_resolve_application_root "$1")"
 workspace_root="$(realpath -e -- "$GITHUB_WORKSPACE")"
@@ -35,7 +41,7 @@ archive="$CONTAINER_VALIDATION_ROOT/${image_name}-${architecture}.tar"
 docker buildx create \
     --name "$builder" \
     --driver docker-container \
-    --driver-opt "env.KONCLAVE_VALIDATION_RUN=$CONTAINER_VALIDATION_RUN_ID" \
+    --driver-opt "env.KONCLAVE_VALIDATION_RUN=$run_identity" \
     --bootstrap >/dev/null
 
 # Attestations would add a second manifest to the exported index and are not part of
@@ -46,8 +52,8 @@ docker buildx build \
     --platform "linux/$architecture" \
     --provenance=false \
     --sbom=false \
-    --label "${CONTAINER_VALIDATION_OWNER_LABEL}=${CONTAINER_VALIDATION_RUN_ID}" \
-    --tag "local/${image_name}:validation-${CONTAINER_VALIDATION_RUN_ID}-${architecture}" \
+    --label "${CONTAINER_VALIDATION_OWNER_LABEL}=${run_identity}" \
+    --tag "local/${image_name}:validation-${run_identity}-${architecture}" \
     --output "type=oci,dest=$archive" \
     "$workspace_root"
 

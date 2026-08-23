@@ -6,17 +6,19 @@ set -euo pipefail
 # disappeared. Teardown continues past individual failures and reports at the end, so a
 # single stuck resource cannot leave the rest behind unreported.
 
-: "${CONTAINER_VALIDATION_RUN_ID:?CONTAINER_VALIDATION_RUN_ID is required.}"
-
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ci/container-validation.lib.sh
 . "$script_directory/container-validation.lib.sh"
 
+# Validation exports the identity it actually used. Deriving a fresh one here would
+# name resources nothing created, so an absent value means validation never got far
+# enough to make anything and there is nothing owned to remove.
+run_identity="${CONTAINER_VALIDATION_RUN_ID:-}"
 status=0
 
-if container_validation_docker_available; then
-    container_validation_remove_owned "$CONTAINER_VALIDATION_RUN_ID"
-    container_validation_assert_no_residue "$CONTAINER_VALIDATION_RUN_ID" || status=1
+if [ -n "$run_identity" ] && container_validation_docker_available; then
+    container_validation_remove_owned "$run_identity"
+    container_validation_assert_no_residue "$run_identity" || status=1
 
     # The baseline is optional: a run that failed before capturing one still has to
     # clean up, and demanding the file would turn that into a second failure.
