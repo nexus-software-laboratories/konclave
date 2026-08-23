@@ -168,13 +168,23 @@ pub(crate) async fn attach_adapter(
 /// # Errors
 ///
 /// Returns a lease or clock error. An active lease held by a different consumer fails
-/// closed rather than displacing it.
+/// closed rather than displacing it, and a channel that authenticated as a different
+/// consumer than the launch configuration names is refused.
 fn acquire_attachment(
     config: &AdapterLaunchConfig,
     store: &ProfileStore,
     channel: AuthenticatedChannel,
     now_unix_milliseconds: u64,
 ) -> anyhow::Result<AdapterAttachment> {
+    // The lease is taken under the launch-configured consumer while every request is
+    // answered over the authenticated channel. Those are two independently sourced
+    // values, so requiring them to agree keeps a mismatch from ever becoming a lease
+    // held on behalf of an identity the peer did not actually prove.
+    let announced = parse_consumer_id(channel.consumer())
+        .context("reading the authenticated adapter consumer")?;
+    if announced != config.consumer_id() {
+        bail!("the authenticated adapter announced a different consumer than it was launched with");
+    }
     let lease_id = generate_lease_id().context("generating an adapter lease identifier")?;
     let expires_at = now_unix_milliseconds
         .checked_add(
@@ -673,6 +683,17 @@ mod tests {
             fn endpoint(&self) -> AdapterEndpoint {
                 AdapterEndpoint::parse(self.socket.to_str().unwrap()).unwrap()
             }
+
+            /// The consumer identifier the adapter announces, in wire form.
+            ///
+            /// It is shared and mutable because one endpoint outlives the consumer
+            /// attached to it, which is what a restarted or replaced adapter looks
+            /// like from the daemon's side.
+            fn announced(
+                consumer: [u8; AdapterConsumerId::LENGTH],
+            ) -> std::sync::Arc<std::sync::Mutex<String>> {
+                std::sync::Arc::new(std::sync::Mutex::new(URL_SAFE_NO_PAD.encode(consumer)))
+            }
         }
 
         fn restrict(path: &Path) {
@@ -692,17 +713,24 @@ mod tests {
         ///
         /// A single-shot listener would make a retry hang until the handshake
         /// timeout, which reads as a protocol failure rather than a missing peer.
-        fn serve(listener: tokio::net::UnixListener) -> tokio::task::JoinHandle<()> {
+        fn serve(
+            listener: tokio::net::UnixListener,
+            consumer: std::sync::Arc<std::sync::Mutex<String>>,
+        ) -> tokio::task::JoinHandle<()> {
             tokio::spawn(async move {
                 loop {
                     let Ok((mut stream, _)) = listener.accept().await else {
                         return;
                     };
+                    let consumer = consumer
+                        .lock()
+                        .map(|consumer| consumer.clone())
+                        .unwrap_or_default();
                     tokio::spawn(async move {
                         let authenticated = complete_adapter_handshake(
                             &mut stream,
                             PROFILE,
-                            "consumer",
+                            &consumer,
                             &LaunchCapability::from_bytes([9_u8; LaunchCapability::LENGTH]),
                             &mut SequentialChallenges::new(),
                         )
@@ -725,7 +753,11 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let store = store(root.path());
             let rendezvous = Rendezvous::new();
-            let adapter = serve(tokio::net::UnixListener::bind(&rendezvous.socket).unwrap());
+            let announced = Rendezvous::announced([1; 16]);
+            let adapter = serve(
+                tokio::net::UnixListener::bind(&rendezvous.socket).unwrap(),
+                announced.clone(),
+            );
 
             let attachment = attach_adapter(&rendezvous.config([1; 16]), PROFILE, &store, NOW)
                 .await
@@ -741,12 +773,17 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let store = store(root.path());
             let rendezvous = Rendezvous::new();
-            let adapter = serve(tokio::net::UnixListener::bind(&rendezvous.socket).unwrap());
+            let announced = Rendezvous::announced([1; 16]);
+            let adapter = serve(
+                tokio::net::UnixListener::bind(&rendezvous.socket).unwrap(),
+                announced.clone(),
+            );
 
             let first = attach_adapter(&rendezvous.config([1; 16]), PROFILE, &store, NOW)
                 .await
                 .unwrap();
 
+            *announced.lock().unwrap() = URL_SAFE_NO_PAD.encode([2_u8; 16]);
             let error = attach_adapter(&rendezvous.config([2; 16]), PROFILE, &store, NOW)
                 .await
                 .unwrap_err();
@@ -764,11 +801,45 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn an_adapter_announcing_another_consumer_never_reaches_the_lease() {
+            let root = tempfile::tempdir().unwrap();
+            let store = store(root.path());
+            let rendezvous = Rendezvous::new();
+            // The capability and profile both check out. Only the announced consumer
+            // disagrees with what the daemon was launched to serve.
+            let announced = Rendezvous::announced([2; 16]);
+            let adapter = serve(
+                tokio::net::UnixListener::bind(&rendezvous.socket).unwrap(),
+                announced.clone(),
+            );
+
+            let error = attach_adapter(&rendezvous.config([1; 16]), PROFILE, &store, NOW)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("different consumer"),
+                "a mismatched consumer must be refused: {error:#}"
+            );
+
+            // No lease was taken, so the consumer the daemon was launched for is
+            // still able to attach once the adapter announces it.
+            *announced.lock().unwrap() = URL_SAFE_NO_PAD.encode([1_u8; 16]);
+            attach_adapter(&rendezvous.config([1; 16]), PROFILE, &store, NOW)
+                .await
+                .unwrap();
+            adapter.abort();
+        }
+
+        #[tokio::test]
         async fn a_wrong_profile_capability_never_reaches_the_lease() {
             let root = tempfile::tempdir().unwrap();
             let store = store(root.path());
             let rendezvous = Rendezvous::new();
-            let adapter = serve(tokio::net::UnixListener::bind(&rendezvous.socket).unwrap());
+            let announced = Rendezvous::announced([1; 16]);
+            let adapter = serve(
+                tokio::net::UnixListener::bind(&rendezvous.socket).unwrap(),
+                announced.clone(),
+            );
 
             let error = attach_adapter(&rendezvous.config([1; 16]), "bob", &store, NOW)
                 .await
