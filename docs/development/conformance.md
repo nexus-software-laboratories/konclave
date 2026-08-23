@@ -31,6 +31,12 @@ protocol limits, MLS configuration, and profile schema from an isolated tag arch
 An unreleased manifest whose tag does not yet exist is validated against the current
 working tree.
 
+Continuous integration checks out a shallow revision without tags, so a locally
+missing tag does not prove that a release is unpublished. The verifier asks the
+origin remote, shallow-fetches the exact release tag when it exists, and fails closed
+when that lookup cannot complete. It never falls back to the working tree for a
+manifest whose release already exists.
+
 ## Required suites
 
 ### Schema compatibility

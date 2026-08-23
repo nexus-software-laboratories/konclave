@@ -57,7 +57,30 @@ if (-not $CurrentTree) {
     }
     $tagRef = "refs/tags/$tag"
     & git -C $ProjectRoot rev-parse --verify --quiet "$tagRef^{commit}" | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    $tagIsPresent = $LASTEXITCODE -eq 0
+    if (-not $tagIsPresent) {
+        if ($LASTEXITCODE -ne 1) {
+            throw "Could not determine whether protocol tag $tag exists locally."
+        }
+        # A shallow CI checkout omits tags, so absence here does not prove the
+        # release is unpublished. Ask the origin before choosing a baseline.
+        $remoteTag = & git -C $ProjectRoot ls-remote --tags origin $tagRef
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not query origin for protocol tag $tag."
+        }
+        if ($remoteTag) {
+            & git -C $ProjectRoot fetch --no-recurse-submodules --depth=1 origin "+${tagRef}:${tagRef}"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not fetch immutable protocol tag $tag."
+            }
+            & git -C $ProjectRoot rev-parse --verify --quiet "$tagRef^{commit}" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Fetched protocol tag $tag is unusable."
+            }
+            $tagIsPresent = $true
+        }
+    }
+    if ($tagIsPresent) {
         & git -C $ProjectRoot diff --quiet $tagRef -- $ManifestPath
         if ($LASTEXITCODE -ne 0) {
             throw "Released protocol manifest differs from immutable tag $tag."
@@ -90,9 +113,6 @@ if (-not $CurrentTree) {
                 Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
             }
         }
-    }
-    if ($LASTEXITCODE -ne 1) {
-        throw "Could not determine whether protocol tag $tag exists."
     }
 }
 
