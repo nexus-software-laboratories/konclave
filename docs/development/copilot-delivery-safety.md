@@ -42,6 +42,21 @@ releases the claim, so the event stays reclaimable rather than being lost. A cra
 between acceptance and acknowledgment may redeliver the same stable notification
 identifier, which the contract permits and the identifier makes recognizable.
 
+## Delivery is off until it is asked for
+
+A conversation delivers nothing until automatic delivery is explicitly enabled for it.
+A conversation with no recorded policy reads as muted, so an unattended session cannot
+start waking on peer traffic because a conversation happened to exist.
+
+Two daemon tools control and observe this. `set_auto_delivery` enables or mutes one
+conversation and is write-authorized, because it changes whether peer content can enter
+a session. `delivery_status` is read-authorized and reports queued and in-flight event
+counts, how many conversations currently have a live watch worker, whether delivery is
+degraded, and — when a conversation is named — whether that conversation is muted.
+
+Muting suppresses delivery; it never acknowledges undelivered work. Events queue while
+muted and are claimable once delivery is enabled again.
+
 ## Bursts and wake budgets
 
 A burst becomes one delivery, bounded independently by event count and by total peer

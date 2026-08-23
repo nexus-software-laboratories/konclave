@@ -32,14 +32,15 @@ async fn run_with_capabilities<F>(profile: RuntimeProfile, shutdown: F) -> anyho
 where
     F: Future<Output = ()>,
 {
+    let health = crate::health::DeliveryHealth::default();
     let mcp_server = crate::mcp::StdioServer::new(
         profile.conversations.clone(),
         profile.applications.clone(),
+        health.clone(),
         crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
     );
     let service_applications = profile.applications.clone();
     let adapter_store = profile.conversations.store();
-    let health = crate::health::DeliveryHealth::default();
     let adapter_health = health.clone();
     let adapter_profile = profile.profile_id.clone();
     let _profile = profile;

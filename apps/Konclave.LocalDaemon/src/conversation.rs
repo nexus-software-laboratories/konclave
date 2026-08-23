@@ -75,6 +75,46 @@ impl ConversationCoordinator {
         self.store.clone()
     }
 
+    /// Reports pending and claimed remote-event counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile-store error.
+    pub(crate) fn remote_event_counts(&self) -> Result<(u32, u32), ConversationCoordinatorError> {
+        Ok(self.store.remote_event_counts()?)
+    }
+
+    /// Reports whether automatic delivery is enabled for one conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile-store error.
+    pub(crate) fn adapter_delivery_enabled(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ConversationCoordinatorError> {
+        Ok(self.store.adapter_delivery_enabled(conversation_id)?)
+    }
+
+    /// Enables or mutes automatic delivery for one conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile-store error.
+    pub(crate) fn set_adapter_delivery_enabled(
+        &self,
+        conversation_id: ConversationId,
+        enabled: bool,
+    ) -> Result<(), ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        Ok(self
+            .store
+            .set_adapter_delivery_enabled(conversation_id, enabled)?)
+    }
+
     pub(crate) fn is_local_member(
         &self,
         conversation_id: ConversationId,
