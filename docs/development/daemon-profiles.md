@@ -23,7 +23,7 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 
 ## Profile store
 
-Schema version 9 stores:
+Schema version 10 stores:
 
 - one profile row with a sealed device root and optional sealed relay credential;
 - normalized non-secret relay endpoint;
@@ -47,6 +47,13 @@ Schema version 9 stores:
   envelope, completion kind, historical completion policy, and independently advanced
   current policy authority;
 - one sealed cursor-ordered history for both sent and received messages.
+- one sealed per-conversation automatic-delivery policy, defaulting to muted when
+  absent;
+- one sealed profile-global remote-event journal with stable notification
+  identifiers, event sequence, authenticated journal head, typed source references,
+  and sealed delivery state; and
+- one ephemeral active adapter-consumer lease plus per-event claim generations,
+  expiries, acknowledgments, releases, and restart recovery.
 
 Version 1 through 8 schema changes use explicit transactions. Before changing a v2
 schema, startup rejects ready or accepted outbound rows whose plaintext cannot be
@@ -58,6 +65,37 @@ The version 9 migration reconstructs the application outbox in one transaction s
 terminal reason `2` can represent local removal without reusing expiry. Any copy,
 constraint, or index failure rolls the migration back and leaves the version 8 table
 authoritative.
+
+The version 10 migration adds the remote-event journal and adapter-consumer state in
+one transaction. Existing conversations have no sealed delivery policy and therefore
+remain muted. No legacy history is converted into synthetic adapter events. A failed
+schema change rolls back to version 9.
+
+Remote application and membership completion create one context-bound event before
+advancing the relay cursor. Local echoes do not create events. Muted conversations
+create terminally suppressed records while relay replay and sealed history continue.
+Remote self-removal has a distinct immutable event kind rather than a value derived
+from later profile state. Enabled conversations create pending records; hard profile
+and conversation count and encoded-source-byte limits stop replay before an event
+could be dropped.
+
+One active transport-neutral consumer lease owns claims for the profile. Claim state
+is sealed independently from relay progress and carries a generation, expiry, and
+stable notification identifier. Acknowledgment is idempotent after harness
+acceptance. Expired, released, disconnected, and restart-interrupted claims become
+pending without changing their notification identifiers. A stale generation cannot
+acknowledge a later claim.
+
+The sealed journal head binds the latest sequence and notification identifier.
+Bounded cleanup removes only a contiguous prefix of acknowledged or suppressed
+records and advances a separately sealed floor; acknowledgment and suppression
+transitions invoke cleanup automatically while retaining a bounded recent terminal
+horizon for idempotency. Pending or claimed work stops prefix cleanup, and a separate
+hard total-record limit prevents that blockage from growing the table without bound.
+Reaching the hard limit pauses replay rather than dropping an event, including for a
+muted conversation. Startup verifies the head, floor, retained chain, every mutable
+delivery-state record, and the exact event source before accepting a consumer.
+Plaintext status, policy, lease, deletion, or sequence edits therefore fail closed.
 
 Schema migration never infers a replay head from legacy plaintext completion fields.
 A legacy profile with a nonzero cursor and no sealed replay head fails closed and

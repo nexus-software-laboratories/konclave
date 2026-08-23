@@ -7,8 +7,8 @@ use KonclaveCryptographicCore::{
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
-    JoinProof, Member, MembershipOperationId, MessageId, ProtocolVersion, RelayEnvelope, RoutingId,
-    StoredRelayEnvelope,
+    JoinProof, Member, MembershipOperationId, MessageId, NotificationId, ProtocolVersion,
+    RelayEnvelope, RoutingId, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_membership_commit_bundle, decode_membership_control,
@@ -59,6 +59,14 @@ impl ConversationCoordinator {
             .lock()
             .map(|device| device.device_id())
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)
+    }
+
+    fn generate_notification_id(&self) -> Result<NotificationId, ConversationCoordinatorError> {
+        self.device
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
+            .generate_notification_id()
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)
     }
 
     /// Creates and persists one initial administrator conversation.
@@ -161,9 +169,12 @@ impl ConversationCoordinator {
             let group = client
                 .restore_group(transition.next_state, transition.bindings, None)
                 .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let replay_cursor = self
-                .store
-                .complete_membership_inbox(conversation_id, transition.stored.cursor())?;
+            let notification_id = self.generate_notification_id()?;
+            let replay_cursor = self.store.complete_membership_inbox_with_notification(
+                conversation_id,
+                transition.stored.cursor(),
+                notification_id,
+            )?;
             return Ok(OpenConversation {
                 routing_id,
                 replay_cursor,
@@ -1328,8 +1339,12 @@ impl ConversationCoordinator {
                         outbound.epoch,
                         &outbound.message,
                     )?;
-                    self.store
-                        .complete_inbox(conversation_id, stored.cursor())?;
+                    let notification_id = self.generate_notification_id()?;
+                    self.store.complete_inbox_with_notification(
+                        conversation_id,
+                        stored.cursor(),
+                        notification_id,
+                    )?;
                     return Ok(ProcessedApplication {
                         conversation_id,
                         cursor: stored.cursor(),
@@ -1355,8 +1370,12 @@ impl ConversationCoordinator {
                     .group
                     .persist()
                     .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                self.store
-                    .complete_inbox(conversation_id, stored.cursor())?;
+                let notification_id = self.generate_notification_id()?;
+                self.store.complete_inbox_with_notification(
+                    conversation_id,
+                    stored.cursor(),
+                    notification_id,
+                )?;
                 Ok(ProcessedApplication {
                     conversation_id,
                     cursor: stored.cursor(),
@@ -1379,8 +1398,12 @@ impl ConversationCoordinator {
                     {
                         return Err(ConversationCoordinatorError::StateMismatch);
                     }
-                    self.store
-                        .complete_inbox(conversation_id, stored.cursor())?;
+                    let notification_id = self.generate_notification_id()?;
+                    self.store.complete_inbox_with_notification(
+                        conversation_id,
+                        stored.cursor(),
+                        notification_id,
+                    )?;
                     return Ok(ProcessedApplication {
                         conversation_id,
                         cursor: stored.cursor(),
@@ -1416,8 +1439,12 @@ impl ConversationCoordinator {
                         return Err(ConversationCoordinatorError::Cryptographic);
                     }
                 }
-                self.store
-                    .complete_inbox(conversation_id, stored.cursor())?;
+                let notification_id = self.generate_notification_id()?;
+                self.store.complete_inbox_with_notification(
+                    conversation_id,
+                    stored.cursor(),
+                    notification_id,
+                )?;
                 Ok(ProcessedApplication {
                     conversation_id,
                     cursor: stored.cursor(),
@@ -1656,9 +1683,11 @@ impl ConversationCoordinator {
         {
             return Err(ConversationCoordinatorError::StateMismatch);
         }
-        self.store.complete_membership_inbox(
+        let notification_id = self.generate_notification_id()?;
+        self.store.complete_membership_inbox_with_notification(
             transition.next_state.conversation_id(),
             transition.stored.cursor(),
+            notification_id,
         )?;
         Ok(ProcessedMembership {
             conversation_id: transition.next_state.conversation_id(),

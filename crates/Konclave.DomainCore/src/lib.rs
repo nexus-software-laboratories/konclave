@@ -7,8 +7,9 @@ mod model;
 
 pub use error::KonclaveDomainError;
 pub use identifiers::{
-    ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
-    EnvelopeId, InvitationId, InvitationNonce, MembershipOperationId, MessageId, RoutingId,
+    AdapterConsumerId, AdapterLeaseId, ConversationId, CredentialBindingHash, DeviceId,
+    Ed25519PublicKey, Ed25519Signature, EnvelopeId, InvitationId, InvitationNonce,
+    MembershipOperationId, MessageId, NotificationId, RoutingId,
 };
 pub use model::{
     APPLICATION_PROTOCOL_MAJOR, APPLICATION_PROTOCOL_MINOR, AcknowledgeRequest, AddMember,

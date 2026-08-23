@@ -74,6 +74,24 @@ define_fixed_bytes!(
     "envelope_id"
 );
 define_fixed_bytes!(
+    /// Stable identifier for one local remote-delivery event.
+    NotificationId,
+    16,
+    "notification_id"
+);
+define_fixed_bytes!(
+    /// Identifier for one harness-neutral local adapter consumer.
+    AdapterConsumerId,
+    16,
+    "adapter_consumer_id"
+);
+define_fixed_bytes!(
+    /// Identifier for one active local adapter consumer lease.
+    AdapterLeaseId,
+    16,
+    "adapter_lease_id"
+);
+define_fixed_bytes!(
     /// Identifier for one invitation authorization.
     InvitationId,
     16,

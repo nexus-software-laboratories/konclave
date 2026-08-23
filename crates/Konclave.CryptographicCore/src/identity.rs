@@ -1,7 +1,7 @@
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
     Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
-    MessageId, ProtocolVersion, RoutingId, SignatureScheme,
+    MessageId, NotificationId, ProtocolVersion, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -106,6 +106,17 @@ impl DeviceIdentity {
     pub fn generate_envelope_id(&self) -> Result<EnvelopeId, KonclaveCryptographicError> {
         Ok(EnvelopeId::from_slice(
             &self.generate_identifier_bytes(EnvelopeId::LENGTH)?,
+        )?)
+    }
+
+    /// Generates a high-entropy local notification identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when secure randomness is unavailable.
+    pub fn generate_notification_id(&self) -> Result<NotificationId, KonclaveCryptographicError> {
+        Ok(NotificationId::from_slice(
+            &self.generate_identifier_bytes(NotificationId::LENGTH)?,
         )?)
     }
 
@@ -818,6 +829,14 @@ mod tests {
         assert_eq!(
             identity.generate_envelope_id().unwrap().as_bytes().len(),
             EnvelopeId::LENGTH
+        );
+        assert_eq!(
+            identity
+                .generate_notification_id()
+                .unwrap()
+                .as_bytes()
+                .len(),
+            NotificationId::LENGTH
         );
     }
 
