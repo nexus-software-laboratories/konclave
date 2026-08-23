@@ -167,6 +167,262 @@ impl TestRelay {
 
 #[cfg(unix)]
 pub use adapter_host::{AdapterHost, AdapterSession};
+#[cfg(unix)]
+pub use daemon_fixture::{DaemonClient, DaemonFixture, TestClient};
+
+/// Reads the text out of a delivered payload, failing loudly on any other kind.
+#[cfg(unix)]
+pub fn text_of(payload: &KonclaveAdapterTransport::DeliveredPayload) -> &str {
+    match payload {
+        KonclaveAdapterTransport::DeliveredPayload::ApplicationText(text) => text,
+        other => panic!("expected application text, observed {other:?}"),
+    }
+}
+
+/// Puts two daemons in one conversation and returns its identifier.
+#[cfg(unix)]
+pub async fn join_conversation(inviter: &DaemonClient, joiner: &DaemonClient) -> String {
+    let joiner_identity = joiner
+        .require("get_identity", serde_json::Value::Null)
+        .await;
+    let created = inviter
+        .require("create_conversation", serde_json::Value::Null)
+        .await;
+    let conversation_id = created["conversation_id"].as_str().unwrap().to_string();
+    let invitation = inviter
+        .require(
+            "create_invitation",
+            json!({
+                "conversation_id": conversation_id,
+                "expected_device_id": joiner_identity["device_id"],
+                "role": "member"
+            }),
+        )
+        .await;
+    let proof = joiner
+        .require(
+            "create_join_proof",
+            json!({
+                "invitation": invitation["invitation"],
+                "routing_id": invitation["routing_id"],
+                "issuer_public_key": invitation["issuer_public_key"],
+                "peer_bindings": invitation["peer_bindings"]
+            }),
+        )
+        .await;
+    let added = inviter
+        .require(
+            "add_member",
+            json!({
+                "conversation_id": conversation_id,
+                "join_proof": proof["join_proof"]
+            }),
+        )
+        .await;
+    joiner
+        .require(
+            "accept_welcome",
+            json!({
+                "conversation_id": conversation_id,
+                "welcome": added["welcome"],
+                "cursor": added["cursor"]
+            }),
+        )
+        .await;
+    conversation_id
+}
+
+#[cfg(unix)]
+mod daemon_fixture {
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+
+    use KonclaveRelayCore::RelayPrincipalId;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rmcp::model::{CallToolRequestParams, CallToolResult};
+    use rmcp::service::RunningService;
+    use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+    use rmcp::{ClientHandler, RoleClient, ServiceExt};
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    use super::{AdapterHost, TestRelay};
+
+    #[derive(Clone, Default)]
+    pub struct TestClient;
+
+    impl ClientHandler for TestClient {}
+
+    /// One relay plus the profile material several daemons share on a device.
+    ///
+    /// Two sessions on one machine share a relay credential, which is the topology the
+    /// product actually targets, so the fixture models it rather than giving every
+    /// daemon its own.
+    pub struct DaemonFixture {
+        _directory: TempDir,
+        profile_root: std::path::PathBuf,
+        wrapping_key_file: std::path::PathBuf,
+        relay_credential_file: std::path::PathBuf,
+        relay: TestRelay,
+    }
+
+    impl DaemonFixture {
+        pub async fn start(service: &str) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let profile_root = directory.path().join("profiles");
+            let wrapping_key_file = directory.path().join("wrapping.key");
+            let relay_credential_file = directory.path().join("relay.credential");
+            let token = [11_u8; RelayPrincipalId::LENGTH];
+            std::fs::write(&wrapping_key_file, [3_u8; 32]).unwrap();
+            std::fs::write(
+                &relay_credential_file,
+                format!("{}\n", URL_SAFE_NO_PAD.encode(token)),
+            )
+            .unwrap();
+            let relay = TestRelay::start(token, service).await;
+            Self {
+                _directory: directory,
+                profile_root,
+                wrapping_key_file,
+                relay_credential_file,
+                relay,
+            }
+        }
+
+        pub fn relay(&self) -> &TestRelay {
+            &self.relay
+        }
+
+        pub async fn stop(self) {
+            self.relay.stop().await;
+        }
+
+        /// Starts one daemon child and completes the MCP handshake with it.
+        pub async fn connect(&self, profile_id: &str, host: Option<&AdapterHost>) -> DaemonClient {
+            let profile_root = self.profile_root.clone();
+            let profile_id = profile_id.to_string();
+            let wrapping_key_file = self.wrapping_key_file.clone();
+            let relay_endpoint = self.relay.endpoint().to_string();
+            let relay_credential_file = self.relay_credential_file.clone();
+            let adapter_environment: Vec<(&str, std::ffi::OsString)> = host
+                .map(|host| host.launch_environment().to_vec())
+                .unwrap_or_default();
+            let (transport, diagnostics_pipe) = TokioChildProcess::builder(
+                Command::new(env!("CARGO_BIN_EXE_KonclaveLocalDaemon")).configure(move |command| {
+                    command
+                        .env("KONCLAVE_PROFILE_ROOT", profile_root)
+                        .env("KONCLAVE_PROFILE_ID", profile_id)
+                        .env("KONCLAVE_WRAPPING_KEY_FILE", wrapping_key_file)
+                        .env("KONCLAVE_RELAY_ENDPOINT", relay_endpoint)
+                        .env("KONCLAVE_RELAY_CREDENTIAL_FILE", relay_credential_file)
+                        .env("KONCLAVE_MCP_ALLOW_WRITE", "true")
+                        .envs(adapter_environment);
+                }),
+            )
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+            let process_id = transport.id();
+            let diagnostics = Arc::new(Mutex::new(String::new()));
+            // Diagnostics are captured rather than inherited so a test can assert what
+            // the daemon is allowed to write, and are echoed so a failure still
+            // explains itself.
+            if let Some(pipe) = diagnostics_pipe {
+                let sink = Arc::clone(&diagnostics);
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(pipe).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        eprintln!("[daemon] {line}");
+                        if let Ok(mut sink) = sink.lock() {
+                            sink.push_str(&line);
+                            sink.push('\n');
+                        }
+                    }
+                });
+            }
+            DaemonClient {
+                service: TestClient.serve(transport).await.unwrap(),
+                process_id,
+                diagnostics,
+            }
+        }
+    }
+
+    /// One daemon child and the MCP client attached to it.
+    pub struct DaemonClient {
+        service: RunningService<RoleClient, TestClient>,
+        process_id: Option<u32>,
+        diagnostics: Arc<Mutex<String>>,
+    }
+
+    impl DaemonClient {
+        /// Everything this daemon has written to its diagnostics stream so far.
+        pub fn diagnostics(&self) -> String {
+            self.diagnostics
+                .lock()
+                .map(|captured| captured.clone())
+                .unwrap_or_default()
+        }
+
+        /// Invokes one tool and returns the raw result, errors included.
+        pub async fn call(&self, name: &str, arguments: Value) -> CallToolResult {
+            let parameters = match arguments.as_object() {
+                Some(arguments) => {
+                    CallToolRequestParams::new(name.to_string()).with_arguments(arguments.clone())
+                }
+                None => CallToolRequestParams::new(name.to_string()),
+            };
+            self.service.call_tool(parameters).await.unwrap()
+        }
+
+        /// Invokes one tool and requires it to succeed.
+        pub async fn require(&self, name: &str, arguments: Value) -> Value {
+            let result = self.call(name, arguments).await;
+            assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+            result.structured_content.unwrap()
+        }
+
+        /// Sends one application message.
+        pub async fn send(&self, conversation_id: &str, message_id: &str, text: &str) {
+            self.require(
+                "send_message",
+                json!({
+                    "conversation_id": conversation_id,
+                    "message_id": message_id,
+                    "text": text
+                }),
+            )
+            .await;
+        }
+
+        /// Ends the session the way an ordinary shutdown would.
+        pub async fn close(mut self) {
+            self.service.close().await.unwrap();
+        }
+
+        /// Kills the daemon without letting it release anything.
+        ///
+        /// A graceful close releases the consumer lease and settles claims, which is
+        /// the opposite of the crash the recovery tests need to model.
+        pub async fn kill(self) {
+            let process_id = self
+                .process_id
+                .expect("a spawned daemon must expose a process identifier");
+            let killed = std::process::Command::new("kill")
+                .arg("-KILL")
+                .arg(process_id.to_string())
+                .status()
+                .expect("sending a kill signal must succeed");
+            assert!(killed.success(), "the daemon process must be killable");
+            // Dropping the client afterwards tears down a transport whose peer is
+            // already gone, which is exactly what a real crash leaves behind.
+            drop(self.service);
+        }
+    }
+}
 
 #[cfg(unix)]
 mod adapter_host {
