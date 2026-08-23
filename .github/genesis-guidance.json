@@ -152,8 +152,8 @@
         "owner": "seed:common"
       },
       {
-        "path": "docs/development/pitcrew-ci.md",
-        "title": "PitCrew CI",
+        "path": "docs/development/ci.md",
+        "title": "Continuous integration",
         "section": "Development",
         "order": 35,
         "owner": "project:konclave"

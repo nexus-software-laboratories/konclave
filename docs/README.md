@@ -34,7 +34,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Harness-neutral adapter transport spike](development/adapter-transport-spike.md)
 - [Adapter channel authentication](development/adapter-channel-authentication.md)
 - [Repository controls](development/repository-controls.md)
-- [PitCrew CI](development/pitcrew-ci.md)
+- [Continuous integration](development/ci.md)
 
 ## Guides
 
