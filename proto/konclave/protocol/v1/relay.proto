@@ -12,6 +12,8 @@ enum DeliveryClass {
   DELIVERY_CLASS_GROUP_PROPOSAL = 3;
   DELIVERY_CLASS_GROUP_COMMIT = 4;
   DELIVERY_CLASS_GROUP_APPLICATION = 5;
+  // Pre-membership pairing traffic, which has no MLS epoch and no visible conversation.
+  DELIVERY_CLASS_PAIRING = 6;
 }
 
 // Carries opaque MLS or KeyPackage bytes to one relay route.

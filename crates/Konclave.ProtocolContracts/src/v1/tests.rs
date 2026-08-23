@@ -451,3 +451,28 @@ fn pairing_offer_wire() -> wire::PairingOffer {
     let encoded = encode_pairing_offer(&pairing_offer_fixture()).unwrap();
     wire::PairingOffer::decode(encoded.as_slice()).unwrap()
 }
+
+#[test]
+fn pairing_envelopes_round_trip_and_carry_no_epoch() {
+    let mut envelope = wire::RelayEnvelope::decode(RELAY_FIXTURE).unwrap();
+    envelope.delivery_class = wire::DeliveryClass::Pairing as i32;
+    envelope.expected_parent_epoch = None;
+
+    let decoded = decode_relay_envelope(&envelope.encode_to_vec()).unwrap();
+    assert_eq!(
+        decoded.delivery_class(),
+        KonclaveDomainCore::DeliveryClass::Pairing
+    );
+    assert_eq!(decoded.expected_parent_epoch(), None);
+    assert_eq!(decoded.delivery_class().as_str(), "pairing");
+
+    // Pairing happens before the joiner is in any group, so claiming a parent epoch
+    // would assert membership in a group that does not include it yet.
+    envelope.expected_parent_epoch = Some(1);
+    assert!(matches!(
+        decode_relay_envelope(&envelope.encode_to_vec()),
+        Err(KonclaveProtocolError::Domain(
+            KonclaveDomainError::InvalidExpectedParentEpoch { .. }
+        ))
+    ));
+}

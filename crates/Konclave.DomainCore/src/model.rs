@@ -945,6 +945,12 @@ pub enum DeliveryClass {
     GroupProposal,
     GroupCommit,
     GroupApplication,
+    /// Pre-membership pairing traffic.
+    ///
+    /// A pairing exchange happens before the joiner is in any MLS group, so it has no
+    /// epoch and belongs to no conversation the relay can see. Reusing an MLS class for
+    /// it would tell the relay something false about what it is carrying.
+    Pairing,
 }
 
 impl DeliveryClass {
@@ -957,6 +963,7 @@ impl DeliveryClass {
             Self::GroupProposal => "group_proposal",
             Self::GroupCommit => "group_commit",
             Self::GroupApplication => "group_application",
+            Self::Pairing => "pairing",
         }
     }
 

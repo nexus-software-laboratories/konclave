@@ -367,6 +367,7 @@ fn delivery_class_to_wire(value: DeliveryClass) -> i32 {
         DeliveryClass::GroupProposal => wire::DeliveryClass::GroupProposal as i32,
         DeliveryClass::GroupCommit => wire::DeliveryClass::GroupCommit as i32,
         DeliveryClass::GroupApplication => wire::DeliveryClass::GroupApplication as i32,
+        DeliveryClass::Pairing => wire::DeliveryClass::Pairing as i32,
     }
 }
 
@@ -377,6 +378,7 @@ fn delivery_class_from_wire(value: i32) -> Result<DeliveryClass, KonclaveProtoco
         Ok(wire::DeliveryClass::GroupProposal) => Ok(DeliveryClass::GroupProposal),
         Ok(wire::DeliveryClass::GroupCommit) => Ok(DeliveryClass::GroupCommit),
         Ok(wire::DeliveryClass::GroupApplication) => Ok(DeliveryClass::GroupApplication),
+        Ok(wire::DeliveryClass::Pairing) => Ok(DeliveryClass::Pairing),
         _ => Err(KonclaveProtocolError::UnsupportedEnum {
             field: "delivery_class",
             value,
