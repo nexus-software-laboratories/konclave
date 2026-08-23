@@ -132,36 +132,33 @@ jobs:
     needs: validation-plan
     if: needs.validation-plan.outputs.scope == 'full'
     name: Container CI (community-relay)
-    runs-on: [linux, x64, image-builder]
+    # This repository is public, so container validation uses free hosted capacity
+    # and never depends on self-hosted image-builder availability.
+    runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BUILDKIT_HOST: tcp://buildkitd:1234
+      CONTAINER_VALIDATION_BUILDER: konclave-container-validation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Initialize image-builder paths
+      - name: Initialize container validation paths
         shell: bash
-        run: bash ./scripts/ci/Initialize-ImageBuilderPaths.sh
-      - name: Materialize BuildKit client credentials
-        shell: bash
-        env:
-          BUILDKIT_CLIENT_CA_PEM_B64: ${{ secrets.BUILDKIT_CLIENT_CA_PEM_B64 }}
-          BUILDKIT_CLIENT_CERT_PEM_B64: ${{ secrets.BUILDKIT_CLIENT_CERT_PEM_B64 }}
-          BUILDKIT_CLIENT_KEY_PEM_B64: ${{ secrets.BUILDKIT_CLIENT_KEY_PEM_B64 }}
-        run: bash ./scripts/ci/Initialize-BuildKitClient.sh
+        run: >-
+          bash ./scripts/ci/Initialize-JobPrivatePaths.sh
+          CONTAINER_VALIDATION_ROOT=konclave-container-validation
       - name: Build and validate AMD64 OCI archive
         shell: bash
         run: >-
-          bash ./scripts/ci/Validate-RemoteContainerImage.sh
+          bash ./scripts/ci/Validate-HostedContainerImage.sh
           apps/Konclave.CommunityRelay
           konclave-community-relay
-      # Cleanup is unconditional because client keys are job-private.
-      - name: Remove image-builder client material
+      # Cleanup is unconditional so no builder, cache, or archive survives the job.
+      - name: Remove container validation state
         if: always()
         shell: bash
-        run: bash ./scripts/ci/Cleanup-ImageBuilder.sh
+        run: bash ./scripts/ci/Cleanup-HostedContainerImage.sh
 
   local-daemon-daemon-packaging:
     needs: validation-plan
