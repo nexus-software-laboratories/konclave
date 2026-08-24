@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use KonclaveClientLibrary::{PairingCapability, RelayEndpoint};
 use KonclaveCryptographicCore::{
     DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit, MlsConversation,
     MlsConversationClient, MlsWelcome, OutboundMembershipCommit, verify_device_credential_binding,
@@ -7,8 +8,8 @@ use KonclaveCryptographicCore::{
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
-    JoinProof, Member, MembershipOperationId, MessageId, NotificationId, ProtocolVersion,
-    RelayEnvelope, RoutingId, StoredRelayEnvelope,
+    JoinProof, Member, MembershipOperationId, MessageId, NotificationId, PairingControl, PairingId,
+    PairingMessageId, PairingStage, ProtocolVersion, RelayEnvelope, RoutingId, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_membership_commit_bundle, decode_membership_control,
@@ -18,12 +19,16 @@ use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::pairing::PairingOperationState;
+use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
     ExpireOutboundResult, HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE,
     MembershipInboxOperation, MembershipOutboxStatus, MessageDirection, OutboundReservation,
     PendingOutbox, ProfileStore, ProfileStoreError, StoredMembershipTransition,
     StoredOutboundApplication,
 };
+
+const MAX_RECOVERED_PAIRINGS: usize = 32;
 
 /// Durable conversation composition over one locked daemon profile.
 #[derive(Clone)]
@@ -71,6 +76,52 @@ impl ConversationCoordinator {
             .lock()
             .map(|device| device.device_id())
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)
+    }
+
+    /// Issues one root-signed capability from the profile identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state or pairing-construction error.
+    pub(crate) fn issue_pairing_capability(
+        &self,
+        relay_endpoint: RelayEndpoint,
+        requested_role: ConversationRole,
+        expires_at_unix_seconds: u64,
+        now_unix_seconds: u64,
+    ) -> Result<PairingCapability, ConversationCoordinatorError> {
+        let device = self
+            .device
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        PairingCapability::issue(
+            &device,
+            relay_endpoint,
+            requested_role,
+            expires_at_unix_seconds,
+            now_unix_seconds,
+        )
+        .map_err(|_| ConversationCoordinatorError::Cryptographic)
+    }
+
+    /// Signs one completion or cancellation with the profile device root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state or cryptographic error.
+    pub(crate) fn sign_pairing_control(
+        &self,
+        pairing_id: PairingId,
+        message_id: PairingMessageId,
+        stage: PairingStage,
+        in_reply_to: PairingMessageId,
+        conversation_id: ConversationId,
+    ) -> Result<PairingControl, ConversationCoordinatorError> {
+        self.device
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
+            .sign_pairing_control(pairing_id, message_id, stage, in_reply_to, conversation_id)
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)
     }
 
     /// Returns whether the local profile remains a member of one stored conversation.
@@ -385,10 +436,13 @@ impl ConversationCoordinator {
             let page_length = page.len();
             pending_after = page.last().copied();
             for conversation_id in page {
+                let retain_for_pairing =
+                    self.active_pairing_retains_pending_join(conversation_id)?;
                 match self.store.load_conversation(conversation_id) {
-                    Ok(_) => {
+                    Ok(_) if !retain_for_pairing => {
                         self.store.delete_pending_join(conversation_id)?;
                     }
+                    Ok(_) => {}
                     Err(ProfileStoreError::ConversationNotFound) => {
                         let pending = self.store.load_pending_join(conversation_id)?;
                         let has_group = self
@@ -397,7 +451,10 @@ impl ConversationCoordinator {
                             .map_err(|_| ConversationCoordinatorError::SecretStorage)?;
                         match (pending.state.is_some(), has_group) {
                             (true, true) => {
-                                self.finalize_pending_join_unlocked(conversation_id)?;
+                                self.finalize_pending_join_unlocked(
+                                    conversation_id,
+                                    retain_for_pairing,
+                                )?;
                             }
                             (false, true) => {
                                 return Err(ConversationCoordinatorError::StateMismatch);
@@ -427,6 +484,35 @@ impl ConversationCoordinator {
             }
         }
         Ok(())
+    }
+
+    fn active_pairing_retains_pending_join(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ConversationCoordinatorError> {
+        let mut after = None;
+        loop {
+            let pairings = self
+                .store
+                .active_pairing_ids(after, MAX_RECOVERED_PAIRINGS)?;
+            let page_length = pairings.len();
+            after = pairings.last().copied();
+            for pairing_id in pairings {
+                let checkpoint = self.store.load_pairing(pairing_id)?;
+                if checkpoint.role == PairingRole::Joiner
+                    && checkpoint.phase == PairingPhase::JoinerAwaitingWelcome
+                {
+                    let state = PairingOperationState::from_checkpoint(&checkpoint)
+                        .map_err(|_| ConversationCoordinatorError::StateMismatch)?;
+                    if state.conversation_id() == Some(conversation_id) {
+                        return Ok(true);
+                    }
+                }
+            }
+            if page_length < MAX_RECOVERED_PAIRINGS {
+                return Ok(false);
+            }
+        }
     }
 
     /// Lists one bounded page of local conversation identifiers.
@@ -639,6 +725,31 @@ impl ConversationCoordinator {
         welcome: &MlsWelcome,
         receipt: &StoredRelayEnvelope,
     ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        self.accept_welcome_with_retention(conversation_id, welcome, receipt, false)
+    }
+
+    /// Accepts a pairing Welcome while retaining its exact recovery journal until
+    /// the root-signed completion is relay-accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a pending-join, Welcome, profile, MLS, or state-recovery error.
+    pub(crate) fn accept_pairing_welcome(
+        &self,
+        conversation_id: ConversationId,
+        welcome: &MlsWelcome,
+        receipt: &StoredRelayEnvelope,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        self.accept_welcome_with_retention(conversation_id, welcome, receipt, true)
+    }
+
+    fn accept_welcome_with_retention(
+        &self,
+        conversation_id: ConversationId,
+        welcome: &MlsWelcome,
+        receipt: &StoredRelayEnvelope,
+        retain_pending_join: bool,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
         let _operation = self
             .operations
             .lock()
@@ -654,7 +765,7 @@ impl ConversationCoordinator {
             {
                 return Err(ConversationCoordinatorError::StateMismatch);
             }
-            return self.finalize_pending_join_unlocked(conversation_id);
+            return self.finalize_pending_join_unlocked(conversation_id, retain_pending_join);
         }
         let proof = pending
             .proof
@@ -698,12 +809,13 @@ impl ConversationCoordinator {
         prepared
             .persist()
             .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        self.finalize_pending_join_unlocked(conversation_id)
+        self.finalize_pending_join_unlocked(conversation_id, retain_pending_join)
     }
 
     fn finalize_pending_join_unlocked(
         &self,
         conversation_id: ConversationId,
+        retain_pending_join: bool,
     ) -> Result<ConversationSummary, ConversationCoordinatorError> {
         let pending = self.store.load_pending_join(conversation_id)?;
         let state = pending
@@ -759,9 +871,11 @@ impl ConversationCoordinator {
             }
             Err(error) => return Err(error.into()),
         }
-        match self.store.delete_pending_join(conversation_id) {
-            Ok(()) | Err(ProfileStoreError::OperationNotFound) => {}
-            Err(error) => return Err(error.into()),
+        if !retain_pending_join {
+            match self.store.delete_pending_join(conversation_id) {
+                Ok(()) | Err(ProfileStoreError::OperationNotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         // Joining is the same explicit act as creating, so delivery starts here too.
         self.store
@@ -772,6 +886,25 @@ impl ConversationCoordinator {
             routing_id: pending.routing_id,
             epoch: state.epoch(),
         })
+    }
+
+    /// Removes a retained pairing join journal after completion is relay-accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile-store error other than an already-removed journal.
+    pub(crate) fn complete_pairing_join(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        match self.store.delete_pending_join(conversation_id) {
+            Ok(()) | Err(ProfileStoreError::OperationNotFound) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Encrypts and journals one outbound application message before transmission.

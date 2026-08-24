@@ -68,6 +68,11 @@ impl<T> ApplicationService<T> {
     pub(crate) fn membership_changed(&self) -> std::sync::Arc<tokio::sync::Notify> {
         self.conversations.membership_changed()
     }
+
+    /// Returns the authenticated relay transport shared by composed daemon services.
+    pub(crate) fn relay_transport(&self) -> Arc<T> {
+        Arc::clone(&self.transport)
+    }
 }
 
 impl<T> Clone for ApplicationService<T> {
@@ -86,9 +91,14 @@ where
 {
     /// Creates an application service sharing one authenticated relay transport.
     pub(crate) fn new(conversations: ConversationCoordinator, transport: T) -> Self {
+        Self::from_shared(conversations, Arc::new(transport))
+    }
+
+    /// Creates an application service over an already shared relay transport.
+    pub(crate) fn from_shared(conversations: ConversationCoordinator, transport: Arc<T>) -> Self {
         Self {
             conversations,
-            transport: Arc::new(transport),
+            transport,
             submissions: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -291,6 +301,33 @@ where
         welcome: MlsWelcome,
         cursor: u64,
     ) -> Result<ConversationSummary, ApplicationServiceError> {
+        self.accept_welcome_with_retention(conversation_id, welcome, cursor, false)
+            .await
+    }
+
+    /// Verifies and accepts a pairing Welcome while retaining its recovery journal
+    /// until pairing completion is relay-accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a request, relay, task, Welcome, profile, or receipt-integrity error.
+    pub(crate) async fn accept_pairing_welcome(
+        &self,
+        conversation_id: ConversationId,
+        welcome: MlsWelcome,
+        cursor: u64,
+    ) -> Result<ConversationSummary, ApplicationServiceError> {
+        self.accept_welcome_with_retention(conversation_id, welcome, cursor, true)
+            .await
+    }
+
+    async fn accept_welcome_with_retention(
+        &self,
+        conversation_id: ConversationId,
+        welcome: MlsWelcome,
+        cursor: u64,
+        retain_pending_join: bool,
+    ) -> Result<ConversationSummary, ApplicationServiceError> {
         let _submission = self.submissions.lock().await;
         let after_cursor = cursor
             .checked_sub(1)
@@ -319,7 +356,11 @@ where
         let receipt = receipt.clone();
         let conversations = self.conversations.clone();
         tokio::task::spawn_blocking(move || {
-            conversations.accept_welcome(conversation_id, &welcome, &receipt)
+            if retain_pending_join {
+                conversations.accept_pairing_welcome(conversation_id, &welcome, &receipt)
+            } else {
+                conversations.accept_welcome(conversation_id, &welcome, &receipt)
+            }
         })
         .await
         .map_err(|_| ApplicationServiceError::Task)?
@@ -752,7 +793,7 @@ where
 /// of a route, so a concurrent reader or an acknowledgment that outlived a crash can
 /// already have advanced it. Only a regressed cursor or a rewritten route contradicts
 /// the relay contract.
-fn validate_acknowledgment(
+pub(crate) fn validate_acknowledgment(
     requested: AcknowledgeRequest,
     effective: AcknowledgeRequest,
 ) -> Result<(), ApplicationServiceError> {
@@ -762,7 +803,7 @@ fn validate_acknowledgment(
     Ok(())
 }
 
-fn validate_replay_page(
+pub(crate) fn validate_replay_page(
     after_cursor: u64,
     page: &ReplayPage,
 ) -> Result<(), ApplicationServiceError> {
