@@ -552,40 +552,38 @@ fn valid_transition(role: PairingRole, current: PairingPhase, next: PairingPhase
     if current == next {
         return !current.is_terminal();
     }
-    match (role, current, next) {
+    matches!(
+        (role, current, next),
         (
             PairingRole::Joiner,
             PairingPhase::JoinerAwaitingInvitation,
             PairingPhase::JoinerAwaitingInviterAuthorization | PairingPhase::Cancelled,
-        )
-        | (
+        ) | (
             PairingRole::Joiner,
             PairingPhase::JoinerAwaitingInviterAuthorization,
             PairingPhase::JoinerAwaitingWelcome | PairingPhase::Cancelled,
-        )
-        | (
+        ) | (
             PairingRole::Joiner,
             PairingPhase::JoinerAwaitingWelcome,
             PairingPhase::Completed | PairingPhase::Cancelled,
-        )
-        | (
+        ) | (
             PairingRole::Inviter,
             PairingPhase::InviterAwaitingAuthorization,
             PairingPhase::InviterAwaitingJoinProof | PairingPhase::Cancelled,
-        )
-        | (
+        ) | (
             PairingRole::Inviter,
             PairingPhase::InviterAwaitingJoinProof,
             PairingPhase::InviterAwaitingCompletion | PairingPhase::Cancelled,
-        )
-        | (
+        ) | (
             PairingRole::Inviter,
             PairingPhase::InviterAwaitingCompletion,
             PairingPhase::Completed | PairingPhase::Compensating,
+        ) | (
+            PairingRole::Inviter,
+            PairingPhase::Compensating,
+            PairingPhase::Cancelled
         )
-        | (PairingRole::Inviter, PairingPhase::Compensating, PairingPhase::Cancelled) => true,
-        _ => false,
-    }
+    )
 }
 
 fn validate_metadata(
