@@ -2,7 +2,6 @@ use super::*;
 
 use KonclaveDomainCore::PairingId;
 
-const MAX_PAIRING_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ACTIVE_PAIRINGS: usize = 32;
 const PAIRING_RECORD_SCOPE: u8 = 1;
 
@@ -650,7 +649,7 @@ fn pairing_phase(value: i64) -> Result<PairingPhase, ProfileStoreError> {
 }
 
 fn validate_state(state: &[u8]) -> Result<(), ProfileStoreError> {
-    if state.is_empty() || state.len() > MAX_PAIRING_CHECKPOINT_BYTES {
+    if state.is_empty() || state.len() > crate::pairing::MAX_PAIRING_STATE_BYTES {
         return Err(ProfileStoreError::InvalidTransition);
     }
     Ok(())

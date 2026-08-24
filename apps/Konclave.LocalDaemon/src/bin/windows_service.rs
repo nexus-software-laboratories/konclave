@@ -16,6 +16,10 @@ mod mcp;
 mod observability;
 #[allow(dead_code)]
 #[cfg(windows)]
+#[path = "../pairing.rs"]
+mod pairing;
+#[allow(dead_code)]
+#[cfg(windows)]
 #[path = "../persistence.rs"]
 mod persistence;
 #[cfg(windows)]
