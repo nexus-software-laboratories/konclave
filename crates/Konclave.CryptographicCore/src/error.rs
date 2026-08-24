@@ -117,6 +117,14 @@ pub enum KonclaveCryptographicError {
     #[error("keyed authentication material is invalid")]
     InvalidKeyMaterial,
 
+    /// A pairing envelope does not authenticate under its pairing and direction.
+    #[error("pairing envelope authentication failed")]
+    PairingAuthenticationFailed,
+
+    /// Pairing plaintext or ciphertext exceeds the finite envelope budget.
+    #[error("pairing payload exceeds {maximum} bytes (actual: {actual})")]
+    PairingPayloadTooLarge { maximum: usize, actual: usize },
+
     /// Domain validation rejected a cryptographic input or result.
     #[error(transparent)]
     Domain(#[from] KonclaveDomainError),
@@ -154,6 +162,8 @@ impl KonclaveCryptographicError {
             Self::RosterMismatch => "mls_roster_mismatch",
             Self::AuthorizationStateUnavailable => "authorization_state_unavailable",
             Self::InvalidKeyMaterial => "invalid_key_material",
+            Self::PairingAuthenticationFailed => "pairing_authentication_failed",
+            Self::PairingPayloadTooLarge { .. } => "pairing_payload_too_large",
             Self::Domain(error) => error.code(),
         }
     }

@@ -10,6 +10,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0003: Relay transport authentication](adr/adr-0003-relay-transport-authentication.md)
 - [ADR 0004: Daemon profile journal](adr/adr-0004-daemon-profile-journal.md)
 - [ADR 0005: Harness-neutral adapter boundary](adr/adr-0005-harness-neutral-adapter-boundary.md)
+- [ADR 0006: Joiner-issued pairing capabilities](adr/adr-0006-joiner-issued-pairing-capabilities.md)
 
 ## Protocol
 

@@ -100,6 +100,10 @@ pub enum KonclaveDomainError {
     /// A replay page is not strictly ordered by durable cursor.
     #[error("replay page cursors must be strictly increasing")]
     InvalidReplayOrder,
+
+    /// A pairing envelope field contradicts its finite stage.
+    #[error("pairing envelope {field} contradicts its stage")]
+    InvalidPairingEnvelope { field: &'static str },
 }
 
 impl KonclaveDomainError {
@@ -128,6 +132,7 @@ impl KonclaveDomainError {
             Self::InvitationAlreadyConsumed => "invitation_already_consumed",
             Self::InvalidExpectedParentEpoch { .. } => "invalid_expected_parent_epoch",
             Self::InvalidReplayOrder => "invalid_replay_order",
+            Self::InvalidPairingEnvelope { .. } => "invalid_pairing_envelope",
         }
     }
 }
