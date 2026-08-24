@@ -16,7 +16,7 @@ export const file_konclave_protocol_v1_pairing: GenFile = /*@__PURE__*/
 
 /**
  * Carries one authenticated, encrypted pairing record.
- * 
+ *
  * The complete clear header is canonical AEAD associated data. Ciphertext therefore
  * cannot be moved to another pairing, role, stage, reply chain, deadline, or nonce.
  *
