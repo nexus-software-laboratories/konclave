@@ -1,8 +1,9 @@
 # Continuous integration
 
-This repository is public. Build, lint, test, and packaging jobs run on
-operator-owned PitCrew runners; container validation runs on free GitHub-hosted
-capacity so a required check never depends on private runner availability.
+This repository is public. Build, lint, and test jobs run on operator-owned PitCrew
+runners. Container and cross-platform release-package validation run on free
+GitHub-hosted capacity so those required checks never depend on private runner
+availability.
 
 ## Runner lanes
 
@@ -12,6 +13,8 @@ capacity so a required check never depends on private runner availability.
   policy checks.
 - `ubuntu-latest` (GitHub-hosted) runs the Community Relay OCI build and
   validation.
+- `ubuntu-latest`, `windows-latest`, `macos-15`, and `macos-15-intel`
+  (GitHub-hosted) build and exercise native unsigned release candidates.
 
 Named PitCrew profiles advertise `linux`, `x64`, and the profile label without
 the broad `self-hosted` label. The default `general-purpose` profile retains
@@ -36,6 +39,23 @@ Hosted container validation inherits the same boundary: it is scheduled by the
 default branch through `pull_request_target` and gated on the same
 same-repository head check, and it never checks out a fork head.
 
+The separate package-validation workflow uses `pull_request` and only
+GitHub-hosted runners with read-only repository permissions. Fork code may execute
+there because it cannot reach PitCrew, credentials, a registry, or a deployment
+target.
+
+## Native package validation
+
+`.github/workflows/package-validation.yml` builds Linux x64, Windows x64, macOS
+Apple-silicon, and macOS Intel binaries. Each lane packages the CLI, daemon,
+standalone relay, platform service files, and built Copilot plugin according to
+`distribution/release-artifacts.json`.
+
+The package gate creates each native archive twice and requires byte-identical output,
+extracts it outside the source tree, runs the packaged CLI, and requires `konclave
+doctor` to recognize the packaged daemon and plugin. Candidates are retained as
+short-lived unsigned workflow artifacts; the workflow does not publish a release.
+
 ## OCI validation
 
 Container validation builds one `linux/amd64` OCI archive for the Community
@@ -51,7 +71,10 @@ does not run the image.
 
 `scripts/ci/Validate-HostedContainerImage.sh` creates a run-scoped
 `docker-container` buildx builder, exports an OCI archive without provenance or
-SBOM attestations, and asserts the archive.
+SBOM attestations, and asserts the archive. Package validation can request a
+deterministically tagged Docker-loadable archive as a second exporter from the same
+build result. That candidate is uploaded before exact cleanup; it is never loaded,
+pushed, or deployed by CI.
 
 ### Bounded local Docker validation
 

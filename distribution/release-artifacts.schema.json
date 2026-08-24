@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://konclave.example.com/schemas/release-artifacts.schema.json",
+  "title": "Konclave release artifact contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "release", "artifacts"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "const": "./release-artifacts.schema.json"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "channel", "signatureStatus"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "channel": {
+          "type": "string",
+          "const": "prerelease"
+        },
+        "signatureStatus": {
+          "type": "string",
+          "const": "unsigned"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 9,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "target",
+          "operatingSystem",
+          "architecture",
+          "archiveFormat",
+          "fileName"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,127}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["client", "relay", "container"]
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "x86_64-unknown-linux-gnu",
+              "x86_64-pc-windows-msvc",
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "linux/amd64"
+            ]
+          },
+          "operatingSystem": {
+            "type": "string",
+            "enum": ["linux", "windows", "macos"]
+          },
+          "architecture": {
+            "type": "string",
+            "enum": ["x64", "arm64"]
+          },
+          "archiveFormat": {
+            "type": "string",
+            "enum": ["tar.gz", "zip", "docker.tar"]
+          },
+          "fileName": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"
+          },
+          "rootDirectory": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"
+          },
+          "image": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "container"
+                }
+              },
+              "required": ["kind"]
+            },
+            "then": {
+              "required": ["image"]
+            },
+            "else": {
+              "required": ["rootDirectory"]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

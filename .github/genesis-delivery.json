@@ -8,6 +8,7 @@
     "CI",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
+    "Package validation",
     "PR title",
     "Review policy"
   ],
@@ -63,7 +64,19 @@
       ]
     }
   ],
-  "componentWorkflows": [],
+  "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/package-validation.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Package validation"
+      ]
+    }
+  ],
   "pullRequestTitle": {
     "pattern": "^(feat|fix|docs|refactor|test|style|build|ci|chore|perf|revert)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: .+$",
     "maxLength": 72

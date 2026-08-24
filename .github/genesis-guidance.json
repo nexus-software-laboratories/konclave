@@ -173,6 +173,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/distribution/installation.md",
+        "title": "Install an unsigned prerelease",
+        "section": "Guides",
+        "order": 10,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/ux-design.md",
         "title": "UX and design resilience",
         "section": "Guides",

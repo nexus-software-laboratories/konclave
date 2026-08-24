@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-    echo 'Usage: Validate-HostedContainerImage.sh <application-root> <image-name>' >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo 'Usage: Validate-HostedContainerImage.sh <application-root> <image-name> [release-reference]' >&2
     exit 2
 fi
 
@@ -34,6 +34,14 @@ container_image_assert_contract "$application_root" "$image_name"
 
 install -d -m 0700 "$CONTAINER_VALIDATION_ROOT"
 archive="$CONTAINER_VALIDATION_ROOT/${image_name}-${architecture}.tar"
+image_reference="local/${image_name}:validation-${run_identity}-${architecture}"
+outputs=(--output "type=oci,dest=$archive")
+release_archive=''
+if [ "$#" -eq 3 ]; then
+    image_reference="$(container_image_release_reference "$image_name" "$3")"
+    release_archive="$CONTAINER_VALIDATION_ROOT/${image_name}-${architecture}-docker.tar"
+    outputs+=(--output "type=docker,dest=$release_archive")
+fi
 
 # An OCI archive export requires the container driver; the default docker driver
 # cannot export one. The builder is named from this run identity, so a concurrent run
@@ -53,11 +61,15 @@ docker buildx build \
     --provenance=false \
     --sbom=false \
     --label "${CONTAINER_VALIDATION_OWNER_LABEL}=${run_identity}" \
-    --tag "local/${image_name}:validation-${run_identity}-${architecture}" \
-    --output "type=oci,dest=$archive" \
+    --tag "$image_reference" \
+    "${outputs[@]}" \
     "$workspace_root"
 
 container_image_assert_archive "$archive" "$architecture"
+if [ -n "$release_archive" ] && [ ! -s "$release_archive" ]; then
+    echo '::error::Docker-loadable release archive was not created.'
+    exit 1
+fi
 container_image_write_summary \
     "$image_name" \
     "$architecture" \

@@ -1,0 +1,101 @@
+{
+  "$schema": "./release-artifacts.schema.json",
+  "schemaVersion": 1,
+  "release": {
+    "version": "0.1.0",
+    "channel": "prerelease",
+    "signatureStatus": "unsigned"
+  },
+  "artifacts": [
+    {
+      "id": "konclave-client-linux-x64",
+      "kind": "client",
+      "target": "x86_64-unknown-linux-gnu",
+      "operatingSystem": "linux",
+      "architecture": "x64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-client-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+      "rootDirectory": "konclave-client-0.1.0-x86_64-unknown-linux-gnu"
+    },
+    {
+      "id": "konclave-relay-linux-x64",
+      "kind": "relay",
+      "target": "x86_64-unknown-linux-gnu",
+      "operatingSystem": "linux",
+      "architecture": "x64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-relay-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+      "rootDirectory": "konclave-relay-0.1.0-x86_64-unknown-linux-gnu"
+    },
+    {
+      "id": "konclave-community-relay-container-linux-amd64",
+      "kind": "container",
+      "target": "linux/amd64",
+      "operatingSystem": "linux",
+      "architecture": "x64",
+      "archiveFormat": "docker.tar",
+      "fileName": "konclave-community-relay-container-0.1.0-linux-amd64.docker.tar",
+      "image": "konclave-community-relay:0.1.0"
+    },
+    {
+      "id": "konclave-client-windows-x64",
+      "kind": "client",
+      "target": "x86_64-pc-windows-msvc",
+      "operatingSystem": "windows",
+      "architecture": "x64",
+      "archiveFormat": "zip",
+      "fileName": "konclave-client-0.1.0-x86_64-pc-windows-msvc.zip",
+      "rootDirectory": "konclave-client-0.1.0-x86_64-pc-windows-msvc"
+    },
+    {
+      "id": "konclave-relay-windows-x64",
+      "kind": "relay",
+      "target": "x86_64-pc-windows-msvc",
+      "operatingSystem": "windows",
+      "architecture": "x64",
+      "archiveFormat": "zip",
+      "fileName": "konclave-relay-0.1.0-x86_64-pc-windows-msvc.zip",
+      "rootDirectory": "konclave-relay-0.1.0-x86_64-pc-windows-msvc"
+    },
+    {
+      "id": "konclave-client-macos-arm64",
+      "kind": "client",
+      "target": "aarch64-apple-darwin",
+      "operatingSystem": "macos",
+      "architecture": "arm64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-client-0.1.0-aarch64-apple-darwin.tar.gz",
+      "rootDirectory": "konclave-client-0.1.0-aarch64-apple-darwin"
+    },
+    {
+      "id": "konclave-relay-macos-arm64",
+      "kind": "relay",
+      "target": "aarch64-apple-darwin",
+      "operatingSystem": "macos",
+      "architecture": "arm64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-relay-0.1.0-aarch64-apple-darwin.tar.gz",
+      "rootDirectory": "konclave-relay-0.1.0-aarch64-apple-darwin"
+    },
+    {
+      "id": "konclave-client-macos-x64",
+      "kind": "client",
+      "target": "x86_64-apple-darwin",
+      "operatingSystem": "macos",
+      "architecture": "x64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-client-0.1.0-x86_64-apple-darwin.tar.gz",
+      "rootDirectory": "konclave-client-0.1.0-x86_64-apple-darwin"
+    },
+    {
+      "id": "konclave-relay-macos-x64",
+      "kind": "relay",
+      "target": "x86_64-apple-darwin",
+      "operatingSystem": "macos",
+      "architecture": "x64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-relay-0.1.0-x86_64-apple-darwin.tar.gz",
+      "rootDirectory": "konclave-relay-0.1.0-x86_64-apple-darwin"
+    }
+  ]
+}

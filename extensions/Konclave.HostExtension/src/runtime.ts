@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   createAdapterRendezvous,
@@ -7,6 +9,16 @@ import {
 } from './adapter/channel.js';
 import { createDeliveryCoordinator } from './adapter/delivery.js';
 import { startDeliveryRuntime, type AdapterIntegration } from './adapter/runtime.js';
+import { resolveDaemonCommand } from './daemon-path.js';
+
+/**
+ * Directory of the running module itself, used to locate a daemon bundled beside
+ * the installed plugin. `import.meta.url` reflects the executing file's real
+ * on-disk location even after esbuild inlines this module into the single
+ * `extension.mjs` bundle, unlike `process.cwd()`, which reflects the caller's
+ * working directory instead.
+ */
+const runtimeModuleDir = dirname(fileURLToPath(import.meta.url));
 
 export interface PromptMessage {
   prompt: string;
@@ -322,9 +334,7 @@ export function createExtensionJoinConfig(
   platform: NodeJS.Platform,
   rendezvous: AdapterRendezvous | null = null,
 ): JoinSessionConfig {
-  const command =
-    environment.KONCLAVE_DAEMON_PATH?.trim() ||
-    (platform === 'win32' ? 'KonclaveLocalDaemon.exe' : 'KonclaveLocalDaemon');
+  const command = resolveDaemonCommand(environment, platform, runtimeModuleDir);
   const daemonEnvironment: Record<string, string> = {
     KONCLAVE_PROFILE_ID: deriveProfileId(environment),
     KONCLAVE_MCP_ALLOW_WRITE: 'true',

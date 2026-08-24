@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/KonclaveLocalDaemon/KonclaveLocalDaemon
+ExecStart=/opt/konclave/bin/KonclaveLocalDaemon
 Restart=on-failure
 DynamicUser=yes
 StateDirectory=KonclaveLocalDaemon
-WorkingDirectory=/opt/KonclaveLocalDaemon
+WorkingDirectory=/opt/konclave
 
 [Install]
 WantedBy=multi-user.target

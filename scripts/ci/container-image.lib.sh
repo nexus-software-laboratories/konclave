@@ -41,6 +41,29 @@ container_image_assert_contract() {
     ' "$config_path" >/dev/null
 }
 
+# Validates one local release reference for a previously validated image name.
+#
+# Registry paths and digests are deliberately excluded: release validation exports a
+# local Docker archive and never gains a push or deployment destination.
+container_image_release_reference() {
+    local image_name="$1"
+    local reference="$2"
+    local tag
+
+    case "$reference" in
+        "${image_name}":*) tag="${reference#"${image_name}:"}" ;;
+        *)
+            echo '::error::Release image reference must use the validated local image name.'
+            return 1
+            ;;
+    esac
+    if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+        echo '::error::Release image tag is invalid.'
+        return 1
+    fi
+    printf '%s\n' "$reference"
+}
+
 # Resolves the single image manifest in an OCI layout archive.
 #
 # A build backend may emit the image manifest directly in index.json or nest it behind

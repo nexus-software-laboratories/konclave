@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
+. (Join-Path $PSScriptRoot '..' 'CargoLock.Functions.ps1')
 $rootPrefix = $ProjectRoot.TrimEnd(
     [IO.Path]::DirectorySeparatorChar,
     [IO.Path]::AltDirectorySeparatorChar
@@ -135,15 +136,9 @@ if ($fixtureDifference.Count -gt 0) {
     throw 'Protocol release fixture set does not exactly match fixtures/protocol/v1.'
 }
 
-$cargoLock = Get-Content -LiteralPath (Join-Path $ProjectRoot 'Cargo.lock') -Raw -Encoding UTF8
-$cargoVersions = @{}
-foreach ($block in [regex]::Split($cargoLock, '(?m)^\[\[package\]\]\s*$')) {
-    $name = [regex]::Match($block, '(?m)^name = "([^"]+)"\s*$')
-    $version = [regex]::Match($block, '(?m)^version = "([^"]+)"\s*$')
-    if ($name.Success -and $version.Success) {
-        $cargoVersions[$name.Groups[1].Value] = $version.Groups[1].Value
-    }
-}
+$cargoVersions = Get-CargoLockedPackageVersions (
+    Join-Path $ProjectRoot 'Cargo.lock'
+)
 foreach ($dependency in $manifest.dependencies.securityCritical) {
     $actual = $cargoVersions[[string]$dependency.name]
     if ($actual -cne [string]$dependency.version) {

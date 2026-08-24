@@ -42,5 +42,6 @@ This map lists the documentation contributed by the selected project shape.
 
 ## Guides
 
+- [Install an unsigned prerelease](distribution/installation.md)
 - [UX and design resilience](ux-design.md)
 - [Impeccable design workflow](impeccable-design.md)

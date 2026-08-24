@@ -1,0 +1,34 @@
+name: konclave-community-relay
+
+services:
+  relay:
+    image: konclave-community-relay:0.1.0
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SERVICE_HTTP_ADDRESS: 0.0.0.0:8080
+      SERVICE_HEALTH_ADDRESS: 127.0.0.1:8080
+      KONCLAVE_RELAY_ACCESS_FILE: /run/secrets/konclave-relay-access.json
+      KONCLAVE_RELAY_DATABASE_PATH: /var/lib/konclave/relay.sqlite
+      KONCLAVE_RELAY_TLS_TERMINATED: "true"
+    ports:
+      - 127.0.0.1:8080:8080
+    secrets:
+      - source: relay-access
+        target: konclave-relay-access.json
+    volumes:
+      - relay-data:/var/lib/konclave
+    tmpfs:
+      - /tmp
+
+secrets:
+  relay-access:
+    file: ${KONCLAVE_RELAY_ACCESS_SOURCE:-./secrets/relay-access.json}
+
+volumes:
+  relay-data:
