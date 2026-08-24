@@ -14,6 +14,10 @@ pub enum KonclaveClientError {
     #[error("relay access credential is invalid")]
     InvalidCredential,
 
+    /// An enrollment bearer credential is malformed or has the wrong size.
+    #[error("relay enrollment credential is invalid")]
+    InvalidEnrollmentCredential,
+
     /// A pairing capability is malformed, non-canonical, expired, or unauthentic.
     #[error("pairing capability is invalid")]
     InvalidPairingCapability,
@@ -70,6 +74,7 @@ impl KonclaveClientError {
         match self {
             Self::InvalidEndpoint => "client_invalid_endpoint",
             Self::InvalidCredential => "client_invalid_credential",
+            Self::InvalidEnrollmentCredential => "client_invalid_enrollment_credential",
             Self::InvalidPairingCapability => "client_invalid_pairing_capability",
             Self::PairingCapabilityTooLarge { .. } => "client_pairing_capability_too_large",
             Self::Timeout => "client_timeout",
