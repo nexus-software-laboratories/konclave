@@ -326,6 +326,10 @@ impl PairingOffer {
     ///
     /// Returns [`KonclaveDomainError::ZeroValue`] when `expires_at_unix_seconds` is
     /// zero.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the signed pairing offer fields remain explicit and atomic"
+    )]
     pub fn new(
         version: ProtocolVersion,
         pairing_id: PairingId,
