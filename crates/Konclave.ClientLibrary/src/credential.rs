@@ -1,12 +1,11 @@
 use KonclaveRelayAuthentication::RelayPrincipalId;
 use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::HeaderValue;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::KonclaveClientError;
 use crate::RelayEndpoint;
+use crate::protected_http::{authorization_header, decode_canonical_credential};
 
 const RELAY_CREDENTIAL_MAGIC: &[u8; 4] = b"KRC1";
 /// Exact-size relay bearer credential retained only by trusted endpoint code.
@@ -39,23 +38,9 @@ impl RelayAccessCredential {
     /// incorrectly sized value. The caller remains responsible for clearing the
     /// source string.
     pub fn from_base64(value: &str) -> Result<Self, KonclaveClientError> {
-        if value.len() != 43 {
-            return Err(KonclaveClientError::InvalidCredential);
-        }
-        let decoded = Zeroizing::new(
-            URL_SAFE_NO_PAD
-                .decode(value)
-                .map_err(|_| KonclaveClientError::InvalidCredential)?,
-        );
-        let canonical = Zeroizing::new(URL_SAFE_NO_PAD.encode(decoded.as_slice()));
-        if canonical.as_str() != value {
-            return Err(KonclaveClientError::InvalidCredential);
-        }
-        let bytes = decoded
-            .as_slice()
-            .try_into()
-            .map_err(|_| KonclaveClientError::InvalidCredential)?;
-        Ok(Self(bytes))
+        decode_canonical_credential(value)
+            .map(Self)
+            .ok_or(KonclaveClientError::InvalidCredential)
     }
 
     /// Seals this credential for one non-empty local profile identifier.
@@ -129,14 +114,7 @@ impl RelayAccessCredential {
     }
 
     pub(crate) fn authorization_header(&self) -> Result<HeaderValue, KonclaveClientError> {
-        let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(self.0));
-        let mut value = Zeroizing::new(Vec::with_capacity(7 + encoded.len()));
-        value.extend_from_slice(b"Bearer ");
-        value.extend_from_slice(encoded.as_bytes());
-        let mut header =
-            HeaderValue::from_bytes(&value).map_err(|_| KonclaveClientError::InvalidCredential)?;
-        header.set_sensitive(true);
-        Ok(header)
+        authorization_header(&self.0).ok_or(KonclaveClientError::InvalidCredential)
     }
 
     fn credential_context(profile_id: &[u8]) -> Result<SecretRecordContext, KonclaveClientError> {

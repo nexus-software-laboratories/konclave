@@ -10,17 +10,11 @@ use KonclaveProtocolContracts::v1::{
     encode_acknowledge_request, encode_relay_envelope, encode_replay_request,
 };
 use async_trait::async_trait;
-use futures_util::StreamExt;
-use reqwest::Response;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 
-use crate::error::stable_relay_code;
+use crate::protected_http::{DEFAULT_OPERATION_TIMEOUT, ProtectedHttpClient};
 use crate::websocket::connect_watch;
 use crate::{KonclaveClientError, RelayAccessCredential, RelayEndpoint, RelayWatchSession};
 
-const PROTOBUF_MEDIA_TYPE: &str = "application/protobuf";
-const ERROR_CODE_HEADER: &str = "x-konclave-error-code";
-const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_WATCH_READ_TIMEOUT: Duration = Duration::from_secs(75);
 const STORED_ENVELOPE_MAX_BYTES: usize = MAX_RELAY_ENVELOPE_BYTES + 32;
 
@@ -52,7 +46,7 @@ pub trait RelayTransport: Send + Sync {
 /// Cloneable outbound HTTP/WebSocket relay client sharing one protected credential.
 #[derive(Clone)]
 pub struct RelayClient {
-    http: reqwest::Client,
+    http: ProtectedHttpClient,
     endpoint: RelayEndpoint,
     credential: Arc<RelayAccessCredential>,
     operation_timeout: Duration,
@@ -68,15 +62,7 @@ impl RelayClient {
         endpoint: RelayEndpoint,
         credential: RelayAccessCredential,
     ) -> Result<Self, KonclaveClientError> {
-        Self::ensure_tls_provider()?;
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .connect_timeout(DEFAULT_OPERATION_TIMEOUT)
-            .timeout(DEFAULT_OPERATION_TIMEOUT)
-            .user_agent(concat!("KonclaveClientLibrary/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| KonclaveClientError::TransportUnavailable)?;
+        let http = ProtectedHttpClient::new(endpoint.clone())?;
         Ok(Self {
             http,
             endpoint,
@@ -85,46 +71,18 @@ impl RelayClient {
         })
     }
 
-    fn ensure_tls_provider() -> Result<(), KonclaveClientError> {
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        }
-        if rustls::crypto::CryptoProvider::get_default().is_some() {
-            Ok(())
-        } else {
-            Err(KonclaveClientError::TransportUnavailable)
-        }
-    }
-
     async fn post(
         &self,
         relative: &str,
         body: Vec<u8>,
         maximum_response_bytes: usize,
     ) -> Result<Vec<u8>, KonclaveClientError> {
-        let url = self.endpoint.http_url(relative)?;
         let authorization = self.credential.authorization_header()?;
-        let response = self
+        Ok(self
             .http
-            .post(url)
-            .header(AUTHORIZATION, authorization)
-            .header(CONTENT_TYPE, PROTOBUF_MEDIA_TYPE)
-            .body(body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
-        if !response.status().is_success() {
-            return Err(relay_rejection(&response));
-        }
-        if response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            != Some(PROTOBUF_MEDIA_TYPE)
-        {
-            return Err(KonclaveClientError::InvalidResponse);
-        }
-        read_bounded(response, maximum_response_bytes).await
+            .post(relative, authorization, body, maximum_response_bytes)
+            .await?
+            .body)
     }
 }
 
@@ -176,55 +134,5 @@ impl RelayTransport for RelayClient {
             DEFAULT_WATCH_READ_TIMEOUT,
         )
         .await
-    }
-}
-
-async fn read_bounded(response: Response, maximum: usize) -> Result<Vec<u8>, KonclaveClientError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > maximum as u64)
-    {
-        return Err(KonclaveClientError::ResponseTooLarge { maximum });
-    }
-    let mut body = Vec::with_capacity(
-        response
-            .content_length()
-            .and_then(|length| usize::try_from(length).ok())
-            .unwrap_or_default()
-            .min(maximum),
-    );
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| KonclaveClientError::TransportUnavailable)?;
-        let next_length = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or(KonclaveClientError::ResponseTooLarge { maximum })?;
-        if next_length > maximum {
-            return Err(KonclaveClientError::ResponseTooLarge { maximum });
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn relay_rejection(response: &Response) -> KonclaveClientError {
-    let relay_code = response
-        .headers()
-        .get(ERROR_CODE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(stable_relay_code)
-        .unwrap_or_else(|| "relay_rejected".to_string());
-    KonclaveClientError::RelayRejected {
-        status: response.status().as_u16(),
-        relay_code,
-    }
-}
-
-fn map_reqwest_error(error: reqwest::Error) -> KonclaveClientError {
-    if error.is_timeout() {
-        KonclaveClientError::Timeout
-    } else {
-        KonclaveClientError::TransportUnavailable
     }
 }

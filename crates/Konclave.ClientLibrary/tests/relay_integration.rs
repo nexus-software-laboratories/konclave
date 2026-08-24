@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use KonclaveClientLibrary::{
-    KonclaveClientError, RelayAccessCredential, RelayClient, RelayEndpoint, RelayTransport,
+    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError, RelayAccessCredential,
+    RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
+    RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayTransport,
 };
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
@@ -19,6 +21,7 @@ use tempfile::TempDir;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use zeroize::Zeroizing;
 
 struct TestServer {
     _directory: TempDir,
@@ -27,13 +30,11 @@ struct TestServer {
     server: JoinHandle<()>,
     route: RoutingId,
     token: [u8; RelayPrincipalId::LENGTH],
+    enrollment_token: Option<Zeroizing<[u8; RelayEnrollmentCredential::LENGTH]>>,
 }
 
 impl TestServer {
     async fn start(wildcard: bool) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("relay.sqlite");
-        let access_path = directory.path().join("access.json");
         let route = RoutingId::from_bytes([8; RoutingId::LENGTH]);
         let token = [7; RelayPrincipalId::LENGTH];
         let principal = RelayPrincipalId::from_access_token(&token);
@@ -42,21 +43,45 @@ impl TestServer {
         } else {
             URL_SAFE_NO_PAD.encode(route.as_bytes())
         };
-        std::fs::write(
-            &access_path,
-            serde_json::to_vec(&json!({
-                "version": 1,
-                "principals": [{
-                    "principal": URL_SAFE_NO_PAD.encode(principal.as_bytes()),
-                    "grants": [{
-                        "route": route_grant,
-                        "permissions": ["send", "replay", "acknowledge"]
-                    }]
+        let access_document = json!({
+            "version": 1,
+            "principals": [{
+                "principal": URL_SAFE_NO_PAD.encode(principal.as_bytes()),
+                "grants": [{
+                    "route": route_grant,
+                    "permissions": ["send", "replay", "acknowledge"]
                 }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+            }]
+        });
+        Self::start_with_access(access_document, None).await
+    }
+
+    async fn start_enrollment() -> Self {
+        let enrollment_token = Zeroizing::new([12; RelayEnrollmentCredential::LENGTH]);
+        let authority =
+            KonclaveRelayAuthentication::RelayEnrollmentAuthorityId::from_enrollment_token(
+                &enrollment_token,
+            );
+        let access_document = json!({
+            "version": 2,
+            "principals": [],
+            "enrollment": {
+                "authority": URL_SAFE_NO_PAD.encode(authority.as_bytes())
+            }
+        });
+        Self::start_with_access(access_document, Some(enrollment_token)).await
+    }
+
+    async fn start_with_access(
+        access_document: serde_json::Value,
+        enrollment_token: Option<Zeroizing<[u8; RelayEnrollmentCredential::LENGTH]>>,
+    ) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("relay.sqlite");
+        let access_path = directory.path().join("access.json");
+        let route = RoutingId::from_bytes([8; RoutingId::LENGTH]);
+        let token = [7; RelayPrincipalId::LENGTH];
+        std::fs::write(&access_path, serde_json::to_vec(&access_document).unwrap()).unwrap();
         let access = StaticRelayAccess::load(&access_path).unwrap();
         let application = RelayApplication::connect(&database_path, access.clone())
             .await
@@ -90,6 +115,7 @@ impl TestServer {
             server,
             route,
             token,
+            enrollment_token,
         }
     }
 
@@ -99,6 +125,16 @@ impl TestServer {
             RelayAccessCredential::from_bytes(self.token),
         )
         .unwrap()
+    }
+
+    fn enrollment_client(&self) -> RelayEnrollmentClient<HttpRelayEnrollmentTransport> {
+        RelayEnrollmentClient::new(
+            HttpRelayEnrollmentTransport::new(
+                RelayEndpoint::parse(&format!("http://{}", self.address)).unwrap(),
+                RelayEnrollmentCredential::from_bytes(**self.enrollment_token.as_ref().unwrap()),
+            )
+            .unwrap(),
+        )
     }
 
     async fn stop(self) {
@@ -145,6 +181,51 @@ async fn client_submits_replays_and_acknowledges_idempotently() {
             .cursor(),
         1
     );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn client_enrolls_and_activates_one_independent_data_plane_principal() {
+    let server = TestServer::start_enrollment().await;
+    let request = RelayEnrollmentRequest::new(
+        ProtocolVersion::application_v1(),
+        EnrollmentRequestId::from_bytes([4; EnrollmentRequestId::LENGTH]),
+        RelayPrincipalId::from_access_token(&server.token),
+    );
+    let enrollment = server.enrollment_client();
+    let wrong_enrollment = RelayEnrollmentClient::new(
+        HttpRelayEnrollmentTransport::new(
+            RelayEndpoint::parse(&format!("http://{}", server.address)).unwrap(),
+            RelayEnrollmentCredential::from_bytes([13; RelayEnrollmentCredential::LENGTH]),
+        )
+        .unwrap(),
+    );
+
+    assert!(matches!(
+        wrong_enrollment.register(request).await.unwrap_err(),
+        KonclaveClientError::RelayRejected {
+            status: 401,
+            ref relay_code
+        } if relay_code == "relay_authentication_failed"
+    ));
+    assert_eq!(
+        enrollment.register(request).await.unwrap().outcome(),
+        RelayEnrollmentOutcome::Registered
+    );
+    assert_eq!(
+        enrollment.register(request).await.unwrap().outcome(),
+        RelayEnrollmentOutcome::AlreadyRegistered
+    );
+    assert_eq!(
+        server
+            .client()
+            .submit(&envelope(server.route, 5, 50))
+            .await
+            .unwrap()
+            .cursor(),
+        1
+    );
+
     server.stop().await;
 }
 

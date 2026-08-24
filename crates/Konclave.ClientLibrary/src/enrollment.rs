@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
+use KonclaveDomainCore::MAX_RELAY_CONTROL_MESSAGE_BYTES;
+use KonclaveProtocolContracts::v1::{
+    decode_relay_enrollment_response, encode_relay_enrollment_request,
+};
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
 use async_trait::async_trait;
 
-use crate::KonclaveClientError;
+use crate::protected_http::ProtectedHttpClient;
+use crate::{KonclaveClientError, RelayEndpoint, RelayEnrollmentCredential};
 
 /// Deployment-specific transport for authenticated relay principal registration.
 #[async_trait]
@@ -17,6 +22,62 @@ pub trait RelayEnrollmentTransport: Send + Sync {
         &self,
         request: RelayEnrollmentRequest,
     ) -> Result<RelayEnrollmentResponse, KonclaveClientError>;
+}
+
+/// Authenticated self-hosted relay enrollment over bounded HTTP.
+#[derive(Clone)]
+pub struct HttpRelayEnrollmentTransport {
+    http: ProtectedHttpClient,
+    credential: Arc<RelayEnrollmentCredential>,
+}
+
+impl HttpRelayEnrollmentTransport {
+    /// Creates a transport with redirects and automatic proxy discovery disabled.
+    ///
+    /// The endpoint must already satisfy the shared TLS-or-loopback policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error when the underlying HTTP client cannot initialize.
+    pub fn new(
+        endpoint: RelayEndpoint,
+        credential: RelayEnrollmentCredential,
+    ) -> Result<Self, KonclaveClientError> {
+        Ok(Self {
+            http: ProtectedHttpClient::new(endpoint)?,
+            credential: Arc::new(credential),
+        })
+    }
+}
+
+#[async_trait]
+impl RelayEnrollmentTransport for HttpRelayEnrollmentTransport {
+    async fn register(
+        &self,
+        request: RelayEnrollmentRequest,
+    ) -> Result<RelayEnrollmentResponse, KonclaveClientError> {
+        let body = encode_relay_enrollment_request(&request)?;
+        let authorization = self.credential.authorization_header()?;
+        let response = self
+            .http
+            .post(
+                "v1/enrollment/principals",
+                authorization,
+                body,
+                MAX_RELAY_CONTROL_MESSAGE_BYTES,
+            )
+            .await?;
+        let enrollment = decode_relay_enrollment_response(&response.body)?;
+        let expected_status = match enrollment.outcome() {
+            KonclaveRelayAuthentication::RelayEnrollmentOutcome::Registered => 201,
+            KonclaveRelayAuthentication::RelayEnrollmentOutcome::AlreadyRegistered => 200,
+            _ => return Err(KonclaveClientError::InvalidEnrollmentResponse),
+        };
+        if response.status != expected_status {
+            return Err(KonclaveClientError::InvalidEnrollmentResponse);
+        }
+        Ok(enrollment)
+    }
 }
 
 /// Validates deployment enrollment responses against their exact request identity.
