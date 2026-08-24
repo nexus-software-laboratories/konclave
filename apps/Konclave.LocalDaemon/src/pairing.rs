@@ -389,11 +389,11 @@ impl PairingOperationState {
         output
             .push(u8::try_from(self.observations.len()).map_err(|_| PairingStateError::Capacity)?);
         for encoded in &observations {
-            append_bytes(&mut output, &encoded, MAX_ENCODED_STORED_ENVELOPE_BYTES)?;
+            append_bytes(&mut output, encoded, MAX_ENCODED_STORED_ENVELOPE_BYTES)?;
         }
         output.push(u8::try_from(self.outbounds.len()).map_err(|_| PairingStateError::Capacity)?);
         for (outbound, encoded) in self.outbounds.iter().zip(&outbounds) {
-            append_bytes(&mut output, &encoded, MAX_ENCODED_ENVELOPE_BYTES)?;
+            append_bytes(&mut output, encoded, MAX_ENCODED_ENVELOPE_BYTES)?;
             match outbound.accepted_cursor {
                 Some(cursor) => {
                     output.push(1);
