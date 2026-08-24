@@ -16,6 +16,7 @@ dependencies = [
  "futures-util",
  "log",
  "reqwest",
+ "rustix",
  "rustls",
  "thiserror",
  "tokio",
