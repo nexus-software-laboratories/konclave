@@ -12,6 +12,10 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0005: Separate harness delivery from the daemon through an outbound local adapter channel](../adr/adr-0005-harness-neutral-adapter-boundary.md)
 - [ADR 0006: Pair sessions through joiner-issued, self-authenticating capabilities](../adr/adr-0006-joiner-issued-pairing-capabilities.md)
 
+## Proposed records
+
+- [ADR 0007: Provision per-profile relay principals through an outbound enrollment control plane](../adr/adr-0007-outbound-relay-principal-enrollment.md)
+
 ## When to write one
 
 Use an ADR when a choice changes system structure, technology, integration boundaries,
