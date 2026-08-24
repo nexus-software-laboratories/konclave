@@ -6,6 +6,7 @@ license = "Apache-2.0"
 rust-version = "1.85"
 
 [dependencies]
+KonclaveCryptographicCore = { path = "../Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
 KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }

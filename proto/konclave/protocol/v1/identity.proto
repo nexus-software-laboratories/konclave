@@ -67,4 +67,6 @@ message PairingOffer {
   uint64 expires_at_unix_seconds = 6;
   // Exactly 64 bytes for Ed25519 in protocol v1.
   bytes device_signature = 7;
+  // Binds the offer to its secret-derived route and normalized relay endpoint.
+  PairingContextHash context_hash = 8;
 }

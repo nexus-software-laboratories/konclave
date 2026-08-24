@@ -10,6 +10,7 @@ rust-version = "1.85"
 cargo-fuzz = true
 
 [dependencies]
+KonclaveClientLibrary = { path = "../crates/Konclave.ClientLibrary" }
 KonclaveCryptographicCore = { path = "../crates/Konclave.CryptographicCore" }
 KonclaveProtocolContracts = { path = "../crates/Konclave.ProtocolContracts" }
 KonclaveSecretStorage = { path = "../crates/Konclave.SecretStorage", default-features = false }

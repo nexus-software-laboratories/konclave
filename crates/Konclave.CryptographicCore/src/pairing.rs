@@ -1,9 +1,11 @@
 use aws_lc_rs::hkdf::{self, KeyType};
+use aws_lc_rs::{digest, digest::SHA256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use KonclaveDomainCore::{
-    MAX_PAIRING_CIPHERTEXT_BYTES, PairingEnvelope, PairingId, PairingMessageId, PairingNonce,
-    PairingSenderRole, PairingStage, ProtocolVersion, RoutingId,
+    MAX_PAIRING_CIPHERTEXT_BYTES, MAX_PAIRING_RELAY_ENDPOINT_BYTES, PairingContextHash,
+    PairingEnvelope, PairingId, PairingMessageId, PairingNonce, PairingSenderRole, PairingStage,
+    ProtocolVersion, RoutingId,
 };
 use KonclaveSecretStorage::{
     AUTHENTICATED_CIPHER_KEY_BYTES, AuthenticatedCipher, AuthenticatedCiphertext,
@@ -21,6 +23,7 @@ const ROUTING_KEY_INFO: &[u8] = b"konclave-pairing-routing-id-v1\0";
 const JOINER_KEY_INFO: &[u8] = b"konclave-pairing-joiner-key-v1\0";
 const INVITER_KEY_INFO: &[u8] = b"konclave-pairing-inviter-key-v1\0";
 const ENVELOPE_AAD_DOMAIN: &[u8] = b"konclave-pairing-envelope-aad-v1\0";
+const CAPABILITY_CONTEXT_DOMAIN: &[u8] = b"konclave-pairing-capability-context-v1\0";
 
 /// Random bearer secret transferred in one pairing capability.
 ///
@@ -46,6 +49,14 @@ impl PairingSecret {
     #[must_use]
     pub const fn from_bytes(bytes: [u8; PAIRING_SECRET_BYTES]) -> Self {
         Self(bytes)
+    }
+
+    /// Appends the secret to an explicitly secret-bearing pairing capability buffer.
+    ///
+    /// This is the only public export path. The destination must be zeroized by the
+    /// caller after it has encoded the transferable bearer capability.
+    pub fn write_capability_bytes(&self, destination: &mut Vec<u8>) {
+        destination.extend_from_slice(&self.0);
     }
 
     pub(crate) const fn as_bytes(&self) -> &[u8; PAIRING_SECRET_BYTES] {
@@ -85,6 +96,54 @@ impl PairingKeySchedule {
             joiner_cipher: AuthenticatedCipher::new(&joiner_key),
             inviter_cipher: AuthenticatedCipher::new(&inviter_key),
         })
+    }
+
+    /// Hashes the secret-derived route and normalized relay endpoint into an offer binding.
+    ///
+    /// The joiner's root signature covers this value. Replacing the pairing secret changes
+    /// the derived route, and replacing the relay endpoint changes its canonical bytes, so
+    /// either mutation invalidates the otherwise-public offer signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns a domain error when the endpoint is empty or exceeds the pairing capability
+    /// bound.
+    pub fn pairing_context_hash(
+        pairing_id: PairingId,
+        routing_id: RoutingId,
+        relay_endpoint: &str,
+    ) -> Result<PairingContextHash, KonclaveCryptographicError> {
+        if relay_endpoint.is_empty() || relay_endpoint.len() > MAX_PAIRING_RELAY_ENDPOINT_BYTES {
+            return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+                field: "pairing_relay_endpoint",
+                minimum: 1,
+                maximum: MAX_PAIRING_RELAY_ENDPOINT_BYTES,
+                actual: relay_endpoint.len(),
+            }
+            .into());
+        }
+        let endpoint_length = u16::try_from(relay_endpoint.len()).map_err(|_| {
+            KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+                field: "pairing_relay_endpoint",
+                minimum: 1,
+                maximum: MAX_PAIRING_RELAY_ENDPOINT_BYTES,
+                actual: relay_endpoint.len(),
+            }
+        })?;
+        let mut input = Vec::with_capacity(
+            CAPABILITY_CONTEXT_DOMAIN.len()
+                + PairingId::LENGTH
+                + RoutingId::LENGTH
+                + 2
+                + relay_endpoint.len(),
+        );
+        input.extend_from_slice(CAPABILITY_CONTEXT_DOMAIN);
+        input.extend_from_slice(pairing_id.as_bytes());
+        input.extend_from_slice(routing_id.as_bytes());
+        input.extend_from_slice(&endpoint_length.to_be_bytes());
+        input.extend_from_slice(relay_endpoint.as_bytes());
+        let hash = digest::digest(&SHA256, &input);
+        PairingContextHash::from_slice(hash.as_ref()).map_err(Into::into)
     }
 
     /// Returns the pseudorandom relay route for this pairing.

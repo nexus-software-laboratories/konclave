@@ -1,3 +1,4 @@
+use KonclaveCryptographicCore::KonclaveCryptographicError;
 use KonclaveProtocolContracts::KonclaveProtocolError;
 use thiserror::Error;
 
@@ -12,6 +13,14 @@ pub enum KonclaveClientError {
     /// A bearer credential is malformed or has the wrong size.
     #[error("relay access credential is invalid")]
     InvalidCredential,
+
+    /// A pairing capability is malformed, non-canonical, expired, or unauthentic.
+    #[error("pairing capability is invalid")]
+    InvalidPairingCapability,
+
+    /// A pairing capability exceeds its transfer bound.
+    #[error("pairing capability exceeds {maximum} bytes (actual: {actual})")]
+    PairingCapabilityTooLarge { maximum: usize, actual: usize },
 
     /// An outbound operation exceeded its deadline.
     #[error("relay operation timed out")]
@@ -44,6 +53,10 @@ pub enum KonclaveClientError {
     /// Protocol encoding or decoding rejected a bounded message.
     #[error(transparent)]
     Protocol(#[from] KonclaveProtocolError),
+
+    /// Cryptographic validation or generation rejected a pairing operation.
+    #[error(transparent)]
+    Cryptographic(#[from] KonclaveCryptographicError),
 }
 
 impl KonclaveClientError {
@@ -53,6 +66,8 @@ impl KonclaveClientError {
         match self {
             Self::InvalidEndpoint => "client_invalid_endpoint",
             Self::InvalidCredential => "client_invalid_credential",
+            Self::InvalidPairingCapability => "client_invalid_pairing_capability",
+            Self::PairingCapabilityTooLarge { .. } => "client_pairing_capability_too_large",
             Self::Timeout => "client_timeout",
             Self::TransportUnavailable => "client_transport_unavailable",
             Self::ResponseTooLarge { .. } => "client_response_too_large",
@@ -61,6 +76,7 @@ impl KonclaveClientError {
             Self::WatchClosed => "client_watch_closed",
             Self::WatchRejected { relay_code, .. } => relay_code,
             Self::Protocol(error) => error.code(),
+            Self::Cryptographic(error) => error.code(),
         }
     }
 }

@@ -1,8 +1,9 @@
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeviceCredentialBinding, Ed25519PublicKey, EnvelopeId, Invitation, InvitationNonce, Member,
-    MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId, PairingId,
-    PairingOffer, ProtocolVersion, RemoveMember, RoutingId, SignatureScheme,
+    MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId,
+    PairingContextHash, PairingId, PairingOffer, ProtocolVersion, RemoveMember, RoutingId,
+    SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
@@ -715,11 +716,20 @@ fn pairing_id(value: u8) -> PairingId {
     PairingId::from_bytes([value; PairingId::LENGTH])
 }
 
+fn pairing_context(value: u8) -> PairingContextHash {
+    PairingContextHash::from_bytes([value; PairingContextHash::LENGTH])
+}
+
 #[test]
 fn a_pairing_offer_authenticates_without_prior_knowledge_of_the_device() {
     let joiner = DeviceIdentity::generate().unwrap();
     let offer = joiner
-        .offer_pairing(pairing_id(1), ConversationRole::Member, PAIRING_EXPIRY)
+        .offer_pairing(
+            pairing_id(1),
+            ConversationRole::Member,
+            PAIRING_EXPIRY,
+            pairing_context(1),
+        )
         .unwrap();
 
     // Nothing about the joiner is supplied to verification. The offer stands on its
@@ -735,7 +745,12 @@ fn a_pairing_offer_claiming_another_device_is_rejected() {
     let joiner = DeviceIdentity::generate().unwrap();
     let other = DeviceIdentity::generate().unwrap();
     let authentic = joiner
-        .offer_pairing(pairing_id(2), ConversationRole::Member, PAIRING_EXPIRY)
+        .offer_pairing(
+            pairing_id(2),
+            ConversationRole::Member,
+            PAIRING_EXPIRY,
+            pairing_context(2),
+        )
         .unwrap();
 
     // The signature is real and the key is real, but the offer names someone else.
@@ -747,6 +762,7 @@ fn a_pairing_offer_claiming_another_device_is_rejected() {
         authentic.device_root_public_key(),
         authentic.requested_role(),
         authentic.expires_at_unix_seconds(),
+        authentic.context_hash(),
         authentic.device_signature(),
     )
     .unwrap();
@@ -761,7 +777,12 @@ fn a_pairing_offer_claiming_another_device_is_rejected() {
 fn a_pairing_offer_is_bound_to_its_exchange_role_and_window() {
     let joiner = DeviceIdentity::generate().unwrap();
     let offer = joiner
-        .offer_pairing(pairing_id(3), ConversationRole::Member, PAIRING_EXPIRY)
+        .offer_pairing(
+            pairing_id(3),
+            ConversationRole::Member,
+            PAIRING_EXPIRY,
+            pairing_context(3),
+        )
         .unwrap();
 
     // Every signed field is load bearing: moving an offer to another exchange, or
@@ -774,6 +795,7 @@ fn a_pairing_offer_is_bound_to_its_exchange_role_and_window() {
             offer.device_root_public_key(),
             offer.requested_role(),
             offer.expires_at_unix_seconds(),
+            offer.context_hash(),
             offer.device_signature(),
         )
         .unwrap(),
@@ -784,6 +806,7 @@ fn a_pairing_offer_is_bound_to_its_exchange_role_and_window() {
             offer.device_root_public_key(),
             ConversationRole::Administrator,
             offer.expires_at_unix_seconds(),
+            offer.context_hash(),
             offer.device_signature(),
         )
         .unwrap(),
@@ -794,6 +817,18 @@ fn a_pairing_offer_is_bound_to_its_exchange_role_and_window() {
             offer.device_root_public_key(),
             offer.requested_role(),
             offer.expires_at_unix_seconds() + 1,
+            offer.context_hash(),
+            offer.device_signature(),
+        )
+        .unwrap(),
+        PairingOffer::new(
+            offer.version(),
+            offer.pairing_id(),
+            offer.device_id(),
+            offer.device_root_public_key(),
+            offer.requested_role(),
+            offer.expires_at_unix_seconds(),
+            pairing_context(4),
             offer.device_signature(),
         )
         .unwrap(),
@@ -814,7 +849,12 @@ fn a_pairing_offer_is_bound_to_its_exchange_role_and_window() {
 fn a_pairing_offer_discloses_no_conversation() {
     let joiner = DeviceIdentity::generate().unwrap();
     let offer = joiner
-        .offer_pairing(pairing_id(5), ConversationRole::Member, PAIRING_EXPIRY)
+        .offer_pairing(
+            pairing_id(5),
+            ConversationRole::Member,
+            PAIRING_EXPIRY,
+            pairing_context(5),
+        )
         .unwrap();
 
     // An offer travels in a capability a human may paste around before anyone has
