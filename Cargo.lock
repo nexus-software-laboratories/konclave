@@ -20,6 +20,7 @@ name = "KonclaveClientLibrary"
 version = "0.1.0"
 dependencies = [
  "KonclaveCommunityRelay",
+ "KonclaveCryptographicCore",
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
  "KonclaveRelayCore",

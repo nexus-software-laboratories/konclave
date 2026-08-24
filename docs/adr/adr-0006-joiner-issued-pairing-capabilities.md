@@ -90,11 +90,13 @@ root. The offer binds:
 - a fresh pairing identifier;
 - the claimed device identifier and its root public key;
 - the requested role; and
-- an absolute authorization deadline.
+- an absolute authorization deadline; and
+- a hash of the secret-derived route and normalized relay endpoint.
 
 Verification re-derives the claimed `DeviceId` from the included public key and verifies
-the signature over every field. The role is a request; the inviter chooses the role it
-grants in the existing signed invitation.
+the signature over every field. The context hash prevents a public offer from being
+recombined with an attacker-chosen secret or relay endpoint. The role is a request; the
+inviter chooses the role it grants in the existing signed invitation.
 
 The transferable capability contains the offer, a 256-bit random pairing secret, the
 deadline, and the relay endpoint identifier needed to reject accidental cross-relay

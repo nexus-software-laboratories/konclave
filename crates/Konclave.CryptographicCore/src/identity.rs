@@ -1,7 +1,8 @@
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
     Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
-    MessageId, NotificationId, PairingOffer, ProtocolVersion, RoutingId, SignatureScheme,
+    MessageId, NotificationId, PairingContextHash, PairingOffer, ProtocolVersion, RoutingId,
+    SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -316,6 +317,7 @@ impl DeviceIdentity {
         pairing_id: KonclaveDomainCore::PairingId,
         requested_role: ConversationRole,
         expires_at_unix_seconds: u64,
+        context_hash: PairingContextHash,
     ) -> Result<PairingOffer, KonclaveCryptographicError> {
         let cipher_suite = cipher_suite(&self.provider)?;
         let canonical = canonical_pairing_offer(
@@ -325,6 +327,7 @@ impl DeviceIdentity {
             self.public_key,
             requested_role,
             expires_at_unix_seconds,
+            context_hash,
         );
         let signature = cipher_suite
             .sign(&self.secret_key, &canonical)
@@ -336,6 +339,7 @@ impl DeviceIdentity {
             self.public_key,
             requested_role,
             expires_at_unix_seconds,
+            context_hash,
             Ed25519Signature::from_slice(&signature)?,
         )?)
     }
@@ -676,6 +680,7 @@ pub fn verify_pairing_offer(
         offer.device_root_public_key(),
         offer.requested_role(),
         offer.expires_at_unix_seconds(),
+        offer.context_hash(),
     );
     let public_key = SignaturePublicKey::new_slice(offer.device_root_public_key().as_bytes());
     cipher_suite
@@ -801,6 +806,7 @@ fn canonical_pairing_offer(
     device_root_public_key: Ed25519PublicKey,
     requested_role: ConversationRole,
     expires_at_unix_seconds: u64,
+    context_hash: PairingContextHash,
 ) -> Vec<u8> {
     let mut output = Vec::with_capacity(128);
     output.extend_from_slice(PAIRING_OFFER_DOMAIN);
@@ -810,6 +816,7 @@ fn canonical_pairing_offer(
     output.extend_from_slice(device_root_public_key.as_bytes());
     output.push(role_code(requested_role));
     output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
+    output.extend_from_slice(context_hash.as_bytes());
     output
 }
 

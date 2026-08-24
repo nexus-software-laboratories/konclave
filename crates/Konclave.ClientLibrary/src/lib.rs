@@ -7,12 +7,14 @@ mod credential;
 mod endpoint;
 mod error;
 mod http;
+mod pairing;
 mod websocket;
 
 pub use credential::RelayAccessCredential;
 pub use endpoint::RelayEndpoint;
 pub use error::KonclaveClientError;
 pub use http::{RelayClient, RelayTransport};
+pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
 pub use websocket::RelayWatchSession;
 
 #[cfg(test)]

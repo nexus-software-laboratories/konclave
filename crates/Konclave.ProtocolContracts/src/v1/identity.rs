@@ -7,9 +7,10 @@ use crate::KonclaveProtocolError;
 use crate::v1::common::{
     decode_bounded, device_id_from_wire, device_id_to_wire, encode_bounded,
     invitation_id_from_wire, invitation_id_to_wire, nonce_from_bytes, nonce_to_bytes,
-    pairing_id_from_wire, pairing_id_to_wire, public_key_from_bytes, public_key_to_bytes,
-    role_from_wire, role_to_wire, routing_id_from_wire, routing_id_to_wire, signature_from_bytes,
-    signature_to_bytes, version_from_wire, version_to_wire,
+    pairing_context_hash_from_wire, pairing_context_hash_to_wire, pairing_id_from_wire,
+    pairing_id_to_wire, public_key_from_bytes, public_key_to_bytes, role_from_wire, role_to_wire,
+    routing_id_from_wire, routing_id_to_wire, signature_from_bytes, signature_to_bytes,
+    version_from_wire, version_to_wire,
 };
 use crate::wire::v1 as wire;
 
@@ -108,6 +109,7 @@ fn pairing_offer_to_wire(value: &PairingOffer) -> wire::PairingOffer {
         requested_role: role_to_wire(value.requested_role()),
         expires_at_unix_seconds: value.expires_at_unix_seconds(),
         device_signature: signature_to_bytes(value.device_signature()),
+        context_hash: Some(pairing_context_hash_to_wire(value.context_hash())),
     }
 }
 
@@ -121,6 +123,7 @@ fn pairing_offer_from_wire(
         public_key_from_bytes(&value.device_root_public_key)?,
         role_from_wire(value.requested_role)?,
         value.expires_at_unix_seconds,
+        pairing_context_hash_from_wire(value.context_hash)?,
         signature_from_bytes(&value.device_signature)?,
     )?)
 }

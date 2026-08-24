@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/common.proto.
  */
 export const file_konclave_protocol_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("CiFrb25jbGF2ZS9wcm90b2NvbC92MS9jb21tb24ucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIi8KD1Byb3RvY29sVmVyc2lvbhINCgVtYWpvchgBIAEoDRINCgVtaW5vchgCIAEoDSIZCghEZXZpY2VJZBINCgV2YWx1ZRgBIAEoDCIfCg5Db252ZXJzYXRpb25JZBINCgV2YWx1ZRgBIAEoDCIaCglNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiGwoKRW52ZWxvcGVJZBINCgV2YWx1ZRgBIAEoDCIdCgxJbnZpdGF0aW9uSWQSDQoFdmFsdWUYASABKAwiGgoJUGFpcmluZ0lkEg0KBXZhbHVlGAEgASgMIiEKEFBhaXJpbmdNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiGgoJUm91dGluZ0lkEg0KBXZhbHVlGAEgASgMKngKEENvbnZlcnNhdGlvblJvbGUSIQodQ09OVkVSU0FUSU9OX1JPTEVfVU5TUEVDSUZJRUQQABIjCh9DT05WRVJTQVRJT05fUk9MRV9BRE1JTklTVFJBVE9SEAESHAoYQ09OVkVSU0FUSU9OX1JPTEVfTUVNQkVSEAJiBnByb3RvMw");
+  fileDesc("CiFrb25jbGF2ZS9wcm90b2NvbC92MS9jb21tb24ucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIi8KD1Byb3RvY29sVmVyc2lvbhINCgVtYWpvchgBIAEoDRINCgVtaW5vchgCIAEoDSIZCghEZXZpY2VJZBINCgV2YWx1ZRgBIAEoDCIfCg5Db252ZXJzYXRpb25JZBINCgV2YWx1ZRgBIAEoDCIaCglNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiGwoKRW52ZWxvcGVJZBINCgV2YWx1ZRgBIAEoDCIdCgxJbnZpdGF0aW9uSWQSDQoFdmFsdWUYASABKAwiGgoJUGFpcmluZ0lkEg0KBXZhbHVlGAEgASgMIiEKEFBhaXJpbmdNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiIwoSUGFpcmluZ0NvbnRleHRIYXNoEg0KBXZhbHVlGAEgASgMIhoKCVJvdXRpbmdJZBINCgV2YWx1ZRgBIAEoDCp4ChBDb252ZXJzYXRpb25Sb2xlEiEKHUNPTlZFUlNBVElPTl9ST0xFX1VOU1BFQ0lGSUVEEAASIwofQ09OVkVSU0FUSU9OX1JPTEVfQURNSU5JU1RSQVRPUhABEhwKGENPTlZFUlNBVElPTl9ST0xFX01FTUJFUhACYgZwcm90bzM");
 
 /**
  * Identifies one version of a Konclave protocol layer.
@@ -180,6 +180,25 @@ export const PairingMessageIdSchema: GenMessage<PairingMessageId> = /*@__PURE__*
   messageDesc(file_konclave_protocol_v1_common, 7);
 
 /**
+ * @generated from message konclave.protocol.v1.PairingContextHash
+ */
+export type PairingContextHash = Message<"konclave.protocol.v1.PairingContextHash"> & {
+  /**
+   * Exactly 32 SHA-256 bytes in protocol v1.
+   *
+   * @generated from field: bytes value = 1;
+   */
+  value: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.PairingContextHash.
+ * Use `create(PairingContextHashSchema)` to create a new message.
+ */
+export const PairingContextHashSchema: GenMessage<PairingContextHash> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_common, 8);
+
+/**
  * Identifies one opaque relay route.
  *
  * @generated from message konclave.protocol.v1.RoutingId
@@ -198,7 +217,7 @@ export type RoutingId = Message<"konclave.protocol.v1.RoutingId"> & {
  * Use `create(RoutingIdSchema)` to create a new message.
  */
 export const RoutingIdSchema: GenMessage<RoutingId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 8);
+  messageDesc(file_konclave_protocol_v1_common, 9);
 
 /**
  * Defines the application authorization assigned to a conversation member.

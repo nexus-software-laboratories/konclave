@@ -116,6 +116,12 @@ define_fixed_bytes!(
     "pairing_nonce"
 );
 define_fixed_bytes!(
+    /// Hash binding one signed offer to its secret-derived route and relay endpoint.
+    PairingContextHash,
+    32,
+    "pairing_context_hash"
+);
+define_fixed_bytes!(
     /// Opaque identifier used only for relay routing.
     RoutingId,
     32,

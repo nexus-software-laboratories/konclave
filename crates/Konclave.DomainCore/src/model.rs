@@ -5,7 +5,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
-    MessageId, PairingId, PairingMessageId, PairingNonce, RoutingId,
+    MessageId, PairingContextHash, PairingId, PairingMessageId, PairingNonce, RoutingId,
 };
 
 /// Current Konclave application protocol major version.
@@ -31,6 +31,8 @@ pub const MAX_MLS_KEY_PACKAGE_BYTES: usize = 64 * 1024;
 /// Pairing stages can carry bounded MLS material, including a Welcome, so they use
 /// the relay payload budget while reserving fixed framing headroom.
 pub const MAX_PAIRING_CIPHERTEXT_BYTES: usize = MAX_RELAY_PAYLOAD_BYTES - 1024;
+/// Maximum normalized relay endpoint bytes bound into a pairing capability.
+pub const MAX_PAIRING_RELAY_ENDPOINT_BYTES: usize = 2 * 1024;
 const MIN_PAIRING_CIPHERTEXT_BYTES: usize = 16;
 /// Maximum number of envelopes returned by one replay page.
 pub const MAX_REPLAY_PAGE_SIZE: usize = 100;
@@ -309,6 +311,7 @@ pub struct PairingOffer {
     device_root_public_key: Ed25519PublicKey,
     requested_role: ConversationRole,
     expires_at_unix_seconds: u64,
+    context_hash: PairingContextHash,
     device_signature: Ed25519Signature,
 }
 
@@ -330,6 +333,7 @@ impl PairingOffer {
         device_root_public_key: Ed25519PublicKey,
         requested_role: ConversationRole,
         expires_at_unix_seconds: u64,
+        context_hash: PairingContextHash,
         device_signature: Ed25519Signature,
     ) -> Result<Self, KonclaveDomainError> {
         require_positive(expires_at_unix_seconds, "expires_at_unix_seconds")?;
@@ -340,6 +344,7 @@ impl PairingOffer {
             device_root_public_key,
             requested_role,
             expires_at_unix_seconds,
+            context_hash,
             device_signature,
         })
     }
@@ -381,6 +386,12 @@ impl PairingOffer {
     #[must_use]
     pub const fn expires_at_unix_seconds(&self) -> u64 {
         self.expires_at_unix_seconds
+    }
+
+    /// Returns the signed binding to the secret-derived route and relay endpoint.
+    #[must_use]
+    pub const fn context_hash(&self) -> PairingContextHash {
+        self.context_hash
     }
 
     /// Returns the device signature over the canonical offer.

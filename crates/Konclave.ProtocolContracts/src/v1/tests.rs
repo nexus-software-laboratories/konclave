@@ -380,6 +380,7 @@ fn pairing_offer_fixture() -> KonclaveDomainCore::PairingOffer {
         KonclaveDomainCore::Ed25519PublicKey::from_bytes([5; 32]),
         KonclaveDomainCore::ConversationRole::Member,
         1_700_000_000,
+        KonclaveDomainCore::PairingContextHash::from_bytes([7; 32]),
         KonclaveDomainCore::Ed25519Signature::from_bytes([6; 64]),
     )
     .unwrap()
@@ -402,6 +403,7 @@ fn pairing_offer_round_trips() {
         decoded.expires_at_unix_seconds(),
         offer.expires_at_unix_seconds()
     );
+    assert_eq!(decoded.context_hash(), offer.context_hash());
     assert_eq!(decoded.device_signature(), offer.device_signature());
 }
 
