@@ -3,6 +3,12 @@ import { describe, expect, it } from 'vitest';
 
 import { decodeApplicationMessage, encodeApplicationMessage } from '../src/application.js';
 import {
+  decodeRelayEnrollmentRequest,
+  decodeRelayEnrollmentResponse,
+  encodeRelayEnrollmentRequest,
+  encodeRelayEnrollmentResponse,
+} from '../src/enrollment.js';
+import {
   bytesEqual,
   bytesKey,
   encodeBounded,
@@ -49,6 +55,7 @@ import {
   encodeStoredRelayEnvelope,
 } from '../src/relay.js';
 import { ConversationRole } from '../src/generated/konclave/protocol/v1/common_pb.js';
+import { RelayEnrollmentOutcome } from '../src/generated/konclave/protocol/v1/enrollment_pb.js';
 import {
   ApplicationMessageSchema,
   TextContentSchema,
@@ -62,6 +69,8 @@ import {
   bytes,
   conversationState,
   credential,
+  enrollmentRequest,
+  enrollmentResponse,
   invitation,
   joinProof,
   membershipChange,
@@ -357,6 +366,13 @@ describe('relay contracts', () => {
     expect(
       encodeRelayEnvelope(
         relayEnvelope({
+          deliveryClass: DeliveryClass.PAIRING,
+        }),
+      ),
+    ).toBeInstanceOf(Uint8Array);
+    expect(
+      encodeRelayEnvelope(
+        relayEnvelope({
           deliveryClass: DeliveryClass.GROUP_PROPOSAL,
           expectedParentEpoch: 2n,
         }),
@@ -382,7 +398,7 @@ describe('relay contracts', () => {
     if (deliveryClassOffset < 0) {
       throw new Error('relay fixture does not contain its delivery class');
     }
-    unknownDeliveryClass[deliveryClassOffset + 1] = 6;
+    unknownDeliveryClass[deliveryClassOffset + 1] = 7;
     expectCode(() => decodeRelayEnvelope(unknownDeliveryClass), protocolErrorCodes.unsupportedEnum);
     expectCode(
       () =>
@@ -411,6 +427,49 @@ describe('relay contracts', () => {
       () => encodeRelayEnvelope(relayEnvelope({ payloadLength: MAX_RELAY_PAYLOAD_BYTES + 1 })),
       protocolErrorCodes.outOfRange,
     );
+  });
+
+  describe('enrollment contracts', () => {
+    it('round trips requests and finite outcomes', () => {
+      const requestBytes = encodeRelayEnrollmentRequest(enrollmentRequest());
+      expect(encodeRelayEnrollmentRequest(decodeRelayEnrollmentRequest(requestBytes))).toEqual(
+        requestBytes,
+      );
+
+      for (const outcome of [
+        RelayEnrollmentOutcome.REGISTERED,
+        RelayEnrollmentOutcome.ALREADY_REGISTERED,
+      ]) {
+        const responseBytes = encodeRelayEnrollmentResponse(enrollmentResponse({ outcome }));
+        expect(encodeRelayEnrollmentResponse(decodeRelayEnrollmentResponse(responseBytes))).toEqual(
+          responseBytes,
+        );
+      }
+    });
+
+    it('rejects unsupported versions, identifier lengths, and outcomes', () => {
+      expectCode(
+        () => encodeRelayEnrollmentRequest(enrollmentRequest({ major: 2 })),
+        protocolErrorCodes.unsupportedMajor,
+      );
+      expectCode(
+        () => encodeRelayEnrollmentRequest(enrollmentRequest({ requestIdLength: 15 })),
+        protocolErrorCodes.invalidLength,
+      );
+      expectCode(
+        () => encodeRelayEnrollmentRequest(enrollmentRequest({ principalIdLength: 31 })),
+        protocolErrorCodes.invalidLength,
+      );
+      expectCode(
+        () =>
+          encodeRelayEnrollmentResponse(
+            enrollmentResponse({
+              outcome: RelayEnrollmentOutcome.UNSPECIFIED,
+            }),
+          ),
+        protocolErrorCodes.unsupportedEnum,
+      );
+    });
   });
 
   it('enforces cursor, replay limit, and replay ordering invariants', () => {

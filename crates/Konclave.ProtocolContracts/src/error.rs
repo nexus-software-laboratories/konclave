@@ -1,4 +1,5 @@
 use KonclaveDomainCore::KonclaveDomainError;
+use KonclaveRelayAuthentication::RelayAuthenticationError;
 use thiserror::Error;
 
 /// Stable failures while decoding, validating, or encoding protocol contracts.
@@ -39,6 +40,10 @@ pub enum KonclaveProtocolError {
     /// Wire values fail domain validation.
     #[error(transparent)]
     Domain(#[from] KonclaveDomainError),
+
+    /// Relay authentication or enrollment values fail validation.
+    #[error(transparent)]
+    RelayAuthentication(#[from] RelayAuthenticationError),
 }
 
 impl KonclaveProtocolError {
@@ -53,6 +58,7 @@ impl KonclaveProtocolError {
             Self::MissingVariant { .. } => "missing_variant",
             Self::UnsupportedMajor { .. } => "unsupported_major",
             Self::Domain(error) => error.code(),
+            Self::RelayAuthentication(error) => error.code(),
         }
     }
 }

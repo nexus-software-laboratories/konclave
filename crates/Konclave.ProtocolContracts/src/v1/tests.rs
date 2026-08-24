@@ -2,7 +2,11 @@ use prost::Message;
 
 use KonclaveDomainCore::{
     KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES, MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS,
-    MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_SIZE,
+    MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_SIZE, ProtocolVersion,
+};
+use KonclaveRelayAuthentication::{
+    EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
+    RelayPrincipalId,
 };
 
 use super::{
@@ -10,14 +14,15 @@ use super::{
     decode_device_credential_binding, decode_invitation, decode_join_proof,
     decode_membership_change, decode_membership_commit_bundle, decode_membership_control,
     decode_pairing_control, decode_pairing_envelope, decode_pairing_invitation,
-    decode_pairing_offer, decode_pairing_welcome, decode_relay_envelope, decode_replay_page,
+    decode_pairing_offer, decode_pairing_welcome, decode_relay_enrollment_request,
+    decode_relay_enrollment_response, decode_relay_envelope, decode_replay_page,
     decode_replay_request, decode_stored_relay_envelope, encode_acknowledge_request,
     encode_application_message, encode_conversation_state, encode_device_credential_binding,
     encode_invitation, encode_join_proof, encode_membership_change,
     encode_membership_commit_bundle, encode_membership_control, encode_pairing_control,
     encode_pairing_envelope, encode_pairing_invitation, encode_pairing_offer,
-    encode_pairing_welcome, encode_relay_envelope, encode_replay_page, encode_replay_request,
-    encode_stored_relay_envelope,
+    encode_pairing_welcome, encode_relay_enrollment_request, encode_relay_enrollment_response,
+    encode_relay_envelope, encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
 };
 use crate::KonclaveProtocolError;
 use crate::wire::v1 as wire;
@@ -47,6 +52,65 @@ const REPLAY_PAGE_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/replay-page.bin");
 const ACKNOWLEDGE_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/acknowledge-request.bin");
+
+#[test]
+fn enrollment_request_and_response_round_trip() {
+    let request = RelayEnrollmentRequest::new(
+        ProtocolVersion::application_v1(),
+        EnrollmentRequestId::from_bytes([1; EnrollmentRequestId::LENGTH]),
+        RelayPrincipalId::from_bytes([2; RelayPrincipalId::LENGTH]),
+    );
+    let encoded_request = encode_relay_enrollment_request(&request).unwrap();
+    assert_eq!(
+        decode_relay_enrollment_request(&encoded_request).unwrap(),
+        request
+    );
+    let response = RelayEnrollmentResponse::new(
+        request.version(),
+        request.request_id(),
+        request.principal_id(),
+        RelayEnrollmentOutcome::Registered,
+    );
+    let encoded_response = encode_relay_enrollment_response(&response).unwrap();
+    assert_eq!(
+        decode_relay_enrollment_response(&encoded_response).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn enrollment_contract_rejects_wrong_lengths_and_unknown_outcomes() {
+    let malformed = wire::RelayEnrollmentRequest {
+        version: Some(wire::ProtocolVersion { major: 1, minor: 0 }),
+        request_id: Some(wire::EnrollmentRequestId {
+            value: vec![1; EnrollmentRequestId::LENGTH - 1].into(),
+        }),
+        principal_id: Some(wire::RelayPrincipalId {
+            value: vec![2; RelayPrincipalId::LENGTH].into(),
+        }),
+    }
+    .encode_to_vec();
+    assert!(decode_relay_enrollment_request(&malformed).is_err());
+
+    let unknown = wire::RelayEnrollmentResponse {
+        version: Some(wire::ProtocolVersion { major: 1, minor: 0 }),
+        request_id: Some(wire::EnrollmentRequestId {
+            value: vec![1; EnrollmentRequestId::LENGTH].into(),
+        }),
+        principal_id: Some(wire::RelayPrincipalId {
+            value: vec![2; RelayPrincipalId::LENGTH].into(),
+        }),
+        outcome: 99,
+    }
+    .encode_to_vec();
+    assert!(matches!(
+        decode_relay_enrollment_response(&unknown),
+        Err(KonclaveProtocolError::UnsupportedEnum {
+            field: "relay_enrollment_outcome",
+            value: 99
+        })
+    ));
+}
 
 #[test]
 fn immutable_v1_fixtures_round_trip_exactly() {

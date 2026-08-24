@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         protocol_root.join("membership.proto"),
         protocol_root.join("application.proto"),
         protocol_root.join("relay.proto"),
+        protocol_root.join("enrollment.proto"),
     ];
 
     for proto in &protos {

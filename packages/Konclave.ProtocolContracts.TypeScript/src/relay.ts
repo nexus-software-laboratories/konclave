@@ -175,7 +175,7 @@ function validateRelayEnvelope(value: RelayEnvelope): void {
   validateFixedBytes(required(value.envelopeId, 'envelope_id').value, 16, 'envelope_id');
   if (
     value.deliveryClass < DeliveryClass.KEY_PACKAGE ||
-    value.deliveryClass > DeliveryClass.GROUP_APPLICATION
+    value.deliveryClass > DeliveryClass.PAIRING
   ) {
     throw new ProtocolValidationError(
       protocolErrorCodes.unsupportedEnum,

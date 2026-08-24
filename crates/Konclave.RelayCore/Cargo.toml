@@ -12,8 +12,8 @@ sqlite = ["dep:sqlx"]
 [dependencies]
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+KonclaveRelayAuthentication = { path = "../Konclave.RelayAuthentication" }
 async-trait.workspace = true
-sha2.workspace = true
 sqlx = { workspace = true, features = ["sqlite"], optional = true }
 thiserror.workspace = true
 

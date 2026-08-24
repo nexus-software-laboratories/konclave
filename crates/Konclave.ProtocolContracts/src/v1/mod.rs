@@ -2,6 +2,7 @@
 
 mod application;
 mod common;
+mod enrollment;
 mod identity;
 mod membership;
 mod pairing;
@@ -11,6 +12,10 @@ mod relay;
 mod tests;
 
 pub use application::{decode_application_message, encode_application_message};
+pub use enrollment::{
+    decode_relay_enrollment_request, decode_relay_enrollment_response,
+    encode_relay_enrollment_request, encode_relay_enrollment_response,
+};
 pub use identity::{
     decode_device_credential_binding, decode_invitation, decode_join_proof, decode_pairing_offer,
     encode_device_credential_binding, encode_invitation, encode_join_proof, encode_pairing_offer,

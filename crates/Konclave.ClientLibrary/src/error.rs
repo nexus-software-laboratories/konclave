@@ -38,6 +38,10 @@ pub enum KonclaveClientError {
     #[error("relay response is invalid")]
     InvalidResponse,
 
+    /// An enrollment response does not echo the exact requested identity.
+    #[error("relay enrollment response is invalid")]
+    InvalidEnrollmentResponse,
+
     /// The relay rejected an authenticated operation with a stable code.
     #[error("relay rejected the operation with status {status}: {relay_code}")]
     RelayRejected { status: u16, relay_code: String },
@@ -72,6 +76,7 @@ impl KonclaveClientError {
             Self::TransportUnavailable => "client_transport_unavailable",
             Self::ResponseTooLarge { .. } => "client_response_too_large",
             Self::InvalidResponse => "client_invalid_response",
+            Self::InvalidEnrollmentResponse => "client_invalid_enrollment_response",
             Self::RelayRejected { relay_code, .. } => relay_code,
             Self::WatchClosed => "client_watch_closed",
             Self::WatchRejected { relay_code, .. } => relay_code,
