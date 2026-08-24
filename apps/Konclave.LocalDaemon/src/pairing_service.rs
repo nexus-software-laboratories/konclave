@@ -27,7 +27,7 @@ use crate::persistence::{ProfileStore, ProfileStoreError};
 
 const PAIRING_REPLAY_LIMIT: u32 = 8;
 const ACTIVE_PAIRING_PAGE_SIZE: usize = 32;
-const MAX_AUTHORIZATION_WINDOW_SECONDS: u64 = 15 * 60;
+pub(crate) const MAX_AUTHORIZATION_WINDOW_SECONDS: u64 = 15 * 60;
 const COMPLETION_WINDOW_SECONDS: u64 = 300;
 const COMPENSATION_ENVELOPE_EXPIRY: u64 = i64::MAX as u64;
 

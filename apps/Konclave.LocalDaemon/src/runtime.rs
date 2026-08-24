@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
+use crate::pairing_service::PairingService;
 use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
 use crate::service::Service;
 
@@ -36,6 +37,7 @@ where
     let mcp_server = crate::mcp::StdioServer::new(
         profile.conversations.clone(),
         profile.applications.clone(),
+        profile.pairings.clone(),
         health.clone(),
         crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
     );
@@ -93,6 +95,7 @@ where
 struct RuntimeProfile {
     conversations: ConversationCoordinator,
     applications: Option<ApplicationService<RelayClient>>,
+    pairings: Option<PairingService<RelayClient>>,
     allow_mcp_write: bool,
     profile_id: String,
 }
@@ -192,10 +195,11 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
         .context("loading daemon device identity")?;
     provision_relay_if_needed(&store, config.relay_provisioning.as_ref())?;
     let relay = match store.relay_configuration() {
-        Ok((endpoint, credential)) => Some(
-            RelayClient::new(endpoint, credential)
-                .context("creating authenticated relay client")?,
-        ),
+        Ok((endpoint, credential)) => {
+            let transport = RelayClient::new(endpoint.clone(), credential)
+                .context("creating authenticated relay client")?;
+            Some((endpoint, transport))
+        }
         Err(ProfileStoreError::RelayNotConfigured) => None,
         Err(error) => return Err(error).context("loading relay configuration"),
     };
@@ -203,11 +207,19 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
     conversations
         .recover()
         .context("recovering daemon conversations")?;
-    let applications =
-        relay.map(|transport| ApplicationService::new(conversations.clone(), transport));
+    let (applications, pairings) = match relay {
+        Some((endpoint, transport)) => {
+            let applications = ApplicationService::new(conversations.clone(), transport);
+            let pairings =
+                PairingService::new(conversations.clone(), applications.clone(), endpoint);
+            (Some(applications), Some(pairings))
+        }
+        None => (None, None),
+    };
     Ok(RuntimeProfile {
         conversations,
         applications,
+        pairings,
         allow_mcp_write: config.allow_mcp_write,
         profile_id: config.profile_id.as_str().to_string(),
     })
@@ -415,10 +427,12 @@ mod tests {
         };
         let first = initialize_profile(config("https://relay.example.test")).unwrap();
         assert!(first.applications.is_some());
+        assert!(first.pairings.is_some());
         drop(first);
         std::fs::remove_file(&credential_path).unwrap();
         let reopened = initialize_profile(config("https://relay.example.test")).unwrap();
         assert!(reopened.applications.is_some());
+        assert!(reopened.pairings.is_some());
         drop(reopened);
         assert!(initialize_profile(config("https://other.example.test")).is_err());
     }

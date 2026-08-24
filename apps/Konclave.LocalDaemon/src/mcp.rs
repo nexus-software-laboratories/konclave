@@ -5,7 +5,7 @@ use KonclaveClientLibrary::RelayClient;
 use KonclaveCryptographicCore::MlsWelcome;
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, DeviceId,
-    Ed25519PublicKey, EnvelopeId, MAX_RELAY_PAYLOAD_BYTES, MessageId, RoutingId,
+    Ed25519PublicKey, EnvelopeId, MAX_RELAY_PAYLOAD_BYTES, MessageId, PairingId, RoutingId,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, decode_invitation, decode_join_proof,
@@ -19,6 +19,7 @@ use rmcp::{Json, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_r
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::time::timeout;
+use zeroize::Zeroize;
 
 use crate::application::{ApplicationService, SendApplicationRequest, SentMembership};
 use crate::conversation::{
@@ -26,6 +27,8 @@ use crate::conversation::{
     ProcessedApplication,
 };
 use crate::health::DeliveryHealth;
+use crate::pairing_service::{MAX_AUTHORIZATION_WINDOW_SECONDS, PairingService, PairingStatus};
+use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{MessageDirection, StoredHistoryMessage};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -104,6 +107,42 @@ struct ChangeMemberRoleRequest {
     conversation_id: String,
     device_id: String,
     role: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreatePairingCapabilityRequest {
+    requested_role: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RedeemPairingCapabilityRequest {
+    capability: String,
+}
+
+impl Drop for RedeemPairingCapabilityRequest {
+    fn drop(&mut self) {
+        self.capability.zeroize();
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PairingRequest {
+    pairing_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AuthorizePairingJoinerRequest {
+    pairing_id: String,
+    conversation_id: String,
+    granted_role: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AuthorizePairingInviterRequest {
+    pairing_id: String,
+    inviter_device_id: String,
+    conversation_id: String,
+    granted_role: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -196,10 +235,43 @@ struct DeliveryStatusResult {
     auto_delivery_enabled: Option<bool>,
 }
 
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct PairingStatusResult {
+    pairing_id: String,
+    local_role: String,
+    phase: String,
+    joiner_device_id: String,
+    requested_role: String,
+    inviter_device_id: Option<String>,
+    granted_role: Option<String>,
+    conversation_id: Option<String>,
+    authorization_deadline_unix_seconds: u64,
+    completion_deadline_unix_seconds: Option<u64>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct PairingCapabilityResult {
+    pairing: PairingStatusResult,
+    capability: String,
+}
+
+impl Drop for PairingCapabilityResult {
+    fn drop(&mut self) {
+        self.capability.zeroize();
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct PairingSyncResult {
+    pairing: PairingStatusResult,
+    processed_records: usize,
+}
+
 #[derive(Clone)]
 pub(crate) struct StdioServer {
     conversations: ConversationCoordinator,
     applications: Option<ApplicationService<RelayClient>>,
+    pairings: Option<PairingService<RelayClient>>,
     health: DeliveryHealth,
     authorize: AuthorizationHook,
     tool_router: ToolRouter<Self>,
@@ -210,12 +282,14 @@ impl StdioServer {
     pub(crate) fn new(
         conversations: ConversationCoordinator,
         applications: Option<ApplicationService<RelayClient>>,
+        pairings: Option<PairingService<RelayClient>>,
         health: DeliveryHealth,
         authorize: AuthorizationHook,
     ) -> Self {
         Self {
             conversations,
             applications,
+            pairings,
             health,
             authorize,
             tool_router: Self::tool_router(),
@@ -299,6 +373,161 @@ impl StdioServer {
                     .as_bytes(),
             ),
         }))
+    }
+
+    #[tool(
+        name = "create_pairing_capability",
+        description = "Create the one short-lived capability another session needs to start pairing."
+    )]
+    async fn create_pairing_capability(
+        &self,
+        Parameters(request): Parameters<CreatePairingCapabilityRequest>,
+    ) -> Result<Json<PairingCapabilityResult>, String> {
+        self.authorize("create_pairing_capability")?;
+        let pairings = self.pairing_service()?;
+        let requested_role = parse_role(&request.requested_role)?;
+        let now = current_unix_seconds()?;
+        let expires_at = now
+            .checked_add(MAX_AUTHORIZATION_WINDOW_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let created = pairings
+            .create_capability(requested_role, expires_at, now)
+            .await
+            .map_err(tool_error)?;
+        let status = pairings
+            .status(created.pairing_id)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(PairingCapabilityResult {
+            pairing: pairing_status_result(status),
+            capability: created.capability.as_str().to_owned(),
+        }))
+    }
+
+    #[tool(
+        name = "redeem_pairing_capability",
+        description = "Open an authorization request from a capability received from another session."
+    )]
+    async fn redeem_pairing_capability(
+        &self,
+        Parameters(request): Parameters<RedeemPairingCapabilityRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("redeem_pairing_capability")?;
+        let status = self
+            .pairing_service()?
+            .redeem_capability(&request.capability, current_unix_seconds()?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(status)))
+    }
+
+    #[tool(
+        name = "get_pairing_status",
+        description = "Show the authenticated identities, authorization decision, and progress for one pairing."
+    )]
+    async fn get_pairing_status(
+        &self,
+        Parameters(request): Parameters<PairingRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("get_pairing_status")?;
+        let status = self
+            .pairing_service()?
+            .status(parse_pairing_id(&request.pairing_id)?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(status)))
+    }
+
+    #[tool(
+        name = "authorize_pairing_joiner",
+        description = "Approve the requesting device for one conversation and role."
+    )]
+    async fn authorize_pairing_joiner(
+        &self,
+        Parameters(request): Parameters<AuthorizePairingJoinerRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("authorize_pairing_joiner")?;
+        let pairings = self.pairing_service()?;
+        let pairing_id = parse_pairing_id(&request.pairing_id)?;
+        pairings
+            .authorize_joiner(
+                pairing_id,
+                parse_conversation_id(&request.conversation_id)?,
+                parse_role(&request.granted_role)?,
+                current_unix_seconds()?,
+            )
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(
+            pairings.status(pairing_id).await.map_err(tool_error)?,
+        )))
+    }
+
+    #[tool(
+        name = "authorize_pairing_inviter",
+        description = "Approve the displayed inviter identity, conversation, and granted role."
+    )]
+    async fn authorize_pairing_inviter(
+        &self,
+        Parameters(request): Parameters<AuthorizePairingInviterRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("authorize_pairing_inviter")?;
+        let pairings = self.pairing_service()?;
+        let pairing_id = parse_pairing_id(&request.pairing_id)?;
+        pairings
+            .authorize_inviter(
+                pairing_id,
+                parse_device_id(&request.inviter_device_id)?,
+                parse_conversation_id(&request.conversation_id)?,
+                parse_role(&request.granted_role)?,
+                current_unix_seconds()?,
+            )
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(
+            pairings.status(pairing_id).await.map_err(tool_error)?,
+        )))
+    }
+
+    #[tool(
+        name = "sync_pairing",
+        description = "Process the next available pairing records and return current progress."
+    )]
+    async fn sync_pairing(
+        &self,
+        Parameters(request): Parameters<PairingRequest>,
+    ) -> Result<Json<PairingSyncResult>, String> {
+        self.authorize("sync_pairing")?;
+        let pairings = self.pairing_service()?;
+        let pairing_id = parse_pairing_id(&request.pairing_id)?;
+        let processed_records = pairings
+            .replay_once(pairing_id, current_unix_seconds()?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(PairingSyncResult {
+            pairing: pairing_status_result(pairings.status(pairing_id).await.map_err(tool_error)?),
+            processed_records,
+        }))
+    }
+
+    #[tool(
+        name = "cancel_pairing",
+        description = "Cancel an active pairing and safely undo membership when required."
+    )]
+    async fn cancel_pairing(
+        &self,
+        Parameters(request): Parameters<PairingRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("cancel_pairing")?;
+        let pairings = self.pairing_service()?;
+        let pairing_id = parse_pairing_id(&request.pairing_id)?;
+        pairings
+            .cancel(pairing_id, current_unix_seconds()?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(
+            pairings.status(pairing_id).await.map_err(tool_error)?,
+        )))
     }
 
     #[tool(
@@ -688,6 +917,12 @@ impl StdioServer {
     fn authorize(&self, method: &'static str) -> Result<(), String> {
         (self.authorize)(AuthorizationContext { method }).map_err(tool_error)
     }
+
+    fn pairing_service(&self) -> Result<&PairingService<RelayClient>, String> {
+        self.pairings
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -704,8 +939,14 @@ impl ServerHandler for StdioServer {
 pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook {
     Arc::new(move |context| match context.method {
         "initialize" | "get_identity" | "list_conversations" | "read_messages"
-        | "delivery_status" => Ok(()),
+        | "delivery_status" | "get_pairing_status" => Ok(()),
         "create_conversation"
+        | "create_pairing_capability"
+        | "redeem_pairing_capability"
+        | "authorize_pairing_joiner"
+        | "authorize_pairing_inviter"
+        | "sync_pairing"
+        | "cancel_pairing"
         | "create_invitation"
         | "create_join_proof"
         | "add_member"
@@ -780,6 +1021,12 @@ fn parse_conversation_id(value: &str) -> Result<ConversationId, String> {
         .map_err(|_| "invalid_conversation_id".to_string())
 }
 
+fn parse_pairing_id(value: &str) -> Result<PairingId, String> {
+    decode_hex(value)
+        .map(PairingId::from_bytes)
+        .map_err(|_| "invalid_pairing_id".to_string())
+}
+
 fn parse_message_id(value: &str) -> Result<MessageId, String> {
     decode_hex(value)
         .map(MessageId::from_bytes)
@@ -848,6 +1095,49 @@ fn conversation_result(summary: ConversationSummary) -> ConversationResult {
         conversation_id: encode_hex(summary.conversation_id.as_bytes()),
         routing_id: encode_hex(summary.routing_id.as_bytes()),
         epoch: summary.epoch,
+    }
+}
+
+fn pairing_status_result(status: PairingStatus) -> PairingStatusResult {
+    PairingStatusResult {
+        pairing_id: encode_hex(status.pairing_id.as_bytes()),
+        local_role: match status.role {
+            PairingRole::Joiner => "joiner",
+            PairingRole::Inviter => "inviter",
+        }
+        .to_string(),
+        phase: match status.phase {
+            PairingPhase::JoinerAwaitingInvitation => "joiner_awaiting_invitation",
+            PairingPhase::JoinerAwaitingInviterAuthorization => {
+                "joiner_awaiting_inviter_authorization"
+            }
+            PairingPhase::JoinerAwaitingWelcome => "joiner_awaiting_welcome",
+            PairingPhase::InviterAwaitingAuthorization => "inviter_awaiting_authorization",
+            PairingPhase::InviterAwaitingJoinProof => "inviter_awaiting_join_proof",
+            PairingPhase::InviterAwaitingCompletion => "inviter_awaiting_completion",
+            PairingPhase::Compensating => "compensating",
+            PairingPhase::Completed => "completed",
+            PairingPhase::Cancelled => "cancelled",
+        }
+        .to_string(),
+        joiner_device_id: encode_hex(status.joiner_device_id.as_bytes()),
+        requested_role: role_name(status.requested_role).to_string(),
+        inviter_device_id: status
+            .inviter_device_id
+            .map(|identifier| encode_hex(identifier.as_bytes())),
+        granted_role: status.granted_role.map(|role| role_name(role).to_string()),
+        conversation_id: status
+            .conversation_id
+            .map(|identifier| encode_hex(identifier.as_bytes())),
+        authorization_deadline_unix_seconds: status.authorization_deadline_unix_seconds,
+        completion_deadline_unix_seconds: status.completion_deadline_unix_seconds,
+    }
+}
+
+const fn role_name(role: ConversationRole) -> &'static str {
+    match role {
+        ConversationRole::Administrator => "administrator",
+        ConversationRole::Member => "member",
     }
 }
 
@@ -1033,8 +1323,8 @@ mod tests {
     use std::sync::Arc;
 
     use KonclaveDomainCore::{
-        ApplicationContent, ApplicationMessage, ConversationId, DeviceId, EnvelopeId, MessageId,
-        ProtocolVersion,
+        ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, DeviceId,
+        EnvelopeId, MessageId, PairingId, ProtocolVersion,
     };
     use rmcp::model::CallToolRequestParams;
     use rmcp::{ClientHandler, ServiceExt};
@@ -1042,11 +1332,13 @@ mod tests {
 
     use super::{
         AuthorizationContext, AuthorizationHook, DeliveryHealth, StdioServer,
-        ensure_stdout_safe_diagnostics, local_stdio_authorization,
+        ensure_stdout_safe_diagnostics, local_stdio_authorization, pairing_status_result,
     };
     use crate::conversation::ProcessedApplication;
     use crate::conversation::tests::open_coordinator;
+    use crate::pairing_service::PairingStatus;
     use crate::persistence::MessageDirection;
+    use crate::persistence::pairing::{PairingPhase, PairingRole};
 
     #[derive(Clone, Default)]
     struct TestClient;
@@ -1081,9 +1373,19 @@ mod tests {
             method: "get_identity",
         })
         .unwrap();
+        read_only(AuthorizationContext {
+            method: "get_pairing_status",
+        })
+        .unwrap();
         assert!(
             read_only(AuthorizationContext {
                 method: "create_conversation",
+            })
+            .is_err()
+        );
+        assert!(
+            read_only(AuthorizationContext {
+                method: "create_pairing_capability",
             })
             .is_err()
         );
@@ -1098,6 +1400,30 @@ mod tests {
         .unwrap();
         writable(AuthorizationContext {
             method: "accept_welcome",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "create_pairing_capability",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "redeem_pairing_capability",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "authorize_pairing_joiner",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "authorize_pairing_inviter",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "sync_pairing",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "cancel_pairing",
         })
         .unwrap();
         assert!(writable(AuthorizationContext { method: "unknown" }).is_err());
@@ -1153,11 +1479,32 @@ mod tests {
         assert_eq!(result.direction, "outbound");
     }
 
+    #[test]
+    fn pairing_status_uses_stable_public_names() {
+        let result = pairing_status_result(PairingStatus {
+            pairing_id: PairingId::from_bytes([1; PairingId::LENGTH]),
+            role: PairingRole::Joiner,
+            phase: PairingPhase::JoinerAwaitingInviterAuthorization,
+            joiner_device_id: DeviceId::from_bytes([2; DeviceId::LENGTH]),
+            requested_role: ConversationRole::Member,
+            inviter_device_id: Some(DeviceId::from_bytes([3; DeviceId::LENGTH])),
+            granted_role: Some(ConversationRole::Administrator),
+            conversation_id: Some(ConversationId::from_bytes([4; ConversationId::LENGTH])),
+            authorization_deadline_unix_seconds: 10,
+            completion_deadline_unix_seconds: None,
+        });
+        assert_eq!(result.local_role, "joiner");
+        assert_eq!(result.phase, "joiner_awaiting_inviter_authorization");
+        assert_eq!(result.requested_role, "member");
+        assert_eq!(result.granted_role.as_deref(), Some("administrator"));
+    }
+
     #[tokio::test]
     async fn in_memory_client_observes_deterministic_server_identity() {
         let root = tempfile::tempdir().unwrap();
         let server_state = StdioServer::new(
             open_coordinator(root.path(), "mcp-test"),
+            None,
             None,
             DeliveryHealth::default(),
             local_stdio_authorization(true),
@@ -1211,6 +1558,18 @@ mod tests {
             listed["conversation_ids"][0].as_str(),
             Some(conversation_id)
         );
+        let pairing_without_relay = client
+            .call_tool(
+                CallToolRequestParams::new("create_pairing_capability").with_arguments(
+                    json!({"requested_role": "member"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pairing_without_relay.is_error, Some(true));
 
         client.close().await.unwrap();
         server.await.unwrap();
@@ -1224,6 +1583,7 @@ mod tests {
         health.set_degraded(true);
         let server_state = StdioServer::new(
             open_coordinator(root.path(), "mcp-delivery"),
+            None,
             None,
             health,
             local_stdio_authorization(true),
