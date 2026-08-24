@@ -36,6 +36,10 @@ pub enum SecretStorageError {
     #[error("native wrapping-key custody is unavailable")]
     NativeCustodyUnavailable,
 
+    /// A requested native credential-store entry does not exist.
+    #[error("native credential does not exist")]
+    NativeCredentialNotFound,
+
     /// A native credential exists but does not contain a valid wrapping key.
     #[error("native wrapping-key credential is invalid")]
     InvalidNativeCredential,
@@ -58,6 +62,7 @@ impl SecretStorageError {
             Self::RandomGenerationFailed => "secure_random_generation_failed",
             Self::InvalidExternalKey => "invalid_external_wrapping_key",
             Self::NativeCustodyUnavailable => "native_key_custody_unavailable",
+            Self::NativeCredentialNotFound => "native_credential_not_found",
             Self::InvalidNativeCredential => "invalid_native_key_credential",
             Self::MlsStorageBackendFailure { .. } => "mls_storage_backend_failure",
         }

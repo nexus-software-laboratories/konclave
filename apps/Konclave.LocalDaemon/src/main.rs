@@ -19,6 +19,8 @@ mod pairing_supervisor;
 mod persistence;
 mod runtime;
 mod service;
+#[cfg(test)]
+mod test_support;
 
 use std::process::ExitCode;
 

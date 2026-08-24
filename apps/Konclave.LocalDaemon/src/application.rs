@@ -912,28 +912,21 @@ mod tests {
     use KonclaveClientLibrary::{
         RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
     };
-    use KonclaveCommunityRelay::access::StaticRelayAccess;
-    use KonclaveCommunityRelay::application::RelayApplication;
-    use KonclaveCommunityRelay::http::{HttpState, router};
     use KonclaveDomainCore::{
         AcknowledgeRequest, ApplicationContent, DeliveryClass, EnvelopeId, ProtocolVersion,
         RelayEnvelope, ReplayPage, ReplayRequest,
     };
-    use KonclaveRelayCore::RelayPrincipalId;
     use KonclaveSecretStorage::{
         ExternalWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
     };
     use async_trait::async_trait;
-    use base64::Engine as _;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use serde_json::json;
     use tokio::sync::oneshot;
-    use tokio::task::JoinHandle;
     use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::conversation::tests::{invited_coordinators, paired_coordinators};
     use crate::persistence::{LockedProfile, MessageDirection, ProfileId};
+    use crate::test_support::TestRelay;
 
     struct RecordingRelay {
         cursor: AtomicU64,
@@ -945,77 +938,6 @@ mod tests {
         replay_requests: Mutex<Vec<ReplayRequest>>,
         acknowledgments: Mutex<Vec<AcknowledgeRequest>>,
         acknowledged_high_water: Mutex<Vec<(KonclaveDomainCore::RoutingId, u64)>>,
-    }
-
-    struct TestRelay {
-        _directory: tempfile::TempDir,
-        endpoint: String,
-        shutdown: watch::Sender<bool>,
-        server: JoinHandle<()>,
-    }
-
-    impl TestRelay {
-        async fn start(token: [u8; RelayPrincipalId::LENGTH]) -> Self {
-            let directory = tempfile::tempdir().unwrap();
-            let access_path = directory.path().join("access.json");
-            let principal = RelayPrincipalId::from_access_token(&token);
-            std::fs::write(
-                &access_path,
-                serde_json::to_vec(&json!({
-                    "version": 1,
-                    "principals": [{
-                        "principal": URL_SAFE_NO_PAD.encode(principal.as_bytes()),
-                        "grants": [{
-                            "route": "*",
-                            "permissions": ["send", "replay", "acknowledge"]
-                        }]
-                    }]
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-            let access = StaticRelayAccess::load(&access_path).unwrap();
-            let application =
-                RelayApplication::connect(&directory.path().join("relay.sqlite"), access.clone())
-                    .await
-                    .unwrap();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let (shutdown, mut shutdown_rx) = watch::channel(false);
-            let server = tokio::spawn(async move {
-                axum::serve(
-                    listener,
-                    router(
-                        HttpState::new("watch-supervisor-test", application),
-                        access,
-                        shutdown_rx.clone(),
-                    ),
-                )
-                .with_graceful_shutdown(async move {
-                    while !*shutdown_rx.borrow() {
-                        if shutdown_rx.changed().await.is_err() {
-                            break;
-                        }
-                    }
-                })
-                .await
-                .unwrap();
-            });
-            Self {
-                _directory: directory,
-                endpoint: format!("http://{address}"),
-                shutdown,
-                server,
-            }
-        }
-
-        async fn stop(self) {
-            self.shutdown.send(true).unwrap();
-            timeout(Duration::from_secs(2), self.server)
-                .await
-                .unwrap()
-                .unwrap();
-        }
     }
 
     struct ObservingRelay {
@@ -1763,7 +1685,7 @@ mod tests {
     #[tokio::test]
     async fn continuous_watch_survives_empty_initial_page_and_processes_later_message() {
         let token = [7_u8; RelayAccessCredential::LENGTH];
-        let relay = TestRelay::start(token).await;
+        let relay = TestRelay::start_static(token).await;
         let (_root, alice, bob, conversation_id, alice_device_id) = paired_coordinators();
         let alice_transport = RelayClient::new(
             RelayEndpoint::parse(&relay.endpoint).unwrap(),

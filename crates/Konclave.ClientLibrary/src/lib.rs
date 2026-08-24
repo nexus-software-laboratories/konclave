@@ -9,6 +9,7 @@ mod enrollment;
 mod enrollment_credential;
 mod error;
 mod http;
+mod installation;
 mod pairing;
 mod protected_http;
 mod websocket;
@@ -25,6 +26,10 @@ pub use enrollment::{
 pub use enrollment_credential::RelayEnrollmentCredential;
 pub use error::KonclaveClientError;
 pub use http::{RelayClient, RelayTransport};
+pub use installation::{
+    RELAY_INSTALLATION_CONFIG_FILE, RelayEnrollmentSourceConfig, RelayInstallationConfig,
+    RelayInstallationConfigError,
+};
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
 pub use websocket::RelayWatchSession;
 

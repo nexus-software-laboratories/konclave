@@ -3,9 +3,15 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use KonclaveClientLibrary::{RelayAccessCredential, RelayClient, RelayEndpoint};
+use KonclaveClientLibrary::{
+    HttpRelayEnrollmentTransport, RELAY_INSTALLATION_CONFIG_FILE, RelayAccessCredential,
+    RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
+    RelayEnrollmentRequest, RelayEnrollmentSourceConfig, RelayInstallationConfig,
+};
+use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveSecretStorage::{
-    ExternalWrappingKeyProvider, NativeWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
+    ExternalWrappingKeyProvider, NativeEnrollmentCredentialStore, NativeWrappingKeyProvider,
+    SealedSqliteMlsStorage, SecretSealer,
 };
 use anyhow::{Context, bail};
 use tokio::sync::watch;
@@ -14,7 +20,7 @@ use zeroize::Zeroizing;
 use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
 use crate::pairing_service::PairingService;
-use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
+use crate::persistence::{LockedProfile, ProfileId, ProfileStore, ProfileStoreError};
 use crate::service::Service;
 
 pub async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
@@ -23,9 +29,7 @@ where
 {
     let _telemetry_guard = crate::observability::init()?;
     let config = ProfileConfig::from_environment()?;
-    let profile = tokio::task::spawn_blocking(move || initialize_profile(config))
-        .await
-        .context("joining daemon profile initialization")??;
+    let profile = initialize_profile(config).await?;
     run_with_capabilities(profile, shutdown).await
 }
 
@@ -121,12 +125,28 @@ struct ProfileConfig {
     profile_id: ProfileId,
     wrapping_key_file: Option<PathBuf>,
     relay_provisioning: Option<RelayProvisioning>,
+    relay_installation: Option<RelayInstallationConfig>,
     allow_mcp_write: bool,
 }
 
 struct RelayProvisioning {
     endpoint: RelayEndpoint,
     credential_file: PathBuf,
+}
+
+struct OpenedProfile {
+    store: ProfileStore,
+    mls_storage: SealedSqliteMlsStorage,
+    device: DeviceIdentity,
+    enrollment: Option<EnrollmentPlan>,
+    allow_mcp_write: bool,
+    profile_id: String,
+}
+
+struct EnrollmentPlan {
+    endpoint: RelayEndpoint,
+    request: RelayEnrollmentRequest,
+    credential: RelayEnrollmentCredential,
 }
 
 impl ProfileConfig {
@@ -147,6 +167,7 @@ impl ProfileConfig {
         };
         let allow_mcp_write =
             parse_mcp_allow_write(std::env::var_os("KONCLAVE_MCP_ALLOW_WRITE").as_deref())?;
+        let relay_installation = read_relay_installation(&root)?;
         let relay_provisioning = Self::parse_relay_provisioning(
             std::env::var_os("KONCLAVE_RELAY_ENDPOINT").as_deref(),
             std::env::var_os("KONCLAVE_RELAY_CREDENTIAL_FILE").as_deref(),
@@ -156,6 +177,7 @@ impl ProfileConfig {
             profile_id,
             wrapping_key_file,
             relay_provisioning,
+            relay_installation,
             allow_mcp_write,
         })
     }
@@ -185,6 +207,23 @@ impl ProfileConfig {
     }
 }
 
+fn read_relay_installation(
+    root: &std::path::Path,
+) -> anyhow::Result<Option<RelayInstallationConfig>> {
+    let path = root.join(RELAY_INSTALLATION_CONFIG_FILE);
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("opening relay installation {}", path.display()));
+        }
+    };
+    RelayInstallationConfig::from_reader(file)
+        .with_context(|| format!("reading relay installation {}", path.display()))
+        .map(Some)
+}
+
 fn parse_mcp_allow_write(value: Option<&std::ffi::OsStr>) -> anyhow::Result<bool> {
     match value.and_then(std::ffi::OsStr::to_str) {
         None if value.is_none() => Ok(false),
@@ -195,7 +234,35 @@ fn parse_mcp_allow_write(value: Option<&std::ffi::OsStr>) -> anyhow::Result<bool
     }
 }
 
-fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
+async fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
+    let mut opened = tokio::task::spawn_blocking(move || open_profile(config))
+        .await
+        .context("joining daemon profile open")??;
+    if let Some(enrollment) = opened.enrollment.take() {
+        let endpoint = enrollment.endpoint;
+        let request = enrollment.request;
+        let transport = HttpRelayEnrollmentTransport::new(endpoint.clone(), enrollment.credential)
+            .context("creating relay enrollment transport")?;
+        let response = RelayEnrollmentClient::new(transport)
+            .register(request)
+            .await
+            .context("registering relay principal")?;
+        opened = tokio::task::spawn_blocking(move || {
+            opened
+                .store
+                .promote_relay_enrollment(&endpoint, response)
+                .context("promoting relay enrollment")?;
+            anyhow::Result::<OpenedProfile>::Ok(opened)
+        })
+        .await
+        .context("joining relay enrollment promotion")??;
+    }
+    tokio::task::spawn_blocking(move || finish_profile(opened))
+        .await
+        .context("joining daemon profile finalization")?
+}
+
+fn open_profile(config: ProfileConfig) -> anyhow::Result<OpenedProfile> {
     let locked = LockedProfile::acquire(&config.root, config.profile_id.clone())
         .context("acquiring daemon profile lock")?;
     let mls_database_path = locked.mls_database_path();
@@ -210,6 +277,36 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
         .load_or_create_device()
         .context("loading daemon device identity")?;
     provision_relay_if_needed(&store, config.relay_provisioning.as_ref())?;
+    let enrollment = match store.relay_configuration() {
+        Ok(_) => None,
+        Err(ProfileStoreError::RelayNotConfigured) => match config.relay_installation.as_ref() {
+            Some(installation) => Some(prepare_enrollment(&store, installation)?),
+            None if store.pending_relay_enrollment()?.is_some() => {
+                bail!("pending relay enrollment requires its installation source")
+            }
+            None => None,
+        },
+        Err(error) => return Err(error).context("loading relay configuration"),
+    };
+    Ok(OpenedProfile {
+        store,
+        mls_storage,
+        device,
+        enrollment,
+        allow_mcp_write: config.allow_mcp_write,
+        profile_id: config.profile_id.as_str().to_string(),
+    })
+}
+
+fn finish_profile(opened: OpenedProfile) -> anyhow::Result<RuntimeProfile> {
+    let OpenedProfile {
+        store,
+        mls_storage,
+        device,
+        enrollment: _,
+        allow_mcp_write,
+        profile_id,
+    } = opened;
     let relay = match store.relay_configuration() {
         Ok((endpoint, credential)) => {
             let transport = RelayClient::new(endpoint.clone(), credential)
@@ -236,9 +333,48 @@ fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
         conversations,
         applications,
         pairings,
-        allow_mcp_write: config.allow_mcp_write,
-        profile_id: config.profile_id.as_str().to_string(),
+        allow_mcp_write,
+        profile_id,
     })
+}
+
+fn prepare_enrollment(
+    store: &ProfileStore,
+    installation: &RelayInstallationConfig,
+) -> anyhow::Result<EnrollmentPlan> {
+    let pending = store
+        .reserve_relay_enrollment(installation.endpoint())
+        .context("reserving relay enrollment")?;
+    let credential = load_enrollment_credential(installation.source(), installation.endpoint())?;
+    Ok(EnrollmentPlan {
+        endpoint: pending.endpoint().clone(),
+        request: pending.request(),
+        credential,
+    })
+}
+
+fn load_enrollment_credential(
+    source: &RelayEnrollmentSourceConfig,
+    endpoint: &RelayEndpoint,
+) -> anyhow::Result<RelayEnrollmentCredential> {
+    match source {
+        RelayEnrollmentSourceConfig::Native { installation_id } => {
+            let record = NativeEnrollmentCredentialStore::new(installation_id.clone())
+                .context("validating enrollment installation identifier")?
+                .load()
+                .context("loading native enrollment credential")?;
+            RelayEnrollmentCredential::from_bound_reader(record.as_slice(), endpoint)
+                .context("validating native enrollment credential")
+        }
+        RelayEnrollmentSourceConfig::ExternalFile { path } => {
+            let file = std::fs::File::open(path).with_context(|| {
+                format!("opening external enrollment credential {}", path.display())
+            })?;
+            RelayEnrollmentCredential::from_bound_reader(file, endpoint)
+                .context("reading endpoint-bound external enrollment credential")
+        }
+        _ => bail!("relay enrollment source is unsupported"),
+    }
 }
 
 fn provision_relay_if_needed(
@@ -357,6 +493,7 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestRelay;
 
     #[test]
     fn mcp_write_policy_is_explicit_and_fail_closed() {
@@ -366,8 +503,8 @@ mod tests {
         assert!(parse_mcp_allow_write(Some(std::ffi::OsStr::new("yes"))).is_err());
     }
 
-    #[test]
-    fn external_key_profile_initializes_and_reopens() {
+    #[tokio::test]
+    async fn external_key_profile_initializes_and_reopens() {
         let directory = tempfile::tempdir().unwrap();
         let key_path = directory.path().join("wrapping.key");
         let root = directory.path().join("profiles");
@@ -377,14 +514,15 @@ mod tests {
             profile_id: ProfileId::parse("runtime-test").unwrap(),
             wrapping_key_file: Some(key_path.clone()),
             relay_provisioning: None,
+            relay_installation: None,
             allow_mcp_write: false,
         };
-        let first = initialize_profile(config()).unwrap();
+        let first = initialize_profile(config()).await.unwrap();
         let first_device = first.conversations.device_id().unwrap();
         assert!(root.join("runtime-test").join("profile.sqlite").is_file());
         assert!(root.join("runtime-test").join("mls.sqlite").is_file());
         drop(first);
-        let reopened = initialize_profile(config()).unwrap();
+        let reopened = initialize_profile(config()).await.unwrap();
         assert_eq!(reopened.conversations.device_id().unwrap(), first_device);
     }
 
@@ -419,8 +557,8 @@ mod tests {
         assert!(read_relay_credential(&oversized).is_err());
     }
 
-    #[test]
-    fn relay_provisioning_is_first_run_only_and_endpoint_bound() {
+    #[tokio::test]
+    async fn relay_provisioning_is_first_run_only_and_endpoint_bound() {
         let directory = tempfile::tempdir().unwrap();
         let key_path = directory.path().join("wrapping.key");
         let credential_path = directory.path().join("relay.credential");
@@ -439,17 +577,159 @@ mod tests {
                 endpoint: RelayEndpoint::parse(endpoint).unwrap(),
                 credential_file: credential_path.clone(),
             }),
+            relay_installation: None,
             allow_mcp_write: false,
         };
-        let first = initialize_profile(config("https://relay.example.test")).unwrap();
+        let first = initialize_profile(config("https://relay.example.test"))
+            .await
+            .unwrap();
         assert!(first.applications.is_some());
         assert!(first.pairings.is_some());
         drop(first);
         std::fs::remove_file(&credential_path).unwrap();
-        let reopened = initialize_profile(config("https://relay.example.test")).unwrap();
+        let reopened = initialize_profile(config("https://relay.example.test"))
+            .await
+            .unwrap();
         assert!(reopened.applications.is_some());
         assert!(reopened.pairings.is_some());
         drop(reopened);
-        assert!(initialize_profile(config("https://other.example.test")).is_err());
+        assert!(
+            initialize_profile(config("https://other.example.test"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn installation_source_enrolls_distinct_profiles_automatically() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("profiles");
+        let key_path = directory.path().join("wrapping.key");
+        let credential_path = directory.path().join("enrollment.credential");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        let enrollment_token = [11_u8; RelayEnrollmentCredential::LENGTH];
+        let relay = TestRelay::start_enrollment(enrollment_token).await;
+        let endpoint = RelayEndpoint::parse(&relay.endpoint).unwrap();
+        let credential = RelayEnrollmentCredential::from_bytes(enrollment_token);
+        std::fs::write(
+            &credential_path,
+            credential.encode_bound(&endpoint).unwrap().as_slice(),
+        )
+        .unwrap();
+        let installation = RelayInstallationConfig::new(
+            endpoint,
+            RelayEnrollmentSourceConfig::ExternalFile {
+                path: credential_path.clone(),
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(RELAY_INSTALLATION_CONFIG_FILE),
+            installation.encode().unwrap(),
+        )
+        .unwrap();
+
+        let first = initialize_profile(external_profile_config(&root, &key_path, "automatic-a"))
+            .await
+            .unwrap();
+        let first_principal = first
+            .conversations
+            .store()
+            .relay_configuration()
+            .unwrap()
+            .1
+            .principal_id();
+        assert!(first.applications.is_some());
+        assert!(first.pairings.is_some());
+        drop(first);
+
+        let second = initialize_profile(external_profile_config(&root, &key_path, "automatic-b"))
+            .await
+            .unwrap();
+        let second_principal = second
+            .conversations
+            .store()
+            .relay_configuration()
+            .unwrap()
+            .1
+            .principal_id();
+        assert_ne!(first_principal, second_principal);
+        drop(second);
+
+        std::fs::remove_file(&credential_path).unwrap();
+        let reopened = initialize_profile(external_profile_config(&root, &key_path, "automatic-a"))
+            .await
+            .unwrap();
+        assert!(reopened.applications.is_some());
+        relay.stop().await;
+    }
+
+    #[tokio::test]
+    async fn missing_external_source_fails_closed_and_exact_retry_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("profiles");
+        let key_path = directory.path().join("wrapping.key");
+        let credential_path = directory.path().join("missing-enrollment.credential");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&key_path, [6_u8; 32]).unwrap();
+        let enrollment_token = [12_u8; RelayEnrollmentCredential::LENGTH];
+        let relay = TestRelay::start_enrollment(enrollment_token).await;
+        let endpoint = RelayEndpoint::parse(&relay.endpoint).unwrap();
+        let installation = RelayInstallationConfig::new(
+            endpoint.clone(),
+            RelayEnrollmentSourceConfig::ExternalFile {
+                path: credential_path.clone(),
+            },
+        )
+        .unwrap();
+        let installation_bytes = installation.encode().unwrap();
+        std::fs::write(
+            root.join(RELAY_INSTALLATION_CONFIG_FILE),
+            &installation_bytes,
+        )
+        .unwrap();
+        let config = || external_profile_config(&root, &key_path, "missing-source");
+
+        assert!(initialize_profile(config()).await.is_err());
+        std::fs::remove_file(root.join(RELAY_INSTALLATION_CONFIG_FILE)).unwrap();
+        assert!(initialize_profile(config()).await.is_err());
+        std::fs::write(
+            root.join(RELAY_INSTALLATION_CONFIG_FILE),
+            installation_bytes,
+        )
+        .unwrap();
+        let credential = RelayEnrollmentCredential::from_bytes(enrollment_token);
+        std::fs::write(
+            &credential_path,
+            credential.encode_bound(&endpoint).unwrap().as_slice(),
+        )
+        .unwrap();
+        let recovered = initialize_profile(config()).await.unwrap();
+        assert!(recovered.applications.is_some());
+        assert!(
+            recovered
+                .conversations
+                .store()
+                .pending_relay_enrollment()
+                .unwrap()
+                .is_none()
+        );
+        relay.stop().await;
+    }
+
+    fn external_profile_config(
+        root: &std::path::Path,
+        key_path: &std::path::Path,
+        profile: &str,
+    ) -> ProfileConfig {
+        ProfileConfig {
+            root: root.to_path_buf(),
+            profile_id: ProfileId::parse(profile).unwrap(),
+            wrapping_key_file: Some(key_path.to_path_buf()),
+            relay_provisioning: None,
+            relay_installation: read_relay_installation(root).unwrap(),
+            allow_mcp_write: false,
+        }
     }
 }
