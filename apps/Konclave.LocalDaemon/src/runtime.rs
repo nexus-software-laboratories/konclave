@@ -42,6 +42,11 @@ where
         crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
     );
     let service_applications = profile.applications.clone();
+    let pairing_service = profile.pairings.clone();
+    let pairing_retry_seed = profile
+        .conversations
+        .device_id()
+        .context("loading pairing retry identity")?;
     let adapter_store = profile.conversations.store();
     let adapter_health = health.clone();
     let adapter_profile = profile.profile_id.clone();
@@ -75,6 +80,17 @@ where
         result
     };
 
+    let pairing_shutdown_tx = shutdown_tx.clone();
+    let pairing_shutdown_rx = shutdown_rx.clone();
+    let pairing = async move {
+        let result =
+            crate::pairing_supervisor::PairingSupervisor::new(pairing_service, pairing_retry_seed)
+                .run_until(wait_for_shutdown(pairing_shutdown_rx))
+                .await;
+        let _ = pairing_shutdown_tx.send(true);
+        result
+    };
+
     let adapter_shutdown_rx = shutdown_rx.clone();
     let adapter = async move {
         crate::adapter::run_adapter_channel(
@@ -87,7 +103,7 @@ where
         anyhow::Result::<()>::Ok(())
     };
 
-    tokio::try_join!(service, mcp_server, adapter, external_shutdown)?;
+    tokio::try_join!(service, pairing, mcp_server, adapter, external_shutdown)?;
 
     Ok(())
 }
