@@ -1,6 +1,6 @@
 ---
 title: Provision per-profile relay principals through an outbound enrollment control plane
-status: Proposed
+status: Accepted
 date: 2026-08-24
 authors:
   - Konclave maintainers
