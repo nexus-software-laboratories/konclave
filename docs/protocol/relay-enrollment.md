@@ -30,6 +30,34 @@ environment variables, URLs, logs, or plugin configuration. Replacing or removin
 the verifier and restarting the relay rotates or disables enrollment. Existing
 data-plane principals remain independently active or revoked.
 
+## Client installation source
+
+The daemon reads the non-secret `relay-installation.conf` file once from the shared
+profile root. The bounded strict format selects the normalized relay endpoint and
+exactly one protected source:
+
+```text
+version=1
+relay_endpoint=https://relay.example.com/
+enrollment_source=native
+installation_id=<installation-id>
+```
+
+Headless installations use `enrollment_source=external_file` plus an absolute
+`credential_path` to a permission-restricted secret mount containing the
+endpoint-bound binary credential record. Native installation identifiers resolve
+only inside the dedicated relay-enrollment keyring service; they cannot address
+profile wrapping-key entries. Both source forms authenticate the normalized endpoint
+before exposing bearer bytes. A missing, malformed, wrong-length, unavailable, or
+endpoint-mismatched source fails startup; there is no environment, anonymous,
+generated-authority, or shared data-plane fallback.
+
+Profiles with an existing sealed relay credential do not reopen the installation
+source. A new profile generates and seals its own data-plane credential and request
+identity before the first outbound registration. Failed registration restarts reopen
+that exact intent; successful registration atomically promotes it and removes the
+pending journal.
+
 ## HTTP contract
 
 The authenticated endpoint is:

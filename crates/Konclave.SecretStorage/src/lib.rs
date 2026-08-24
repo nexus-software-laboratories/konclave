@@ -19,7 +19,7 @@ pub use error::SecretStorageError;
 pub use key::{ExternalWrappingKeyProvider, WrappingKeyProvider};
 pub use mls_storage::SealedMlsStorage;
 #[cfg(feature = "native-keyring")]
-pub use native::NativeWrappingKeyProvider;
+pub use native::{NativeEnrollmentCredentialStore, NativeWrappingKeyProvider};
 pub use sealed_blob::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
 };

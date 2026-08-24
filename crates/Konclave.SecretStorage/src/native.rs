@@ -5,7 +5,10 @@ use crate::key::{WRAPPING_KEY_BYTES, WrappingKey};
 use crate::{SecretStorageError, WrappingKeyProvider};
 
 const SERVICE_NAME: &str = "Konclave";
+const ENROLLMENT_SERVICE_NAME: &str = "Konclave Relay Enrollment";
 const MAX_PROFILE_ID_BYTES: usize = 64;
+const MAX_INSTALLATION_ID_BYTES: usize = 64;
+const MAX_ENROLLMENT_RECORD_BYTES: usize = 4 * 1024;
 
 /// Native operating-system credential-store provider for one local profile.
 ///
@@ -14,6 +17,62 @@ const MAX_PROFILE_ID_BYTES: usize = 64;
 /// transaction.
 pub struct NativeWrappingKeyProvider {
     account_name: String,
+}
+
+/// Dedicated operating-system credential-store entry for relay enrollment authority.
+pub struct NativeEnrollmentCredentialStore {
+    account_name: String,
+}
+
+impl NativeEnrollmentCredentialStore {
+    /// Opens one installation identifier in the enrollment-only keyring namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an empty, oversized, or unsafe name.
+    pub fn new(installation_id: impl Into<String>) -> Result<Self, SecretStorageError> {
+        let installation_id = installation_id.into();
+        if installation_id.is_empty()
+            || installation_id.len() > MAX_INSTALLATION_ID_BYTES
+            || !installation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(SecretStorageError::InvalidRecordIdentifier {
+                maximum: MAX_INSTALLATION_ID_BYTES,
+            });
+        }
+        Ok(Self {
+            account_name: format!("installation:{installation_id}:authority:1"),
+        })
+    }
+
+    /// Loads one bounded endpoint-bound credential record without creating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, unavailable, or invalid native credential error.
+    pub fn load(&self) -> Result<Zeroizing<Vec<u8>>, SecretStorageError> {
+        let entry = KeyringEntry(
+            keyring::Entry::new(ENROLLMENT_SERVICE_NAME, &self.account_name)
+                .map_err(|_| SecretStorageError::NativeCustodyUnavailable)?,
+        );
+        load_bounded_from(&entry)
+    }
+
+    /// Stores and verifies one bounded endpoint-bound credential record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-length or unavailable native credential-store error. The
+    /// caller remains responsible for clearing any additional secret copy.
+    pub fn store(&self, secret: &[u8]) -> Result<(), SecretStorageError> {
+        let entry = KeyringEntry(
+            keyring::Entry::new(ENROLLMENT_SERVICE_NAME, &self.account_name)
+                .map_err(|_| SecretStorageError::NativeCustodyUnavailable)?,
+        );
+        store_bounded_to(&entry, secret)
+    }
 }
 
 impl NativeWrappingKeyProvider {
@@ -103,6 +162,37 @@ fn parse_native_secret(secret: Vec<u8>) -> Result<WrappingKey, SecretStorageErro
     WrappingKey::from_slice(&secret)
 }
 
+fn load_bounded_from(entry: &impl NativeEntry) -> Result<Zeroizing<Vec<u8>>, SecretStorageError> {
+    let secret = match entry.get_secret() {
+        Ok(secret) => Zeroizing::new(secret),
+        Err(NativeEntryError::NotFound) => {
+            return Err(SecretStorageError::NativeCredentialNotFound);
+        }
+        Err(NativeEntryError::Unavailable) => {
+            return Err(SecretStorageError::NativeCustodyUnavailable);
+        }
+    };
+    if secret.is_empty() || secret.len() > MAX_ENROLLMENT_RECORD_BYTES {
+        return Err(SecretStorageError::InvalidNativeCredential);
+    }
+    Ok(secret)
+}
+
+fn store_bounded_to(entry: &impl NativeEntry, secret: &[u8]) -> Result<(), SecretStorageError> {
+    if secret.is_empty() || secret.len() > MAX_ENROLLMENT_RECORD_BYTES {
+        return Err(SecretStorageError::InvalidNativeCredential);
+    }
+    entry
+        .set_secret(secret)
+        .map_err(|_| SecretStorageError::NativeCustodyUnavailable)?;
+    let stored = load_bounded_from(entry)?;
+    if stored.as_slice() == secret {
+        Ok(())
+    } else {
+        Err(SecretStorageError::InvalidNativeCredential)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -113,6 +203,9 @@ mod tests {
     #[test]
     fn profile_identifier_is_portable_and_bounded() {
         assert!(NativeWrappingKeyProvider::new("default-profile").is_ok());
+        assert!(NativeEnrollmentCredentialStore::new("installation-a").is_ok());
+        assert!(NativeEnrollmentCredentialStore::new("../credential").is_err());
+        assert!(NativeEnrollmentCredentialStore::new("profile:victim:wrapping-key:1").is_err());
         assert_eq!(
             NativeWrappingKeyProvider::new("../profile").err(),
             Some(SecretStorageError::InvalidRecordIdentifier {
@@ -157,6 +250,44 @@ mod tests {
             Some(SecretStorageError::InvalidNativeCredential)
         );
         assert_eq!(readback.set_count.get(), 1);
+    }
+
+    #[test]
+    fn bounded_enrollment_record_never_creates_or_truncates() {
+        let zero = FakeEntry::new([Ok(Vec::new())]);
+        assert_eq!(
+            load_bounded_from(&zero).err(),
+            Some(SecretStorageError::InvalidNativeCredential)
+        );
+        assert_eq!(
+            store_bounded_to(&zero, &[]).err(),
+            Some(SecretStorageError::InvalidNativeCredential)
+        );
+
+        let exact = FakeEntry::new([Ok(vec![7; 64])]);
+        assert_eq!(load_bounded_from(&exact).unwrap().as_slice(), &[7; 64]);
+
+        let missing = FakeEntry::new([Err(NativeEntryError::NotFound)]);
+        assert_eq!(
+            load_bounded_from(&missing).err(),
+            Some(SecretStorageError::NativeCredentialNotFound)
+        );
+        assert_eq!(missing.set_count.get(), 0);
+
+        let wrong_length = FakeEntry::new([Ok(vec![7; MAX_ENROLLMENT_RECORD_BYTES + 1])]);
+        assert_eq!(
+            load_bounded_from(&wrong_length).err(),
+            Some(SecretStorageError::InvalidNativeCredential)
+        );
+
+        let readback = FakeEntry::new([Ok(vec![8; 64])]);
+        store_bounded_to(&readback, &[8; 64]).unwrap();
+        assert_eq!(readback.set_count.get(), 1);
+        let mismatched = FakeEntry::new([Ok(vec![9; 64])]);
+        assert_eq!(
+            store_bounded_to(&mismatched, &[8; 64]).err(),
+            Some(SecretStorageError::InvalidNativeCredential)
+        );
     }
 
     struct FakeEntry {

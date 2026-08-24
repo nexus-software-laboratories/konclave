@@ -17,6 +17,13 @@ application and MLS databases under one key load and one profile lock.
 store. The caller must hold the profile's exclusive process lock before loading or
 creating the credential.
 
+`NativeEnrollmentCredentialStore` uses a dedicated keyring service and internally
+derives its account name from a bounded installation identifier. It cannot address
+profile wrapping-key entries. It never creates a missing value: bounded reads
+distinguish missing, malformed, and unavailable records, while writes read back and
+verify endpoint-bound bytes. Relay enrollment uses this boundary so filesystem
+configuration cannot redirect a profile wrapping key or unbound bearer credential.
+
 Headless deployments disable the `native-keyring` feature and construct
 `ExternalWrappingKeyProvider` from exactly 32 bytes supplied by an external secret
 mechanism. The reader rejects short or trailing data. There is no environment-variable
