@@ -9,6 +9,7 @@ rust-version = "1.85"
 KonclaveCryptographicCore = { path = "../Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+KonclaveRelayAuthentication = { path = "../Konclave.RelayAuthentication" }
 KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }
 async-trait.workspace = true
 base64.workspace = true

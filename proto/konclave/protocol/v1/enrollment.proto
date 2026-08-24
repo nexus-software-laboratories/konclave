@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+message EnrollmentRequestId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
+message RelayPrincipalId {
+  // Exactly 32 SHA-256 bytes in protocol v1.
+  bytes value = 1;
+}
+
+message RelayEnrollmentRequest {
+  ProtocolVersion version = 1;
+  EnrollmentRequestId request_id = 2;
+  RelayPrincipalId principal_id = 3;
+}
+
+enum RelayEnrollmentOutcome {
+  RELAY_ENROLLMENT_OUTCOME_UNSPECIFIED = 0;
+  RELAY_ENROLLMENT_OUTCOME_REGISTERED = 1;
+  RELAY_ENROLLMENT_OUTCOME_ALREADY_REGISTERED = 2;
+}
+
+message RelayEnrollmentResponse {
+  ProtocolVersion version = 1;
+  EnrollmentRequestId request_id = 2;
+  RelayPrincipalId principal_id = 3;
+  RelayEnrollmentOutcome outcome = 4;
+}

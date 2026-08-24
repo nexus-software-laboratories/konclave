@@ -23,6 +23,7 @@ dependencies = [
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
+ "KonclaveRelayAuthentication",
  "KonclaveRelayCore",
  "KonclaveSecretStorage",
  "async-trait",
@@ -155,9 +156,19 @@ name = "KonclaveProtocolContracts"
 version = "0.1.0"
 dependencies = [
  "KonclaveDomainCore",
+ "KonclaveRelayAuthentication",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "thiserror",
+]
+
+[[package]]
+name = "KonclaveRelayAuthentication"
+version = "0.1.0"
+dependencies = [
+ "KonclaveDomainCore",
+ "sha2",
  "thiserror",
 ]
 
@@ -167,8 +178,8 @@ version = "0.1.0"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
+ "KonclaveRelayAuthentication",
  "async-trait",
- "sha2",
  "sqlx",
  "tempfile",
  "thiserror",

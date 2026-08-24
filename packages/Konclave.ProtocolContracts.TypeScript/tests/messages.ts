@@ -25,6 +25,15 @@ import {
   type JoinProof,
 } from '../src/generated/konclave/protocol/v1/identity_pb.js';
 import {
+  EnrollmentRequestIdSchema,
+  RelayEnrollmentOutcome,
+  RelayEnrollmentRequestSchema,
+  RelayEnrollmentResponseSchema,
+  RelayPrincipalIdSchema,
+  type RelayEnrollmentRequest,
+  type RelayEnrollmentResponse,
+} from '../src/generated/konclave/protocol/v1/enrollment_pb.js';
+import {
   AddMemberSchema,
   ChangeMemberRoleSchema,
   ConversationStateSchema,
@@ -53,6 +62,37 @@ import {
 
 export const bytes = (length: number, value: number): Uint8Array =>
   new Uint8Array(length).fill(value);
+
+export function enrollmentRequest(options?: {
+  major?: number;
+  requestIdLength?: number;
+  principalIdLength?: number;
+}): RelayEnrollmentRequest {
+  return create(RelayEnrollmentRequestSchema, {
+    version: create(ProtocolVersionSchema, {
+      major: options?.major ?? 1,
+      minor: 0,
+    }),
+    requestId: create(EnrollmentRequestIdSchema, {
+      value: bytes(options?.requestIdLength ?? 16, 0x91),
+    }),
+    principalId: create(RelayPrincipalIdSchema, {
+      value: bytes(options?.principalIdLength ?? 32, 0x92),
+    }),
+  });
+}
+
+export function enrollmentResponse(options?: {
+  outcome?: RelayEnrollmentOutcome;
+}): RelayEnrollmentResponse {
+  const request = enrollmentRequest();
+  return create(RelayEnrollmentResponseSchema, {
+    version: request.version,
+    requestId: request.requestId,
+    principalId: request.principalId,
+    outcome: options?.outcome ?? RelayEnrollmentOutcome.REGISTERED,
+  });
+}
 
 export function membershipCommitBundle(): MembershipCommitBundle {
   return create(MembershipCommitBundleSchema, {

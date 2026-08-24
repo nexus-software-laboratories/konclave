@@ -5,13 +5,19 @@
 
 mod credential;
 mod endpoint;
+mod enrollment;
 mod error;
 mod http;
 mod pairing;
 mod websocket;
 
+pub use KonclaveRelayAuthentication::{
+    EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
+    RelayPrincipalId,
+};
 pub use credential::RelayAccessCredential;
 pub use endpoint::RelayEndpoint;
+pub use enrollment::{RelayEnrollmentClient, RelayEnrollmentTransport};
 pub use error::KonclaveClientError;
 pub use http::{RelayClient, RelayTransport};
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};

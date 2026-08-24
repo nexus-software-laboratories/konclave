@@ -1,3 +1,4 @@
+use KonclaveRelayAuthentication::RelayPrincipalId;
 use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -22,6 +23,12 @@ impl RelayAccessCredential {
     #[must_use]
     pub const fn from_bytes(bytes: [u8; Self::LENGTH]) -> Self {
         Self(bytes)
+    }
+
+    /// Returns the non-secret pseudonymous principal derived from this credential.
+    #[must_use]
+    pub fn principal_id(&self) -> RelayPrincipalId {
+        RelayPrincipalId::from_access_token(&self.0)
     }
 
     /// Decodes one canonical unpadded base64url credential.
@@ -155,6 +162,12 @@ mod tests {
         let encoded = URL_SAFE_NO_PAD.encode([7; RelayAccessCredential::LENGTH]);
         let credential = RelayAccessCredential::from_base64(&encoded).unwrap();
         assert!(credential.authorization_header().unwrap().is_sensitive());
+        assert_eq!(
+            credential.principal_id(),
+            KonclaveRelayAuthentication::RelayPrincipalId::from_access_token(
+                &[7; RelayAccessCredential::LENGTH]
+            )
+        );
         assert!(RelayAccessCredential::from_base64("short").is_err());
         assert!(RelayAccessCredential::from_base64(&format!("{encoded}=")).is_err());
     }
