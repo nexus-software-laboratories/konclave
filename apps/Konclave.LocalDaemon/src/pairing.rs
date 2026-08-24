@@ -42,6 +42,25 @@ pub(crate) struct PairingOutbound {
     accepted_cursor: Option<u64>,
 }
 
+/// One authenticated pairing record opened from sealed operation state.
+///
+/// Plaintext is zeroized on drop and this type intentionally implements neither
+/// `Clone` nor `Debug`.
+pub(crate) struct OpenedPairingRecord {
+    envelope: PairingEnvelope,
+    plaintext: Zeroizing<Vec<u8>>,
+}
+
+impl OpenedPairingRecord {
+    pub(crate) const fn envelope(&self) -> &PairingEnvelope {
+        &self.envelope
+    }
+
+    pub(crate) fn plaintext(&self) -> &[u8] {
+        &self.plaintext
+    }
+}
+
 impl PairingOutbound {
     pub(crate) fn envelope(&self) -> &RelayEnvelope {
         &self.envelope
@@ -139,6 +158,50 @@ impl PairingOperationState {
         &self.outbounds
     }
 
+    /// Opens the authenticated remote record for one stage, when observed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol or authentication error for malformed sealed state.
+    pub(crate) fn remote_record(
+        &self,
+        stage: PairingStage,
+    ) -> Result<Option<OpenedPairingRecord>, PairingStateError> {
+        for observed in &self.observations {
+            let envelope = decode_pairing_envelope(observed.envelope().payload())?;
+            if envelope.stage() == stage {
+                let plaintext = self.capability.key_schedule()?.open(&envelope)?;
+                return Ok(Some(OpenedPairingRecord {
+                    envelope,
+                    plaintext,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Opens the authenticated local record prepared for one stage, when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol or authentication error for malformed sealed state.
+    pub(crate) fn local_record(
+        &self,
+        stage: PairingStage,
+    ) -> Result<Option<OpenedPairingRecord>, PairingStateError> {
+        for outbound in &self.outbounds {
+            let envelope = outbound.pairing_envelope()?;
+            if envelope.stage() == stage {
+                let plaintext = self.capability.key_schedule()?.open(&envelope)?;
+                return Ok(Some(OpenedPairingRecord {
+                    envelope,
+                    plaintext,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     /// Creates and journals one exact outbound pairing envelope before submission.
     ///
     /// # Errors
@@ -151,6 +214,34 @@ impl PairingOperationState {
         expires_at_unix_seconds: u64,
         plaintext: &[u8],
     ) -> Result<PairingMessageId, PairingStateError> {
+        let message_id = generate_pairing_message_id()?;
+        self.prepare_outbound_with_id(
+            message_id,
+            stage,
+            in_reply_to,
+            expires_at_unix_seconds,
+            plaintext,
+        )?;
+        Ok(message_id)
+    }
+
+    /// Journals one outbound with a caller-reserved logical identifier.
+    ///
+    /// This is used when the identifier must be covered by a root signature inside
+    /// the encrypted payload. The identifier remains random and is supplied only
+    /// after [`generate_pairing_message_id`] succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a capacity, duplicate-stage, cryptographic, protocol, or domain error.
+    pub(crate) fn prepare_outbound_with_id(
+        &mut self,
+        message_id: PairingMessageId,
+        stage: PairingStage,
+        in_reply_to: Option<PairingMessageId>,
+        expires_at_unix_seconds: u64,
+        plaintext: &[u8],
+    ) -> Result<(), PairingStateError> {
         if self.outbounds.len() >= MAX_OUTBOUNDS {
             return Err(PairingStateError::Capacity);
         }
@@ -159,9 +250,6 @@ impl PairingOperationState {
                 return Err(PairingStateError::Conflict);
             }
         }
-        let mut message_id = [0_u8; PairingMessageId::LENGTH];
-        fill_random(&mut message_id)?;
-        let message_id = PairingMessageId::from_bytes(message_id);
         let sender = local_sender(self.role);
         let pairing = self.capability.key_schedule()?.seal(
             message_id,
@@ -187,7 +275,7 @@ impl PairingOperationState {
             envelope,
             accepted_cursor: None,
         });
-        Ok(message_id)
+        Ok(())
     }
 
     /// Marks one prepared outbound record accepted by the relay.
@@ -202,6 +290,7 @@ impl PairingOperationState {
         if cursor == 0 {
             return Err(PairingStateError::InvalidEncoding);
         }
+
         if self
             .observations
             .iter()
@@ -312,6 +401,9 @@ impl PairingOperationState {
                 if existing == pairing {
                     return Ok(PairingObservationResult::Duplicate(plaintext));
                 }
+                return Err(PairingStateError::Conflict);
+            }
+            if existing.stage() == pairing.stage() {
                 return Err(PairingStateError::Conflict);
             }
             if observed.cursor() == stored.cursor() {
@@ -479,6 +571,18 @@ impl PairingOperationState {
     }
 }
 
+/// Generates a random logical identifier before a signed control is constructed.
+///
+/// # Errors
+///
+/// Returns a cryptographic provider error when secure randomness is unavailable.
+pub(crate) fn generate_pairing_message_id()
+-> Result<PairingMessageId, KonclaveCryptographicCore::KonclaveCryptographicError> {
+    let mut message_id = [0_u8; PairingMessageId::LENGTH];
+    fill_random(&mut message_id)?;
+    Ok(PairingMessageId::from_bytes(message_id))
+}
+
 /// Stable bounded failures from pairing state encoding and transitions.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -512,6 +616,7 @@ fn validate_loaded_state(state: &PairingOperationState) -> Result<(), PairingSta
     let pairing_id = state.capability.offer().pairing_id();
     let routing_id = state.capability.key_schedule()?.routing_id();
     let mut observed_messages = BTreeSet::new();
+    let mut observed_stages = Vec::new();
     let mut used_relay_cursors = BTreeSet::new();
     let mut prior_observed_cursor = 0;
     for observation in &state.observations {
@@ -522,10 +627,12 @@ fn validate_loaded_state(state: &PairingOperationState) -> Result<(), PairingSta
             || pairing.expires_at_unix_seconds() != observation.envelope().expires_at_unix_seconds()
             || observation.cursor() <= prior_observed_cursor
             || !observed_messages.insert(pairing.message_id())
+            || observed_stages.contains(&pairing.stage())
             || !used_relay_cursors.insert(observation.cursor())
         {
             return Err(PairingStateError::Conflict);
         }
+        observed_stages.push(pairing.stage());
         prior_observed_cursor = observation.cursor();
         state.capability.key_schedule()?.open(&pairing)?;
     }
@@ -834,6 +941,35 @@ mod tests {
         .unwrap();
         assert!(matches!(
             joiner.observe(&stored(&conflicting, 3)),
+            Err(PairingStateError::Conflict)
+        ));
+        assert_eq!(joiner.observations().len(), 1);
+
+        let repeated_stage = joiner
+            .capability()
+            .key_schedule()
+            .unwrap()
+            .seal(
+                message_id(9),
+                PairingSenderRole::Inviter,
+                PairingStage::Invitation,
+                None,
+                DEADLINE,
+                b"another invitation",
+            )
+            .unwrap();
+        let repeated_stage = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            invitation.routing_id(),
+            envelope_id(9),
+            DeliveryClass::Pairing,
+            None,
+            DEADLINE,
+            encode_pairing_envelope(&repeated_stage).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            joiner.observe(&stored(&repeated_stage, 3)),
             Err(PairingStateError::Conflict)
         ));
         assert_eq!(joiner.observations().len(), 1);
