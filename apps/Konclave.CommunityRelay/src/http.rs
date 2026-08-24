@@ -1,15 +1,16 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use KonclaveDomainCore::{
     AcknowledgeRequest, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
 };
 use KonclaveProtocolContracts::KonclaveProtocolError;
 use KonclaveProtocolContracts::v1::{
-    decode_acknowledge_request, decode_replay_request, encode_acknowledge_request,
+    decode_acknowledge_request, decode_relay_enrollment_request, decode_replay_request,
+    encode_acknowledge_request, encode_relay_enrollment_response,
     encode_stored_relay_envelope_preserving,
 };
 use KonclaveRelayCore::{RelayError, RelayPrincipalId};
@@ -28,7 +29,7 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tower::limit::ConcurrencyLimitLayer;
 
-use crate::access::StaticRelayAccess;
+use crate::access::{RelayAccess, StaticRelayAccess};
 use crate::application::RelayApplication;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/protobuf";
@@ -36,6 +37,9 @@ const ERROR_CODE_HEADER: &str = "x-konclave-error-code";
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_REQUESTS: usize = 256;
 const MAX_WEBSOCKET_SESSIONS: usize = 256;
+const MAX_CONCURRENT_ENROLLMENTS: usize = 8;
+const MAX_ENROLLMENTS_PER_WINDOW: u32 = 16;
+const ENROLLMENT_RATE_WINDOW: Duration = Duration::from_secs(1);
 const ACCESS_FILE_ENV: &str = "KONCLAVE_RELAY_ACCESS_FILE";
 const DATABASE_PATH_ENV: &str = "KONCLAVE_RELAY_DATABASE_PATH";
 const TLS_TERMINATED_ENV: &str = "KONCLAVE_RELAY_TLS_TERMINATED";
@@ -46,7 +50,45 @@ pub struct HttpState {
     service_name: String,
     application: RelayApplication,
     websocket_slots: Arc<tokio::sync::Semaphore>,
+    enrollment_slots: Arc<tokio::sync::Semaphore>,
+    enrollment_rate: EnrollmentRateLimiter,
     watch_config: crate::websocket::SessionConfig,
+}
+
+#[derive(Clone)]
+struct EnrollmentRateLimiter {
+    window: Arc<Mutex<EnrollmentRateWindow>>,
+}
+
+struct EnrollmentRateWindow {
+    started: Instant,
+    requests: u32,
+}
+
+impl EnrollmentRateLimiter {
+    fn new() -> Self {
+        Self {
+            window: Arc::new(Mutex::new(EnrollmentRateWindow {
+                started: Instant::now(),
+                requests: 0,
+            })),
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        let Ok(mut window) = self.window.lock() else {
+            return false;
+        };
+        if window.started.elapsed() >= ENROLLMENT_RATE_WINDOW {
+            window.started = Instant::now();
+            window.requests = 0;
+        }
+        if window.requests >= MAX_ENROLLMENTS_PER_WINDOW {
+            return false;
+        }
+        window.requests += 1;
+        true
+    }
 }
 
 impl HttpState {
@@ -57,6 +99,8 @@ impl HttpState {
             service_name: service_name.into(),
             application,
             websocket_slots: Arc::new(tokio::sync::Semaphore::new(MAX_WEBSOCKET_SESSIONS)),
+            enrollment_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ENROLLMENTS)),
+            enrollment_rate: EnrollmentRateLimiter::new(),
             watch_config: crate::websocket::SessionConfig::default(),
         }
     }
@@ -96,6 +140,7 @@ pub fn router(
     shutdown: watch::Receiver<bool>,
 ) -> Router {
     let websocket_shutdown = shutdown.clone();
+    let data_access = RelayAccess::new(access.clone(), state.application.registry());
     let protected = Router::new()
         .route("/v1/envelopes", post(submit))
         .route("/v1/replay", post(replay))
@@ -131,12 +176,19 @@ pub fn router(
             ),
         )
         .route_layer(middleware::from_fn_with_state(
-            access.clone(),
+            data_access,
             authenticate_request,
+        ));
+    let enrollment = Router::new()
+        .route("/v1/enrollment/principals", post(enroll_principal))
+        .route_layer(middleware::from_fn_with_state(
+            access,
+            authenticate_enrollment_request,
         ));
 
     Router::new()
         .route("/healthz", get(health))
+        .merge(enrollment)
         .merge(protected)
         .with_state(state)
         .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
@@ -247,16 +299,72 @@ pub async fn serve_until(
 }
 
 async fn authenticate_request(
+    State(access): State<RelayAccess>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    match access.authenticate_data_plane(request.headers()).await {
+        Ok(principal) => {
+            request
+                .headers_mut()
+                .remove(axum::http::header::AUTHORIZATION);
+            request.extensions_mut().insert(principal);
+            next.run(request).await
+        }
+        Err(RelayError::Unauthorized) => authentication_error_response(),
+        Err(error) => relay_error_response(&error),
+    }
+}
+
+async fn authenticate_enrollment_request(
     State(access): State<StaticRelayAccess>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    match access.authenticate(request.headers()) {
-        Ok(principal) => {
-            request.extensions_mut().insert(principal);
+    match access.authenticate_enrollment(request.headers()) {
+        Ok(()) => {
+            request
+                .headers_mut()
+                .remove(axum::http::header::AUTHORIZATION);
             next.run(request).await
         }
         Err(_) => authentication_error_response(),
+    }
+}
+
+async fn enroll_principal(State(state): State<HttpState>, request: Request<Body>) -> Response {
+    let _permit = match state.enrollment_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "relay_enrollment_capacity");
+        }
+    };
+    if !state.enrollment_rate.try_acquire() {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "relay_enrollment_rate_limited",
+        );
+    }
+    let bytes = match read_protobuf(request, MAX_RELAY_CONTROL_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_relay_enrollment_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let response = match state.application.register_principal(request).await {
+        Ok(response) => response,
+        Err(error) => return relay_error_response(&error),
+    };
+    let status = match response.outcome() {
+        KonclaveRelayAuthentication::RelayEnrollmentOutcome::Registered => StatusCode::CREATED,
+        KonclaveRelayAuthentication::RelayEnrollmentOutcome::AlreadyRegistered => StatusCode::OK,
+        _ => return internal_error_response(),
+    };
+    match encode_relay_enrollment_response(&response) {
+        Ok(bytes) => protobuf_response(status, bytes),
+        Err(_) => internal_error_response(),
     }
 }
 
@@ -417,7 +525,12 @@ fn relay_error_response(error: &RelayError) -> Response {
     let status = match error {
         RelayError::Unauthorized => StatusCode::FORBIDDEN,
         RelayError::ExpiredEnvelope => StatusCode::GONE,
-        RelayError::IdempotencyConflict | RelayError::StaleEpoch => StatusCode::CONFLICT,
+        RelayError::IdempotencyConflict
+        | RelayError::StaleEpoch
+        | RelayError::EnrollmentConflict => StatusCode::CONFLICT,
+        RelayError::PrincipalCapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+        RelayError::PrincipalRevoked => StatusCode::FORBIDDEN,
+        RelayError::UnsupportedEnrollmentVersion => StatusCode::BAD_REQUEST,
         RelayError::InvalidAcknowledgment => StatusCode::UNPROCESSABLE_ENTITY,
         RelayError::SequenceExhausted
         | RelayError::ClockUnavailable

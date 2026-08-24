@@ -8,6 +8,7 @@ rust-version = "1.88"
 [dependencies]
 KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../../crates/Konclave.ProtocolContracts" }
+KonclaveRelayAuthentication = { path = "../../crates/Konclave.RelayAuthentication" }
 KonclaveRelayCore = { path = "../../crates/Konclave.RelayCore", default-features = false }
 anyhow = "1.0.104"
 async-trait.workspace = true

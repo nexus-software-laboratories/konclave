@@ -12,8 +12,8 @@ mod pairing;
 mod websocket;
 
 pub use KonclaveRelayAuthentication::{
-    EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
-    RelayPrincipalId,
+    EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,
+    RelayEnrollmentRequest, RelayEnrollmentResponse, RelayPrincipalId,
 };
 pub use credential::RelayAccessCredential;
 pub use endpoint::RelayEndpoint;

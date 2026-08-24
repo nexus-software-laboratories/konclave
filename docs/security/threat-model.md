@@ -12,6 +12,7 @@ evidence that implementations honor both.
 - MLS epoch secrets, resumption secrets, and persisted group state;
 - invitation capabilities and local authorization credentials;
 - pairing capabilities, directional pairing keys, and pairing authorization state;
+- install-scoped enrollment credentials and per-profile relay data-plane tokens;
 - ephemeral local adapter capabilities and authenticated delivery leases;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
@@ -210,6 +211,7 @@ the mutually supported maximum.
 | Pairing record injection or replay | Direction-specific AEAD keys, complete canonical-header authentication, stable logical message identifiers, reply-chain validation, and no state advance on invalid or unexpected records |
 | Pairing expiry after membership commit | Separate completion deadline; recover the exact Welcome or issue a durable compensating MLS removal |
 | Remote pairing credential escalation | Never embed a wildcard or durable relay credential; require pre-provisioned access or an exact-route short-lived principal |
+| Enrollment authority theft or abuse | Separate enrollment/data-plane derivation domains, authenticate before body processing, fixed server grants, rate/concurrency/principal caps, verifier-only configuration, rotation, and revocation |
 | Credential substitution | Device-root binding validation and optional out-of-band fingerprint comparison |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |
 | Protocol downgrade | Signed capability negotiation and fail-closed version selection |
