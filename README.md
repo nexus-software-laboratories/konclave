@@ -50,6 +50,27 @@ The Copilot CLI host extension is packaged from
 `extensions/Konclave.HostExtension` with `npm run build`.
 <!-- genesis:run-command:end -->
 
+### Initialize an installation
+
+After installing the CLI, daemon, and Copilot plugin, configure relay enrollment once:
+
+```shell
+konclave init --relay-endpoint https://relay.example.com
+konclave doctor
+```
+
+Native setup prompts without echo and stores an endpoint-bound credential in the
+operating system credential store. Unix headless setup can create an owner-owned,
+mode-`0600` external record from bounded stdin:
+
+```shell
+printf '%s\n' '<enrollment-credential>' | konclave init --relay-endpoint https://relay.example.com --external-source /run/secrets/konclave-enrollment
+```
+
+Later Copilot sessions create independent profiles and enroll automatically without
+receiving the credential through their environment or plugin configuration. Repeating
+`init` is idempotent for the same endpoint and source; conflicting setup fails.
+
 ## Architecture
 
 Konclave separates the trusted local agent boundary from relay transport:

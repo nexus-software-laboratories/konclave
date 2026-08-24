@@ -43,7 +43,7 @@ enrollment_source=native
 installation_id=<installation-id>
 ```
 
-Headless installations use `enrollment_source=external_file` plus an absolute
+Unix headless installations use `enrollment_source=external_file` plus an absolute
 `credential_path` to a permission-restricted secret mount containing the
 endpoint-bound binary credential record. Native installation identifiers resolve
 only inside the dedicated relay-enrollment keyring service; they cannot address
@@ -51,6 +51,11 @@ profile wrapping-key entries. Both source forms authenticate the normalized endp
 before exposing bearer bytes. A missing, malformed, wrong-length, unavailable, or
 endpoint-mismatched source fails startup; there is no environment, anonymous,
 generated-authority, or shared data-plane fallback.
+
+External records must be regular files owned by the daemon account, have one hard
+link, and grant no group/other permission bits. Reads and creates reject symbolic
+links. Windows installations use native credential custody because a portable
+owner-only DACL verifier is not part of the initial external-source adapter.
 
 Profiles with an existing sealed relay credential do not reopen the installation
 source. A new profile generates and seals its own data-plane credential and request

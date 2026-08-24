@@ -19,10 +19,16 @@ creating the credential.
 
 `NativeEnrollmentCredentialStore` uses a dedicated keyring service and internally
 derives its account name from a bounded installation identifier. It cannot address
-profile wrapping-key entries. It never creates a missing value: bounded reads
-distinguish missing, malformed, and unavailable records, while writes read back and
-verify endpoint-bound bytes. Relay enrollment uses this boundary so filesystem
-configuration cannot redirect a profile wrapping key or unbound bearer credential.
+profile wrapping-key entries. Bounded reads never create and distinguish missing,
+malformed, and unavailable records. Writes create a missing record or verify an exact
+existing record, never replace a conflicting value, and read back newly stored
+endpoint-bound bytes. Relay enrollment uses this boundary so filesystem configuration
+cannot redirect a profile wrapping key or unbound bearer credential.
+
+Native stores do not expose a portable create-if-absent transaction. Initialization
+therefore derives the installation identifier from both the enrollment authority and
+the normalized relay endpoint, so concurrent writers for one identifier carry
+identical endpoint-bound bytes.
 
 Headless deployments disable the `native-keyring` feature and construct
 `ExternalWrappingKeyProvider` from exactly 32 bytes supplied by an external secret

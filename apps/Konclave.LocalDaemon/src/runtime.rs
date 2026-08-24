@@ -7,6 +7,7 @@ use KonclaveClientLibrary::{
     HttpRelayEnrollmentTransport, RELAY_INSTALLATION_CONFIG_FILE, RelayAccessCredential,
     RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
     RelayEnrollmentRequest, RelayEnrollmentSourceConfig, RelayInstallationConfig,
+    default_profile_root,
 };
 use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveSecretStorage::{
@@ -345,7 +346,7 @@ fn prepare_enrollment(
     let pending = store
         .reserve_relay_enrollment(installation.endpoint())
         .context("reserving relay enrollment")?;
-    let credential = load_enrollment_credential(installation.source(), installation.endpoint())?;
+    let credential = load_installation_credential(installation)?;
     Ok(EnrollmentPlan {
         endpoint: pending.endpoint().clone(),
         request: pending.request(),
@@ -353,28 +354,24 @@ fn prepare_enrollment(
     })
 }
 
-fn load_enrollment_credential(
-    source: &RelayEnrollmentSourceConfig,
-    endpoint: &RelayEndpoint,
+fn load_installation_credential(
+    installation: &RelayInstallationConfig,
 ) -> anyhow::Result<RelayEnrollmentCredential> {
-    match source {
-        RelayEnrollmentSourceConfig::Native { installation_id } => {
-            let record = NativeEnrollmentCredentialStore::new(installation_id.clone())
-                .context("validating enrollment installation identifier")?
-                .load()
-                .context("loading native enrollment credential")?;
-            RelayEnrollmentCredential::from_bound_reader(record.as_slice(), endpoint)
-                .context("validating native enrollment credential")
-        }
-        RelayEnrollmentSourceConfig::ExternalFile { path } => {
-            let file = std::fs::File::open(path).with_context(|| {
-                format!("opening external enrollment credential {}", path.display())
-            })?;
-            RelayEnrollmentCredential::from_bound_reader(file, endpoint)
-                .context("reading endpoint-bound external enrollment credential")
-        }
-        _ => bail!("relay enrollment source is unsupported"),
+    if let Some(credential) = installation
+        .load_external_credential()
+        .context("loading endpoint-bound external enrollment credential")?
+    {
+        return Ok(credential);
     }
+    let RelayEnrollmentSourceConfig::Native { installation_id } = installation.source() else {
+        bail!("relay enrollment source is unsupported");
+    };
+    let record = NativeEnrollmentCredentialStore::new(installation_id.clone())
+        .context("validating enrollment installation identifier")?
+        .load()
+        .context("loading native enrollment credential")?;
+    RelayEnrollmentCredential::from_bound_reader(record.as_slice(), installation.endpoint())
+        .context("validating native enrollment credential")
 }
 
 fn provision_relay_if_needed(
@@ -440,43 +437,6 @@ fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
             SecretSealer::from_provider(provider).context("loading native wrapping key")
         }
     }
-}
-
-fn default_profile_root() -> anyhow::Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        let root = std::env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("LOCALAPPDATA is required"))?;
-        return Ok(PathBuf::from(root).join("Konclave").join("profiles"));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("HOME is required"))?;
-        return Ok(PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("Konclave")
-            .join("profiles"));
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(root) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-            return Ok(PathBuf::from(root).join("konclave").join("profiles"));
-        }
-        let home = std::env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("HOME is required"))?;
-        return Ok(PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("konclave")
-            .join("profiles"));
-    }
-    #[allow(unreachable_code)]
-    Err(anyhow::anyhow!("this platform has no default profile root"))
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -601,6 +561,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn installation_source_enrolls_distinct_profiles_automatically() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("profiles");
@@ -611,12 +572,6 @@ mod tests {
         let enrollment_token = [11_u8; RelayEnrollmentCredential::LENGTH];
         let relay = TestRelay::start_enrollment(enrollment_token).await;
         let endpoint = RelayEndpoint::parse(&relay.endpoint).unwrap();
-        let credential = RelayEnrollmentCredential::from_bytes(enrollment_token);
-        std::fs::write(
-            &credential_path,
-            credential.encode_bound(&endpoint).unwrap().as_slice(),
-        )
-        .unwrap();
         let installation = RelayInstallationConfig::new(
             endpoint,
             RelayEnrollmentSourceConfig::ExternalFile {
@@ -624,6 +579,9 @@ mod tests {
             },
         )
         .unwrap();
+        installation
+            .create_external_credential(&RelayEnrollmentCredential::from_bytes(enrollment_token))
+            .unwrap();
         std::fs::write(
             root.join(RELAY_INSTALLATION_CONFIG_FILE),
             installation.encode().unwrap(),
@@ -666,6 +624,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn missing_external_source_fails_closed_and_exact_retry_recovers() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("profiles");
@@ -699,12 +658,9 @@ mod tests {
             installation_bytes,
         )
         .unwrap();
-        let credential = RelayEnrollmentCredential::from_bytes(enrollment_token);
-        std::fs::write(
-            &credential_path,
-            credential.encode_bound(&endpoint).unwrap().as_slice(),
-        )
-        .unwrap();
+        installation
+            .create_external_credential(&RelayEnrollmentCredential::from_bytes(enrollment_token))
+            .unwrap();
         let recovered = initialize_profile(config()).await.unwrap();
         assert!(recovered.applications.is_some());
         assert!(

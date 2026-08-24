@@ -4,7 +4,7 @@ use std::time::Duration;
 use KonclaveClientLibrary::{
     EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError, RelayAccessCredential,
     RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
-    RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayTransport,
+    RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayTransport, check_relay_health,
 };
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
@@ -162,6 +162,9 @@ fn envelope(route: RoutingId, id: u8, payload: u8) -> RelayEnvelope {
 #[tokio::test]
 async fn client_submits_replays_and_acknowledges_idempotently() {
     let server = TestServer::start(true).await;
+    check_relay_health(RelayEndpoint::parse(&format!("http://{}", server.address)).unwrap())
+        .await
+        .unwrap();
     let client = server.client();
     let envelope = envelope(server.route, 1, 10);
     assert_eq!(client.submit(&envelope).await.unwrap().cursor(), 1);

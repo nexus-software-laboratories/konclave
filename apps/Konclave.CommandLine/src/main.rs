@@ -1,5 +1,7 @@
 mod cli;
-mod config;
+mod doctor;
+mod init;
+mod installation;
 
 use std::process::ExitCode;
 
@@ -7,8 +9,9 @@ use clap::Parser;
 
 use crate::cli::{Cli, Command};
 
-fn main() -> ExitCode {
-    match run() {
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("Error: {err:#}");
@@ -17,10 +20,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Version => print_version(),
-        Command::Config => config::run()?,
+        Command::Init(args) => init::run(args)?,
+        Command::Doctor(args) => doctor::run(args).await?,
     }
     Ok(())
 }
