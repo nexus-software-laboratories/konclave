@@ -141,8 +141,6 @@ jobs:
     # and never depends on self-hosted image-builder availability.
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env:
-      CONTAINER_VALIDATION_BUILDER: konclave-container-validation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -153,13 +151,24 @@ jobs:
         run: >-
           bash ./scripts/ci/Initialize-JobPrivatePaths.sh
           CONTAINER_VALIDATION_ROOT=konclave-container-validation
+      # The cleanup contract is exercised against a real engine before anything is
+      # built, so a filter that removes too much is caught while the only resources at
+      # risk are the throwaway ones this test made.
+      - name: Verify container validation cleanup contract
+        shell: bash
+        run: bash ./scripts/ci/Test-ContainerValidationCleanup.sh
+      - name: Capture Docker baseline
+        shell: bash
+        run: >-
+          bash ./scripts/ci/Capture-ContainerValidationBaseline.sh
       - name: Build and validate AMD64 OCI archive
         shell: bash
         run: >-
           bash ./scripts/ci/Validate-HostedContainerImage.sh
           apps/Konclave.CommunityRelay
           konclave-community-relay
-      # Cleanup is unconditional so no builder, cache, or archive survives the job.
+      # Cleanup is unconditional so no builder, cache, or archive survives the job, and
+      # it fails the job when anything run-owned remains or anything else vanished.
       - name: Remove container validation state
         if: always()
         shell: bash
