@@ -25,7 +25,7 @@ showing isolated clients different histories.
 
 ## SQLite schema
 
-Schema version 3 uses three tables:
+Schema version 4 uses four tables:
 
 - `relay_route` stores the opaque routing identifier, next cursor, and current epoch;
 - `relay_envelope` stores the cursor, globally unique envelope identifier, protocol
@@ -33,6 +33,8 @@ Schema version 3 uses three tables:
   exact encoded envelope;
 - `relay_acknowledgment` stores one monotonic cursor per opaque route and authenticated
   principal.
+- `relay_dynamic_principal` stores one client-generated principal digest, stable
+  enrollment request identifier, and active/revoked status.
 
 The schema uses constraints for identifier sizes, payload size, delivery-class epoch
 rules, and positive counters. An unknown schema version or missing required table
@@ -47,8 +49,17 @@ MLS secret custody.
 Schema version 2 migrates version 1 payload rows by reconstructing their canonical v1
 envelopes inside one transaction. Version 3 expands the finite delivery-class
 constraint to admit opaque Pairing envelopes while preserving every version 2 row.
-New submissions retain their exact validated bytes so forwarding does not discard
-additive protobuf fields.
+Version 4 adds the bounded dynamic-principal registry without rewriting envelope or
+acknowledgment rows. New submissions retain their exact validated bytes so forwarding
+does not discard additive protobuf fields.
+
+Dynamic registration uses one atomic insert/select statement to enforce 1,024 active
+principals and 4,096 total active/revoked records. Exact `(request_id, principal_id)`
+retry returns the prior outcome; reusing either identity with a different counterpart
+is a conflict. Revocation is idempotent, releases active capacity, and retains the
+record so the same credential cannot silently re-enroll. The fixed self-hosted
+authorizer grants active dynamic principals the deployment's wildcard data-plane
+policy; enrollment authentication remains a separate HTTP adapter.
 
 ## Replay and acknowledgment
 

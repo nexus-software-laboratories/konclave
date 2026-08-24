@@ -9,13 +9,19 @@ use KonclaveDomainCore::{
 use KonclaveProtocolContracts::v1::{
     decode_relay_envelope, encode_relay_envelope, encode_replay_page_preserving,
 };
+use KonclaveRelayAuthentication::{
+    EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
+    RelayPrincipalId,
+};
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
-use crate::{EncodedReplayPage, RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
+use crate::{EncodedReplayPage, RelayError, RelayPrincipalRegistry, RelayRepository, SubmitResult};
 
-const SQLITE_SCHEMA_VERSION: u32 = 3;
+const SQLITE_SCHEMA_VERSION: u32 = 4;
+const MAX_ACTIVE_DYNAMIC_PRINCIPALS: i64 = 1_024;
+const MAX_DYNAMIC_PRINCIPAL_RECORDS: i64 = 4_096;
 const REPLAY_PAGE_FIXED_WIRE_BUDGET: usize = 64;
 const STORED_ENVELOPE_WIRE_OVERHEAD_BUDGET: usize = 32;
 
@@ -179,7 +185,131 @@ impl RelayRepository for SqliteRelayRepository {
     }
 }
 
+#[async_trait]
+impl RelayPrincipalRegistry for SqliteRelayRepository {
+    async fn register_principal(
+        &self,
+        request: RelayEnrollmentRequest,
+    ) -> Result<RelayEnrollmentResponse, RelayError> {
+        if request.version().major() != 1 {
+            return Err(RelayError::UnsupportedEnrollmentVersion);
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO relay_dynamic_principal (principal_id, request_id, status)
+             SELECT ?1, ?2, 1
+             WHERE (SELECT count(*) FROM relay_dynamic_principal WHERE status = 1) < ?3
+               AND (SELECT count(*) FROM relay_dynamic_principal) < ?4
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(request.principal_id().as_bytes().as_slice())
+        .bind(request.request_id().as_bytes().as_slice())
+        .bind(MAX_ACTIVE_DYNAMIC_PRINCIPALS)
+        .bind(MAX_DYNAMIC_PRINCIPAL_RECORDS)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| storage_failure("dynamic principal registration"))?
+        .rows_affected();
+        let outcome = if inserted == 1 {
+            RelayEnrollmentOutcome::Registered
+        } else {
+            self.classify_principal_registration(request).await?
+        };
+        Ok(RelayEnrollmentResponse::new(
+            request.version(),
+            request.request_id(),
+            request.principal_id(),
+            outcome,
+        ))
+    }
+
+    async fn is_principal_active(&self, principal: RelayPrincipalId) -> Result<bool, RelayError> {
+        let status: Option<i64> = sqlx::query_scalar(
+            "SELECT status FROM relay_dynamic_principal WHERE principal_id = ?1",
+        )
+        .bind(principal.as_bytes().as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| storage_failure("dynamic principal status query"))?;
+        match status {
+            None | Some(2) => Ok(false),
+            Some(1) => Ok(true),
+            Some(_) => Err(RelayError::InvalidStoredData),
+        }
+    }
+
+    async fn revoke_principal(&self, principal: RelayPrincipalId) -> Result<bool, RelayError> {
+        let changed = sqlx::query(
+            "UPDATE relay_dynamic_principal
+             SET status = 2
+             WHERE principal_id = ?1 AND status = 1",
+        )
+        .bind(principal.as_bytes().as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(|_| storage_failure("dynamic principal revocation"))?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+}
+
 impl SqliteRelayRepository {
+    async fn classify_principal_registration(
+        &self,
+        request: RelayEnrollmentRequest,
+    ) -> Result<RelayEnrollmentOutcome, RelayError> {
+        let rows = sqlx::query(
+            "SELECT
+                CASE WHEN length(principal_id) = 32 THEN principal_id END AS principal_id,
+                CASE WHEN length(request_id) = 16 THEN request_id END AS request_id,
+                status
+             FROM relay_dynamic_principal
+             WHERE principal_id = ?1 OR request_id = ?2
+             LIMIT 2",
+        )
+        .bind(request.principal_id().as_bytes().as_slice())
+        .bind(request.request_id().as_bytes().as_slice())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| storage_failure("dynamic principal conflict classification"))?;
+        for row in &rows {
+            let principal = RelayPrincipalId::from_slice(
+                &row.try_get::<Vec<u8>, _>("principal_id")
+                    .map_err(invalid_row)?,
+            )
+            .map_err(|_| RelayError::InvalidStoredData)?;
+            let request_id = EnrollmentRequestId::from_slice(
+                &row.try_get::<Vec<u8>, _>("request_id")
+                    .map_err(invalid_row)?,
+            )
+            .map_err(|_| RelayError::InvalidStoredData)?;
+            let status: i64 = row.try_get("status").map_err(invalid_row)?;
+            if principal == request.principal_id() && request_id == request.request_id() {
+                return match status {
+                    1 => Ok(RelayEnrollmentOutcome::AlreadyRegistered),
+                    2 => Err(RelayError::PrincipalRevoked),
+                    _ => Err(RelayError::InvalidStoredData),
+                };
+            }
+        }
+        if !rows.is_empty() {
+            return Err(RelayError::EnrollmentConflict);
+        }
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                count(*) FILTER (WHERE status = 1),
+                count(*)
+             FROM relay_dynamic_principal",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| storage_failure("dynamic principal capacity query"))?;
+        if counts.0 >= MAX_ACTIVE_DYNAMIC_PRINCIPALS || counts.1 >= MAX_DYNAMIC_PRINCIPAL_RECORDS {
+            Err(RelayError::PrincipalCapacityExceeded)
+        } else {
+            Err(storage_failure("dynamic principal registration outcome"))
+        }
+    }
+
     async fn load_replay_entries(
         &self,
         request: ReplayRequest,
@@ -623,15 +753,20 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
         .execute(&mut *transaction)
         .await
         .map_err(|_| storage_failure("acknowledgment schema initialization"))?;
-        sqlx::query("PRAGMA user_version = 3")
+        initialize_dynamic_principal_schema(&mut transaction).await?;
+        sqlx::query("PRAGMA user_version = 4")
             .execute(&mut *transaction)
             .await
             .map_err(|_| storage_failure("schema version write"))?;
     } else if version == 1 {
         migrate_schema_v1_to_v2(&mut transaction).await?;
         migrate_schema_v2_to_v3(&mut transaction).await?;
+        migrate_schema_v3_to_v4(&mut transaction).await?;
     } else if version == 2 {
         migrate_schema_v2_to_v3(&mut transaction).await?;
+        migrate_schema_v3_to_v4(&mut transaction).await?;
+    } else if version == 3 {
+        migrate_schema_v3_to_v4(&mut transaction).await?;
     }
     validate_schema(&mut transaction).await?;
     transaction
@@ -650,6 +785,7 @@ async fn validate_schema(
                 encoded_envelope
          FROM relay_envelope LIMIT 0",
         "SELECT routing_id, principal_id, cursor FROM relay_acknowledgment LIMIT 0",
+        "SELECT principal_id, request_id, status FROM relay_dynamic_principal LIMIT 0",
     ] {
         sqlx::query(query)
             .execute(&mut **transaction)
@@ -881,6 +1017,33 @@ async fn migrate_schema_v2_to_v3(
     Ok(())
 }
 
+async fn migrate_schema_v3_to_v4(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    initialize_dynamic_principal_schema(transaction).await?;
+    sqlx::query("PRAGMA user_version = 4")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v4 version write"))?;
+    Ok(())
+}
+
+async fn initialize_dynamic_principal_schema(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "CREATE TABLE relay_dynamic_principal (
+            principal_id BLOB PRIMARY KEY CHECK (length(principal_id) = 32),
+            request_id BLOB NOT NULL UNIQUE CHECK (length(request_id) = 16),
+            status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 2)
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("dynamic principal schema initialization"))?;
+    Ok(())
+}
+
 fn envelope_from_v1_row(
     row: &sqlx::sqlite::SqliteRow,
     payload: Vec<u8>,
@@ -970,7 +1133,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{RelayAuthorizer, RelayClock, RelayPermission, RelayService};
+    use crate::{
+        DynamicRelayAuthorizer, RelayAuthorizer, RelayClock, RelayPermission,
+        RelayPrincipalRegistry, RelayService,
+    };
 
     fn bytes<const N: usize>(value: u8) -> [u8; N] {
         [value; N]
@@ -993,6 +1159,213 @@ mod tests {
             vec![payload],
         )
         .unwrap()
+    }
+
+    fn enrollment(value: u64) -> RelayEnrollmentRequest {
+        let mut request_id = [0_u8; EnrollmentRequestId::LENGTH];
+        request_id[..8].copy_from_slice(&value.to_be_bytes());
+        let mut principal_id = [0_u8; RelayPrincipalId::LENGTH];
+        principal_id[..8].copy_from_slice(&value.to_be_bytes());
+        RelayEnrollmentRequest::new(
+            ProtocolVersion::application_v1(),
+            EnrollmentRequestId::from_bytes(request_id),
+            RelayPrincipalId::from_bytes(principal_id),
+        )
+    }
+
+    #[tokio::test]
+    async fn dynamic_registration_is_idempotent_authorized_and_revocable() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let request = enrollment(1);
+        let registered = repository.register_principal(request).await.unwrap();
+        assert_eq!(registered.outcome(), RelayEnrollmentOutcome::Registered);
+        assert_eq!(
+            repository
+                .register_principal(request)
+                .await
+                .unwrap()
+                .outcome(),
+            RelayEnrollmentOutcome::AlreadyRegistered
+        );
+        assert_eq!(
+            repository
+                .register_principal(enrollment(2))
+                .await
+                .unwrap()
+                .outcome(),
+            RelayEnrollmentOutcome::Registered
+        );
+        let conflicting_request = RelayEnrollmentRequest::new(
+            request.version(),
+            request.request_id(),
+            enrollment(3).principal_id(),
+        );
+        assert_eq!(
+            repository.register_principal(conflicting_request).await,
+            Err(RelayError::EnrollmentConflict)
+        );
+        let conflicting_principal = RelayEnrollmentRequest::new(
+            request.version(),
+            enrollment(3).request_id(),
+            request.principal_id(),
+        );
+        assert_eq!(
+            repository.register_principal(conflicting_principal).await,
+            Err(RelayError::EnrollmentConflict)
+        );
+
+        let authorizer = DynamicRelayAuthorizer::new(repository.clone());
+        assert!(
+            authorizer
+                .authorize(
+                    request.principal_id(),
+                    RoutingId::from_bytes([9; RoutingId::LENGTH]),
+                    RelayPermission::Send,
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            repository
+                .revoke_principal(request.principal_id())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repository
+                .revoke_principal(request.principal_id())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repository
+                .is_principal_active(request.principal_id())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            authorizer
+                .authorize(
+                    request.principal_id(),
+                    RoutingId::from_bytes([9; RoutingId::LENGTH]),
+                    RelayPermission::Replay,
+                )
+                .await,
+            Err(RelayError::Unauthorized)
+        );
+        assert_eq!(
+            repository.register_principal(request).await,
+            Err(RelayError::PrincipalRevoked)
+        );
+        assert_eq!(
+            repository
+                .register_principal(RelayEnrollmentRequest::new(
+                    ProtocolVersion::new(2, 0).unwrap(),
+                    enrollment(5).request_id(),
+                    enrollment(5).principal_id(),
+                ))
+                .await,
+            Err(RelayError::UnsupportedEnrollmentVersion)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_registration_commits_one_principal() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let request = enrollment(4);
+        let (first, second) = tokio::join!(
+            repository.register_principal(request),
+            repository.register_principal(request)
+        );
+        let outcomes = BTreeSet::from([
+            first.unwrap().outcome() as u8,
+            second.unwrap().outcome() as u8,
+        ]);
+        assert_eq!(outcomes.len(), 2);
+        assert!(
+            repository
+                .is_principal_active(request.principal_id())
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn active_principal_capacity_is_atomic_and_revocation_releases_it() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let capacity = u64::try_from(MAX_ACTIVE_DYNAMIC_PRINCIPALS).unwrap();
+        for value in 0..capacity - 1 {
+            repository
+                .register_principal(enrollment(value))
+                .await
+                .unwrap();
+        }
+        let first_request = enrollment(capacity - 1);
+        let second_request = enrollment(capacity);
+        let (first, second) = tokio::join!(
+            repository.register_principal(first_request),
+            repository.register_principal(second_request)
+        );
+        let (accepted, rejected) = match (first, second) {
+            (Ok(response), Err(RelayError::PrincipalCapacityExceeded)) => {
+                assert_eq!(response.outcome(), RelayEnrollmentOutcome::Registered);
+                (first_request, second_request)
+            }
+            (Err(RelayError::PrincipalCapacityExceeded), Ok(response)) => {
+                assert_eq!(response.outcome(), RelayEnrollmentOutcome::Registered);
+                (second_request, first_request)
+            }
+            outcomes => panic!("exactly one registration must win the final slot: {outcomes:?}"),
+        };
+        assert_eq!(
+            repository
+                .register_principal(accepted)
+                .await
+                .unwrap()
+                .outcome(),
+            RelayEnrollmentOutcome::AlreadyRegistered
+        );
+        assert!(
+            repository
+                .revoke_principal(accepted.principal_id())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repository
+                .register_principal(rejected)
+                .await
+                .unwrap()
+                .outcome(),
+            RelayEnrollmentOutcome::Registered
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_principal_history_has_a_hard_total_bound() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let mut transaction = repository.pool.begin().await.unwrap();
+        for value in 0..u64::try_from(MAX_DYNAMIC_PRINCIPAL_RECORDS).unwrap() {
+            let request = enrollment(value);
+            sqlx::query(
+                "INSERT INTO relay_dynamic_principal (principal_id, request_id, status)
+                 VALUES (?1, ?2, 2)",
+            )
+            .bind(request.principal_id().as_bytes().as_slice())
+            .bind(request.request_id().as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        }
+        transaction.commit().await.unwrap();
+        assert_eq!(
+            repository
+                .register_principal(enrollment(
+                    u64::try_from(MAX_DYNAMIC_PRINCIPAL_RECORDS).unwrap()
+                ))
+                .await,
+            Err(RelayError::PrincipalCapacityExceeded)
+        );
     }
 
     async fn create_v1_pool(path: &Path) -> SqlitePool {
@@ -1424,7 +1797,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let replay = repository
             .replay_encoded(ReplayRequest::new(envelope.routing_id(), 0, 100).unwrap())
             .await
@@ -1463,7 +1836,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let replay = repository
             .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
             .await
@@ -1479,6 +1852,85 @@ mod tests {
             .await
             .unwrap();
         assert!(pairing_replay.envelopes()[0].envelope() == &pairing);
+    }
+
+    #[tokio::test]
+    async fn schema_v3_adds_dynamic_registration_without_rewriting_envelopes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let existing = envelope(30, 31, DeliveryClass::GroupApplication, None, 32);
+        insert_v1_row(&pool, &existing, 1, existing.payload()).await;
+        let mut transaction = pool.begin().await.unwrap();
+        migrate_schema_v1_to_v2(&mut transaction).await.unwrap();
+        migrate_schema_v2_to_v3(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 3);
+        pool.close().await;
+
+        let repository = SqliteRelayRepository::connect(&path).await.unwrap();
+        let replay = repository
+            .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
+            .await
+            .unwrap();
+        assert!(replay.envelopes()[0].envelope() == &existing);
+        assert_eq!(
+            repository
+                .register_principal(enrollment(33))
+                .await
+                .unwrap()
+                .outcome(),
+            RelayEnrollmentOutcome::Registered
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_schema_v3_migration_preserves_the_v3_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let existing = envelope(34, 35, DeliveryClass::GroupApplication, None, 36);
+        insert_v1_row(&pool, &existing, 1, existing.payload()).await;
+        let mut transaction = pool.begin().await.unwrap();
+        migrate_schema_v1_to_v2(&mut transaction).await.unwrap();
+        migrate_schema_v2_to_v3(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+        sqlx::query("CREATE TABLE relay_dynamic_principal (sentinel INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        assert!(SqliteRelayRepository::connect(&path).await.is_err());
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let original_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let sentinel_columns: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pragma_table_info('relay_dynamic_principal')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, 3);
+        assert_eq!(original_count, 1);
+        assert_eq!(sentinel_columns, 1);
     }
 
     #[tokio::test]

@@ -34,6 +34,22 @@ pub enum RelayError {
     #[error("acknowledgment exceeds the highest assigned cursor")]
     InvalidAcknowledgment,
 
+    /// An enrollment request identity conflicts with another principal or request.
+    #[error("relay enrollment identity conflicts with an existing registration")]
+    EnrollmentConflict,
+
+    /// Dynamic principal registration reached its configured hard bound.
+    #[error("relay dynamic principal capacity is exhausted")]
+    PrincipalCapacityExceeded,
+
+    /// A previously registered principal has been revoked.
+    #[error("relay principal is revoked")]
+    PrincipalRevoked,
+
+    /// Enrollment uses another protocol major version.
+    #[error("relay enrollment protocol version is unsupported")]
+    UnsupportedEnrollmentVersion,
+
     /// System time is unavailable.
     #[error("relay clock is unavailable")]
     ClockUnavailable,
@@ -71,6 +87,10 @@ impl RelayError {
             Self::StaleEpoch => "relay_stale_epoch",
             Self::SequenceExhausted => "relay_sequence_exhausted",
             Self::InvalidAcknowledgment => "relay_invalid_acknowledgment",
+            Self::EnrollmentConflict => "relay_enrollment_conflict",
+            Self::PrincipalCapacityExceeded => "relay_principal_capacity",
+            Self::PrincipalRevoked => "relay_principal_revoked",
+            Self::UnsupportedEnrollmentVersion => "relay_enrollment_version_unsupported",
             Self::ClockUnavailable => "relay_clock_unavailable",
             Self::StorageFailure { .. } => "relay_storage_failure",
             Self::UnsupportedSchemaVersion { .. } => "relay_schema_unsupported",
