@@ -1,3 +1,4 @@
+use aws_lc_rs::digest::{Context as DigestContext, SHA256};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -12,7 +13,9 @@ const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const HEADER_BYTES: usize = MAGIC.len() + 1 + 1 + 4 + NONCE_BYTES;
 const AAD_DOMAIN: &[u8] = b"konclave-sealed-secret-aad-v1\0";
+const CONTEXT_DERIVATION_DOMAIN: &[u8] = b"konclave-secret-record-context-v1\0";
 const MAX_RECORD_IDENTIFIER_BYTES: usize = 128;
+const MAX_CONTEXT_COMPONENTS: usize = 8;
 
 /// Maximum plaintext bytes accepted by one sealed secret record.
 pub const MAX_SECRET_PLAINTEXT_BYTES: usize = 16 * 1024 * 1024;
@@ -37,6 +40,7 @@ pub enum SecretRecordKind {
     RemoteEventJournalHead = 13,
     RemoteEventDeliveryPolicy = 14,
     PairingOperation = 15,
+    RelayEnrollmentIntent = 16,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.
@@ -63,6 +67,59 @@ impl SecretRecordContext {
             });
         }
         Ok(Self { kind, identifier })
+    }
+
+    /// Derives a compact identifier from bounded, non-empty context components.
+    ///
+    /// Component order and byte lengths are authenticated, so concatenation
+    /// ambiguities cannot map distinct record contexts to the same digest input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an empty or excessive component set, an empty
+    /// component, or cumulative input beyond the sealed-plaintext bound.
+    pub fn derive(
+        kind: SecretRecordKind,
+        components: &[&[u8]],
+    ) -> Result<Self, SecretStorageError> {
+        if components.is_empty()
+            || components.len() > MAX_CONTEXT_COMPONENTS
+            || components.iter().any(|component| component.is_empty())
+        {
+            return Err(SecretStorageError::InvalidRecordIdentifier {
+                maximum: MAX_RECORD_IDENTIFIER_BYTES,
+            });
+        }
+        let mut total = 0_usize;
+        let component_count = u8::try_from(components.len()).map_err(|_| {
+            SecretStorageError::InvalidRecordIdentifier {
+                maximum: MAX_RECORD_IDENTIFIER_BYTES,
+            }
+        })?;
+        let mut digest = DigestContext::new(&SHA256);
+        digest.update(CONTEXT_DERIVATION_DOMAIN);
+        digest.update(&[kind as u8, component_count]);
+        for component in components {
+            total = total.checked_add(component.len()).ok_or(
+                SecretStorageError::InvalidRecordIdentifier {
+                    maximum: MAX_RECORD_IDENTIFIER_BYTES,
+                },
+            )?;
+            if total > MAX_SECRET_PLAINTEXT_BYTES {
+                return Err(SecretStorageError::InvalidRecordIdentifier {
+                    maximum: MAX_RECORD_IDENTIFIER_BYTES,
+                });
+            }
+            digest.update(
+                &u64::try_from(component.len())
+                    .map_err(|_| SecretStorageError::InvalidRecordIdentifier {
+                        maximum: MAX_RECORD_IDENTIFIER_BYTES,
+                    })?
+                    .to_be_bytes(),
+            );
+            digest.update(component);
+        }
+        Self::new(kind, digest.finish().as_ref().to_vec())
     }
 
     /// Returns the record namespace.
@@ -293,6 +350,45 @@ mod tests {
         assert_ne!(first.as_bytes(), second.as_bytes());
         assert_eq!(sealer.open(&context, &first).unwrap().as_slice(), b"same");
         assert_eq!(sealer.open(&context, &second).unwrap().as_slice(), b"same");
+    }
+
+    #[test]
+    fn derived_contexts_bind_component_order_lengths_and_kind() {
+        let first = SecretRecordContext::derive(
+            SecretRecordKind::RelayEnrollmentIntent,
+            &[b"profile", b"ab", b"c"],
+        )
+        .unwrap();
+        let reordered = SecretRecordContext::derive(
+            SecretRecordKind::RelayEnrollmentIntent,
+            &[b"profile", b"c", b"ab"],
+        )
+        .unwrap();
+        let repartitioned = SecretRecordContext::derive(
+            SecretRecordKind::RelayEnrollmentIntent,
+            &[b"profile", b"a", b"bc"],
+        )
+        .unwrap();
+        let wrong_kind = SecretRecordContext::derive(
+            SecretRecordKind::PairingOperation,
+            &[b"profile", b"ab", b"c"],
+        )
+        .unwrap();
+
+        assert_eq!(first.identifier().len(), 32);
+        assert_ne!(first, reordered);
+        assert_ne!(first, repartitioned);
+        assert_ne!(first, wrong_kind);
+        assert!(
+            SecretRecordContext::derive(SecretRecordKind::RelayEnrollmentIntent, &[],).is_err()
+        );
+        assert!(
+            SecretRecordContext::derive(
+                SecretRecordKind::RelayEnrollmentIntent,
+                &[b"profile", b""],
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -30,10 +30,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+#[path = "enrollment_persistence.rs"]
+pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 11;
+const PROFILE_SCHEMA_VERSION: u32 = 12;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -7661,6 +7663,10 @@ pub(crate) enum ProfileStoreError {
     RelayNotConfigured,
     #[error("profile relay credential is unavailable")]
     Credential,
+    #[error("profile relay is already configured")]
+    RelayAlreadyConfigured,
+    #[error("profile relay enrollment state conflicts with the requested operation")]
+    RelayEnrollmentConflict,
     #[error("conversation already exists")]
     ConversationExists,
     #[error("conversation does not exist")]
@@ -7731,29 +7737,33 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
-        10 => return pairing::initialize_pairing_schema(connection),
-        9 => return initialize_remote_event_and_pairing_schema(connection),
+        11 => return enrollment::initialize_enrollment_schema(connection),
+        10 => {
+            pairing::initialize_pairing_schema(connection)?;
+            return enrollment::initialize_enrollment_schema(connection);
+        }
+        9 => return initialize_remote_event_pairing_and_enrollment_schema(connection),
         8 => {
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         7 => {
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         6 => {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         5 => {
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         4 => {
             initialize_pending_join_schema(connection)?;
@@ -7761,7 +7771,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         3 => {
             initialize_membership_outbox_schema(connection)?;
@@ -7770,7 +7780,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         2 => {
             initialize_message_history_schema(connection)?;
@@ -7780,7 +7790,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_and_pairing_schema(connection);
+            return initialize_remote_event_pairing_and_enrollment_schema(connection);
         }
         0 => connection
             .execute_batch(
@@ -7927,14 +7937,15 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
     initialize_replay_head_schema(connection)?;
     initialize_outbox_terminal_schema(connection)?;
     initialize_outbox_removed_terminal_schema(connection)?;
-    initialize_remote_event_and_pairing_schema(connection)
+    initialize_remote_event_pairing_and_enrollment_schema(connection)
 }
 
-fn initialize_remote_event_and_pairing_schema(
+fn initialize_remote_event_pairing_and_enrollment_schema(
     connection: &Connection,
 ) -> Result<(), ProfileStoreError> {
     initialize_remote_event_schema(connection)?;
-    pairing::initialize_pairing_schema(connection)
+    pairing::initialize_pairing_schema(connection)?;
+    enrollment::initialize_enrollment_schema(connection)
 }
 
 fn initialize_message_history_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -10200,7 +10211,8 @@ mod tests {
     fn downgrade_v10_to_v9(connection: &Connection) {
         connection
             .execute_batch(
-                "DROP TABLE daemon_pairing;
+                "DROP TABLE daemon_relay_enrollment;
+                 DROP TABLE daemon_pairing;
                  DROP TABLE daemon_adapter_consumer;
                  DROP TABLE daemon_remote_event;
                  ALTER TABLE daemon_conversation DROP COLUMN sealed_adapter_delivery_policy;
@@ -12376,7 +12388,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v1_to_v11_transactionally() {
+    fn profile_schema_migrates_v1_to_v12_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration-test").unwrap();
         let locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
@@ -12398,6 +12410,7 @@ mod tests {
             "daemon_membership_outbox",
             "daemon_membership_inbox",
             "daemon_pending_join",
+            "daemon_relay_enrollment",
         ] {
             let exists: i64 = store
                 .lock()
@@ -12414,7 +12427,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v9_to_v11_remote_event_journal() {
+    fn profile_schema_migrates_v9_to_v12_remote_event_journal() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("remote-event-migration").unwrap();
         let database_path = {
@@ -12498,7 +12511,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v2_to_v11() {
+    fn profile_schema_migrates_v2_to_v12() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("message-history-migration").unwrap();
         let database_path = {
@@ -12658,7 +12671,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v3_to_v11_membership_journal() {
+    fn profile_schema_migrates_v3_to_v12_membership_journal() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("membership-migration").unwrap();
         let database_path = {
@@ -12706,7 +12719,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v6_to_v11_with_replay_heads() {
+    fn profile_schema_migrates_v6_to_v12_with_replay_heads() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("replay-head-migration").unwrap();
         let database_path = {
@@ -12817,7 +12830,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v7_to_v11_outbox_terminal_reasons() {
+    fn profile_schema_migrates_v7_to_v12_outbox_terminal_reasons() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-terminal-migration").unwrap();
         let database_path = {
@@ -12855,7 +12868,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v8_to_v11_removed_terminal_reason() {
+    fn profile_schema_migrates_v8_to_v12_removed_terminal_reason() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-removed-migration").unwrap();
         let database_path = {
@@ -12966,7 +12979,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v5_to_v11_join_receipts() {
+    fn profile_schema_migrates_v5_to_v12_join_receipts() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("join-receipt-migration").unwrap();
         let database_path = {
@@ -13058,7 +13071,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v4_to_v11_pending_joins() {
+    fn profile_schema_migrates_v4_to_v12_pending_joins() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("pending-join-migration").unwrap();
         let database_path = {

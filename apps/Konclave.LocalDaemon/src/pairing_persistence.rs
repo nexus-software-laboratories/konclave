@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn version_ten_profile_migrates_to_pairing_schema() {
+    fn version_ten_profile_migrates_to_current_schema() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("profiles");
         {
@@ -1256,7 +1256,11 @@ mod tests {
             store
                 .lock()
                 .unwrap()
-                .execute_batch("DROP TABLE daemon_pairing; PRAGMA user_version = 10;")
+                .execute_batch(
+                    "DROP TABLE daemon_relay_enrollment;
+                     DROP TABLE daemon_pairing;
+                     PRAGMA user_version = 10;",
+                )
                 .unwrap();
         }
         let reopened = store(&path);
