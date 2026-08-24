@@ -56,21 +56,45 @@ impl ProtectedHttpClient {
             .send()
             .await
             .map_err(map_reqwest_error)?;
-        if !response.status().is_success() {
-            return Err(relay_rejection(&response));
-        }
-        if response
+        complete_response(response, maximum_response_bytes, true).await
+    }
+
+    pub(crate) async fn get(
+        &self,
+        relative: &str,
+        maximum_response_bytes: usize,
+    ) -> Result<ProtectedHttpResponse, KonclaveClientError> {
+        let url = self.endpoint.http_url(relative)?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        complete_response(response, maximum_response_bytes, false).await
+    }
+}
+
+async fn complete_response(
+    response: Response,
+    maximum_response_bytes: usize,
+    require_protobuf: bool,
+) -> Result<ProtectedHttpResponse, KonclaveClientError> {
+    if !response.status().is_success() {
+        return Err(relay_rejection(&response));
+    }
+    if require_protobuf
+        && response
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             != Some(PROTOBUF_MEDIA_TYPE)
-        {
-            return Err(KonclaveClientError::InvalidResponse);
-        }
-        let status = response.status().as_u16();
-        let body = read_bounded(response, maximum_response_bytes).await?;
-        Ok(ProtectedHttpResponse { status, body })
+    {
+        return Err(KonclaveClientError::InvalidResponse);
     }
+    let status = response.status().as_u16();
+    let body = read_bounded(response, maximum_response_bytes).await?;
+    Ok(ProtectedHttpResponse { status, body })
 }
 
 pub(crate) fn decode_canonical_credential(value: &str) -> Option<[u8; 32]> {

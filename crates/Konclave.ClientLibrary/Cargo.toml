@@ -16,6 +16,7 @@ base64.workspace = true
 futures-util.workspace = true
 log.workspace = true
 reqwest.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["net", "time"] }

@@ -8,6 +8,7 @@ mod endpoint;
 mod enrollment;
 mod enrollment_credential;
 mod error;
+mod health;
 mod http;
 mod installation;
 mod pairing;
@@ -25,10 +26,11 @@ pub use enrollment::{
 };
 pub use enrollment_credential::RelayEnrollmentCredential;
 pub use error::KonclaveClientError;
+pub use health::check_relay_health;
 pub use http::{RelayClient, RelayTransport};
 pub use installation::{
     RELAY_INSTALLATION_CONFIG_FILE, RelayEnrollmentSourceConfig, RelayInstallationConfig,
-    RelayInstallationConfigError,
+    RelayInstallationConfigError, default_profile_root,
 };
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
 pub use websocket::RelayWatchSession;
