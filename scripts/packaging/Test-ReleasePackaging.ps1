@@ -238,6 +238,7 @@ try {
                     --install-root $payloadRoot `
                     --profile-root $doctorProfile 2>&1
                 $doctorExitCode = $LASTEXITCODE
+                $global:LASTEXITCODE = 0
             }
             finally {
                 $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
