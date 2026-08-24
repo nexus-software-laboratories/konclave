@@ -36,6 +36,7 @@ pub enum SecretRecordKind {
     RemoteEventDeliveryState = 12,
     RemoteEventJournalHead = 13,
     RemoteEventDeliveryPolicy = 14,
+    PairingOperation = 15,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.
