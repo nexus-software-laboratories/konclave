@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const RELAY_PRINCIPAL_DOMAIN: &[u8] = b"konclave-relay-principal-v1\0";
+const RELAY_ENROLLMENT_AUTHORITY_DOMAIN: &[u8] = b"konclave-relay-enrollment-authority-v1\0";
 
 macro_rules! define_fixed_bytes {
     ($(#[$meta:meta])* $name:ident, $length:expr, $field:literal) => {
@@ -73,6 +74,27 @@ impl RelayPrincipalId {
     pub fn from_access_token(token: &[u8; Self::LENGTH]) -> Self {
         let mut digest = Sha256::new();
         digest.update(RELAY_PRINCIPAL_DOMAIN);
+        digest.update(token);
+        Self(digest.finalize().into())
+    }
+}
+
+define_fixed_bytes!(
+    /// Verifier derived from one high-entropy self-hosted enrollment credential.
+    RelayEnrollmentAuthorityId,
+    32,
+    "relay_enrollment_authority_id"
+);
+
+impl RelayEnrollmentAuthorityId {
+    /// Derives a non-secret authority verifier from one 256-bit enrollment token.
+    ///
+    /// The caller retains ownership of the token and remains responsible for clearing
+    /// every additional byte copy.
+    #[must_use]
+    pub fn from_enrollment_token(token: &[u8; Self::LENGTH]) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(RELAY_ENROLLMENT_AUTHORITY_DOMAIN);
         digest.update(token);
         Self(digest.finalize().into())
     }
@@ -223,6 +245,24 @@ mod tests {
                 0x6e, 0x56, 0xaa, 0xd1, 0xf9, 0xfe, 0x6f, 0x80, 0x53, 0x63, 0x95, 0xb7, 0x0d, 0xf8,
                 0xb9, 0x98, 0x7c, 0x03, 0x5f, 0x7c, 0x03, 0x15, 0x0e, 0xba, 0xae, 0x96, 0xb7, 0x22,
                 0xcf, 0x54, 0x51, 0xcb,
+            ]
+        );
+    }
+
+    #[test]
+    fn enrollment_authority_uses_a_distinct_derivation_domain() {
+        let token = [0x42; RelayEnrollmentAuthorityId::LENGTH];
+        let authority = RelayEnrollmentAuthorityId::from_enrollment_token(&token);
+        assert_ne!(
+            authority.as_bytes(),
+            RelayPrincipalId::from_access_token(&token).as_bytes()
+        );
+        assert_eq!(
+            authority.into_bytes(),
+            [
+                0x14, 0xe8, 0x43, 0xce, 0xca, 0x21, 0xde, 0xfb, 0x8e, 0xa3, 0x97, 0x0e, 0x11, 0x57,
+                0x01, 0x63, 0x8d, 0xa5, 0xb6, 0x87, 0xc2, 0xaf, 0x4f, 0xd9, 0x9c, 0xc4, 0x14, 0x2f,
+                0xde, 0x51, 0x91, 0xa6,
             ]
         );
     }

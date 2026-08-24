@@ -18,6 +18,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Protocol compatibility contract](protocol/compatibility.md)
 - [Identity signature encodings](protocol/identity-signatures.md)
 - [Relay transport authentication](protocol/relay-authentication.md)
+- [Relay principal enrollment](protocol/relay-enrollment.md)
 
 ## Security
 

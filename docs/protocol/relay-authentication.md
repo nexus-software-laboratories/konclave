@@ -4,6 +4,10 @@ This document is the canonical owner of the community relay's data-plane
 authentication and route-grant contract. MLS identity and membership authorization
 remain end-to-end client responsibilities.
 
+Per-profile principal registration uses the separately authenticated
+[relay enrollment](relay-enrollment.md) control plane. Enrollment does not change the
+data-plane bearer format, principal derivation, or route permissions described here.
+
 ## Bearer credential
 
 One request uses exactly one `Authorization` header:
@@ -140,9 +144,10 @@ the `Authorization` header and prevent direct access to the plaintext listener.
 - Routing identifiers are not credentials.
 - The relay never receives device roots, MLS secrets, wrapping keys, or application
   plaintext.
-- A stolen bearer token remains usable until its principal grant is removed and the
-  relay reloads configuration.
+- A stolen bearer token remains usable until its static grant is removed and the relay
+  reloads, or its dynamic registration is revoked.
 - Revoking relay access limits metadata exposure and abuse. MLS removal is still
   required to prevent later message decryption.
-- The initial static adapter is fail-closed and restart-loaded. Other deployments may
-  replace it behind the same authenticated-principal and route-authorizer seams.
+- Static grants are fail-closed and restart-loaded. Dynamically enrolled principals
+  are checked from durable state on each authorization. Other deployments may replace
+  either adapter behind the same authenticated-principal and route-authorizer seams.

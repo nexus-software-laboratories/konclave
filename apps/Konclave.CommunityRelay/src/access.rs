@@ -5,7 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use KonclaveDomainCore::RoutingId;
-use KonclaveRelayCore::{RelayAuthorizer, RelayError, RelayPermission, RelayPrincipalId};
+use KonclaveRelayAuthentication::RelayEnrollmentAuthorityId;
+use KonclaveRelayCore::{
+    DynamicRelayAuthorizer, RelayAuthorizer, RelayError, RelayPermission, RelayPrincipalId,
+    RelayPrincipalRegistry, SqliteRelayRepository,
+};
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use axum::http::HeaderMap;
@@ -15,7 +19,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-const ACCESS_DOCUMENT_VERSION: u32 = 1;
+const ACCESS_DOCUMENT_VERSION: u32 = 2;
 const MAX_ACCESS_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_PRINCIPALS: usize = 1_024;
 const MAX_GRANTS_PER_PRINCIPAL: usize = 1_024;
@@ -25,6 +29,7 @@ const MAX_TOTAL_GRANTS: usize = 8_192;
 #[derive(Clone)]
 pub struct StaticRelayAccess {
     grants: Arc<BTreeMap<RelayPrincipalId, BTreeSet<Grant>>>,
+    enrollment_authority: Option<RelayEnrollmentAuthorityId>,
 }
 
 impl StaticRelayAccess {
@@ -59,12 +64,24 @@ impl StaticRelayAccess {
         let document: AccessDocument =
             serde_json::from_slice(bytes).context("parsing relay access document")?;
         ensure!(
-            document.version == ACCESS_DOCUMENT_VERSION,
+            (1..=ACCESS_DOCUMENT_VERSION).contains(&document.version),
             "unsupported relay access document version"
         );
         ensure!(
-            !document.principals.is_empty() && document.principals.len() <= MAX_PRINCIPALS,
+            document.version == ACCESS_DOCUMENT_VERSION || document.enrollment.is_none(),
+            "version 1 relay access documents cannot configure enrollment"
+        );
+        ensure!(
+            document.principals.len() <= MAX_PRINCIPALS,
             "relay access principal count is outside the supported range"
+        );
+        let enrollment_authority = document
+            .enrollment
+            .map(|enrollment| decode_enrollment_authority(&enrollment.authority))
+            .transpose()?;
+        ensure!(
+            !document.principals.is_empty() || enrollment_authority.is_some(),
+            "relay access document must configure a principal or enrollment authority"
         );
 
         let mut grants_by_principal = BTreeMap::new();
@@ -106,6 +123,7 @@ impl StaticRelayAccess {
         }
         Ok(Self {
             grants: Arc::new(grants_by_principal),
+            enrollment_authority,
         })
     }
 
@@ -119,35 +137,128 @@ impl StaticRelayAccess {
         &self,
         headers: &HeaderMap,
     ) -> Result<RelayPrincipalId, RelayAuthenticationError> {
-        let mut values = headers.get_all(AUTHORIZATION).iter();
-        let value = values.next().ok_or(RelayAuthenticationError)?;
-        if values.next().is_some() {
-            return Err(RelayAuthenticationError);
-        }
-        let value = value.to_str().map_err(|_| RelayAuthenticationError)?;
-        let (scheme, encoded_token) = value.split_once(' ').ok_or(RelayAuthenticationError)?;
-        if !scheme.eq_ignore_ascii_case("bearer")
-            || encoded_token.len() != 43
-            || encoded_token.bytes().any(|byte| byte.is_ascii_whitespace())
-        {
-            return Err(RelayAuthenticationError);
-        }
-        let decoded = Zeroizing::new(
-            URL_SAFE_NO_PAD
-                .decode(encoded_token)
-                .map_err(|_| RelayAuthenticationError)?,
-        );
-        let token = Zeroizing::new(
-            decoded
-                .as_slice()
-                .try_into()
-                .map_err(|_| RelayAuthenticationError)?,
-        );
-        let principal = RelayPrincipalId::from_access_token(&token);
+        let principal = principal_from_headers(headers)?;
         if self.grants.contains_key(&principal) {
             Ok(principal)
         } else {
             Err(RelayAuthenticationError)
+        }
+    }
+
+    /// Authenticates the separately domain-separated enrollment authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same opaque authentication failure for disabled enrollment or any
+    /// missing, duplicated, malformed, incorrectly sized, or wrong credential.
+    pub(crate) fn authenticate_enrollment(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(), RelayAuthenticationError> {
+        let expected = self.enrollment_authority.ok_or(RelayAuthenticationError)?;
+        let token = bearer_token_from_headers(headers)?;
+        let actual = RelayEnrollmentAuthorityId::from_enrollment_token(&token);
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(RelayAuthenticationError)
+        }
+    }
+
+    /// Returns whether a principal appears in the startup-loaded static grants.
+    #[must_use]
+    fn contains_principal(&self, principal: RelayPrincipalId) -> bool {
+        self.grants.contains_key(&principal)
+    }
+
+    fn is_authorized(
+        &self,
+        principal: RelayPrincipalId,
+        routing_id: RoutingId,
+        permission: RelayPermission,
+    ) -> bool {
+        self.grants.get(&principal).is_some_and(|grants| {
+            grants.contains(&Grant {
+                route: RouteGrant::Any,
+                permission,
+            }) || grants.contains(&Grant {
+                route: RouteGrant::Exact(routing_id),
+                permission,
+            })
+        })
+    }
+}
+
+fn principal_from_headers(
+    headers: &HeaderMap,
+) -> Result<RelayPrincipalId, RelayAuthenticationError> {
+    let token = bearer_token_from_headers(headers)?;
+    Ok(RelayPrincipalId::from_access_token(&token))
+}
+
+fn bearer_token_from_headers(
+    headers: &HeaderMap,
+) -> Result<Zeroizing<[u8; RelayPrincipalId::LENGTH]>, RelayAuthenticationError> {
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    let value = values.next().ok_or(RelayAuthenticationError)?;
+    if values.next().is_some() {
+        return Err(RelayAuthenticationError);
+    }
+    let value = value.to_str().map_err(|_| RelayAuthenticationError)?;
+    let (scheme, encoded_token) = value.split_once(' ').ok_or(RelayAuthenticationError)?;
+    if !scheme.eq_ignore_ascii_case("bearer")
+        || encoded_token.len() != 43
+        || encoded_token.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(RelayAuthenticationError);
+    }
+    let decoded = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(encoded_token)
+            .map_err(|_| RelayAuthenticationError)?,
+    );
+    Ok(Zeroizing::new(
+        decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| RelayAuthenticationError)?,
+    ))
+}
+
+/// Static bootstrap grants plus dynamically registered principal authorization.
+#[derive(Clone)]
+pub(crate) struct RelayAccess {
+    static_access: StaticRelayAccess,
+    dynamic_access: DynamicRelayAuthorizer<SqliteRelayRepository>,
+    registry: SqliteRelayRepository,
+}
+
+impl RelayAccess {
+    #[must_use]
+    pub(crate) fn new(static_access: StaticRelayAccess, registry: SqliteRelayRepository) -> Self {
+        Self {
+            static_access,
+            dynamic_access: DynamicRelayAuthorizer::new(registry.clone()),
+            registry,
+        }
+    }
+
+    /// Authenticates a statically configured or active dynamic data-plane principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an opaque unauthorized error or a typed registry dependency failure.
+    pub(crate) async fn authenticate_data_plane(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<RelayPrincipalId, RelayError> {
+        let principal = principal_from_headers(headers).map_err(|_| RelayError::Unauthorized)?;
+        if self.static_access.contains_principal(principal)
+            || self.registry.is_principal_active(principal).await?
+        {
+            Ok(principal)
+        } else {
+            Err(RelayError::Unauthorized)
         }
     }
 }
@@ -160,19 +271,31 @@ impl RelayAuthorizer for StaticRelayAccess {
         routing_id: RoutingId,
         permission: RelayPermission,
     ) -> Result<(), RelayError> {
-        let authorized = self.grants.get(&principal).is_some_and(|grants| {
-            grants.contains(&Grant {
-                route: RouteGrant::Any,
-                permission,
-            }) || grants.contains(&Grant {
-                route: RouteGrant::Exact(routing_id),
-                permission,
-            })
-        });
-        if authorized {
+        if self.is_authorized(principal, routing_id, permission) {
             Ok(())
         } else {
             Err(RelayError::Unauthorized)
+        }
+    }
+}
+
+#[async_trait]
+impl RelayAuthorizer for RelayAccess {
+    async fn authorize(
+        &self,
+        principal: RelayPrincipalId,
+        routing_id: RoutingId,
+        permission: RelayPermission,
+    ) -> Result<(), RelayError> {
+        if self
+            .static_access
+            .is_authorized(principal, routing_id, permission)
+        {
+            Ok(())
+        } else {
+            self.dynamic_access
+                .authorize(principal, routing_id, permission)
+                .await
         }
     }
 }
@@ -199,6 +322,13 @@ enum RouteGrant {
 struct AccessDocument {
     version: u32,
     principals: Vec<PrincipalDocument>,
+    enrollment: Option<EnrollmentDocument>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollmentDocument {
+    authority: String,
 }
 
 #[derive(Deserialize)]
@@ -236,6 +366,15 @@ impl From<PermissionDocument> for RelayPermission {
 fn decode_principal_id(value: &str) -> anyhow::Result<RelayPrincipalId> {
     let bytes = decode_fixed(value, RelayPrincipalId::LENGTH, "relay principal")?;
     RelayPrincipalId::from_slice(&bytes).context("validating relay principal")
+}
+
+fn decode_enrollment_authority(value: &str) -> anyhow::Result<RelayEnrollmentAuthorityId> {
+    let bytes = decode_fixed(
+        value,
+        RelayEnrollmentAuthorityId::LENGTH,
+        "relay enrollment authority",
+    )?;
+    RelayEnrollmentAuthorityId::from_slice(&bytes).context("validating relay enrollment authority")
 }
 
 fn decode_route(value: &str) -> anyhow::Result<RouteGrant> {
@@ -282,6 +421,22 @@ mod tests {
                         "permissions": ["send", "replay", "acknowledge"]
                     }]
                 }]
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap()
+    }
+
+    fn enrollment_access(token: &[u8; RelayEnrollmentAuthorityId::LENGTH]) -> StaticRelayAccess {
+        let authority = RelayEnrollmentAuthorityId::from_enrollment_token(token);
+        StaticRelayAccess::from_bytes(
+            serde_json::to_vec(&json!({
+                "version": 2,
+                "principals": [],
+                "enrollment": {
+                    "authority": URL_SAFE_NO_PAD.encode(authority.as_bytes())
+                }
             }))
             .unwrap()
             .as_slice(),
@@ -343,6 +498,53 @@ mod tests {
         let mut duplicated = bearer(&token);
         duplicated.append(AUTHORIZATION, HeaderValue::from_static("Bearer duplicated"));
         assert!(access.authenticate(&duplicated).is_err());
+    }
+
+    #[test]
+    fn enrollment_authority_is_separate_and_optional() {
+        let token = [12; RelayEnrollmentAuthorityId::LENGTH];
+        let enrollment_config = enrollment_access(&token);
+        assert!(
+            enrollment_config
+                .authenticate_enrollment(&bearer(&token))
+                .is_ok()
+        );
+        assert!(
+            enrollment_config
+                .authenticate_enrollment(&bearer(&[13; RelayEnrollmentAuthorityId::LENGTH]))
+                .is_err()
+        );
+        assert!(enrollment_config.authenticate(&bearer(&token)).is_err());
+
+        let data_only = access(&[14; RelayPrincipalId::LENGTH], "*");
+        assert!(data_only.authenticate_enrollment(&bearer(&token)).is_err());
+    }
+
+    #[test]
+    fn access_document_versions_bound_enrollment_configuration() {
+        let authority = RelayEnrollmentAuthorityId::from_enrollment_token(
+            &[15; RelayEnrollmentAuthorityId::LENGTH],
+        );
+        let version_one_with_enrollment = serde_json::to_vec(&json!({
+            "version": 1,
+            "principals": [],
+            "enrollment": {
+                "authority": URL_SAFE_NO_PAD.encode(authority.as_bytes())
+            }
+        }))
+        .unwrap();
+        assert!(StaticRelayAccess::from_bytes(&version_one_with_enrollment).is_err());
+        assert!(
+            StaticRelayAccess::from_bytes(
+                serde_json::to_vec(&json!({
+                    "version": 2,
+                    "principals": []
+                }))
+                .unwrap()
+                .as_slice()
+            )
+            .is_err()
+        );
     }
 
     #[test]
