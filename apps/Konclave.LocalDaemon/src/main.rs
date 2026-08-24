@@ -11,6 +11,8 @@ mod mcp;
 #[allow(dead_code)]
 mod observability;
 #[allow(dead_code)]
+mod pairing;
+#[allow(dead_code)]
 mod persistence;
 mod runtime;
 mod service;
