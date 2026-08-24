@@ -4,7 +4,10 @@ use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRe
 use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use async_trait::async_trait;
 
-use crate::{EncodedReplayPage, RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
+use crate::{
+    EncodedReplayPage, RelayError, RelayPrincipalId, RelayPrincipalRegistry, RelayRepository,
+    SubmitResult,
+};
 
 /// Relay action checked independently by the authorization adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,6 +32,38 @@ pub trait RelayAuthorizer: Send + Sync {
         routing_id: RoutingId,
         permission: RelayPermission,
     ) -> Result<(), RelayError>;
+}
+
+/// Wildcard data-plane authorizer backed by the dynamic principal registry.
+#[derive(Clone)]
+pub struct DynamicRelayAuthorizer<R> {
+    registry: R,
+}
+
+impl<R> DynamicRelayAuthorizer<R> {
+    #[must_use]
+    pub const fn new(registry: R) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl<R> RelayAuthorizer for DynamicRelayAuthorizer<R>
+where
+    R: RelayPrincipalRegistry,
+{
+    async fn authorize(
+        &self,
+        principal: RelayPrincipalId,
+        _: RoutingId,
+        _: RelayPermission,
+    ) -> Result<(), RelayError> {
+        if self.registry.is_principal_active(principal).await? {
+            Ok(())
+        } else {
+            Err(RelayError::Unauthorized)
+        }
+    }
 }
 
 /// Bounded clock used for expiration validation.

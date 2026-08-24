@@ -3,6 +3,7 @@ use KonclaveDomainCore::{
     ReplayRequest,
 };
 use KonclaveProtocolContracts::v1::{decode_replay_page, encode_relay_envelope};
+use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
 use async_trait::async_trait;
 
 use crate::{RelayError, RelayPrincipalId};
@@ -148,6 +149,35 @@ pub trait RelayRepository: Send + Sync {
         principal: RelayPrincipalId,
         request: AcknowledgeRequest,
     ) -> Result<u64, RelayError>;
+}
+
+/// Durable registry for self-hosted dynamic relay principals.
+#[async_trait]
+pub trait RelayPrincipalRegistry: Send + Sync {
+    /// Atomically registers one principal or returns its exact idempotent outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a version, conflict, revocation, capacity, malformed-data, or storage
+    /// error.
+    async fn register_principal(
+        &self,
+        request: RelayEnrollmentRequest,
+    ) -> Result<RelayEnrollmentResponse, RelayError>;
+
+    /// Returns whether one dynamic principal is currently active.
+    ///
+    /// # Errors
+    ///
+    /// Returns a malformed-data or storage error.
+    async fn is_principal_active(&self, principal: RelayPrincipalId) -> Result<bool, RelayError>;
+
+    /// Idempotently revokes one registered principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    async fn revoke_principal(&self, principal: RelayPrincipalId) -> Result<bool, RelayError>;
 }
 
 #[cfg(test)]
