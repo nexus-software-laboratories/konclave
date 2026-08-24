@@ -307,21 +307,35 @@ fn retry_delay(
     failures: u32,
     config: SupervisorConfig,
 ) -> Duration {
+    bounded_retry_delay(
+        conversation_id.as_bytes(),
+        failures,
+        config.retry_initial,
+        config.retry_maximum,
+    )
+}
+
+/// Calculates deterministic exponential backoff with bounded stable jitter.
+pub(crate) fn bounded_retry_delay(
+    stable_seed: &[u8],
+    failures: u32,
+    retry_initial: Duration,
+    retry_maximum: Duration,
+) -> Duration {
     let exponent = failures.saturating_sub(1).min(5);
     let multiplier = 1_u32 << exponent;
-    let ceiling = config
-        .retry_maximum
-        .saturating_sub(Duration::from_millis(MAXIMUM_RETRY_JITTER_MILLISECONDS));
-    let base = config
-        .retry_initial
+    let ceiling =
+        retry_maximum.saturating_sub(Duration::from_millis(MAXIMUM_RETRY_JITTER_MILLISECONDS));
+    let base = retry_initial
         .saturating_mul(multiplier)
         .min(ceiling)
-        .min(config.retry_maximum);
-    let identifier = conversation_id.as_bytes();
-    let jitter_milliseconds = u64::from(u16::from_be_bytes([identifier[0], identifier[1]]))
-        % MAXIMUM_RETRY_JITTER_MILLISECONDS;
+        .min(retry_maximum);
+    let first = stable_seed.first().copied().unwrap_or_default();
+    let second = stable_seed.get(1).copied().unwrap_or_default();
+    let jitter_milliseconds =
+        u64::from(u16::from_be_bytes([first, second])) % MAXIMUM_RETRY_JITTER_MILLISECONDS;
     base.saturating_add(Duration::from_millis(jitter_milliseconds))
-        .min(config.retry_maximum)
+        .min(retry_maximum)
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
@@ -333,7 +347,7 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
     use std::time::Duration;
 
@@ -423,7 +437,7 @@ mod tests {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap()
     }
 
-    fn coordinator(root: &Path, profile_name: &str) -> ConversationCoordinator {
+    pub(crate) fn coordinator(root: &Path, profile_name: &str) -> ConversationCoordinator {
         let locked = LockedProfile::acquire(root, ProfileId::parse(profile_name).unwrap()).unwrap();
         let mls_path = locked.mls_database_path();
         let profile_sealer = sealer();

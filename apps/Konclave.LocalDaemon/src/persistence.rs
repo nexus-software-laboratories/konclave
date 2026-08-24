@@ -7693,6 +7693,8 @@ pub(crate) enum ProfileStoreError {
     InboxCapacityExceeded,
     #[error("local remote-event journal reached its pending-operation limit")]
     RemoteEventCapacityExceeded,
+    #[error("local pairing journal reached its active-operation limit")]
+    PairingCapacityExceeded,
     #[error("another local adapter consumer owns the profile")]
     AdapterConsumerActive,
     #[error("local adapter lease is missing, expired, or stale")]

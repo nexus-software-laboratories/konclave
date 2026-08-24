@@ -88,7 +88,11 @@ impl ProfileStore {
             generation,
             state,
         )?;
-        let inserted = self.lock()?.execute(
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let inserted = transaction.execute(
             "INSERT INTO daemon_pairing (
                 pairing_id,
                 routing_id,
@@ -111,11 +115,28 @@ impl ProfileStore {
             ],
         );
         match inserted {
-            Ok(1) => Ok(()),
+            Ok(1) => {
+                let active_count: i64 = transaction
+                    .query_row(
+                        "SELECT count(*) FROM daemon_pairing WHERE phase NOT IN (8, 9)",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                if active_count
+                    > i64::try_from(MAX_ACTIVE_PAIRINGS)
+                        .map_err(|_| ProfileStoreError::SequenceExhausted)?
+                {
+                    return Err(ProfileStoreError::PairingCapacityExceeded);
+                }
+                transaction.commit().map_err(|_| ProfileStoreError::Storage)
+            }
             Ok(_) => Err(ProfileStoreError::Storage),
             Err(rusqlite::Error::SqliteFailure(ref details, _))
                 if details.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
+                drop(transaction);
+                drop(connection);
                 let existing = match self.load_pairing(pairing_id) {
                     Ok(existing) => existing,
                     Err(ProfileStoreError::OperationNotFound) => {
@@ -1169,6 +1190,61 @@ mod tests {
             store.active_pairing_ids(Some(pairing_id(1)), 10).unwrap(),
             vec![pairing_id(3)]
         );
+    }
+
+    #[test]
+    fn active_pairing_capacity_is_atomic_and_released_by_terminal_state() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path());
+        for value in 1..=u8::try_from(MAX_ACTIVE_PAIRINGS).unwrap() {
+            store
+                .reserve_pairing(
+                    pairing_id(value),
+                    routing_id(value),
+                    PairingRole::Joiner,
+                    2_000,
+                    b"issued",
+                )
+                .unwrap();
+        }
+        store
+            .reserve_pairing(
+                pairing_id(1),
+                routing_id(1),
+                PairingRole::Joiner,
+                2_000,
+                b"issued",
+            )
+            .unwrap();
+        assert_eq!(
+            store.reserve_pairing(
+                pairing_id(33),
+                routing_id(33),
+                PairingRole::Joiner,
+                2_000,
+                b"issued",
+            ),
+            Err(ProfileStoreError::PairingCapacityExceeded)
+        );
+        store
+            .checkpoint_pairing(
+                pairing_id(1),
+                1,
+                PairingPhase::Cancelled,
+                None,
+                0,
+                b"cancelled",
+            )
+            .unwrap();
+        store
+            .reserve_pairing(
+                pairing_id(33),
+                routing_id(33),
+                PairingRole::Joiner,
+                2_000,
+                b"issued",
+            )
+            .unwrap();
     }
 
     #[test]

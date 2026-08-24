@@ -207,27 +207,62 @@ where
         &self,
         now_unix_seconds: u64,
     ) -> Result<usize, PairingServiceError> {
-        let mut recovered = 0_usize;
-        let mut after = None;
-        loop {
+        let store = Arc::clone(&self.store);
+        let page = tokio::task::spawn_blocking(move || {
+            store.active_pairing_ids(None, ACTIVE_PAIRING_PAGE_SIZE)
+        })
+        .await
+        .map_err(|_| PairingServiceError::Task)??;
+        for pairing_id in &page {
+            self.retry_outbounds(*pairing_id, now_unix_seconds).await?;
+        }
+        if page.len() == ACTIVE_PAIRING_PAGE_SIZE {
             let store = Arc::clone(&self.store);
-            let page = tokio::task::spawn_blocking(move || {
-                store.active_pairing_ids(after, ACTIVE_PAIRING_PAGE_SIZE)
+            let current = tokio::task::spawn_blocking(move || {
+                store.active_pairing_ids(None, ACTIVE_PAIRING_PAGE_SIZE)
             })
             .await
             .map_err(|_| PairingServiceError::Task)??;
-            let page_length = page.len();
-            after = page.last().copied();
-            for pairing_id in page {
-                self.retry_outbounds(pairing_id, now_unix_seconds).await?;
-                recovered = recovered
-                    .checked_add(1)
-                    .ok_or(PairingServiceError::InvalidTransition)?;
-            }
-            if page_length < ACTIVE_PAIRING_PAGE_SIZE {
-                return Ok(recovered);
+            if current.len() == ACTIVE_PAIRING_PAGE_SIZE {
+                let store = Arc::clone(&self.store);
+                let after = current.last().copied();
+                let overflow =
+                    tokio::task::spawn_blocking(move || store.active_pairing_ids(after, 1))
+                        .await
+                        .map_err(|_| PairingServiceError::Task)??;
+                if !overflow.is_empty() {
+                    return Err(ProfileStoreError::PairingCapacityExceeded.into());
+                }
             }
         }
+        Ok(page.len())
+    }
+
+    /// Reconciles durable outbounds and processes one bounded page for every active
+    /// pairing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first task, checkpoint, relay, MLS, or persistence error. Work
+    /// completed for earlier pairings remains durable and idempotent.
+    pub(crate) async fn sync_active_once(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, PairingServiceError> {
+        self.recover(now_unix_seconds).await?;
+        let mut processed = 0_usize;
+        let store = Arc::clone(&self.store);
+        let page = tokio::task::spawn_blocking(move || {
+            store.active_pairing_ids(None, ACTIVE_PAIRING_PAGE_SIZE)
+        })
+        .await
+        .map_err(|_| PairingServiceError::Task)??;
+        for pairing_id in page {
+            processed = processed
+                .checked_add(self.replay_once(pairing_id, now_unix_seconds).await?)
+                .ok_or(PairingServiceError::InvalidTransition)?;
+        }
+        Ok(processed)
     }
 
     /// Authorizes the capability's joiner for one conversation and granted role.

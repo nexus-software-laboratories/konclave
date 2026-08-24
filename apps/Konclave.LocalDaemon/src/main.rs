@@ -14,6 +14,7 @@ mod observability;
 mod pairing;
 #[allow(dead_code)]
 mod pairing_service;
+mod pairing_supervisor;
 #[allow(dead_code)]
 mod persistence;
 mod runtime;
