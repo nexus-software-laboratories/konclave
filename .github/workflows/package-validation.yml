@@ -1,0 +1,219 @@
+name: Package validation
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/package-validation.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'apps/Konclave.CommandLine/**'
+      - 'apps/Konclave.CommunityRelay/**'
+      - 'apps/Konclave.LocalDaemon/**'
+      - 'crates/**'
+      - 'distribution/**'
+      - 'docs/distribution/**'
+      - 'extensions/Konclave.HostExtension/**'
+      - 'scripts/CargoLock.Functions.ps1'
+      - 'scripts/ci/**'
+      - 'scripts/packaging/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-native:
+    name: Package ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: package-${{ matrix.target }}
+          cache-on-failure: false
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 24
+          npm-cache-scope: package-${{ matrix.target }}
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Build native release binaries
+        shell: pwsh
+        run: |
+          cargo build `
+            --locked `
+            --release `
+            --target '${{ matrix.target }}' `
+            -p KonclaveCommandLine `
+            -p KonclaveLocalDaemon `
+            -p KonclaveCommunityRelay `
+            --bins
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Native release build failed.'
+          }
+      - name: Build and verify Copilot plugin
+        shell: pwsh
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin build failed.' }
+          npm run package
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin packaging failed.' }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin tests failed.' }
+      - name: Package and exercise extracted artifacts
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          $pluginArchive = Join-Path `
+            'extensions' `
+            'Konclave.HostExtension' `
+            'build' `
+            'outputs' `
+            "konclave-$($release.release.version).zip"
+          ./scripts/packaging/Test-ReleasePackaging.ps1 `
+            -Target '${{ matrix.target }}' `
+            -BinaryDirectory "target/${{ matrix.target }}/release" `
+            -PluginArchivePath $pluginArchive `
+            -OutputDirectory 'target/release-artifacts' `
+            -RunBinaries
+      - name: Upload unsigned package candidates
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: konclave-${{ matrix.target }}-unsigned
+          path: target/release-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  package-container:
+    name: Package linux/amd64 container
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Resolve container release contract
+        shell: pwsh
+        run: |
+          $releaseJson = Get-Content distribution/release-artifacts.json -Raw
+          if (
+            -not (
+              $releaseJson |
+                Test-Json -SchemaFile distribution/release-artifacts.schema.json
+            )
+          ) {
+            throw 'Release artifact manifest does not satisfy its schema.'
+          }
+          $release = $releaseJson | ConvertFrom-Json -Depth 100
+          $artifacts = @($release.artifacts | Where-Object { $_.kind -ceq 'container' })
+          if ($artifacts.Count -ne 1) {
+            throw 'Release manifest must contain exactly one container artifact.'
+          }
+          "CONTAINER_RELEASE_FILE=$($artifacts[0].fileName)" >>$env:GITHUB_ENV
+          "CONTAINER_RELEASE_IMAGE=$($artifacts[0].image)" >>$env:GITHUB_ENV
+      - name: Verify Compose and container contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/Test-ContainerImageContract.sh
+          compose_image="$(
+            KONCLAVE_RELAY_ACCESS_SOURCE=/dev/null \
+              docker compose \
+              --file apps/Konclave.CommunityRelay/compose.example.yaml \
+              config --images
+          )"
+          if [ "$compose_image" != "$CONTAINER_RELEASE_IMAGE" ]; then
+            echo '::error::Compose image does not match the release manifest.'
+            exit 1
+          fi
+          bash ./scripts/ci/Initialize-JobPrivatePaths.sh \
+            CONTAINER_VALIDATION_ROOT=konclave-container-validation
+      - name: Verify container validation cleanup contract
+        shell: bash
+        run: bash ./scripts/ci/Test-ContainerValidationCleanup.sh
+      - name: Capture Docker baseline
+        shell: bash
+        run: bash ./scripts/ci/Capture-ContainerValidationBaseline.sh
+      - name: Build validated OCI and Docker archives
+        shell: bash
+        run: >-
+          bash ./scripts/ci/Validate-HostedContainerImage.sh
+          apps/Konclave.CommunityRelay
+          konclave-community-relay
+          "$CONTAINER_RELEASE_IMAGE"
+      - name: Stage Docker-loadable release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 target/release-container
+          cp \
+            "$CONTAINER_VALIDATION_ROOT/konclave-community-relay-amd64-docker.tar" \
+            "target/release-container/$CONTAINER_RELEASE_FILE"
+          cp distribution/release-artifacts.json target/release-container/RELEASE.json
+          cp distribution/UNSIGNED-PRERELEASE.txt target/release-container/
+      - name: Remove container validation state
+        if: always()
+        shell: bash
+        run: bash ./scripts/ci/Cleanup-HostedContainerImage.sh
+      - name: Upload unsigned container candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: konclave-linux-amd64-container-unsigned
+          path: target/release-container/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  package-validation:
+    name: Package validation
+    if: always()
+    needs:
+      - package-native
+      - package-container
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check package matrix
+        shell: bash
+        env:
+          NATIVE_RESULT: ${{ needs.package-native.result }}
+          CONTAINER_RESULT: ${{ needs.package-container.result }}
+        run: |
+          set -eu
+          if [ "$NATIVE_RESULT" != 'success' ]; then
+            echo "::error::Native package matrix concluded with $NATIVE_RESULT."
+            exit 1
+          fi
+          if [ "$CONTAINER_RESULT" != 'success' ]; then
+            echo "::error::Container packaging concluded with $CONTAINER_RESULT."
+            exit 1
+          fi
+          echo 'Native and container package validation passed.'

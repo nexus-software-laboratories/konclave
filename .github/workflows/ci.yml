@@ -156,7 +156,9 @@ jobs:
       # risk are the throwaway ones this test made.
       - name: Verify container validation cleanup contract
         shell: bash
-        run: bash ./scripts/ci/Test-ContainerValidationCleanup.sh
+        run: |
+          bash ./scripts/ci/Test-ContainerImageContract.sh
+          bash ./scripts/ci/Test-ContainerValidationCleanup.sh
       - name: Capture Docker baseline
         shell: bash
         run: >-

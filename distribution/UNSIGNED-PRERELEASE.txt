@@ -1,0 +1,8 @@
+UNSIGNED KONCLAVE PRERELEASE
+
+This artifact does not carry a platform code signature or notarization.
+Do not treat its origin as verified by the operating system.
+
+Konclave publishes unsigned prereleases so code-signing enrollment does not block
+the open self-hosted MVP. Integrity manifests, software bills of materials, and
+build provenance are separate release metadata and do not replace a code signature.

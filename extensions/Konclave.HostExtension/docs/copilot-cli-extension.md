@@ -16,9 +16,17 @@ Copilot session ID. Independent CLI sessions therefore run independent device
 profiles without sharing a lock, while a resumed session reopens its durable profile.
 The raw session ID is never passed to the daemon.
 
-The daemon command defaults to `KonclaveLocalDaemon` on Unix and
-`KonclaveLocalDaemon.exe` on Windows. `KONCLAVE_DAEMON_PATH` selects an exact
-installed binary. Optional `KONCLAVE_PROFILE_ROOT` and
+The daemon command is resolved in priority order: an explicit non-empty
+`KONCLAVE_DAEMON_PATH` overrides everything and is never forwarded to the daemon's
+own environment; otherwise the extension looks for a daemon bundled beside the
+installed plugin at `<plugin-root>/bin/KonclaveLocalDaemon` (`.exe` on Windows),
+selecting it only when that path exists and is a regular file; otherwise the bare
+binary name (`KonclaveLocalDaemon` or `KonclaveLocalDaemon.exe`) is resolved against
+the system `PATH`. The plugin root is derived from the compiled extension module's
+own on-disk location (`import.meta.url`), never from `process.cwd()` or by probing
+ancestor directories, because Copilot CLI caches installed plugins at an
+unpredictable path unrelated to the original release install root. Optional
+`KONCLAVE_PROFILE_ROOT` and
 `KONCLAVE_WRAPPING_KEY_FILE` paths are forwarded; secret file contents and relay
 credentials never cross the extension boundary. For first-run relay provisioning,
 the extension also forwards `KONCLAVE_RELAY_ENDPOINT` and

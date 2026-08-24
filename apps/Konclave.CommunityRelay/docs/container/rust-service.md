@@ -13,9 +13,9 @@ Run the same contract used by generated CI:
   -Mode Validate
 ```
 
-`PublishContainerToGhcr` adds the shared GHCR release workflow. That workflow builds
-Linux AMD64 and ARM64 images, generates an SBOM, and emits provenance attestations
-without changing the image contract.
+Release validation exports the Linux AMD64 image as a Docker-loadable archive without
+pushing it to a registry. The packaged `compose.example.yaml` references that local
+image with `pull_policy: never`.
 
 ## Relay runtime mounts
 
@@ -35,3 +35,14 @@ Raw bearer tokens remain sealed at clients and must not be mounted into the rela
 container. See the
 [relay transport authentication contract](../../../../docs/protocol/relay-authentication.md)
 for the bounded document shape and data-plane rules.
+
+Load the unsigned prerelease image and start the example with an explicit access
+document:
+
+```shell
+docker image load --input konclave-community-relay-container-0.1.0-linux-amd64.docker.tar
+KONCLAVE_RELAY_ACCESS_SOURCE=/absolute/path/to/relay-access.json docker compose --file compose.example.yaml up --detach
+```
+
+The example binds port 8080 only on host loopback. An operator-managed reverse proxy
+must terminate trusted TLS before exposing the relay beyond that host.
