@@ -9,7 +9,7 @@ use KonclaveCryptographicCore::{
 };
 use KonclaveDomainCore::{
     AcknowledgeRequest, ConversationId, ConversationRole, DeviceId, PairingEnvelope, PairingId,
-    PairingInvitationPayload, PairingStage, PairingWelcomePayload, ReplayRequest,
+    PairingInvitationPayload, PairingMessageId, PairingStage, PairingWelcomePayload, ReplayRequest,
     StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::{KonclaveProtocolError, v1};
@@ -402,6 +402,119 @@ where
         self.retry_outbounds(pairing_id, now_unix_seconds).await
     }
 
+    /// Cancels one active pairing without pretending an accepted add-Commit vanished.
+    ///
+    /// Pre-Commit cancellation is root-signed and submitted when an authenticated
+    /// peer identity and reply target are known. Post-Commit inviter cancellation
+    /// enters durable MLS compensation immediately and becomes terminal only after
+    /// removal is relay-accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a phase, deadline, signing, protocol, relay, task, MLS, or persistence
+    /// error. Repeating the same cancellation resumes its exact durable work.
+    pub(crate) async fn cancel(
+        &self,
+        pairing_id: PairingId,
+        now_unix_seconds: u64,
+    ) -> Result<(), PairingServiceError> {
+        if self
+            .compensate_if_required(pairing_id, now_unix_seconds)
+            .await?
+        {
+            return Ok(());
+        }
+        let checkpoint = self.load_checkpoint(pairing_id).await?;
+        if checkpoint.phase == PairingPhase::Cancelled {
+            self.cleanup_terminal_join(&checkpoint).await?;
+            return Ok(());
+        }
+        if checkpoint.phase == PairingPhase::Completed {
+            return Err(PairingServiceError::InvalidTransition);
+        }
+        let mut state = PairingOperationState::from_checkpoint(&checkpoint)?;
+        if checkpoint.role == PairingRole::Joiner
+            && checkpoint.phase == PairingPhase::JoinerAwaitingWelcome
+            && state.local_record(PairingStage::Completion)?.is_some()
+        {
+            return Err(PairingServiceError::InvalidTransition);
+        }
+        if checkpoint.role == PairingRole::Inviter
+            && checkpoint.phase == PairingPhase::InviterAwaitingCompletion
+        {
+            self.checkpoint_state(
+                &checkpoint,
+                &state,
+                PairingPhase::Compensating,
+                checkpoint.completion_deadline_unix_seconds,
+                checkpoint.replay_cursor,
+            )
+            .await?;
+            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+        }
+        if checkpoint.phase == PairingPhase::Compensating {
+            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+        }
+        if state.local_record(PairingStage::Cancellation)?.is_some() {
+            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+        }
+        let Some(conversation_id) = state.conversation_id() else {
+            self.checkpoint_state(
+                &checkpoint,
+                &state,
+                PairingPhase::Cancelled,
+                None,
+                checkpoint.replay_cursor,
+            )
+            .await?;
+            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+        };
+        let Some(in_reply_to) =
+            local_cancellation_reply(&state, checkpoint.role, checkpoint.phase)?
+        else {
+            self.checkpoint_state(
+                &checkpoint,
+                &state,
+                PairingPhase::Cancelled,
+                None,
+                checkpoint.replay_cursor,
+            )
+            .await?;
+            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+        };
+        let expires_at_unix_seconds = cancellation_deadline_for_reply(&state, in_reply_to)?;
+        require_before(now_unix_seconds, expires_at_unix_seconds)?;
+        let message_id = generate_pairing_message_id()?;
+        let conversations = self.conversations.clone();
+        let control = tokio::task::spawn_blocking(move || {
+            conversations.sign_pairing_control(
+                pairing_id,
+                message_id,
+                PairingStage::Cancellation,
+                in_reply_to,
+                conversation_id,
+            )
+        })
+        .await
+        .map_err(|_| PairingServiceError::Task)??;
+        state.prepare_outbound_with_id(
+            message_id,
+            PairingStage::Cancellation,
+            Some(in_reply_to),
+            expires_at_unix_seconds,
+            &v1::encode_pairing_control(&control)?,
+        )?;
+        self.checkpoint_state(
+            &checkpoint,
+            &state,
+            checkpoint.phase,
+            checkpoint.completion_deadline_unix_seconds,
+            checkpoint.replay_cursor,
+        )
+        .await?;
+        self.retry_outbounds(pairing_id, now_unix_seconds).await
+    }
+
     /// Replays and durably processes one bounded pairing page.
     ///
     /// Relay acknowledgment advances only after each returned record's state and any
@@ -474,10 +587,34 @@ where
                 return Ok(());
             }
             let mut state = PairingOperationState::from_checkpoint(&checkpoint)?;
-            let pending = state
+            let cancellation = state
                 .outbounds()
                 .iter()
-                .find(|outbound| outbound.accepted_cursor().is_none())
+                .filter(|outbound| outbound.accepted_cursor().is_none())
+                .find(|outbound| {
+                    outbound
+                        .pairing_envelope()
+                        .is_ok_and(|envelope| envelope.stage() == PairingStage::Cancellation)
+                });
+            let cancellation_prerequisite = cancellation
+                .and_then(|outbound| outbound.pairing_envelope().ok())
+                .and_then(|envelope| envelope.in_reply_to())
+                .and_then(|in_reply_to| {
+                    state.outbounds().iter().find(|outbound| {
+                        outbound.accepted_cursor().is_none()
+                            && outbound
+                                .pairing_envelope()
+                                .is_ok_and(|envelope| envelope.message_id() == in_reply_to)
+                    })
+                });
+            let pending = cancellation_prerequisite
+                .or(cancellation)
+                .or_else(|| {
+                    state
+                        .outbounds()
+                        .iter()
+                        .find(|outbound| outbound.accepted_cursor().is_none())
+                })
                 .map(|outbound| {
                     Ok::<_, PairingStateError>((
                         outbound.pairing_envelope()?.message_id(),
@@ -575,6 +712,9 @@ where
         plaintext: &[u8],
         now_unix_seconds: u64,
     ) -> Result<(PairingPhase, Option<u64>), PairingServiceError> {
+        if pairing.stage() == PairingStage::Cancellation {
+            return self.process_remote_cancellation(checkpoint, state, pairing, plaintext);
+        }
         match (checkpoint.role, checkpoint.phase, pairing.stage()) {
             (
                 PairingRole::Joiner,
@@ -718,6 +858,53 @@ where
                 ))
             }
             _ => Err(PairingServiceError::InvalidTransition),
+        }
+    }
+
+    fn process_remote_cancellation(
+        &self,
+        checkpoint: &PairingCheckpoint,
+        state: &PairingOperationState,
+        pairing: &PairingEnvelope,
+        plaintext: &[u8],
+    ) -> Result<(PairingPhase, Option<u64>), PairingServiceError> {
+        let conversation_id = state
+            .conversation_id()
+            .ok_or(PairingServiceError::InvalidTransition)?;
+        let reply = pairing
+            .in_reply_to()
+            .ok_or(PairingServiceError::InvalidTransition)?;
+        if pairing.expires_at_unix_seconds() != cancellation_deadline_for_reply(state, reply)? {
+            return Err(PairingServiceError::InvalidTransition);
+        }
+        let control = v1::decode_pairing_control(plaintext)?;
+        require_matching_control(pairing, &control, conversation_id)?;
+        let peer_public_key = match checkpoint.role {
+            PairingRole::Inviter => state.capability().offer().device_root_public_key(),
+            PairingRole::Joiner => {
+                let invitation = state
+                    .remote_record(PairingStage::Invitation)?
+                    .ok_or(PairingServiceError::InvalidTransition)?;
+                v1::decode_pairing_invitation(invitation.plaintext())?.issuer_public_key()
+            }
+        };
+        verify_pairing_control(&control, peer_public_key)?;
+        if checkpoint.role == PairingRole::Inviter
+            && checkpoint.phase == PairingPhase::InviterAwaitingCompletion
+        {
+            Ok((
+                PairingPhase::Compensating,
+                checkpoint.completion_deadline_unix_seconds,
+            ))
+        } else if is_cancellable_precommit_phase(checkpoint.phase)
+            || checkpoint.phase == PairingPhase::JoinerAwaitingWelcome
+        {
+            Ok((
+                PairingPhase::Cancelled,
+                checkpoint.completion_deadline_unix_seconds,
+            ))
+        } else {
+            Err(PairingServiceError::InvalidTransition)
         }
     }
 
@@ -1027,6 +1214,54 @@ fn require_remote_invitation(
     }
 }
 
+fn local_cancellation_reply(
+    state: &PairingOperationState,
+    role: PairingRole,
+    phase: PairingPhase,
+) -> Result<Option<PairingMessageId>, PairingServiceError> {
+    let record = match (role, phase) {
+        (PairingRole::Joiner, PairingPhase::JoinerAwaitingInviterAuthorization) => {
+            state.remote_record(PairingStage::Invitation)?
+        }
+        (PairingRole::Joiner, PairingPhase::JoinerAwaitingWelcome) => {
+            match state.remote_record(PairingStage::Welcome)? {
+                Some(welcome) => Some(welcome),
+                None => state.local_record(PairingStage::JoinProof)?,
+            }
+        }
+        (PairingRole::Inviter, PairingPhase::InviterAwaitingJoinProof) => {
+            state.local_record(PairingStage::Invitation)?
+        }
+        (PairingRole::Inviter, PairingPhase::InviterAwaitingCompletion) => {
+            state.local_record(PairingStage::Welcome)?
+        }
+        _ => None,
+    };
+    Ok(record.map(|record| record.envelope().message_id()))
+}
+
+fn cancellation_deadline_for_reply(
+    state: &PairingOperationState,
+    in_reply_to: PairingMessageId,
+) -> Result<u64, PairingServiceError> {
+    for stage in [
+        PairingStage::Invitation,
+        PairingStage::JoinProof,
+        PairingStage::Welcome,
+        PairingStage::Completion,
+    ] {
+        for record in [state.local_record(stage)?, state.remote_record(stage)?]
+            .into_iter()
+            .flatten()
+        {
+            if record.envelope().message_id() == in_reply_to {
+                return Ok(record.envelope().expires_at_unix_seconds());
+            }
+        }
+    }
+    Err(PairingServiceError::InvalidTransition)
+}
+
 fn terminal_after_submission(
     checkpoint: &PairingCheckpoint,
     state: &PairingOperationState,
@@ -1037,6 +1272,21 @@ fn terminal_after_submission(
                 .pairing_envelope()
                 .is_ok_and(|envelope| envelope.stage() == PairingStage::Completion)
     });
+    let cancellation_accepted = state.outbounds().iter().any(|outbound| {
+        outbound.accepted_cursor().is_some()
+            && outbound
+                .pairing_envelope()
+                .is_ok_and(|envelope| envelope.stage() == PairingStage::Cancellation)
+    });
+    if cancellation_accepted {
+        return if checkpoint.role == PairingRole::Inviter
+            && checkpoint.phase == PairingPhase::InviterAwaitingCompletion
+        {
+            Ok(PairingPhase::Compensating)
+        } else {
+            Ok(PairingPhase::Cancelled)
+        };
+    }
     if checkpoint.role == PairingRole::Joiner
         && checkpoint.phase == PairingPhase::JoinerAwaitingWelcome
         && completion_accepted
@@ -1055,6 +1305,13 @@ const fn is_precommit_phase(phase: PairingPhase) -> bool {
             | PairingPhase::JoinerAwaitingWelcome
             | PairingPhase::InviterAwaitingAuthorization
             | PairingPhase::InviterAwaitingJoinProof
+    )
+}
+
+const fn is_cancellable_precommit_phase(phase: PairingPhase) -> bool {
+    matches!(
+        phase,
+        PairingPhase::JoinerAwaitingInviterAuthorization | PairingPhase::InviterAwaitingJoinProof
     )
 }
 
@@ -1590,6 +1847,10 @@ mod tests {
                 .phase,
             PairingPhase::JoinerAwaitingWelcome
         );
+        assert!(matches!(
+            fixture.joiner_service.cancel(fixture.pairing_id, NOW).await,
+            Err(PairingServiceError::InvalidTransition)
+        ));
         assert_eq!(fixture.relay.duplicate_latest_pairing_record(), 4);
         assert_eq!(
             fixture
@@ -1615,6 +1876,153 @@ mod tests {
                 .pending_join_ids(None, 10)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_precommit_cancellation_terminates_both_endpoints() {
+        let root = tempfile::tempdir().unwrap();
+        let inviter = open_coordinator(root.path(), "cancel-inviter");
+        let joiner = open_coordinator(root.path(), "cancel-joiner");
+        let conversation = inviter.create().unwrap();
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let inviter_service = service(inviter.clone(), Arc::clone(&relay), &endpoint);
+        let joiner_service = service(joiner, Arc::clone(&relay), &endpoint);
+        let created = joiner_service
+            .create_capability(ConversationRole::Member, DEADLINE, NOW)
+            .await
+            .unwrap();
+        let pairing_id = created.pairing_id;
+        inviter_service
+            .redeem_capability(created.capability.as_str(), NOW)
+            .await
+            .unwrap();
+        inviter_service
+            .authorize_joiner(
+                pairing_id,
+                conversation.conversation_id,
+                ConversationRole::Member,
+                NOW,
+            )
+            .await
+            .unwrap();
+        joiner_service.replay_once(pairing_id, NOW).await.unwrap();
+
+        joiner_service.cancel(pairing_id, NOW).await.unwrap();
+        joiner_service.cancel(pairing_id, NOW).await.unwrap();
+        assert_eq!(
+            joiner_service.status(pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        assert_eq!(
+            inviter_service.replay_once(pairing_id, NOW).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            inviter_service.status(pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        let inviter_conversation = inviter.open(conversation.conversation_id).unwrap();
+        assert_eq!(inviter_conversation.group.epoch(), 0);
+        assert_eq!(inviter_conversation.group.state().members().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn local_postcommit_cancellation_removes_the_joiner_before_terminating() {
+        let fixture = pairing_awaiting_completion().await;
+        fixture
+            .inviter_service
+            .cancel(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+        fixture
+            .inviter_service
+            .cancel(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .inviter_service
+                .status(fixture.pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::Cancelled
+        );
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 2);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_against_prior_frontier_compensates_a_concurrent_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let inviter = open_coordinator(root.path(), "frontier-inviter");
+        let joiner = open_coordinator(root.path(), "frontier-joiner");
+        let conversation = inviter.create().unwrap();
+        let inviter_device_id = inviter.device_id().unwrap();
+        let joiner_device_id = joiner.device_id().unwrap();
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let inviter_service = service(inviter.clone(), Arc::clone(&relay), &endpoint);
+        let joiner_service = service(joiner, Arc::clone(&relay), &endpoint);
+        let created = joiner_service
+            .create_capability(ConversationRole::Member, DEADLINE, NOW)
+            .await
+            .unwrap();
+        let pairing_id = created.pairing_id;
+        inviter_service
+            .redeem_capability(created.capability.as_str(), NOW)
+            .await
+            .unwrap();
+        inviter_service
+            .authorize_joiner(
+                pairing_id,
+                conversation.conversation_id,
+                ConversationRole::Member,
+                NOW,
+            )
+            .await
+            .unwrap();
+        joiner_service.replay_once(pairing_id, NOW).await.unwrap();
+        relay.fail_next_pairing_submit();
+        assert!(
+            joiner_service
+                .authorize_inviter(
+                    pairing_id,
+                    inviter_device_id,
+                    conversation.conversation_id,
+                    ConversationRole::Member,
+                    NOW,
+                )
+                .await
+                .is_err()
+        );
+        joiner_service.cancel(pairing_id, NOW).await.unwrap();
+
+        assert_eq!(
+            inviter_service.replay_once(pairing_id, NOW).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            inviter_service.status(pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        let conversation = inviter.open(conversation.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 2);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(joiner_device_id)
+                .is_none()
         );
     }
 }
