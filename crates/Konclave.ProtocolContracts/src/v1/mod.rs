@@ -20,7 +20,11 @@ pub use membership::{
     decode_membership_commit_bundle, decode_membership_control, encode_conversation_state,
     encode_membership_change, encode_membership_commit_bundle, encode_membership_control,
 };
-pub use pairing::{decode_pairing_envelope, encode_pairing_envelope};
+pub use pairing::{
+    decode_pairing_control, decode_pairing_envelope, decode_pairing_invitation,
+    decode_pairing_welcome, encode_pairing_control, encode_pairing_envelope,
+    encode_pairing_invitation, encode_pairing_welcome,
+};
 pub use relay::{
     decode_acknowledge_request, decode_relay_envelope, decode_replay_page, decode_replay_request,
     decode_stored_relay_envelope, encode_acknowledge_request, encode_relay_envelope,

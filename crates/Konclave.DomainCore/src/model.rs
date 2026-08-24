@@ -33,6 +33,8 @@ pub const MAX_MLS_KEY_PACKAGE_BYTES: usize = 64 * 1024;
 pub const MAX_PAIRING_CIPHERTEXT_BYTES: usize = MAX_RELAY_PAYLOAD_BYTES - 1024;
 /// Maximum normalized relay endpoint bytes bound into a pairing capability.
 pub const MAX_PAIRING_RELAY_ENDPOINT_BYTES: usize = 2 * 1024;
+/// Maximum opaque MLS Welcome bytes carried inside a pairing stage.
+pub const MAX_PAIRING_WELCOME_BYTES: usize = MAX_RELAY_PAYLOAD_BYTES - 1024;
 const MIN_PAIRING_CIPHERTEXT_BYTES: usize = 16;
 /// Maximum number of envelopes returned by one replay page.
 pub const MAX_REPLAY_PAGE_SIZE: usize = 100;
@@ -584,6 +586,239 @@ impl PairingEnvelope {
     #[must_use]
     pub fn ciphertext(&self) -> &[u8] {
         &self.ciphertext
+    }
+}
+
+/// Authorized invitation material sent from inviter to joiner.
+///
+/// The constructor validates structural identity and conversation relationships. The
+/// cryptographic core still verifies the invitation and every credential signature
+/// before a JoinProof may be created.
+pub struct PairingInvitationPayload {
+    invitation: Invitation,
+    issuer_public_key: Ed25519PublicKey,
+    peer_bindings: Vec<DeviceCredentialBinding>,
+}
+
+impl PairingInvitationPayload {
+    /// Creates a structurally consistent invitation payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the invitation has no relay route, peer
+    /// bindings are empty/oversized/duplicated/cross-conversation, the expected joiner
+    /// is already a peer, or no binding matches the claimed issuer key.
+    pub fn new(
+        invitation: Invitation,
+        issuer_public_key: Ed25519PublicKey,
+        peer_bindings: Vec<DeviceCredentialBinding>,
+    ) -> Result<Self, KonclaveDomainError> {
+        if invitation.routing_id().is_none() {
+            return Err(KonclaveDomainError::InvalidPairingEnvelope {
+                field: "invitation_routing_id",
+            });
+        }
+        if peer_bindings.is_empty() || peer_bindings.len() > MAX_MEMBERS {
+            return Err(KonclaveDomainError::OutOfRange {
+                field: "pairing_peer_bindings",
+                minimum: 1,
+                maximum: MAX_MEMBERS,
+                actual: peer_bindings.len(),
+            });
+        }
+        let mut devices = BTreeSet::new();
+        let mut issuer_found = false;
+        for binding in &peer_bindings {
+            if binding.conversation_id() != invitation.conversation_id()
+                || binding.device_id() == invitation.expected_device_id()
+                || !devices.insert(binding.device_id())
+            {
+                return Err(KonclaveDomainError::InvalidPairingEnvelope {
+                    field: "peer_bindings",
+                });
+            }
+            if binding.device_id() == invitation.issuer_device_id()
+                && binding.device_root_public_key() == issuer_public_key
+            {
+                issuer_found = true;
+            }
+        }
+        if !issuer_found {
+            return Err(KonclaveDomainError::InvalidPairingEnvelope {
+                field: "issuer_public_key",
+            });
+        }
+        Ok(Self {
+            invitation,
+            issuer_public_key,
+            peer_bindings,
+        })
+    }
+
+    /// Returns the expected-device-bound invitation.
+    #[must_use]
+    pub const fn invitation(&self) -> &Invitation {
+        &self.invitation
+    }
+
+    /// Returns the device root key claimed by the invitation issuer.
+    #[must_use]
+    pub const fn issuer_public_key(&self) -> Ed25519PublicKey {
+        self.issuer_public_key
+    }
+
+    /// Returns the public current-member credential bindings.
+    #[must_use]
+    pub fn peer_bindings(&self) -> &[DeviceCredentialBinding] {
+        &self.peer_bindings
+    }
+}
+
+/// Opaque Welcome plus the accepted Commit cursor required to verify its receipt.
+pub struct PairingWelcomePayload {
+    conversation_id: ConversationId,
+    welcome: Vec<u8>,
+    commit_cursor: u64,
+}
+
+impl PairingWelcomePayload {
+    /// Creates one bounded Welcome payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for empty/oversized Welcome bytes or a zero cursor.
+    pub fn new(
+        conversation_id: ConversationId,
+        welcome: Vec<u8>,
+        commit_cursor: u64,
+    ) -> Result<Self, KonclaveDomainError> {
+        require_length_range(
+            welcome.len(),
+            1,
+            MAX_PAIRING_WELCOME_BYTES,
+            "pairing_welcome",
+        )?;
+        require_positive(commit_cursor, "pairing_commit_cursor")?;
+        Ok(Self {
+            conversation_id,
+            welcome,
+            commit_cursor,
+        })
+    }
+
+    /// Returns the conversation the Welcome joins.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Returns the opaque MLS Welcome bytes.
+    #[must_use]
+    pub fn welcome(&self) -> &[u8] {
+        &self.welcome
+    }
+
+    /// Returns the relay cursor of the add-member Commit.
+    #[must_use]
+    pub const fn commit_cursor(&self) -> u64 {
+        self.commit_cursor
+    }
+}
+
+/// Device-root-signed completion or cancellation authority.
+///
+/// Both capability holders know both directional AEAD keys, so the pairing envelope's
+/// sender field cannot authorize a role. This proof binds the control stage to the
+/// device root that later phase handling expects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairingControl {
+    version: ProtocolVersion,
+    pairing_id: PairingId,
+    message_id: PairingMessageId,
+    stage: PairingStage,
+    in_reply_to: PairingMessageId,
+    device_id: DeviceId,
+    conversation_id: ConversationId,
+    device_signature: Ed25519Signature,
+}
+
+impl PairingControl {
+    /// Creates one finite completion or cancellation proof.
+    ///
+    /// Signature verification remains the cryptographic core's responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for any stage other than Completion/Cancellation.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the signed pairing control fields remain explicit and atomic"
+    )]
+    pub fn new(
+        version: ProtocolVersion,
+        pairing_id: PairingId,
+        message_id: PairingMessageId,
+        stage: PairingStage,
+        in_reply_to: PairingMessageId,
+        device_id: DeviceId,
+        conversation_id: ConversationId,
+        device_signature: Ed25519Signature,
+    ) -> Result<Self, KonclaveDomainError> {
+        if !matches!(stage, PairingStage::Completion | PairingStage::Cancellation) {
+            return Err(KonclaveDomainError::InvalidPairingEnvelope {
+                field: "control_stage",
+            });
+        }
+        Ok(Self {
+            version,
+            pairing_id,
+            message_id,
+            stage,
+            in_reply_to,
+            device_id,
+            conversation_id,
+            device_signature,
+        })
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> ProtocolVersion {
+        self.version
+    }
+
+    #[must_use]
+    pub const fn pairing_id(&self) -> PairingId {
+        self.pairing_id
+    }
+
+    #[must_use]
+    pub const fn message_id(&self) -> PairingMessageId {
+        self.message_id
+    }
+
+    #[must_use]
+    pub const fn stage(&self) -> PairingStage {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn in_reply_to(&self) -> PairingMessageId {
+        self.in_reply_to
+    }
+
+    #[must_use]
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    #[must_use]
+    pub const fn device_signature(&self) -> Ed25519Signature {
+        self.device_signature
     }
 }
 

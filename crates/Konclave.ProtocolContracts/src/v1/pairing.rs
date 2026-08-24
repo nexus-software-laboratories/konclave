@@ -1,16 +1,26 @@
 use KonclaveDomainCore::{
-    MAX_PAIRING_CIPHERTEXT_BYTES, MAX_RELAY_PAYLOAD_BYTES, PairingEnvelope, PairingNonce,
-    PairingSenderRole, PairingStage,
+    MAX_MEMBERS, MAX_PAIRING_CIPHERTEXT_BYTES, MAX_PAIRING_WELCOME_BYTES, MAX_RELAY_PAYLOAD_BYTES,
+    PairingControl, PairingEnvelope, PairingInvitationPayload, PairingNonce, PairingSenderRole,
+    PairingStage, PairingWelcomePayload,
 };
 
 use crate::KonclaveProtocolError;
 use crate::v1::common::{
-    decode_bounded, encode_bounded, pairing_id_from_wire, pairing_id_to_wire,
-    pairing_message_id_from_wire, pairing_message_id_to_wire, version_from_wire, version_to_wire,
+    conversation_id_from_wire, conversation_id_to_wire, decode_bounded, device_id_from_wire,
+    device_id_to_wire, encode_bounded, pairing_id_from_wire, pairing_id_to_wire,
+    pairing_message_id_from_wire, pairing_message_id_to_wire, public_key_from_bytes,
+    public_key_to_bytes, require_repeated_field_limits, required, signature_from_bytes,
+    signature_to_bytes, version_from_wire, version_to_wire,
+};
+use crate::v1::identity::{
+    credential_from_wire, credential_to_wire, invitation_from_wire, invitation_to_wire,
 };
 use crate::wire::v1 as wire;
 
 const PAIRING_ENVELOPE_CONTRACT: &str = "PairingEnvelope";
+const PAIRING_INVITATION_CONTRACT: &str = "PairingInvitationPayload";
+const PAIRING_WELCOME_CONTRACT: &str = "PairingWelcomePayload";
+const PAIRING_CONTROL_CONTRACT: &str = "PairingControl";
 
 /// Encodes one authenticated pairing envelope.
 ///
@@ -43,6 +53,148 @@ pub fn encode_pairing_envelope(value: &PairingEnvelope) -> Result<Vec<u8>, Koncl
 pub fn decode_pairing_envelope(bytes: &[u8]) -> Result<PairingEnvelope, KonclaveProtocolError> {
     let value = decode_bounded(bytes, MAX_RELAY_PAYLOAD_BYTES, PAIRING_ENVELOPE_CONTRACT)?;
     pairing_envelope_from_wire(value)
+}
+
+/// Encodes inviter-authorized invitation material.
+///
+/// # Errors
+///
+/// Returns a size error when the payload exceeds the relay payload bound.
+pub fn encode_pairing_invitation(
+    value: &PairingInvitationPayload,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &wire::PairingInvitationPayload {
+            invitation: Some(invitation_to_wire(value.invitation())),
+            issuer_public_key: public_key_to_bytes(value.issuer_public_key()),
+            peer_bindings: value
+                .peer_bindings()
+                .iter()
+                .map(credential_to_wire)
+                .collect(),
+        },
+        MAX_RELAY_PAYLOAD_BYTES,
+        PAIRING_INVITATION_CONTRACT,
+    )
+}
+
+/// Decodes and shape-validates inviter-authorized invitation material.
+///
+/// Signature verification remains the caller's responsibility.
+///
+/// # Errors
+///
+/// Returns a typed protocol or domain validation error. Repeated binding count is
+/// bounded before protobuf materialization.
+pub fn decode_pairing_invitation(
+    bytes: &[u8],
+) -> Result<PairingInvitationPayload, KonclaveProtocolError> {
+    require_repeated_field_limits(
+        bytes,
+        MAX_RELAY_PAYLOAD_BYTES,
+        PAIRING_INVITATION_CONTRACT,
+        [(3, MAX_MEMBERS, "pairing_peer_bindings")],
+    )?;
+    let value: wire::PairingInvitationPayload =
+        decode_bounded(bytes, MAX_RELAY_PAYLOAD_BYTES, PAIRING_INVITATION_CONTRACT)?;
+    Ok(PairingInvitationPayload::new(
+        invitation_from_wire(required(value.invitation, "pairing_invitation.invitation")?)?,
+        public_key_from_bytes(&value.issuer_public_key)?,
+        value
+            .peer_bindings
+            .into_iter()
+            .map(credential_from_wire)
+            .collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+/// Encodes one opaque Welcome and add-Commit receipt cursor.
+///
+/// # Errors
+///
+/// Returns a size error when the payload exceeds the relay payload bound.
+pub fn encode_pairing_welcome(
+    value: &PairingWelcomePayload,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &wire::PairingWelcomePayload {
+            conversation_id: Some(conversation_id_to_wire(value.conversation_id())),
+            welcome: prost::bytes::Bytes::copy_from_slice(value.welcome()),
+            commit_cursor: value.commit_cursor(),
+        },
+        MAX_RELAY_PAYLOAD_BYTES,
+        PAIRING_WELCOME_CONTRACT,
+    )
+}
+
+/// Decodes and bounds one opaque Welcome and receipt cursor.
+///
+/// # Errors
+///
+/// Returns a typed protocol or domain validation error.
+pub fn decode_pairing_welcome(
+    bytes: &[u8],
+) -> Result<PairingWelcomePayload, KonclaveProtocolError> {
+    let value: wire::PairingWelcomePayload =
+        decode_bounded(bytes, MAX_RELAY_PAYLOAD_BYTES, PAIRING_WELCOME_CONTRACT)?;
+    if value.welcome.len() > MAX_PAIRING_WELCOME_BYTES {
+        return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+            field: "pairing_welcome",
+            minimum: 1,
+            maximum: MAX_PAIRING_WELCOME_BYTES,
+            actual: value.welcome.len(),
+        }
+        .into());
+    }
+    Ok(PairingWelcomePayload::new(
+        conversation_id_from_wire(value.conversation_id)?,
+        value.welcome.to_vec(),
+        value.commit_cursor,
+    )?)
+}
+
+/// Encodes root-signed pairing completion or cancellation authority.
+///
+/// # Errors
+///
+/// Returns a size error when the payload exceeds the relay payload bound.
+pub fn encode_pairing_control(value: &PairingControl) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &wire::PairingControl {
+            version: Some(version_to_wire(value.version())),
+            pairing_id: Some(pairing_id_to_wire(value.pairing_id())),
+            message_id: Some(pairing_message_id_to_wire(value.message_id())),
+            stage: stage_to_wire(value.stage()),
+            in_reply_to: Some(pairing_message_id_to_wire(value.in_reply_to())),
+            device_id: Some(device_id_to_wire(value.device_id())),
+            conversation_id: Some(conversation_id_to_wire(value.conversation_id())),
+            device_signature: signature_to_bytes(value.device_signature()),
+        },
+        MAX_RELAY_PAYLOAD_BYTES,
+        PAIRING_CONTROL_CONTRACT,
+    )
+}
+
+/// Decodes and shape-validates root-signed pairing control authority.
+///
+/// Signature verification remains the caller's responsibility.
+///
+/// # Errors
+///
+/// Returns a typed protocol or domain validation error.
+pub fn decode_pairing_control(bytes: &[u8]) -> Result<PairingControl, KonclaveProtocolError> {
+    let value: wire::PairingControl =
+        decode_bounded(bytes, MAX_RELAY_PAYLOAD_BYTES, PAIRING_CONTROL_CONTRACT)?;
+    Ok(PairingControl::new(
+        version_from_wire(value.version, PAIRING_CONTROL_CONTRACT)?,
+        pairing_id_from_wire(value.pairing_id)?,
+        pairing_message_id_from_wire(value.message_id)?,
+        stage_from_wire(value.stage)?,
+        pairing_message_id_from_wire(value.in_reply_to)?,
+        device_id_from_wire(value.device_id)?,
+        conversation_id_from_wire(value.conversation_id)?,
+        signature_from_bytes(&value.device_signature)?,
+    )?)
 }
 
 fn pairing_envelope_from_wire(

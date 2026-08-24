@@ -168,7 +168,7 @@ pub fn decode_join_proof(bytes: &[u8]) -> Result<JoinProof, KonclaveProtocolErro
     )?)
 }
 
-fn credential_to_wire(value: &DeviceCredentialBinding) -> wire::DeviceCredentialBinding {
+pub(super) fn credential_to_wire(value: &DeviceCredentialBinding) -> wire::DeviceCredentialBinding {
     wire::DeviceCredentialBinding {
         version: Some(version_to_wire(value.version())),
         device_id: Some(device_id_to_wire(value.device_id())),
@@ -186,7 +186,7 @@ fn credential_to_wire(value: &DeviceCredentialBinding) -> wire::DeviceCredential
     }
 }
 
-fn credential_from_wire(
+pub(super) fn credential_from_wire(
     wire: wire::DeviceCredentialBinding,
 ) -> Result<DeviceCredentialBinding, KonclaveProtocolError> {
     let signature_scheme = match wire::SignatureScheme::try_from(wire.signature_scheme) {
@@ -209,7 +209,7 @@ fn credential_from_wire(
     ))
 }
 
-fn invitation_to_wire(value: &Invitation) -> wire::Invitation {
+pub(super) fn invitation_to_wire(value: &Invitation) -> wire::Invitation {
     wire::Invitation {
         version: Some(version_to_wire(value.version())),
         invitation_id: Some(invitation_id_to_wire(value.invitation_id())),
@@ -226,7 +226,9 @@ fn invitation_to_wire(value: &Invitation) -> wire::Invitation {
     }
 }
 
-fn invitation_from_wire(wire: wire::Invitation) -> Result<Invitation, KonclaveProtocolError> {
+pub(super) fn invitation_from_wire(
+    wire: wire::Invitation,
+) -> Result<Invitation, KonclaveProtocolError> {
     Ok(Invitation::new(
         version_from_wire(wire.version, INVITATION_CONTRACT)?,
         invitation_id_from_wire(wire.invitation_id)?,

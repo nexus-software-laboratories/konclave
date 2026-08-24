@@ -9,12 +9,14 @@ use super::{
     decode_acknowledge_request, decode_application_message, decode_conversation_state,
     decode_device_credential_binding, decode_invitation, decode_join_proof,
     decode_membership_change, decode_membership_commit_bundle, decode_membership_control,
-    decode_pairing_envelope, decode_pairing_offer, decode_relay_envelope, decode_replay_page,
+    decode_pairing_control, decode_pairing_envelope, decode_pairing_invitation,
+    decode_pairing_offer, decode_pairing_welcome, decode_relay_envelope, decode_replay_page,
     decode_replay_request, decode_stored_relay_envelope, encode_acknowledge_request,
     encode_application_message, encode_conversation_state, encode_device_credential_binding,
     encode_invitation, encode_join_proof, encode_membership_change,
-    encode_membership_commit_bundle, encode_membership_control, encode_pairing_envelope,
-    encode_pairing_offer, encode_relay_envelope, encode_replay_page, encode_replay_request,
+    encode_membership_commit_bundle, encode_membership_control, encode_pairing_control,
+    encode_pairing_envelope, encode_pairing_invitation, encode_pairing_offer,
+    encode_pairing_welcome, encode_relay_envelope, encode_replay_page, encode_replay_request,
     encode_stored_relay_envelope,
 };
 use crate::KonclaveProtocolError;
@@ -584,4 +586,128 @@ fn cancellation_accepts_either_sender_but_requires_a_reply() {
 fn pairing_envelope_wire() -> wire::PairingEnvelope {
     let encoded = encode_pairing_envelope(&pairing_envelope_fixture()).unwrap();
     wire::PairingEnvelope::decode(encoded.as_slice()).unwrap()
+}
+
+fn pairing_invitation_fixture() -> KonclaveDomainCore::PairingInvitationPayload {
+    let version = KonclaveDomainCore::ProtocolVersion::application_v1();
+    let conversation_id = KonclaveDomainCore::ConversationId::from_bytes([21; 32]);
+    let issuer = KonclaveDomainCore::DeviceId::from_bytes([22; 32]);
+    let issuer_key = KonclaveDomainCore::Ed25519PublicKey::from_bytes([23; 32]);
+    KonclaveDomainCore::PairingInvitationPayload::new(
+        KonclaveDomainCore::Invitation::new(
+            version,
+            KonclaveDomainCore::InvitationId::from_bytes([24; 16]),
+            conversation_id,
+            Some(KonclaveDomainCore::RoutingId::from_bytes([25; 32])),
+            KonclaveDomainCore::DeviceId::from_bytes([26; 32]),
+            KonclaveDomainCore::ConversationRole::Member,
+            1_700_000_000,
+            KonclaveDomainCore::InvitationNonce::from_bytes([27; 32]),
+            issuer,
+            KonclaveDomainCore::Ed25519Signature::from_bytes([28; 64]),
+        )
+        .unwrap(),
+        issuer_key,
+        vec![KonclaveDomainCore::DeviceCredentialBinding::new(
+            version,
+            issuer,
+            conversation_id,
+            KonclaveDomainCore::SignatureScheme::Ed25519,
+            issuer_key,
+            KonclaveDomainCore::Ed25519PublicKey::from_bytes([29; 32]),
+            KonclaveDomainCore::Ed25519Signature::from_bytes([30; 64]),
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn pairing_stage_payloads_round_trip() {
+    let invitation = pairing_invitation_fixture();
+    let decoded_invitation =
+        decode_pairing_invitation(&encode_pairing_invitation(&invitation).unwrap()).unwrap();
+    assert_eq!(
+        encode_invitation(decoded_invitation.invitation()).unwrap(),
+        encode_invitation(invitation.invitation()).unwrap()
+    );
+    assert_eq!(
+        decoded_invitation.issuer_public_key(),
+        invitation.issuer_public_key()
+    );
+    assert_eq!(
+        decoded_invitation.peer_bindings(),
+        invitation.peer_bindings()
+    );
+
+    let welcome = KonclaveDomainCore::PairingWelcomePayload::new(
+        invitation.invitation().conversation_id(),
+        b"opaque welcome".to_vec(),
+        7,
+    )
+    .unwrap();
+    let decoded_welcome =
+        decode_pairing_welcome(&encode_pairing_welcome(&welcome).unwrap()).unwrap();
+    assert_eq!(decoded_welcome.conversation_id(), welcome.conversation_id());
+    assert_eq!(decoded_welcome.welcome(), welcome.welcome());
+    assert_eq!(decoded_welcome.commit_cursor(), welcome.commit_cursor());
+
+    let control = KonclaveDomainCore::PairingControl::new(
+        KonclaveDomainCore::ProtocolVersion::application_v1(),
+        KonclaveDomainCore::PairingId::from_bytes([31; 16]),
+        KonclaveDomainCore::PairingMessageId::from_bytes([32; 16]),
+        KonclaveDomainCore::PairingStage::Completion,
+        KonclaveDomainCore::PairingMessageId::from_bytes([33; 16]),
+        KonclaveDomainCore::DeviceId::from_bytes([34; 32]),
+        welcome.conversation_id(),
+        KonclaveDomainCore::Ed25519Signature::from_bytes([35; 64]),
+    )
+    .unwrap();
+    assert_eq!(
+        decode_pairing_control(&encode_pairing_control(&control).unwrap()).unwrap(),
+        control
+    );
+}
+
+#[test]
+fn pairing_stage_payloads_reject_malformed_and_amplified_input() {
+    let invitation = pairing_invitation_fixture();
+    let encoded = encode_pairing_invitation(&invitation).unwrap();
+    let mut wire = wire::PairingInvitationPayload::decode(encoded.as_slice()).unwrap();
+    wire.issuer_public_key = prost::bytes::Bytes::from_static(&[0; 31]);
+    assert!(decode_pairing_invitation(&wire.encode_to_vec()).is_err());
+
+    let binding = wire.peer_bindings[0].clone();
+    wire.peer_bindings = vec![binding; KonclaveDomainCore::MAX_MEMBERS + 1];
+    assert!(decode_pairing_invitation(&wire.encode_to_vec()).is_err());
+
+    let empty_welcome = wire::PairingWelcomePayload {
+        conversation_id: Some(wire::ConversationId {
+            value: prost::bytes::Bytes::from_static(&[1; 32]),
+        }),
+        welcome: prost::bytes::Bytes::new(),
+        commit_cursor: 1,
+    };
+    assert!(decode_pairing_welcome(&empty_welcome.encode_to_vec()).is_err());
+
+    let invalid_control = wire::PairingControl {
+        version: Some(wire::ProtocolVersion { major: 1, minor: 0 }),
+        pairing_id: Some(wire::PairingId {
+            value: prost::bytes::Bytes::from_static(&[1; 16]),
+        }),
+        message_id: Some(wire::PairingMessageId {
+            value: prost::bytes::Bytes::from_static(&[2; 16]),
+        }),
+        stage: wire::PairingStage::Welcome as i32,
+        in_reply_to: Some(wire::PairingMessageId {
+            value: prost::bytes::Bytes::from_static(&[3; 16]),
+        }),
+        device_id: Some(wire::DeviceId {
+            value: prost::bytes::Bytes::from_static(&[4; 32]),
+        }),
+        conversation_id: Some(wire::ConversationId {
+            value: prost::bytes::Bytes::from_static(&[5; 32]),
+        }),
+        device_signature: prost::bytes::Bytes::from_static(&[6; 64]),
+    };
+    assert!(decode_pairing_control(&invalid_control.encode_to_vec()).is_err());
 }
