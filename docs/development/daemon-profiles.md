@@ -319,7 +319,16 @@ created and joined conversations acquire workers without an agent polling tool.
 Workers, retry timers, discovery, and shutdown are all owned. Graceful shutdown waits
 up to five seconds and aborts an overdue supervisor rather than detaching it.
 
-## MCP application tools
+Pairing progression is owned separately from conversation watches. The daemon sweeps
+sealed active pairings immediately and every second, reconciles exact prepared
+outbounds, processes one bounded replay page per operation, enforces both deadlines,
+and completes compensating removal before terminal cancellation. Transient transport,
+rate-limit, server, and stale-epoch failures retry with bounded backoff and
+device-stable jitter. Permanent authorization, protocol, cryptographic, and
+persistence-integrity failures stop the daemon. Profiles admit at most 32 active
+pairings, so one sweep remains bounded.
+
+## MCP application and pairing tools
 
 The stdio daemon exposes `get_identity`, bounded conversation/message tools, and the
 membership tools `create_invitation`, `create_join_proof`, `add_member`,
@@ -331,6 +340,15 @@ membership control, and sealed persistence records never cross the MCP boundary.
 Stdio is the local process capability boundary, and every handler also passes an
 explicit method allowlist before parsing or side effects. Identifiers and bounded
 protocol values use canonical lowercase hex.
+
+The paved pairing surface is `create_pairing_capability`,
+`redeem_pairing_capability`, `get_pairing_status`, `authorize_pairing_joiner`,
+`authorize_pairing_inviter`, `sync_pairing`, and `cancel_pairing`. Only the
+short-lived capability crosses between sessions. Invitation, JoinProof, Welcome,
+relay cursor/route, peer bindings, directional keys, and sealed operation state stay
+behind the daemon boundary. Capability request and response buffers are not
+debug-formatted and are zeroized after use. `sync_pairing` is available for explicit
+diagnosis; ordinary progress is automatic and does not depend on an agent polling.
 
 `send_message` requires a caller-stable 16-byte `message_id`. Repeating the same
 conversation/message ID resumes or returns the exact durable operation; changing its
@@ -346,8 +364,9 @@ publishing the joined profile.
 
 MCP starts read-only. `KONCLAVE_MCP_ALLOW_WRITE=true` (or `1`) must be set in the
 long-lived daemon environment to authorize conversation creation, invitation/join,
-membership mutation, send, sync, and watch operations. Invalid values fail startup;
-the daemon never infers write permission from a model request.
+pairing creation/redemption/authorization/sync/cancellation, membership mutation,
+send, sync, and watch operations. Pairing status remains read-authorized. Invalid
+values fail startup; the daemon never infers write permission from a model request.
 
 `watch_messages` owns one cancellable WebSocket session and returns after one replay
 page. It remains an explicit diagnostic/manual operation, as does `sync_messages`;

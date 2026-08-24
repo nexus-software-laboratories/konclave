@@ -15,7 +15,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::{EncodedReplayPage, RelayError, RelayPrincipalId, RelayRepository, SubmitResult};
 
-const SQLITE_SCHEMA_VERSION: u32 = 2;
+const SQLITE_SCHEMA_VERSION: u32 = 3;
 const REPLAY_PAGE_FIXED_WIRE_BUDGET: usize = 64;
 const STORED_ENVELOPE_WIRE_OVERHEAD_BUDGET: usize = 32;
 
@@ -588,7 +588,7 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
             envelope_id BLOB NOT NULL,
             version_major INTEGER NOT NULL CHECK (version_major BETWEEN 1 AND 4294967295),
             version_minor INTEGER NOT NULL CHECK (version_minor BETWEEN 0 AND 4294967295),
-            delivery_class INTEGER NOT NULL CHECK (delivery_class BETWEEN 1 AND 5),
+            delivery_class INTEGER NOT NULL CHECK (delivery_class BETWEEN 1 AND 6),
             expected_parent_epoch INTEGER,
             expires_at_unix_seconds INTEGER NOT NULL CHECK (expires_at_unix_seconds >= 1),
             encoded_envelope BLOB NOT NULL
@@ -623,12 +623,15 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
         .execute(&mut *transaction)
         .await
         .map_err(|_| storage_failure("acknowledgment schema initialization"))?;
-        sqlx::query("PRAGMA user_version = 2")
+        sqlx::query("PRAGMA user_version = 3")
             .execute(&mut *transaction)
             .await
             .map_err(|_| storage_failure("schema version write"))?;
     } else if version == 1 {
         migrate_schema_v1_to_v2(&mut transaction).await?;
+        migrate_schema_v2_to_v3(&mut transaction).await?;
+    } else if version == 2 {
+        migrate_schema_v2_to_v3(&mut transaction).await?;
     }
     validate_schema(&mut transaction).await?;
     transaction
@@ -721,6 +724,7 @@ async fn migrate_schema_v1_to_v2(
         if !(1..=MAX_RELAY_PAYLOAD_BYTES).contains(&payload_length) {
             return Err(RelayError::InvalidStoredData);
         }
+
         let envelope_id: Vec<u8> = row.try_get("envelope_id").map_err(invalid_row)?;
         let payload: Vec<u8> =
             sqlx::query_scalar("SELECT payload FROM relay_envelope WHERE envelope_id = ?1")
@@ -790,6 +794,90 @@ async fn migrate_schema_v1_to_v2(
         .execute(&mut **transaction)
         .await
         .map_err(|_| storage_failure("schema v2 version write"))?;
+    Ok(())
+}
+
+async fn migrate_schema_v2_to_v3(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "CREATE TABLE relay_envelope_v3 (
+            routing_id BLOB NOT NULL,
+            cursor INTEGER NOT NULL CHECK (cursor >= 1),
+            envelope_id BLOB NOT NULL,
+            version_major INTEGER NOT NULL CHECK (version_major BETWEEN 1 AND 4294967295),
+            version_minor INTEGER NOT NULL CHECK (version_minor BETWEEN 0 AND 4294967295),
+            delivery_class INTEGER NOT NULL CHECK (delivery_class BETWEEN 1 AND 6),
+            expected_parent_epoch INTEGER,
+            expires_at_unix_seconds INTEGER NOT NULL CHECK (expires_at_unix_seconds >= 1),
+            encoded_envelope BLOB NOT NULL
+                CHECK (length(encoded_envelope) BETWEEN 1 AND 1048576),
+            PRIMARY KEY (routing_id, cursor),
+            UNIQUE (envelope_id),
+            FOREIGN KEY (routing_id) REFERENCES relay_route(routing_id) ON DELETE CASCADE,
+            CHECK (length(routing_id) = 32),
+            CHECK (length(envelope_id) = 16),
+            CHECK (
+                (delivery_class IN (3, 4) AND expected_parent_epoch IS NOT NULL
+                    AND expected_parent_epoch >= 0)
+                OR
+                (delivery_class NOT IN (3, 4) AND expected_parent_epoch IS NULL)
+            )
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("schema v3 envelope initialization"))?;
+    sqlx::query(
+        "INSERT INTO relay_envelope_v3 (
+            routing_id,
+            cursor,
+            envelope_id,
+            version_major,
+            version_minor,
+            delivery_class,
+            expected_parent_epoch,
+            expires_at_unix_seconds,
+            encoded_envelope
+         )
+         SELECT
+            routing_id,
+            cursor,
+            envelope_id,
+            version_major,
+            version_minor,
+            delivery_class,
+            expected_parent_epoch,
+            expires_at_unix_seconds,
+            encoded_envelope
+         FROM relay_envelope",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("schema v3 envelope migration"))?;
+    let old_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v2 envelope count"))?;
+    let new_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope_v3")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v3 envelope count"))?;
+    if old_count != new_count {
+        return Err(storage_failure("schema v3 envelope migration count"));
+    }
+    sqlx::query("DROP TABLE relay_envelope")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v2 envelope removal"))?;
+    sqlx::query("ALTER TABLE relay_envelope_v3 RENAME TO relay_envelope")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v3 envelope activation"))?;
+    sqlx::query("PRAGMA user_version = 3")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v3 version write"))?;
     Ok(())
 }
 
@@ -1307,7 +1395,8 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::query("PRAGMA user_version = 3")
+        let newer_version = SQLITE_SCHEMA_VERSION + 1;
+        sqlx::query(&format!("PRAGMA user_version = {newer_version}"))
             .execute(&pool)
             .await
             .unwrap();
@@ -1315,7 +1404,9 @@ mod tests {
 
         assert_eq!(
             SqliteRelayRepository::connect(&path).await.err(),
-            Some(RelayError::UnsupportedSchemaVersion { actual: 3 })
+            Some(RelayError::UnsupportedSchemaVersion {
+                actual: newer_version
+            })
         );
     }
 
@@ -1333,7 +1424,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let replay = repository
             .replay_encoded(ReplayRequest::new(envelope.routing_id(), 0, 100).unwrap())
             .await
@@ -1348,6 +1439,90 @@ mod tests {
             decode_replay_page(replay.as_bytes()).unwrap().next_cursor(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn schema_v2_migrates_existing_envelopes_and_accepts_pairing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let existing = envelope(21, 22, DeliveryClass::GroupApplication, None, 23);
+        insert_v1_row(&pool, &existing, 1, existing.payload()).await;
+        let mut transaction = pool.begin().await.unwrap();
+        migrate_schema_v1_to_v2(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 2);
+        pool.close().await;
+
+        let repository = SqliteRelayRepository::connect(&path).await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 3);
+        let replay = repository
+            .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
+            .await
+            .unwrap();
+        assert!(replay.envelopes()[0].envelope() == &existing);
+        let pairing = envelope(24, 25, DeliveryClass::Pairing, None, 26);
+        assert_eq!(
+            repository.submit(&pairing, 1).await.unwrap(),
+            SubmitResult::new(1, false)
+        );
+        let pairing_replay = repository
+            .replay(ReplayRequest::new(pairing.routing_id(), 0, 10).unwrap())
+            .await
+            .unwrap();
+        assert!(pairing_replay.envelopes()[0].envelope() == &pairing);
+    }
+
+    #[tokio::test]
+    async fn failed_schema_v2_migration_preserves_the_v2_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let existing = envelope(27, 28, DeliveryClass::GroupApplication, None, 29);
+        insert_v1_row(&pool, &existing, 1, existing.payload()).await;
+        let mut transaction = pool.begin().await.unwrap();
+        migrate_schema_v1_to_v2(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+        sqlx::query("CREATE TABLE relay_envelope_v3 (sentinel INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        assert!(SqliteRelayRepository::connect(&path).await.is_err());
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let original_count: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_envelope")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let sentinel_columns: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pragma_table_info('relay_envelope_v3')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(original_count, 1);
+        assert_eq!(sentinel_columns, 1);
     }
 
     #[tokio::test]
