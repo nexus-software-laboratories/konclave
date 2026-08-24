@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Weak};
 
 use KonclaveClientLibrary::{
     KonclaveClientError, PairingCapability, PairingCapabilityText, RelayEndpoint, RelayTransport,
@@ -8,12 +9,13 @@ use KonclaveCryptographicCore::{
     verify_pairing_control,
 };
 use KonclaveDomainCore::{
-    AcknowledgeRequest, ConversationId, ConversationRole, DeviceId, PairingEnvelope, PairingId,
-    PairingInvitationPayload, PairingMessageId, PairingStage, PairingWelcomePayload, ReplayRequest,
-    StoredRelayEnvelope,
+    AcknowledgeRequest, ConversationId, ConversationRole, DeviceId, JoinProof, PairingEnvelope,
+    PairingId, PairingInvitationPayload, PairingMessageId, PairingStage, PairingWelcomePayload,
+    ReplayRequest, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::{KonclaveProtocolError, v1};
 use thiserror::Error;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::application::{
     ApplicationService, ApplicationServiceError, validate_acknowledgment, validate_replay_page,
@@ -61,6 +63,7 @@ pub(crate) struct PairingService<T> {
     store: Arc<ProfileStore>,
     transport: Arc<T>,
     relay_endpoint: RelayEndpoint,
+    mutation_locks: PairingMutationLocks,
 }
 
 impl<T> Clone for PairingService<T> {
@@ -71,7 +74,32 @@ impl<T> Clone for PairingService<T> {
             store: Arc::clone(&self.store),
             transport: Arc::clone(&self.transport),
             relay_endpoint: self.relay_endpoint.clone(),
+            mutation_locks: self.mutation_locks.clone(),
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct PairingMutationLocks {
+    gates: Arc<AsyncMutex<BTreeMap<PairingId, Weak<AsyncMutex<()>>>>>,
+}
+
+impl PairingMutationLocks {
+    /// The returned guard intentionally spans relay and MLS awaits so an irreversible
+    /// membership side effect and its pairing checkpoint remain one serialized unit.
+    async fn acquire(&self, pairing_id: PairingId) -> OwnedMutexGuard<()> {
+        let gate = {
+            let mut gates = self.gates.lock().await;
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            if let Some(gate) = gates.get(&pairing_id).and_then(Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(AsyncMutex::new(()));
+                gates.insert(pairing_id, Arc::downgrade(&gate));
+                gate
+            }
+        };
+        gate.lock_owned().await
     }
 }
 
@@ -93,6 +121,7 @@ where
             store,
             transport,
             relay_endpoint,
+            mutation_locks: PairingMutationLocks::default(),
         }
     }
 
@@ -280,6 +309,7 @@ where
         granted_role: ConversationRole,
         now_unix_seconds: u64,
     ) -> Result<(), PairingServiceError> {
+        let _mutation = self.mutation_locks.acquire(pairing_id).await;
         let checkpoint = self.load_checkpoint(pairing_id).await?;
         if checkpoint.role != PairingRole::Inviter {
             return Err(PairingServiceError::InvalidTransition);
@@ -298,7 +328,9 @@ where
             ) {
                 return Ok(());
             }
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         }
         require_phase(
             &checkpoint,
@@ -343,7 +375,8 @@ where
             checkpoint.replay_cursor,
         )
         .await?;
-        self.retry_outbounds(pairing_id, now_unix_seconds).await
+        self.retry_outbounds_serialized(pairing_id, now_unix_seconds)
+            .await
     }
 
     /// Authorizes the inviter identity, conversation, and granted role displayed to
@@ -361,6 +394,7 @@ where
         expected_granted_role: ConversationRole,
         now_unix_seconds: u64,
     ) -> Result<(), PairingServiceError> {
+        let _mutation = self.mutation_locks.acquire(pairing_id).await;
         let checkpoint = self.load_checkpoint(pairing_id).await?;
         if checkpoint.role != PairingRole::Joiner {
             return Err(PairingServiceError::InvalidTransition);
@@ -376,7 +410,9 @@ where
                 expected_conversation_id,
                 expected_granted_role,
             )?;
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         }
         require_phase(
             &checkpoint,
@@ -434,7 +470,8 @@ where
             checkpoint.replay_cursor,
         )
         .await?;
-        self.retry_outbounds(pairing_id, now_unix_seconds).await
+        self.retry_outbounds_serialized(pairing_id, now_unix_seconds)
+            .await
     }
 
     /// Cancels one active pairing without pretending an accepted add-Commit vanished.
@@ -453,8 +490,9 @@ where
         pairing_id: PairingId,
         now_unix_seconds: u64,
     ) -> Result<(), PairingServiceError> {
+        let _mutation = self.mutation_locks.acquire(pairing_id).await;
         if self
-            .compensate_if_required(pairing_id, now_unix_seconds)
+            .compensate_if_required(pairing_id, now_unix_seconds, true)
             .await?
         {
             return Ok(());
@@ -485,13 +523,19 @@ where
                 checkpoint.replay_cursor,
             )
             .await?;
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         }
         if checkpoint.phase == PairingPhase::Compensating {
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         }
         if state.local_record(PairingStage::Cancellation)?.is_some() {
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         }
         let Some(conversation_id) = state.conversation_id() else {
             self.checkpoint_state(
@@ -502,7 +546,9 @@ where
                 checkpoint.replay_cursor,
             )
             .await?;
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         };
         let Some(in_reply_to) =
             local_cancellation_reply(&state, checkpoint.role, checkpoint.phase)?
@@ -515,7 +561,9 @@ where
                 checkpoint.replay_cursor,
             )
             .await?;
-            return self.retry_outbounds(pairing_id, now_unix_seconds).await;
+            return self
+                .retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await;
         };
         let expires_at_unix_seconds = cancellation_deadline_for_reply(&state, in_reply_to)?;
         require_before(now_unix_seconds, expires_at_unix_seconds)?;
@@ -547,7 +595,8 @@ where
             checkpoint.replay_cursor,
         )
         .await?;
-        self.retry_outbounds(pairing_id, now_unix_seconds).await
+        self.retry_outbounds_serialized(pairing_id, now_unix_seconds)
+            .await
     }
 
     /// Replays and durably processes one bounded pairing page.
@@ -564,8 +613,9 @@ where
         pairing_id: PairingId,
         now_unix_seconds: u64,
     ) -> Result<usize, PairingServiceError> {
+        let _mutation = self.mutation_locks.acquire(pairing_id).await;
         if self
-            .compensate_if_required(pairing_id, now_unix_seconds)
+            .compensate_if_required(pairing_id, now_unix_seconds, false)
             .await?
         {
             return Ok(0);
@@ -584,6 +634,7 @@ where
         let page = self.transport.replay(request).await?;
         validate_replay_page(checkpoint.replay_cursor, &page)
             .map_err(|_| PairingServiceError::InvalidRelayResponse)?;
+        let has_more = page.has_more();
         let envelopes = page.envelopes().to_vec();
         for stored in &envelopes {
             self.process_stored(pairing_id, stored, now_unix_seconds)
@@ -593,7 +644,14 @@ where
             let effective = self.transport.acknowledge(acknowledgment).await?;
             validate_acknowledgment(acknowledgment, effective)
                 .map_err(|_| PairingServiceError::InvalidRelayResponse)?;
-            self.retry_outbounds(pairing_id, now_unix_seconds).await?;
+            self.retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await?;
+        }
+        if !has_more {
+            self.resume_inviter_commit_if_required(pairing_id, now_unix_seconds, true)
+                .await?;
+            self.retry_outbounds_serialized(pairing_id, now_unix_seconds)
+                .await?;
         }
         Ok(envelopes.len())
     }
@@ -609,9 +667,19 @@ where
         pairing_id: PairingId,
         now_unix_seconds: u64,
     ) -> Result<(), PairingServiceError> {
+        let _mutation = self.mutation_locks.acquire(pairing_id).await;
+        self.retry_outbounds_serialized(pairing_id, now_unix_seconds)
+            .await
+    }
+
+    async fn retry_outbounds_serialized(
+        &self,
+        pairing_id: PairingId,
+        now_unix_seconds: u64,
+    ) -> Result<(), PairingServiceError> {
         loop {
             if self
-                .compensate_if_required(pairing_id, now_unix_seconds)
+                .compensate_if_required(pairing_id, now_unix_seconds, false)
                 .await?
             {
                 return Ok(());
@@ -718,6 +786,21 @@ where
                 .await
             }
             PairingObservationResult::Added(plaintext) => {
+                if checkpoint.role == PairingRole::Inviter
+                    && checkpoint.phase == PairingPhase::InviterAwaitingJoinProof
+                    && pairing.stage() == PairingStage::JoinProof
+                {
+                    return self
+                        .begin_inviter_commit(
+                            &checkpoint,
+                            &mut state,
+                            &pairing,
+                            &plaintext,
+                            stored.cursor(),
+                            now_unix_seconds,
+                        )
+                        .await;
+                }
                 let (next_phase, completion_deadline) = self
                     .process_remote_stage(
                         &checkpoint,
@@ -737,6 +820,120 @@ where
                 .await
             }
         }
+    }
+
+    async fn begin_inviter_commit(
+        &self,
+        checkpoint: &PairingCheckpoint,
+        state: &mut PairingOperationState,
+        pairing: &PairingEnvelope,
+        plaintext: &[u8],
+        replay_cursor: u64,
+        now_unix_seconds: u64,
+    ) -> Result<(), PairingServiceError> {
+        self.checkpoint_inviter_commit(
+            checkpoint,
+            state,
+            pairing,
+            plaintext,
+            replay_cursor,
+            now_unix_seconds,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn checkpoint_inviter_commit(
+        &self,
+        checkpoint: &PairingCheckpoint,
+        state: &PairingOperationState,
+        pairing: &PairingEnvelope,
+        plaintext: &[u8],
+        replay_cursor: u64,
+        now_unix_seconds: u64,
+    ) -> Result<(), PairingServiceError> {
+        require_authorization_record(checkpoint, pairing)?;
+        validate_join_proof(state, pairing, plaintext)?;
+        let completion_deadline = completion_deadline(
+            checkpoint.authorization_deadline_unix_seconds,
+            now_unix_seconds,
+        )?;
+        self.checkpoint_state(
+            checkpoint,
+            state,
+            PairingPhase::InviterAwaitingCompletion,
+            Some(completion_deadline),
+            replay_cursor,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn resume_inviter_commit_if_required(
+        &self,
+        pairing_id: PairingId,
+        now_unix_seconds: u64,
+        create_if_missing: bool,
+    ) -> Result<bool, PairingServiceError> {
+        let checkpoint = self.load_checkpoint(pairing_id).await?;
+        if checkpoint.role != PairingRole::Inviter
+            || !matches!(
+                checkpoint.phase,
+                PairingPhase::InviterAwaitingCompletion | PairingPhase::Compensating
+            )
+        {
+            return Ok(true);
+        }
+        let mut state = PairingOperationState::from_checkpoint(&checkpoint)?;
+        if state.local_record(PairingStage::Welcome)?.is_some() {
+            return Ok(true);
+        }
+        let join_proof = state
+            .remote_record(PairingStage::JoinProof)?
+            .ok_or(PairingServiceError::InvalidTransition)?;
+        let join_proof_message_id = join_proof.envelope().message_id();
+        let proof = validate_join_proof(&state, join_proof.envelope(), join_proof.plaintext())?;
+        let conversation_id = state
+            .conversation_id()
+            .ok_or(PairingServiceError::InvalidTransition)?;
+        let sent = match self
+            .applications
+            .resume_add_member(conversation_id, &proof, now_unix_seconds)
+            .await?
+        {
+            Some(sent) => sent,
+            None if create_if_missing => {
+                self.applications
+                    .add_member(
+                        conversation_id,
+                        proof,
+                        now_unix_seconds,
+                        checkpoint.authorization_deadline_unix_seconds,
+                    )
+                    .await?
+            }
+            None => return Ok(false),
+        };
+        let welcome = sent.welcome.ok_or(PairingServiceError::InvalidTransition)?;
+        let payload = PairingWelcomePayload::new(conversation_id, welcome, sent.cursor)
+            .map_err(KonclaveProtocolError::from)?;
+        state.prepare_outbound(
+            PairingStage::Welcome,
+            Some(join_proof_message_id),
+            checkpoint
+                .completion_deadline_unix_seconds
+                .ok_or(PairingServiceError::InvalidTransition)?,
+            &v1::encode_pairing_welcome(&payload)?,
+        )?;
+        self.checkpoint_state(
+            &checkpoint,
+            &state,
+            checkpoint.phase,
+            checkpoint.completion_deadline_unix_seconds,
+            checkpoint.replay_cursor,
+        )
+        .await?;
+        Ok(true)
     }
 
     async fn process_remote_stage(
@@ -762,60 +959,6 @@ where
                     .await?;
                 state.set_conversation_id(payload.invitation().conversation_id())?;
                 Ok((PairingPhase::JoinerAwaitingInviterAuthorization, None))
-            }
-            (
-                PairingRole::Inviter,
-                PairingPhase::InviterAwaitingJoinProof,
-                PairingStage::JoinProof,
-            ) => {
-                require_authorization_record(checkpoint, pairing)?;
-                let invitation = state
-                    .local_record(PairingStage::Invitation)?
-                    .ok_or(PairingServiceError::InvalidTransition)?;
-                if pairing.in_reply_to() != Some(invitation.envelope().message_id()) {
-                    return Err(PairingServiceError::InvalidTransition);
-                }
-                let invitation_payload = v1::decode_pairing_invitation(invitation.plaintext())?;
-                let proof = v1::decode_join_proof(plaintext)?;
-                if v1::encode_invitation(proof.invitation())?
-                    != v1::encode_invitation(invitation_payload.invitation())?
-                    || proof.credential().device_id() != state.capability().offer().device_id()
-                    || proof.credential().device_root_public_key()
-                        != state.capability().offer().device_root_public_key()
-                    || Some(proof.invitation().conversation_id()) != state.conversation_id()
-                {
-                    return Err(PairingServiceError::AuthorizationMismatch);
-                }
-                verify_device_credential_binding(proof.credential())?;
-                let conversation_id = state
-                    .conversation_id()
-                    .ok_or(PairingServiceError::InvalidTransition)?;
-                let completion_deadline = completion_deadline(
-                    checkpoint.authorization_deadline_unix_seconds,
-                    now_unix_seconds,
-                )?;
-                let sent = self
-                    .applications
-                    .add_member(
-                        conversation_id,
-                        proof,
-                        now_unix_seconds,
-                        checkpoint.authorization_deadline_unix_seconds,
-                    )
-                    .await?;
-                let welcome = sent.welcome.ok_or(PairingServiceError::InvalidTransition)?;
-                let payload = PairingWelcomePayload::new(conversation_id, welcome, sent.cursor)
-                    .map_err(KonclaveProtocolError::from)?;
-                state.prepare_outbound(
-                    PairingStage::Welcome,
-                    Some(pairing.message_id()),
-                    completion_deadline,
-                    &v1::encode_pairing_welcome(&payload)?,
-                )?;
-                Ok((
-                    PairingPhase::InviterAwaitingCompletion,
-                    Some(completion_deadline),
-                ))
             }
             (PairingRole::Joiner, PairingPhase::JoinerAwaitingWelcome, PairingStage::Welcome) => {
                 let join_proof = state
@@ -1045,9 +1188,13 @@ where
             return Ok(());
         }
         let state = PairingOperationState::from_checkpoint(checkpoint)?;
-        let conversation_id = state
-            .conversation_id()
-            .ok_or(PairingServiceError::InvalidTransition)?;
+        let Some(conversation_id) = state.conversation_id() else {
+            return if checkpoint.phase == PairingPhase::Cancelled {
+                Ok(())
+            } else {
+                Err(PairingServiceError::InvalidTransition)
+            };
+        };
         let conversations = self.conversations.clone();
         tokio::task::spawn_blocking(move || conversations.complete_pairing_join(conversation_id))
             .await
@@ -1059,9 +1206,55 @@ where
         &self,
         pairing_id: PairingId,
         now_unix_seconds: u64,
+        cancellation_requested: bool,
     ) -> Result<bool, PairingServiceError> {
         let mut checkpoint = self.load_checkpoint(pairing_id).await?;
-        let state = PairingOperationState::from_checkpoint(&checkpoint)?;
+        let mut state = PairingOperationState::from_checkpoint(&checkpoint)?;
+        if checkpoint.role == PairingRole::Inviter
+            && matches!(
+                checkpoint.phase,
+                PairingPhase::InviterAwaitingCompletion | PairingPhase::Compensating
+            )
+            && state.local_record(PairingStage::Welcome)?.is_none()
+        {
+            let deadline = checkpoint
+                .completion_deadline_unix_seconds
+                .ok_or(PairingServiceError::InvalidTransition)?;
+            let must_cancel = cancellation_requested
+                || now_unix_seconds >= deadline
+                || checkpoint.phase == PairingPhase::Compensating;
+            if must_cancel && checkpoint.phase == PairingPhase::InviterAwaitingCompletion {
+                self.checkpoint_state(
+                    &checkpoint,
+                    &state,
+                    PairingPhase::Compensating,
+                    Some(deadline),
+                    checkpoint.replay_cursor,
+                )
+                .await?;
+                checkpoint = self.load_checkpoint(pairing_id).await?;
+                state = PairingOperationState::from_checkpoint(&checkpoint)?;
+            }
+            if !self
+                .resume_inviter_commit_if_required(pairing_id, now_unix_seconds, false)
+                .await?
+            {
+                if !must_cancel {
+                    return Ok(false);
+                }
+                self.checkpoint_state(
+                    &checkpoint,
+                    &state,
+                    PairingPhase::Cancelled,
+                    Some(deadline),
+                    checkpoint.replay_cursor,
+                )
+                .await?;
+                return Ok(true);
+            }
+            checkpoint = self.load_checkpoint(pairing_id).await?;
+            state = PairingOperationState::from_checkpoint(&checkpoint)?;
+        }
         let joiner_completion_deadline = if checkpoint.phase == PairingPhase::JoinerAwaitingWelcome
         {
             state
@@ -1098,10 +1291,9 @@ where
             let deadline = checkpoint
                 .completion_deadline_unix_seconds
                 .ok_or(PairingServiceError::InvalidTransition)?;
-            if now_unix_seconds < deadline {
+            if !cancellation_requested && now_unix_seconds < deadline {
                 return Ok(false);
             }
-            let state = PairingOperationState::from_checkpoint(&checkpoint)?;
             self.checkpoint_state(
                 &checkpoint,
                 &state,
@@ -1178,6 +1370,32 @@ fn require_authorization_window(now: u64, deadline: u64) -> Result<(), PairingSe
     } else {
         Ok(())
     }
+}
+
+fn validate_join_proof(
+    state: &PairingOperationState,
+    pairing: &PairingEnvelope,
+    plaintext: &[u8],
+) -> Result<JoinProof, PairingServiceError> {
+    let invitation = state
+        .local_record(PairingStage::Invitation)?
+        .ok_or(PairingServiceError::InvalidTransition)?;
+    if pairing.in_reply_to() != Some(invitation.envelope().message_id()) {
+        return Err(PairingServiceError::InvalidTransition);
+    }
+    let invitation_payload = v1::decode_pairing_invitation(invitation.plaintext())?;
+    let proof = v1::decode_join_proof(plaintext)?;
+    if v1::encode_invitation(proof.invitation())?
+        != v1::encode_invitation(invitation_payload.invitation())?
+        || proof.credential().device_id() != state.capability().offer().device_id()
+        || proof.credential().device_root_public_key()
+            != state.capability().offer().device_root_public_key()
+        || Some(proof.invitation().conversation_id()) != state.conversation_id()
+    {
+        return Err(PairingServiceError::AuthorizationMismatch);
+    }
+    verify_device_credential_binding(proof.credential())?;
+    Ok(proof)
 }
 
 fn require_authorization_record(
@@ -1396,6 +1614,7 @@ mod tests {
         RoutingId, StoredRelayEnvelope,
     };
     use async_trait::async_trait;
+    use tokio::sync::{Notify, oneshot};
 
     use super::*;
     use crate::conversation::tests::open_coordinator;
@@ -1408,6 +1627,10 @@ mod tests {
         routes: Arc<Mutex<BTreeMap<RoutingId, Vec<StoredRelayEnvelope>>>>,
         fail_next_pairing_submit: Arc<AtomicBool>,
         fail_next_group_commit_submit: Arc<AtomicBool>,
+        fail_after_next_group_commit_acceptance: Arc<AtomicBool>,
+        pause_next_group_commit_submit: Arc<AtomicBool>,
+        group_commit_accepted: Arc<Notify>,
+        group_commit_release: Arc<Notify>,
     }
 
     impl MemoryRelay {
@@ -1420,7 +1643,53 @@ mod tests {
                 .store(true, Ordering::SeqCst);
         }
 
+        fn pause_next_group_commit_after_acceptance(&self) {
+            self.pause_next_group_commit_submit
+                .store(true, Ordering::SeqCst);
+        }
+
+        fn fail_after_next_group_commit_acceptance(&self) {
+            self.fail_after_next_group_commit_acceptance
+                .store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_group_commit_acceptance(&self) {
+            self.group_commit_accepted.notified().await;
+        }
+
+        fn release_group_commit(&self) {
+            self.group_commit_release.notify_one();
+        }
+
+        fn delivery_count(&self, delivery_class: DeliveryClass) -> usize {
+            self.routes
+                .lock()
+                .unwrap()
+                .values()
+                .flatten()
+                .filter(|stored| stored.envelope().delivery_class() == delivery_class)
+                .count()
+        }
+
+        fn pairing_stage_count(&self, stage: PairingStage) -> usize {
+            self.routes
+                .lock()
+                .unwrap()
+                .values()
+                .flatten()
+                .filter(|stored| {
+                    stored.envelope().delivery_class() == DeliveryClass::Pairing
+                        && v1::decode_pairing_envelope(stored.envelope().payload())
+                            .is_ok_and(|envelope| envelope.stage() == stage)
+                })
+                .count()
+        }
+
         fn duplicate_latest_pairing_record(&self) -> u64 {
+            self.duplicate_latest_pairing_record_as(0xfe)
+        }
+
+        fn duplicate_latest_pairing_record_as(&self, envelope_id: u8) -> u64 {
             let mut routes = self.routes.lock().unwrap();
             let records = routes
                 .values_mut()
@@ -1434,7 +1703,7 @@ mod tests {
             let duplicate = RelayEnvelope::new(
                 original.version(),
                 original.routing_id(),
-                EnvelopeId::from_bytes([0xfe; EnvelopeId::LENGTH]),
+                EnvelopeId::from_bytes([envelope_id; EnvelopeId::LENGTH]),
                 original.delivery_class(),
                 original.expected_parent_epoch(),
                 original.expires_at_unix_seconds(),
@@ -1465,28 +1734,47 @@ mod tests {
             {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
-            let mut routes = self
-                .routes
-                .lock()
-                .map_err(|_| KonclaveClientError::TransportUnavailable)?;
-            let route = routes.entry(envelope.routing_id()).or_default();
-            if let Some(existing) = route
-                .iter()
-                .find(|stored| stored.envelope().envelope_id() == envelope.envelope_id())
-            {
-                return if existing.envelope() == envelope {
-                    Ok(existing.clone())
-                } else {
-                    Err(KonclaveClientError::InvalidResponse)
-                };
+            let (stored, pause_after_acceptance, fail_after_acceptance) = {
+                let mut routes = self
+                    .routes
+                    .lock()
+                    .map_err(|_| KonclaveClientError::TransportUnavailable)?;
+                let route = routes.entry(envelope.routing_id()).or_default();
+                if let Some(existing) = route
+                    .iter()
+                    .find(|stored| stored.envelope().envelope_id() == envelope.envelope_id())
+                {
+                    return if existing.envelope() == envelope {
+                        Ok(existing.clone())
+                    } else {
+                        Err(KonclaveClientError::InvalidResponse)
+                    };
+                }
+                let cursor = u64::try_from(route.len())
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(KonclaveClientError::InvalidResponse)?;
+                let stored = StoredRelayEnvelope::new(envelope.clone(), cursor)
+                    .map_err(|_| KonclaveClientError::InvalidResponse)?;
+                route.push(stored.clone());
+                let pause_after_acceptance = envelope.delivery_class()
+                    == DeliveryClass::GroupCommit
+                    && self
+                        .pause_next_group_commit_submit
+                        .swap(false, Ordering::SeqCst);
+                let fail_after_acceptance = envelope.delivery_class() == DeliveryClass::GroupCommit
+                    && self
+                        .fail_after_next_group_commit_acceptance
+                        .swap(false, Ordering::SeqCst);
+                (stored, pause_after_acceptance, fail_after_acceptance)
+            };
+            if fail_after_acceptance {
+                return Err(KonclaveClientError::TransportUnavailable);
             }
-            let cursor = u64::try_from(route.len())
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or(KonclaveClientError::InvalidResponse)?;
-            let stored = StoredRelayEnvelope::new(envelope.clone(), cursor)
-                .map_err(|_| KonclaveClientError::InvalidResponse)?;
-            route.push(stored.clone());
+            if pause_after_acceptance {
+                self.group_commit_accepted.notify_one();
+                self.group_commit_release.notified().await;
+            }
             Ok(stored)
         }
 
@@ -1539,7 +1827,7 @@ mod tests {
         PairingService::new(conversations, applications, endpoint.clone())
     }
 
-    struct AwaitingCompletionFixture {
+    struct PairingFixture {
         _root: tempfile::TempDir,
         inviter: ConversationCoordinator,
         joiner: ConversationCoordinator,
@@ -1551,7 +1839,7 @@ mod tests {
         joiner_device_id: DeviceId,
     }
 
-    async fn pairing_awaiting_completion() -> AwaitingCompletionFixture {
+    async fn pairing_awaiting_join_proof() -> PairingFixture {
         let root = tempfile::tempdir().unwrap();
         let inviter = open_coordinator(root.path(), "compensation-inviter");
         let joiner = open_coordinator(root.path(), "compensation-joiner");
@@ -1591,8 +1879,7 @@ mod tests {
             )
             .await
             .unwrap();
-        inviter_service.replay_once(pairing_id, NOW).await.unwrap();
-        AwaitingCompletionFixture {
+        PairingFixture {
             _root: root,
             inviter,
             joiner,
@@ -1603,6 +1890,59 @@ mod tests {
             conversation_id: conversation.conversation_id,
             joiner_device_id,
         }
+    }
+
+    async fn pairing_awaiting_completion() -> PairingFixture {
+        let fixture = pairing_awaiting_join_proof().await;
+        fixture
+            .inviter_service
+            .replay_once(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+        fixture
+    }
+
+    async fn checkpoint_inviter_commit_intent(fixture: &PairingFixture) {
+        let initial = fixture
+            .inviter_service
+            .load_checkpoint(fixture.pairing_id)
+            .await
+            .unwrap();
+        let page = fixture
+            .relay
+            .replay(ReplayRequest::new(initial.routing_id, initial.replay_cursor, 8).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.envelopes().len(), 2);
+        fixture
+            .inviter_service
+            .process_stored(fixture.pairing_id, &page.envelopes()[0], NOW)
+            .await
+            .unwrap();
+
+        let checkpoint = fixture
+            .inviter_service
+            .load_checkpoint(fixture.pairing_id)
+            .await
+            .unwrap();
+        let stored = &page.envelopes()[1];
+        let pairing = v1::decode_pairing_envelope(stored.envelope().payload()).unwrap();
+        let mut state = PairingOperationState::from_checkpoint(&checkpoint).unwrap();
+        let PairingObservationResult::Added(plaintext) = state.observe(stored).unwrap() else {
+            panic!("join proof must be newly observed");
+        };
+        fixture
+            .inviter_service
+            .checkpoint_inviter_commit(
+                &checkpoint,
+                &state,
+                &pairing,
+                &plaintext,
+                stored.cursor(),
+                NOW,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1997,7 +2337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_against_prior_frontier_compensates_a_concurrent_commit() {
+    async fn cancellation_against_prior_frontier_preempts_an_unprepared_commit() {
         let root = tempfile::tempdir().unwrap();
         let inviter = open_coordinator(root.path(), "frontier-inviter");
         let joiner = open_coordinator(root.path(), "frontier-joiner");
@@ -2050,14 +2390,425 @@ mod tests {
             inviter_service.status(pairing_id).await.unwrap().phase,
             PairingPhase::Cancelled
         );
+        assert_eq!(relay.delivery_count(DeliveryClass::GroupCommit), 0);
         let conversation = inviter.open(conversation.conversation_id).unwrap();
-        assert_eq!(conversation.group.epoch(), 2);
+        assert_eq!(conversation.group.epoch(), 0);
         assert!(
             conversation
                 .group
                 .state()
                 .member(joiner_device_id)
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_add_commit_response_recovers_before_cancellation() {
+        let fixture = pairing_awaiting_join_proof().await;
+        fixture.relay.fail_after_next_group_commit_acceptance();
+        assert!(matches!(
+            fixture
+                .inviter_service
+                .replay_once(fixture.pairing_id, NOW)
+                .await,
+            Err(PairingServiceError::Application(
+                ApplicationServiceError::Relay(KonclaveClientError::TransportUnavailable)
+            ))
+        ));
+        assert_eq!(
+            fixture
+                .inviter_service
+                .status(fixture.pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::InviterAwaitingCompletion
+        );
+
+        fixture.inviter.recover().unwrap();
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let recovered = service(
+            fixture.inviter.clone(),
+            Arc::clone(&fixture.relay),
+            &endpoint,
+        );
+        recovered.cancel(fixture.pairing_id, NOW).await.unwrap();
+
+        assert_eq!(
+            recovered.status(fixture.pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 2);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_compensation_recovers_uncertain_add_without_sending_welcome() {
+        let fixture = pairing_awaiting_join_proof().await;
+        fixture.relay.fail_after_next_group_commit_acceptance();
+        assert!(
+            fixture
+                .inviter_service
+                .replay_once(fixture.pairing_id, NOW)
+                .await
+                .is_err()
+        );
+        let checkpoint = fixture
+            .inviter_service
+            .load_checkpoint(fixture.pairing_id)
+            .await
+            .unwrap();
+        let state = PairingOperationState::from_checkpoint(&checkpoint).unwrap();
+        fixture
+            .inviter_service
+            .checkpoint_state(
+                &checkpoint,
+                &state,
+                PairingPhase::Compensating,
+                checkpoint.completion_deadline_unix_seconds,
+                checkpoint.replay_cursor,
+            )
+            .await
+            .unwrap();
+
+        fixture.inviter.recover().unwrap();
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let recovered = service(
+            fixture.inviter.clone(),
+            Arc::clone(&fixture.relay),
+            &endpoint,
+        );
+        recovered
+            .retry_outbounds(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recovered.status(fixture.pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        assert_eq!(fixture.relay.pairing_stage_count(PairingStage::Welcome), 0);
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 2);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_intent_only_restart_never_creates_an_add_commit() {
+        let fixture = pairing_awaiting_join_proof().await;
+        checkpoint_inviter_commit_intent(&fixture).await;
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 0);
+
+        fixture.inviter.recover().unwrap();
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let recovered = service(
+            fixture.inviter.clone(),
+            Arc::clone(&fixture.relay),
+            &endpoint,
+        );
+        recovered.cancel(fixture.pairing_id, NOW).await.unwrap();
+
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 0);
+        assert_eq!(
+            recovered.status(fixture.pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 0);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_cancellation_preempts_an_unprepared_add_after_restart() {
+        let fixture = pairing_awaiting_join_proof().await;
+        checkpoint_inviter_commit_intent(&fixture).await;
+        fixture
+            .joiner_service
+            .cancel(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+
+        fixture.inviter.recover().unwrap();
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let recovered = service(
+            fixture.inviter.clone(),
+            Arc::clone(&fixture.relay),
+            &endpoint,
+        );
+        assert_eq!(
+            recovered
+                .replay_once(fixture.pairing_id, NOW)
+                .await
+                .unwrap(),
+            1
+        );
+
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 0);
+        assert_eq!(
+            recovered.status(fixture.pairing_id).await.unwrap().phase,
+            PairingPhase::Cancelled
+        );
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 0);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_remote_cancellation_preempts_add_creation() {
+        let fixture = pairing_awaiting_join_proof().await;
+        fixture
+            .joiner_service
+            .cancel(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .inviter_service
+                .replay_once(fixture.pairing_id, NOW)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 0);
+        assert_eq!(
+            fixture
+                .inviter_service
+                .status(fixture.pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn add_creation_waits_until_all_pairing_replay_pages_are_clear() {
+        let fixture = pairing_awaiting_join_proof().await;
+        for envelope_id in 0x10..0x18 {
+            fixture
+                .relay
+                .duplicate_latest_pairing_record_as(envelope_id);
+        }
+        fixture
+            .joiner_service
+            .cancel(fixture.pairing_id, NOW)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .inviter_service
+                .replay_once(fixture.pairing_id, NOW)
+                .await
+                .unwrap(),
+            usize::try_from(PAIRING_REPLAY_LIMIT).unwrap()
+        );
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 0);
+        assert_eq!(
+            fixture
+                .inviter_service
+                .status(fixture.pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::InviterAwaitingCompletion
+        );
+
+        assert_eq!(
+            fixture
+                .inviter_service
+                .replay_once(fixture.pairing_id, NOW)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 0);
+        assert_eq!(
+            fixture
+                .inviter_service
+                .status(fixture.pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn intent_only_restart_starts_add_after_cancellation_replay_is_clear() {
+        let fixture = pairing_awaiting_join_proof().await;
+        checkpoint_inviter_commit_intent(&fixture).await;
+        fixture.inviter.recover().unwrap();
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let recovered = service(
+            fixture.inviter.clone(),
+            Arc::clone(&fixture.relay),
+            &endpoint,
+        );
+
+        assert_eq!(
+            recovered
+                .replay_once(fixture.pairing_id, NOW)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(fixture.relay.delivery_count(DeliveryClass::GroupCommit), 1);
+        assert_eq!(
+            recovered.status(fixture.pairing_id).await.unwrap().phase,
+            PairingPhase::InviterAwaitingCompletion
+        );
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 1);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_locks_are_pairing_scoped_and_prune_inactive_gates() {
+        let locks = PairingMutationLocks::default();
+        let first_id = PairingId::from_bytes([1; PairingId::LENGTH]);
+        let second_id = PairingId::from_bytes([2; PairingId::LENGTH]);
+        let third_id = PairingId::from_bytes([3; PairingId::LENGTH]);
+
+        let first = locks.acquire(first_id).await;
+        let first_gate = locks
+            .gates
+            .lock()
+            .await
+            .get(&first_id)
+            .and_then(Weak::upgrade)
+            .unwrap();
+        assert!(first_gate.try_lock().is_err());
+
+        let second = locks.acquire(second_id).await;
+        assert_eq!(locks.gates.lock().await.len(), 2);
+
+        drop(first);
+        drop(first_gate);
+        drop(second);
+        let _third = locks.acquire(third_id).await;
+        let gates = locks.gates.lock().await;
+        assert_eq!(gates.len(), 1);
+        assert!(gates.contains_key(&third_id));
+    }
+
+    #[tokio::test]
+    async fn cancellation_serializes_with_an_accepted_add_commit() {
+        let fixture = pairing_awaiting_join_proof().await;
+        fixture.relay.pause_next_group_commit_after_acceptance();
+        let replay_service = fixture.inviter_service.clone();
+        let pairing_id = fixture.pairing_id;
+        let replay = tokio::spawn(async move { replay_service.replay_once(pairing_id, NOW).await });
+        fixture.relay.wait_for_group_commit_acceptance().await;
+
+        let cancellation_service = fixture.inviter_service.clone();
+        let (started, cancellation_started) = oneshot::channel();
+        let cancellation = tokio::spawn(async move {
+            let _ = started.send(());
+            cancellation_service.cancel(pairing_id, NOW).await
+        });
+        cancellation_started.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!cancellation.is_finished());
+
+        fixture.relay.release_group_commit();
+        assert_eq!(replay.await.unwrap().unwrap(), 2);
+        cancellation.await.unwrap().unwrap();
+        assert_eq!(
+            fixture
+                .inviter_service
+                .status(pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::Cancelled
+        );
+        let conversation = fixture.inviter.open(fixture.conversation_id).unwrap();
+        assert_eq!(conversation.group.epoch(), 2);
+        assert!(
+            conversation
+                .group
+                .state()
+                .member(fixture.joiner_device_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn preinvitation_cancellation_and_expiry_need_no_join_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let relay = Arc::new(MemoryRelay::default());
+        let joiner = open_coordinator(root.path(), "early-cancellation-joiner");
+        let joiner_service = service(joiner, relay, &endpoint);
+
+        let cancelled = joiner_service
+            .create_capability(ConversationRole::Member, DEADLINE, NOW)
+            .await
+            .unwrap();
+        joiner_service
+            .cancel(cancelled.pairing_id, NOW)
+            .await
+            .unwrap();
+        joiner_service
+            .cancel(cancelled.pairing_id, NOW)
+            .await
+            .unwrap();
+        assert_eq!(
+            joiner_service
+                .replay_once(cancelled.pairing_id, NOW)
+                .await
+                .unwrap(),
+            0
+        );
+
+        let expired = joiner_service
+            .create_capability(ConversationRole::Member, DEADLINE, NOW)
+            .await
+            .unwrap();
+        joiner_service
+            .retry_outbounds(expired.pairing_id, DEADLINE)
+            .await
+            .unwrap();
+        assert_eq!(
+            joiner_service
+                .status(expired.pairing_id)
+                .await
+                .unwrap()
+                .phase,
+            PairingPhase::Cancelled
         );
     }
 }

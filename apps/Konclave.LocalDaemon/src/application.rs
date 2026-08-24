@@ -185,35 +185,49 @@ where
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
+        let submission = Arc::clone(&self.submissions).lock_owned().await;
         self.retry_application_ready_locked(now_unix_seconds)
             .await?;
-        let proof_for_lookup = decode_join_proof(
-            &encode_join_proof(&join_proof).map_err(|_| ApplicationServiceError::Protocol)?,
-        )
-        .map_err(|_| ApplicationServiceError::Protocol)?;
-        let conversations = self.conversations.clone();
-        if let Some(existing) = tokio::task::spawn_blocking(move || {
-            conversations.resume_add_member(conversation_id, &proof_for_lookup)
-        })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??
-        {
+        if let Some(existing) = self.find_add_member(conversation_id, &join_proof).await? {
             return self.resume_membership(existing).await;
         }
         self.retry_membership_ready_locked().await?;
         let conversations = self.conversations.clone();
-        let prepared = tokio::task::spawn_blocking(move || {
-            conversations.prepare_add_member(
+        let (submission, prepared) = tokio::task::spawn_blocking(move || {
+            let prepared = conversations.prepare_add_member(
                 conversation_id,
                 join_proof,
                 now_unix_seconds,
                 expires_at_unix_seconds,
-            )
+            );
+            (submission, prepared)
         })
         .await
-        .map_err(|_| ApplicationServiceError::Task)??;
+        .map_err(|_| ApplicationServiceError::Task)?;
+        let _submission = submission;
+        let prepared = prepared?;
         self.submit_membership(prepared).await
+    }
+
+    /// Resumes an exact add-member journal without creating one when no request was
+    /// prepared before a crash.
+    ///
+    /// # Errors
+    ///
+    /// Returns a task, conversation, relay, or persistence error.
+    pub(crate) async fn resume_add_member(
+        &self,
+        conversation_id: ConversationId,
+        join_proof: &JoinProof,
+        now_unix_seconds: u64,
+    ) -> Result<Option<SentMembership>, ApplicationServiceError> {
+        let _submission = self.submissions.lock().await;
+        self.retry_application_ready_locked(now_unix_seconds)
+            .await?;
+        match self.find_add_member(conversation_id, join_proof).await? {
+            Some(existing) => self.resume_membership(existing).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Removes one device through a durable encrypted membership commit.
@@ -652,6 +666,24 @@ where
         applications
             .checked_add(memberships)
             .ok_or(ApplicationServiceError::Protocol)
+    }
+
+    async fn find_add_member(
+        &self,
+        conversation_id: ConversationId,
+        join_proof: &JoinProof,
+    ) -> Result<Option<MembershipRequestState>, ApplicationServiceError> {
+        let proof_for_lookup = decode_join_proof(
+            &encode_join_proof(join_proof).map_err(|_| ApplicationServiceError::Protocol)?,
+        )
+        .map_err(|_| ApplicationServiceError::Protocol)?;
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || {
+            conversations.resume_add_member(conversation_id, &proof_for_lookup)
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)?
+        .map_err(Into::into)
     }
 
     async fn retry_application_ready_locked(
