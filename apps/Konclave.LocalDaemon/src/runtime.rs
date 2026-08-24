@@ -24,7 +24,7 @@ use crate::pairing_service::PairingService;
 use crate::persistence::{LockedProfile, ProfileId, ProfileStore, ProfileStoreError};
 use crate::service::Service;
 
-pub async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
+pub(crate) async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
 where
     F: Future<Output = ()>,
 {

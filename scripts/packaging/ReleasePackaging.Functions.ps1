@@ -126,7 +126,7 @@ function Copy-ReleaseFile {
     )
 
     $item = Get-Item -LiteralPath $Source -ErrorAction Stop
-    if (-not $item.PSIsContainer -and $item.LinkType) {
+    if ($item.LinkType -in @('SymbolicLink', 'Junction')) {
         throw "Release input must not be a symbolic link: $Source"
     }
     if ($item.PSIsContainer) {

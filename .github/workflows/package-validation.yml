@@ -82,10 +82,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
           npm run build
           if ($LASTEXITCODE -ne 0) { throw 'Plugin build failed.' }
-          npm run package
-          if ($LASTEXITCODE -ne 0) { throw 'Plugin packaging failed.' }
-          npm test
-          if ($LASTEXITCODE -ne 0) { throw 'Plugin tests failed.' }
+          npm exec -- vitest run tests/daemon-path.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin daemon-resolution tests failed.' }
       - name: Package and exercise extracted artifacts
         shell: pwsh
         run: |

@@ -1,27 +1,3 @@
-#[allow(dead_code)]
-mod adapter;
-#[allow(dead_code)]
-mod application;
-#[allow(dead_code)]
-mod conversation;
-#[allow(dead_code)]
-mod health;
-#[allow(dead_code)]
-mod mcp;
-#[allow(dead_code)]
-mod observability;
-#[allow(dead_code)]
-mod pairing;
-#[allow(dead_code)]
-mod pairing_service;
-mod pairing_supervisor;
-#[allow(dead_code)]
-mod persistence;
-mod runtime;
-mod service;
-#[cfg(test)]
-mod test_support;
-
 use std::process::ExitCode;
 
 use anyhow::Context;
@@ -43,7 +19,7 @@ async fn run() -> anyhow::Result<()> {
     // signal arriving before registration would terminate the process under its
     // default disposition, skipping coordinated shutdown entirely.
     let shutdown = register_process_shutdown()?;
-    runtime::run_until(shutdown).await
+    konclave_local_daemon::run_until(shutdown).await
 }
 
 #[cfg(unix)]

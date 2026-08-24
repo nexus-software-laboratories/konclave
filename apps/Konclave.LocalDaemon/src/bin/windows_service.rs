@@ -1,34 +1,3 @@
-#[allow(dead_code)]
-#[cfg(windows)]
-#[path = "../application.rs"]
-mod application;
-#[allow(dead_code)]
-#[cfg(windows)]
-#[path = "../conversation.rs"]
-mod conversation;
-#[allow(dead_code)]
-#[cfg(windows)]
-#[path = "../mcp.rs"]
-mod mcp;
-#[allow(dead_code)]
-#[cfg(windows)]
-#[path = "../observability.rs"]
-mod observability;
-#[allow(dead_code)]
-#[cfg(windows)]
-#[path = "../pairing.rs"]
-mod pairing;
-#[allow(dead_code)]
-#[cfg(windows)]
-#[path = "../persistence.rs"]
-mod persistence;
-#[cfg(windows)]
-#[path = "../runtime.rs"]
-mod runtime;
-#[cfg(windows)]
-#[path = "../service.rs"]
-mod service;
-
 #[cfg(windows)]
 fn main() -> windows_service::Result<()> {
     service_host::run()
@@ -90,7 +59,7 @@ mod service_host {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let service_result = runtime.block_on(super::runtime::run_until(async move {
+        let service_result = runtime.block_on(konclave_local_daemon::run_until(async move {
             let _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()).await;
         }));
         let exit_code = if service_result.is_ok() {
