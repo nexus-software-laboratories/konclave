@@ -47,6 +47,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0006-joiner-issued-pairing-capabilities.md",
+        "title": "ADR 0006: Joiner-issued pairing capabilities",
+        "section": "Architecture",
+        "order": 70,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

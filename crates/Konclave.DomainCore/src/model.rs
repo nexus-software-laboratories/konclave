@@ -5,7 +5,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
-    MessageId, PairingId, RoutingId,
+    MessageId, PairingId, PairingMessageId, PairingNonce, RoutingId,
 };
 
 /// Current Konclave application protocol major version.
@@ -26,6 +26,12 @@ pub const MAX_MEMBERS: usize = 128;
 pub const MAX_CONSUMED_INVITATIONS: usize = 1024;
 /// Maximum MLS KeyPackage byte length accepted by a join proof.
 pub const MAX_MLS_KEY_PACKAGE_BYTES: usize = 64 * 1024;
+/// Maximum authenticated ciphertext bytes in one pairing envelope.
+///
+/// Pairing stages can carry bounded MLS material, including a Welcome, so they use
+/// the relay payload budget while reserving fixed framing headroom.
+pub const MAX_PAIRING_CIPHERTEXT_BYTES: usize = MAX_RELAY_PAYLOAD_BYTES - 1024;
+const MIN_PAIRING_CIPHERTEXT_BYTES: usize = 16;
 /// Maximum number of envelopes returned by one replay page.
 pub const MAX_REPLAY_PAGE_SIZE: usize = 100;
 /// Maximum encoded replay page size in protocol v1.
@@ -381,6 +387,188 @@ impl PairingOffer {
     #[must_use]
     pub const fn device_signature(&self) -> Ed25519Signature {
         self.device_signature
+    }
+}
+
+/// The endpoint role that emitted one pairing record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PairingSenderRole {
+    /// The device asking to join.
+    Joiner,
+    /// The current member authorized to invite it.
+    Inviter,
+}
+
+/// One finite stage in the pairing exchange.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PairingStage {
+    /// The inviter authorized the offer and issued a conversation invitation.
+    Invitation,
+    /// The joiner authorized the inviter and returned its one-time JoinProof.
+    JoinProof,
+    /// The inviter committed the add and returned the durable Welcome result.
+    Welcome,
+    /// The joiner accepted the Welcome and completed the exchange.
+    Completion,
+    /// One side cancelled or compensated the exchange.
+    Cancellation,
+}
+
+impl PairingStage {
+    /// Returns the stable diagnostic label for this stage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Invitation => "invitation",
+            Self::JoinProof => "join_proof",
+            Self::Welcome => "welcome",
+            Self::Completion => "completion",
+            Self::Cancellation => "cancellation",
+        }
+    }
+
+    const fn expected_sender(self) -> Option<PairingSenderRole> {
+        match self {
+            Self::Invitation | Self::Welcome => Some(PairingSenderRole::Inviter),
+            Self::JoinProof | Self::Completion => Some(PairingSenderRole::Joiner),
+            Self::Cancellation => None,
+        }
+    }
+
+    const fn requires_reply(self) -> bool {
+        !matches!(self, Self::Invitation)
+    }
+}
+
+/// One bounded, authenticated record exchanged over a pairing route.
+///
+/// The header is clear relay payload metadata only after it is nested inside the
+/// opaque relay envelope. CryptographicCore encodes the complete canonical header as
+/// AEAD associated data, so changing a sender, stage, reply, deadline, or nonce makes
+/// decryption fail rather than changing the meaning of the ciphertext.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingEnvelope {
+    version: ProtocolVersion,
+    pairing_id: PairingId,
+    message_id: PairingMessageId,
+    sender: PairingSenderRole,
+    stage: PairingStage,
+    in_reply_to: Option<PairingMessageId>,
+    expires_at_unix_seconds: u64,
+    nonce: PairingNonce,
+    ciphertext: Vec<u8>,
+}
+
+impl PairingEnvelope {
+    /// Creates one shape-validated pairing envelope.
+    ///
+    /// This constructor does not authenticate ciphertext. It establishes the finite
+    /// stage grammar and allocation bounds before a caller performs cryptographic or
+    /// durable work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the deadline is zero, ciphertext is truncated
+    /// or oversized, a stage is emitted by the wrong role, or its reply link is absent
+    /// or unexpectedly present.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the authenticated pairing header remains explicit and atomic"
+    )]
+    pub fn new(
+        version: ProtocolVersion,
+        pairing_id: PairingId,
+        message_id: PairingMessageId,
+        sender: PairingSenderRole,
+        stage: PairingStage,
+        in_reply_to: Option<PairingMessageId>,
+        expires_at_unix_seconds: u64,
+        nonce: PairingNonce,
+        ciphertext: Vec<u8>,
+    ) -> Result<Self, KonclaveDomainError> {
+        require_positive(expires_at_unix_seconds, "expires_at_unix_seconds")?;
+        require_length_range(
+            ciphertext.len(),
+            MIN_PAIRING_CIPHERTEXT_BYTES,
+            MAX_PAIRING_CIPHERTEXT_BYTES,
+            "pairing_ciphertext",
+        )?;
+        if stage
+            .expected_sender()
+            .is_some_and(|expected| sender != expected)
+        {
+            return Err(KonclaveDomainError::InvalidPairingEnvelope { field: "sender" });
+        }
+        if stage.requires_reply() != in_reply_to.is_some() {
+            return Err(KonclaveDomainError::InvalidPairingEnvelope {
+                field: "in_reply_to",
+            });
+        }
+        Ok(Self {
+            version,
+            pairing_id,
+            message_id,
+            sender,
+            stage,
+            in_reply_to,
+            expires_at_unix_seconds,
+            nonce,
+            ciphertext,
+        })
+    }
+
+    /// Returns the protocol version.
+    #[must_use]
+    pub const fn version(&self) -> ProtocolVersion {
+        self.version
+    }
+
+    /// Returns the pairing exchange this record belongs to.
+    #[must_use]
+    pub const fn pairing_id(&self) -> PairingId {
+        self.pairing_id
+    }
+
+    /// Returns the stable logical record identifier used for idempotency.
+    #[must_use]
+    pub const fn message_id(&self) -> PairingMessageId {
+        self.message_id
+    }
+
+    /// Returns the endpoint role that emitted the record.
+    #[must_use]
+    pub const fn sender(&self) -> PairingSenderRole {
+        self.sender
+    }
+
+    /// Returns the finite pairing stage.
+    #[must_use]
+    pub const fn stage(&self) -> PairingStage {
+        self.stage
+    }
+
+    /// Returns the prior logical record this stage answers.
+    #[must_use]
+    pub const fn in_reply_to(&self) -> Option<PairingMessageId> {
+        self.in_reply_to
+    }
+
+    /// Returns the absolute deadline carried by this record.
+    #[must_use]
+    pub const fn expires_at_unix_seconds(&self) -> u64 {
+        self.expires_at_unix_seconds
+    }
+
+    /// Returns the public AES-GCM nonce.
+    #[must_use]
+    pub const fn nonce(&self) -> PairingNonce {
+        self.nonce
+    }
+
+    /// Returns ciphertext with its appended authentication tag.
+    #[must_use]
+    pub fn ciphertext(&self) -> &[u8] {
+        &self.ciphertext
     }
 }
 

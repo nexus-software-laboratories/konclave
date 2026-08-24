@@ -11,6 +11,7 @@ evidence that implementations honor both.
 - device root private keys and per-conversation MLS private keys;
 - MLS epoch secrets, resumption secrets, and persisted group state;
 - invitation capabilities and local authorization credentials;
+- pairing capabilities, directional pairing keys, and pairing authorization state;
 - ephemeral local adapter capabilities and authenticated delivery leases;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
@@ -71,6 +72,35 @@ observe and fail closed, but cannot detect permanently isolated split views. A r
 that violates this non-equivocation assumption can keep stale members on a fork and
 break membership-removal consistency even though it still cannot forge MLS messages.
 
+### Pairing capabilities
+
+A pairing capability is a short-lived bearer secret issued by the device asking to
+join. It carries a root-signed public offer and enough secret material to derive one
+random relay route plus direction-specific pairing keys. Possession authorizes a
+pairing attempt; it does not identify the human or organization controlling the
+device.
+
+Both endpoints explicitly authorize the identity and role they observe. The inviter
+approves the joiner's root-signed device offer before issuing an invitation. The
+joiner approves the inviter identity authenticated by that invitation before emitting
+a JoinProof. Policy may automate either decision only when it states that it is
+trusting bearer-capability possession rather than independently verified identity.
+
+Pairing records are encrypted before relay submission. Their clear header is
+authenticated as associated data and binds pairing, logical message, sender role,
+stage, reply chain, deadline, and nonce. Direction-specific keys prevent reflection
+between inviter and joiner roles. Invalid, replayed, reordered, or conflicting relay
+records do not advance durable pairing state.
+
+Capability expiry stops new authorization. An add-member Commit already accepted
+before expiry remains a real membership change: its exact Welcome may complete during
+a separate recovery deadline, after which the inviter compensates by removing a member
+that never completed pairing.
+
+Pairing capabilities never contain relay bearer credentials. Zero-setup remote
+pairing remains unavailable until a relay control plane can issue an exact-route,
+short-lived principal.
+
 ### Local persistence and platform key custody
 
 The ordinary filesystem and SQLite database are not trusted to keep secrets
@@ -93,6 +123,7 @@ Konclave considers:
 - an active network attacker who can inject, alter, replay, or suppress traffic;
 - a compromised or malicious relay;
 - an attacker who obtains an invitation capability;
+- an attacker who obtains, copies, races, replays, or modifies a pairing capability;
 - a malicious or compromised current group member;
 - a stale or downgraded client;
 - a local unprivileged process attempting unauthorized daemon operations;
@@ -175,6 +206,10 @@ the mutually supported maximum.
 | Unauthorized member change | Administrator policy checked by every client before applying the Commit |
 | Welcome receipt substitution | Reserve the add Commit envelope identifier before MLS creation, authenticate it in signed Welcome GroupInfo, and require the exact relay receipt at checkpoint and reopen |
 | Invitation theft | Bind the signed invitation to an independently verified expected `DeviceId`, conversation, role, expiry, and nonce; enforce consumption in authenticated conversation state |
+| Pairing capability theft | Root-signed joiner offer, explicit endpoint authorization, short authorization deadline, one durable idempotent state machine, and no claim that bearer possession identifies a human |
+| Pairing record injection or replay | Direction-specific AEAD keys, complete canonical-header authentication, stable logical message identifiers, reply-chain validation, and no state advance on invalid or unexpected records |
+| Pairing expiry after membership commit | Separate completion deadline; recover the exact Welcome or issue a durable compensating MLS removal |
+| Remote pairing credential escalation | Never embed a wildcard or durable relay credential; require pre-provisioned access or an exact-route short-lived principal |
 | Credential substitution | Device-root binding validation and optional out-of-band fingerprint comparison |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |
 | Protocol downgrade | Signed capability negotiation and fail-closed version selection |

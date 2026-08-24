@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(non_snake_case)]
 
+mod authenticated_cipher;
 mod error;
 mod key;
 mod mls_storage;
@@ -10,6 +11,10 @@ mod sealed_blob;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 
+pub use authenticated_cipher::{
+    AUTHENTICATED_CIPHER_KEY_BYTES, AUTHENTICATED_CIPHER_NONCE_BYTES,
+    AUTHENTICATED_CIPHER_TAG_BYTES, AuthenticatedCipher, AuthenticatedCiphertext,
+};
 pub use error::SecretStorageError;
 pub use key::{ExternalWrappingKeyProvider, WrappingKeyProvider};
 pub use mls_storage::SealedMlsStorage;

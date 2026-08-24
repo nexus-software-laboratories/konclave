@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Identifies which endpoint role emitted a pairing record.
+enum PairingSenderRole {
+  PAIRING_SENDER_ROLE_UNSPECIFIED = 0;
+  PAIRING_SENDER_ROLE_JOINER = 1;
+  PAIRING_SENDER_ROLE_INVITER = 2;
+}
+
+// Identifies one finite transition in the pairing exchange.
+enum PairingStage {
+  PAIRING_STAGE_UNSPECIFIED = 0;
+  PAIRING_STAGE_INVITATION = 1;
+  PAIRING_STAGE_JOIN_PROOF = 2;
+  PAIRING_STAGE_WELCOME = 3;
+  PAIRING_STAGE_COMPLETION = 4;
+  PAIRING_STAGE_CANCELLATION = 5;
+}
+
+// Carries one authenticated, encrypted pairing record.
+//
+// The complete clear header is canonical AEAD associated data. Ciphertext therefore
+// cannot be moved to another pairing, role, stage, reply chain, deadline, or nonce.
+message PairingEnvelope {
+  ProtocolVersion version = 1;
+  PairingId pairing_id = 2;
+  PairingMessageId message_id = 3;
+  PairingSenderRole sender = 4;
+  PairingStage stage = 5;
+  PairingMessageId in_reply_to = 6;
+  uint64 expires_at_unix_seconds = 7;
+  // Exactly 12 public AES-GCM nonce bytes in protocol v1.
+  bytes nonce = 8;
+  // Bounded authenticated ciphertext with an appended 16-byte tag.
+  bytes ciphertext = 9;
+}

@@ -5,6 +5,7 @@ mod error;
 mod hmac;
 mod identity;
 mod mls;
+mod pairing;
 
 pub use error::KonclaveCryptographicError;
 pub use hmac::{HMAC_SHA256_TAG_LENGTH, HmacSha256Key, fill_random};
@@ -17,6 +18,7 @@ pub use mls::{
     MlsConversation, MlsConversationClient, MlsWelcome, OutboundMembershipCommit,
     PreparedJoinedConversation,
 };
+pub use pairing::{PAIRING_SECRET_BYTES, PairingKeySchedule, PairingSecret};
 
 #[cfg(test)]
 mod tests;

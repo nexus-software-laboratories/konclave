@@ -104,6 +104,18 @@ define_fixed_bytes!(
     "pairing_id"
 );
 define_fixed_bytes!(
+    /// Stable identifier for one logical record in a pairing exchange.
+    PairingMessageId,
+    16,
+    "pairing_message_id"
+);
+define_fixed_bytes!(
+    /// Public AES-GCM nonce carried by one pairing envelope.
+    PairingNonce,
+    12,
+    "pairing_nonce"
+);
+define_fixed_bytes!(
     /// Opaque identifier used only for relay routing.
     RoutingId,
     32,

@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
-use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use zeroize::Zeroizing;
 
-use crate::key::WrappingKey;
-use crate::{SecretStorageError, WrappingKeyProvider};
+use crate::{
+    AuthenticatedCipher, AuthenticatedCiphertext, SecretStorageError, WrappingKeyProvider,
+};
 
 const MAGIC: &[u8; 4] = b"KSC1";
 const FORMAT_VERSION: u8 = 1;
@@ -120,8 +117,7 @@ impl SealedBlob {
 
 /// AES-256-GCM sealer initialized from one explicit custody provider.
 pub struct SecretSealer {
-    key: Arc<WrappingKey>,
-    random: SystemRandom,
+    cipher: AuthenticatedCipher,
 }
 
 impl SecretSealer {
@@ -131,9 +127,9 @@ impl SecretSealer {
     ///
     /// Returns the provider error without attempting any fallback.
     pub fn from_provider(provider: impl WrappingKeyProvider) -> Result<Self, SecretStorageError> {
+        let key = provider.load_or_create()?;
         Ok(Self {
-            key: Arc::new(provider.load_or_create()?),
-            random: SystemRandom::new(),
+            cipher: AuthenticatedCipher::new(key.as_bytes()),
         })
     }
 
@@ -144,8 +140,7 @@ impl SecretSealer {
     #[must_use]
     pub fn share(&self) -> Self {
         Self {
-            key: Arc::clone(&self.key),
-            random: SystemRandom::new(),
+            cipher: self.cipher.share(),
         }
     }
 
@@ -160,17 +155,18 @@ impl SecretSealer {
         context: &SecretRecordContext,
         plaintext: &[u8],
     ) -> Result<SealedBlob, SecretStorageError> {
-        if plaintext.len() > MAX_SECRET_PLAINTEXT_BYTES {
-            return Err(SecretStorageError::PlaintextTooLarge {
-                maximum: MAX_SECRET_PLAINTEXT_BYTES,
-                actual: plaintext.len(),
-            });
-        }
-        let mut nonce = [0_u8; NONCE_BYTES];
-        self.random
-            .fill(&mut nonce)
-            .map_err(|_| SecretStorageError::RandomGenerationFailed)?;
-        self.seal_with_nonce(context, plaintext, nonce)
+        let ciphertext = self.cipher.seal_with_associated_data(
+            plaintext,
+            MAX_SECRET_PLAINTEXT_BYTES,
+            |nonce| {
+                let header = header(*nonce);
+                associated_data(context, &header)
+            },
+        )?;
+        let mut output = Vec::with_capacity(HEADER_BYTES + ciphertext.as_bytes().len());
+        output.extend_from_slice(&header(*ciphertext.nonce()));
+        output.extend_from_slice(ciphertext.as_bytes());
+        SealedBlob::from_bytes(output)
     }
 
     /// Authenticates and opens one sealed record.
@@ -189,20 +185,16 @@ impl SecretSealer {
             .try_into()
             .map_err(|_| SecretStorageError::InvalidSealedBlob)?;
         let aad = associated_data(context, header);
-        let key = less_safe_key(self.key.as_ref())?;
-        let mut plaintext = Zeroizing::new(blob.as_bytes()[HEADER_BYTES..].to_vec());
-        let length = key
-            .open_in_place(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(aad),
-                &mut plaintext,
-            )
-            .map_err(|_| SecretStorageError::AuthenticationFailed)?
-            .len();
-        plaintext.truncate(length);
-        Ok(plaintext)
+        let ciphertext = AuthenticatedCiphertext::from_parts(
+            &nonce,
+            blob.as_bytes()[HEADER_BYTES..].to_vec(),
+            MAX_SECRET_PLAINTEXT_BYTES,
+        )?;
+        self.cipher
+            .open(&aad, &ciphertext, MAX_SECRET_PLAINTEXT_BYTES)
     }
 
+    #[cfg(test)]
     fn seal_with_nonce(
         &self,
         context: &SecretRecordContext,
@@ -211,25 +203,14 @@ impl SecretSealer {
     ) -> Result<SealedBlob, SecretStorageError> {
         let header = header(nonce);
         let aad = associated_data(context, &header);
-        let key = less_safe_key(self.key.as_ref())?;
-        let mut ciphertext = Zeroizing::new(plaintext.to_vec());
-        key.seal_in_place_append_tag(
-            Nonce::assume_unique_for_key(nonce),
-            Aad::from(aad),
-            &mut *ciphertext,
-        )
-        .map_err(|_| SecretStorageError::AuthenticationFailed)?;
-        let mut output = Vec::with_capacity(HEADER_BYTES + ciphertext.len());
+        let ciphertext =
+            self.cipher
+                .seal_with_nonce(&aad, plaintext, MAX_SECRET_PLAINTEXT_BYTES, nonce)?;
+        let mut output = Vec::with_capacity(HEADER_BYTES + ciphertext.as_bytes().len());
         output.extend_from_slice(&header);
-        output.extend_from_slice(&ciphertext);
+        output.extend_from_slice(ciphertext.as_bytes());
         SealedBlob::from_bytes(output)
     }
-}
-
-fn less_safe_key(key: &WrappingKey) -> Result<LessSafeKey, SecretStorageError> {
-    UnboundKey::new(&AES_256_GCM, key.as_bytes())
-        .map(LessSafeKey::new)
-        .map_err(|_| SecretStorageError::AuthenticationFailed)
 }
 
 fn header(nonce: [u8; NONCE_BYTES]) -> [u8; HEADER_BYTES] {

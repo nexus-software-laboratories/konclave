@@ -43,6 +43,11 @@ message PairingId {
   bytes value = 1;
 }
 
+message PairingMessageId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
 // Identifies one opaque relay route.
 message RoutingId {
   // Exactly 32 bytes in protocol v1.
