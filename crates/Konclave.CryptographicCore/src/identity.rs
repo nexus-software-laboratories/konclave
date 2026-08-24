@@ -1,8 +1,8 @@
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
     Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
-    MessageId, NotificationId, PairingContextHash, PairingOffer, ProtocolVersion, RoutingId,
-    SignatureScheme,
+    MessageId, NotificationId, PairingContextHash, PairingControl, PairingId, PairingMessageId,
+    PairingOffer, PairingStage, ProtocolVersion, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -21,6 +21,7 @@ const CREDENTIAL_DOMAIN: &[u8] = b"konclave-device-credential-binding-v1\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] = b"konclave-device-credential-binding-hash-v1\0";
 const INVITATION_DOMAIN: &[u8] = b"konclave-invitation-v1\0";
 const PAIRING_OFFER_DOMAIN: &[u8] = b"konclave-pairing-offer-v1\0";
+const PAIRING_CONTROL_DOMAIN: &[u8] = b"konclave-pairing-control-v1\0";
 const DEVICE_IDENTITY_MAGIC: &[u8; 4] = b"KDI1";
 const CONVERSATION_SIGNING_MAGIC: &[u8; 4] = b"KCS1";
 
@@ -340,6 +341,44 @@ impl DeviceIdentity {
             requested_role,
             expires_at_unix_seconds,
             context_hash,
+            Ed25519Signature::from_slice(&signature)?,
+        )?)
+    }
+
+    /// Signs one pairing completion or cancellation control.
+    ///
+    /// # Errors
+    ///
+    /// Returns a domain or provider error for an invalid stage or rejected signature.
+    pub fn sign_pairing_control(
+        &self,
+        pairing_id: PairingId,
+        message_id: PairingMessageId,
+        stage: PairingStage,
+        in_reply_to: PairingMessageId,
+        conversation_id: ConversationId,
+    ) -> Result<PairingControl, KonclaveCryptographicError> {
+        let canonical = canonical_pairing_control(
+            ProtocolVersion::application_v1(),
+            pairing_id,
+            message_id,
+            stage,
+            in_reply_to,
+            self.device_id,
+            conversation_id,
+        )?;
+        let cipher_suite = cipher_suite(&self.provider)?;
+        let signature = cipher_suite
+            .sign(&self.secret_key, &canonical)
+            .map_err(|_| provider_failure("pairing control signature"))?;
+        Ok(PairingControl::new(
+            ProtocolVersion::application_v1(),
+            pairing_id,
+            message_id,
+            stage,
+            in_reply_to,
+            self.device_id,
+            conversation_id,
             Ed25519Signature::from_slice(&signature)?,
         )?)
     }
@@ -664,6 +703,7 @@ pub fn verify_pairing_offer(
     if offer.version() != ProtocolVersion::application_v1() {
         return Err(KonclaveCryptographicError::InvalidInvitationSignature);
     }
+
     let provider = configured_provider();
     let cipher_suite = cipher_suite(&provider)?;
     let derived = derive_device_id_with_suite(&cipher_suite, offer.device_root_public_key())?;
@@ -686,6 +726,42 @@ pub fn verify_pairing_offer(
     cipher_suite
         .verify(&public_key, offer.device_signature().as_bytes(), &canonical)
         .map_err(|_| KonclaveCryptographicError::InvalidInvitationSignature)
+}
+
+/// Verifies a pairing completion or cancellation against an expected device root.
+///
+/// # Errors
+///
+/// Returns a typed failure for a wrong version, device, stage, key, or signature.
+pub fn verify_pairing_control(
+    control: &PairingControl,
+    expected_public_key: Ed25519PublicKey,
+) -> Result<(), KonclaveCryptographicError> {
+    if control.version() != ProtocolVersion::application_v1() {
+        return Err(KonclaveCryptographicError::InvalidPairingControl);
+    }
+    let provider = configured_provider();
+    let cipher_suite = cipher_suite(&provider)?;
+    let derived = derive_device_id_with_suite(&cipher_suite, expected_public_key)?;
+    if derived != control.device_id() {
+        return Err(KonclaveCryptographicError::InvalidPairingControl);
+    }
+    let canonical = canonical_pairing_control(
+        control.version(),
+        control.pairing_id(),
+        control.message_id(),
+        control.stage(),
+        control.in_reply_to(),
+        control.device_id(),
+        control.conversation_id(),
+    )?;
+    cipher_suite
+        .verify(
+            &SignaturePublicKey::new_slice(expected_public_key.as_bytes()),
+            control.device_signature().as_bytes(),
+            &canonical,
+        )
+        .map_err(|_| KonclaveCryptographicError::InvalidPairingControl)
 }
 
 pub(crate) fn configured_provider() -> AwsLcCryptoProvider {
@@ -818,6 +894,39 @@ fn canonical_pairing_offer(
     output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
     output.extend_from_slice(context_hash.as_bytes());
     output
+}
+
+fn canonical_pairing_control(
+    version: ProtocolVersion,
+    pairing_id: PairingId,
+    message_id: PairingMessageId,
+    stage: PairingStage,
+    in_reply_to: PairingMessageId,
+    device_id: DeviceId,
+    conversation_id: ConversationId,
+) -> Result<Vec<u8>, KonclaveCryptographicError> {
+    let stage = match stage {
+        PairingStage::Completion => 1,
+        PairingStage::Cancellation => 2,
+        _ => {
+            return Err(
+                KonclaveDomainCore::KonclaveDomainError::InvalidPairingEnvelope {
+                    field: "control_stage",
+                }
+                .into(),
+            );
+        }
+    };
+    let mut output = Vec::with_capacity(160);
+    output.extend_from_slice(PAIRING_CONTROL_DOMAIN);
+    append_version(&mut output, version);
+    output.extend_from_slice(pairing_id.as_bytes());
+    output.extend_from_slice(message_id.as_bytes());
+    output.push(stage);
+    output.extend_from_slice(in_reply_to.as_bytes());
+    output.extend_from_slice(device_id.as_bytes());
+    output.extend_from_slice(conversation_id.as_bytes());
+    Ok(output)
 }
 
 fn append_version(output: &mut Vec<u8>, version: ProtocolVersion) {

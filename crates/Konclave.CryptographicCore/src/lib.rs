@@ -11,7 +11,8 @@ pub use error::KonclaveCryptographicError;
 pub use hmac::{HMAC_SHA256_TAG_LENGTH, HmacSha256Key, fill_random};
 pub use identity::{
     ConversationSigningMaterial, DeviceIdentity, VerifiedDeviceCredentialBinding,
-    verify_device_credential_binding, verify_invitation, verify_pairing_offer,
+    verify_device_credential_binding, verify_invitation, verify_pairing_control,
+    verify_pairing_offer,
 };
 pub use mls::{
     AppliedMembershipCommit, DecryptedApplicationMessage, MlsApplicationMessage, MlsCommit,

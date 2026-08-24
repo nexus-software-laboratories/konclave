@@ -17,6 +17,10 @@ pub enum KonclaveCryptographicError {
     #[error("invitation signature is not authentic")]
     InvalidInvitationSignature,
 
+    /// A pairing completion or cancellation does not authenticate its claimed device.
+    #[error("pairing control signature is not authentic")]
+    InvalidPairingControl,
+
     /// An invitation was presented at or after its expiration time.
     #[error("invitation is expired")]
     ExpiredInvitation,
@@ -138,6 +142,7 @@ impl KonclaveCryptographicError {
             Self::ProviderFailure { .. } => "cryptographic_provider_failure",
             Self::InvalidCredentialBinding => "invalid_credential_binding",
             Self::InvalidInvitationSignature => "invalid_invitation_signature",
+            Self::InvalidPairingControl => "invalid_pairing_control",
             Self::ExpiredInvitation => "expired_invitation",
             Self::InvitationDeviceMismatch => "invitation_device_mismatch",
             Self::InvitationConversationMismatch => "invitation_conversation_mismatch",

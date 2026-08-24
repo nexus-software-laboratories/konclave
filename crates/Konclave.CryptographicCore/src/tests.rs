@@ -2,8 +2,8 @@ use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeviceCredentialBinding, Ed25519PublicKey, EnvelopeId, Invitation, InvitationNonce, Member,
     MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId,
-    PairingContextHash, PairingId, PairingOffer, ProtocolVersion, RemoveMember, RoutingId,
-    SignatureScheme,
+    PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer, PairingStage,
+    ProtocolVersion, RemoveMember, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_join_proof, encode_application_message, encode_join_proof,
@@ -14,7 +14,7 @@ use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SealedSqliteMlsStorage,
 use crate::{
     ConversationSigningMaterial, DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage,
     MlsCommit, MlsConversationClient, MlsWelcome, verify_device_credential_binding,
-    verify_invitation, verify_pairing_offer,
+    verify_invitation, verify_pairing_control, verify_pairing_offer,
 };
 
 fn conversation_id(value: u8) -> ConversationId {
@@ -861,4 +861,126 @@ fn a_pairing_offer_discloses_no_conversation() {
     // approved anything, so it must not name a conversation the joiner is not yet in.
     let rendered = format!("{offer:?}");
     assert!(!rendered.contains("conversation"), "{rendered}");
+}
+
+#[test]
+fn pairing_control_authenticates_completion_or_cancellation_to_one_device_root() {
+    let joiner = DeviceIdentity::generate().unwrap();
+    let control = joiner
+        .sign_pairing_control(
+            pairing_id(9),
+            PairingMessageId::from_bytes([1; 16]),
+            PairingStage::Completion,
+            PairingMessageId::from_bytes([2; 16]),
+            conversation_id(9),
+        )
+        .unwrap();
+    verify_pairing_control(&control, joiner.public_key()).unwrap();
+
+    let other = DeviceIdentity::generate().unwrap();
+    assert!(matches!(
+        verify_pairing_control(&control, other.public_key()),
+        Err(KonclaveCryptographicError::InvalidPairingControl)
+    ));
+    assert!(
+        joiner
+            .sign_pairing_control(
+                pairing_id(9),
+                PairingMessageId::from_bytes([1; 16]),
+                PairingStage::Welcome,
+                PairingMessageId::from_bytes([2; 16]),
+                conversation_id(9),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn every_signed_pairing_control_field_is_load_bearing() {
+    let joiner = DeviceIdentity::generate().unwrap();
+    let control = joiner
+        .sign_pairing_control(
+            pairing_id(9),
+            PairingMessageId::from_bytes([1; 16]),
+            PairingStage::Cancellation,
+            PairingMessageId::from_bytes([2; 16]),
+            conversation_id(9),
+        )
+        .unwrap();
+    let other = DeviceIdentity::generate().unwrap();
+    let signature = control.device_signature();
+    let altered = [
+        PairingControl::new(
+            control.version(),
+            pairing_id(8),
+            control.message_id(),
+            control.stage(),
+            control.in_reply_to(),
+            control.device_id(),
+            control.conversation_id(),
+            signature,
+        )
+        .unwrap(),
+        PairingControl::new(
+            control.version(),
+            control.pairing_id(),
+            PairingMessageId::from_bytes([3; 16]),
+            control.stage(),
+            control.in_reply_to(),
+            control.device_id(),
+            control.conversation_id(),
+            signature,
+        )
+        .unwrap(),
+        PairingControl::new(
+            control.version(),
+            control.pairing_id(),
+            control.message_id(),
+            PairingStage::Completion,
+            control.in_reply_to(),
+            control.device_id(),
+            control.conversation_id(),
+            signature,
+        )
+        .unwrap(),
+        PairingControl::new(
+            control.version(),
+            control.pairing_id(),
+            control.message_id(),
+            control.stage(),
+            PairingMessageId::from_bytes([4; 16]),
+            control.device_id(),
+            control.conversation_id(),
+            signature,
+        )
+        .unwrap(),
+        PairingControl::new(
+            control.version(),
+            control.pairing_id(),
+            control.message_id(),
+            control.stage(),
+            control.in_reply_to(),
+            other.device_id(),
+            control.conversation_id(),
+            signature,
+        )
+        .unwrap(),
+        PairingControl::new(
+            control.version(),
+            control.pairing_id(),
+            control.message_id(),
+            control.stage(),
+            control.in_reply_to(),
+            control.device_id(),
+            conversation_id(8),
+            signature,
+        )
+        .unwrap(),
+    ];
+    for altered in altered {
+        assert!(matches!(
+            verify_pairing_control(&altered, joiner.public_key()),
+            Err(KonclaveCryptographicError::InvalidPairingControl)
+        ));
+    }
 }

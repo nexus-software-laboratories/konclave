@@ -4,15 +4,17 @@
 
 import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
 import { enumDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
-import type { PairingId, PairingMessageId, ProtocolVersion } from "./common_pb.js";
+import type { ConversationId, DeviceId, PairingId, PairingMessageId, ProtocolVersion } from "./common_pb.js";
 import { file_konclave_protocol_v1_common } from "./common_pb.js";
+import type { DeviceCredentialBinding, Invitation } from "./identity_pb.js";
+import { file_konclave_protocol_v1_identity } from "./identity_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file konclave/protocol/v1/pairing.proto.
  */
 export const file_konclave_protocol_v1_pairing: GenFile = /*@__PURE__*/
-  fileDesc("CiJrb25jbGF2ZS9wcm90b2NvbC92MS9wYWlyaW5nLnByb3RvEhRrb25jbGF2ZS5wcm90b2NvbC52MSKnAwoPUGFpcmluZ0VudmVsb3BlEjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SMwoKcGFpcmluZ19pZBgCIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdJZBI6CgptZXNzYWdlX2lkGAMgASgLMiYua29uY2xhdmUucHJvdG9jb2wudjEuUGFpcmluZ01lc3NhZ2VJZBI3CgZzZW5kZXIYBCABKA4yJy5rb25jbGF2ZS5wcm90b2NvbC52MS5QYWlyaW5nU2VuZGVyUm9sZRIxCgVzdGFnZRgFIAEoDjIiLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdTdGFnZRI7Cgtpbl9yZXBseV90bxgGIAEoCzImLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdNZXNzYWdlSWQSHwoXZXhwaXJlc19hdF91bml4X3NlY29uZHMYByABKAQSDQoFbm9uY2UYCCABKAwSEgoKY2lwaGVydGV4dBgJIAEoDCp5ChFQYWlyaW5nU2VuZGVyUm9sZRIjCh9QQUlSSU5HX1NFTkRFUl9ST0xFX1VOU1BFQ0lGSUVEEAASHgoaUEFJUklOR19TRU5ERVJfUk9MRV9KT0lORVIQARIfChtQQUlSSU5HX1NFTkRFUl9ST0xFX0lOVklURVIQAirCAQoMUGFpcmluZ1N0YWdlEh0KGVBBSVJJTkdfU1RBR0VfVU5TUEVDSUZJRUQQABIcChhQQUlSSU5HX1NUQUdFX0lOVklUQVRJT04QARIcChhQQUlSSU5HX1NUQUdFX0pPSU5fUFJPT0YQAhIZChVQQUlSSU5HX1NUQUdFX1dFTENPTUUQAxIcChhQQUlSSU5HX1NUQUdFX0NPTVBMRVRJT04QBBIeChpQQUlSSU5HX1NUQUdFX0NBTkNFTExBVElPThAFYgZwcm90bzM", [file_konclave_protocol_v1_common]);
+  fileDesc("CiJrb25jbGF2ZS9wcm90b2NvbC92MS9wYWlyaW5nLnByb3RvEhRrb25jbGF2ZS5wcm90b2NvbC52MSKnAwoPUGFpcmluZ0VudmVsb3BlEjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SMwoKcGFpcmluZ19pZBgCIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdJZBI6CgptZXNzYWdlX2lkGAMgASgLMiYua29uY2xhdmUucHJvdG9jb2wudjEuUGFpcmluZ01lc3NhZ2VJZBI3CgZzZW5kZXIYBCABKA4yJy5rb25jbGF2ZS5wcm90b2NvbC52MS5QYWlyaW5nU2VuZGVyUm9sZRIxCgVzdGFnZRgFIAEoDjIiLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdTdGFnZRI7Cgtpbl9yZXBseV90bxgGIAEoCzImLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdNZXNzYWdlSWQSHwoXZXhwaXJlc19hdF91bml4X3NlY29uZHMYByABKAQSDQoFbm9uY2UYCCABKAwSEgoKY2lwaGVydGV4dBgJIAEoDCKxAQoYUGFpcmluZ0ludml0YXRpb25QYXlsb2FkEjQKCmludml0YXRpb24YASABKAsyIC5rb25jbGF2ZS5wcm90b2NvbC52MS5JbnZpdGF0aW9uEhkKEWlzc3Vlcl9wdWJsaWNfa2V5GAIgASgMEkQKDXBlZXJfYmluZGluZ3MYAyADKAsyLS5rb25jbGF2ZS5wcm90b2NvbC52MS5EZXZpY2VDcmVkZW50aWFsQmluZGluZyJ+ChVQYWlyaW5nV2VsY29tZVBheWxvYWQSPQoPY29udmVyc2F0aW9uX2lkGAEgASgLMiQua29uY2xhdmUucHJvdG9jb2wudjEuQ29udmVyc2F0aW9uSWQSDwoHd2VsY29tZRgCIAEoDBIVCg1jb21taXRfY3Vyc29yGAMgASgEIrUDCg5QYWlyaW5nQ29udHJvbBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEjMKCnBhaXJpbmdfaWQYAiABKAsyHy5rb25jbGF2ZS5wcm90b2NvbC52MS5QYWlyaW5nSWQSOgoKbWVzc2FnZV9pZBgDIAEoCzImLmtvbmNsYXZlLnByb3RvY29sLnYxLlBhaXJpbmdNZXNzYWdlSWQSMQoFc3RhZ2UYBCABKA4yIi5rb25jbGF2ZS5wcm90b2NvbC52MS5QYWlyaW5nU3RhZ2USOwoLaW5fcmVwbHlfdG8YBSABKAsyJi5rb25jbGF2ZS5wcm90b2NvbC52MS5QYWlyaW5nTWVzc2FnZUlkEjEKCWRldmljZV9pZBgGIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkEj0KD2NvbnZlcnNhdGlvbl9pZBgHIAEoCzIkLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbnZlcnNhdGlvbklkEhgKEGRldmljZV9zaWduYXR1cmUYCCABKAwqeQoRUGFpcmluZ1NlbmRlclJvbGUSIwofUEFJUklOR19TRU5ERVJfUk9MRV9VTlNQRUNJRklFRBAAEh4KGlBBSVJJTkdfU0VOREVSX1JPTEVfSk9JTkVSEAESHwobUEFJUklOR19TRU5ERVJfUk9MRV9JTlZJVEVSEAIqwgEKDFBhaXJpbmdTdGFnZRIdChlQQUlSSU5HX1NUQUdFX1VOU1BFQ0lGSUVEEAASHAoYUEFJUklOR19TVEFHRV9JTlZJVEFUSU9OEAESHAoYUEFJUklOR19TVEFHRV9KT0lOX1BST09GEAISGQoVUEFJUklOR19TVEFHRV9XRUxDT01FEAMSHAoYUEFJUklOR19TVEFHRV9DT01QTEVUSU9OEAQSHgoaUEFJUklOR19TVEFHRV9DQU5DRUxMQVRJT04QBWIGcHJvdG8z", [file_konclave_protocol_v1_common, file_konclave_protocol_v1_identity]);
 
 /**
  * Carries one authenticated, encrypted pairing record.
@@ -79,6 +81,122 @@ export type PairingEnvelope = Message<"konclave.protocol.v1.PairingEnvelope"> & 
  */
 export const PairingEnvelopeSchema: GenMessage<PairingEnvelope> = /*@__PURE__*/
   messageDesc(file_konclave_protocol_v1_pairing, 0);
+
+/**
+ * Carries the inviter-authorized material the joiner verifies before making a JoinProof.
+ *
+ * @generated from message konclave.protocol.v1.PairingInvitationPayload
+ */
+export type PairingInvitationPayload = Message<"konclave.protocol.v1.PairingInvitationPayload"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.Invitation invitation = 1;
+   */
+  invitation?: Invitation | undefined;
+
+  /**
+   * Exactly 32 bytes for Ed25519 in protocol v1.
+   *
+   * @generated from field: bytes issuer_public_key = 2;
+   */
+  issuerPublicKey: Uint8Array;
+
+  /**
+   * @generated from field: repeated konclave.protocol.v1.DeviceCredentialBinding peer_bindings = 3;
+   */
+  peerBindings: DeviceCredentialBinding[];
+};
+
+/**
+ * Describes the message konclave.protocol.v1.PairingInvitationPayload.
+ * Use `create(PairingInvitationPayloadSchema)` to create a new message.
+ */
+export const PairingInvitationPayloadSchema: GenMessage<PairingInvitationPayload> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_pairing, 1);
+
+/**
+ * Carries an opaque MLS Welcome and the add-Commit receipt cursor.
+ *
+ * @generated from message konclave.protocol.v1.PairingWelcomePayload
+ */
+export type PairingWelcomePayload = Message<"konclave.protocol.v1.PairingWelcomePayload"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.ConversationId conversation_id = 1;
+   */
+  conversationId?: ConversationId | undefined;
+
+  /**
+   * @generated from field: bytes welcome = 2;
+   */
+  welcome: Uint8Array;
+
+  /**
+   * @generated from field: uint64 commit_cursor = 3;
+   */
+  commitCursor: bigint;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.PairingWelcomePayload.
+ * Use `create(PairingWelcomePayloadSchema)` to create a new message.
+ */
+export const PairingWelcomePayloadSchema: GenMessage<PairingWelcomePayload> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_pairing, 2);
+
+/**
+ * Carries root-signed completion or cancellation authority.
+ *
+ * @generated from message konclave.protocol.v1.PairingControl
+ */
+export type PairingControl = Message<"konclave.protocol.v1.PairingControl"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.ProtocolVersion version = 1;
+   */
+  version?: ProtocolVersion | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.PairingId pairing_id = 2;
+   */
+  pairingId?: PairingId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.PairingMessageId message_id = 3;
+   */
+  messageId?: PairingMessageId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.PairingStage stage = 4;
+   */
+  stage: PairingStage;
+
+  /**
+   * @generated from field: konclave.protocol.v1.PairingMessageId in_reply_to = 5;
+   */
+  inReplyTo?: PairingMessageId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.DeviceId device_id = 6;
+   */
+  deviceId?: DeviceId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.ConversationId conversation_id = 7;
+   */
+  conversationId?: ConversationId | undefined;
+
+  /**
+   * Exactly 64 bytes for Ed25519 in protocol v1.
+   *
+   * @generated from field: bytes device_signature = 8;
+   */
+  deviceSignature: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.PairingControl.
+ * Use `create(PairingControlSchema)` to create a new message.
+ */
+export const PairingControlSchema: GenMessage<PairingControl> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_pairing, 3);
 
 /**
  * Identifies which endpoint role emitted a pairing record.
