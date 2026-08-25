@@ -19,12 +19,27 @@ on:
       - 'scripts/ci/**'
       - 'scripts/packaging/**'
   workflow_dispatch:
+    inputs:
+      request_id:
+        description: Optional caller correlation identifier
+        required: false
+        type: string
+      demo_windows_only:
+        description: Build only the transient Windows package for the local demo
+        required: false
+        default: false
+        type: boolean
+
+run-name: >-
+  ${{ inputs.request_id && format('Package validation [{0}]', inputs.request_id) ||
+      github.event.pull_request.title || 'Package validation' }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: package-validation-${{ github.event.pull_request.number || github.ref }}
+  # Each dispatch is consumed and cancelled independently by its caller.
+  group: package-validation-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -33,15 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
+        include: ${{ fromJSON(inputs.demo_windows_only && '[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]' || '[{"runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"},{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"macos-15-intel","target":"x86_64-apple-darwin"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -150,9 +157,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+      - name: Keep demo candidate available for its caller
+        if: ${{ inputs.demo_windows_only }}
+        shell: pwsh
+        run: Start-Sleep -Seconds 600
 
   package-container:
     name: Package linux/amd64 container
+    if: ${{ !inputs.demo_windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -289,6 +301,7 @@ jobs:
 
   release-integrity:
     name: Release integrity
+    if: ${{ !inputs.demo_windows_only }}
     needs:
       - package-native
       - package-container
@@ -431,6 +444,7 @@ jobs:
           & (Join-Path $releaseRoot 'Verify-Release.ps1') -Directory $releaseRoot
   packaged-acceptance:
     name: Packaged clean-install acceptance
+    if: ${{ !inputs.demo_windows_only }}
     needs:
       - package-native
       - package-container
@@ -512,6 +526,7 @@ jobs:
       - name: Check package matrix
         shell: bash
         env:
+          DEMO_WINDOWS_ONLY: ${{ inputs.demo_windows_only }}
           NATIVE_RESULT: ${{ needs.package-native.result }}
           CONTAINER_RESULT: ${{ needs.package-container.result }}
           INTEGRITY_RESULT: ${{ needs.release-integrity.result }}
@@ -521,6 +536,10 @@ jobs:
           if [ "$NATIVE_RESULT" != 'success' ]; then
             echo "::error::Native package matrix concluded with $NATIVE_RESULT."
             exit 1
+          fi
+          if [ "$DEMO_WINDOWS_ONLY" = 'true' ]; then
+            echo 'Transient Windows demo package passed.'
+            exit 0
           fi
           if [ "$CONTAINER_RESULT" != 'success' ]; then
             echo "::error::Container packaging concluded with $CONTAINER_RESULT."

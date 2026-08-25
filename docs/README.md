@@ -45,5 +45,6 @@ This map lists the documentation contributed by the selected project shape.
 - [Install an unsigned prerelease](distribution/installation.md)
 - [Verify release integrity and contents](distribution/integrity.md)
 - [Packaged clean-install acceptance](distribution/acceptance.md)
+- [Local Copilot demo](distribution/local-demo.md)
 - [UX and design resilience](ux-design.md)
 - [Impeccable design workflow](impeccable-design.md)
