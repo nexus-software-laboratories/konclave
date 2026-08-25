@@ -124,6 +124,7 @@ function Stop-PackageWorkflowAndDeleteArtifacts {
 }
 
 $repository = 'nexus-software-laboratories/konclave'
+$workflowRunsApiPath = "repos/$repository/actions/workflows/package-validation.yml/runs?event=workflow_dispatch&branch=main&per_page=100"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $localAppData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
@@ -379,8 +380,7 @@ function Get-PackageWorkflowRun {
         try {
             $runs = Invoke-RequiredCommand gh @(
                 'api',
-                "repos/$repository/actions/workflows/package-validation.yml/runs" +
-                    '?event=workflow_dispatch&branch=main&per_page=100'
+                $workflowRunsApiPath
             ) | ConvertFrom-Json -Depth 20
         }
         catch {
@@ -499,7 +499,10 @@ function Test-ProvenanceDigest {
     }
     $source = @(
         $statement.predicate.buildDefinition.resolvedDependencies |
-            Where-Object { $_.digest.gitCommit }
+            Where-Object {
+                $_.PSObject.Properties['digest'] -and
+                $_.digest.PSObject.Properties['gitCommit']
+            }
     )
     if (
         $source.Count -ne 1 -or
@@ -644,11 +647,13 @@ function Install-DemoPackages {
         [IO.Path]::GetTempPath()
     ) "konclave-demo-$([Guid]::NewGuid().ToString('N'))"
     $stagingRoot = Join-Path $installParent "demo.$([Guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Path $downloadRoot, $stagingRoot -Force | Out-Null
-    $workflowRun = Get-PackageWorkflowRun
-    $runId = [int64]$workflowRun.Id
+    $runId = [int64]0
     $runCleaned = $false
     try {
+        New-Item -ItemType Directory -Path $downloadRoot, $stagingRoot -Force |
+            Out-Null
+        $workflowRun = Get-PackageWorkflowRun
+        $runId = [int64]$workflowRun.Id
         Write-Output "Building the Windows demo package in public workflow run $runId..."
         if ($workflowRun.HeadSha -cne $localHead) {
             throw (
@@ -686,7 +691,7 @@ function Install-DemoPackages {
         Move-Item -LiteralPath $stagingRoot -Destination $installRoot
     }
     finally {
-        if (-not $runCleaned) {
+        if ($runId -gt 0 -and -not $runCleaned) {
             try {
                 Stop-PackageWorkflowAndDeleteArtifacts -RunId $runId
             }
@@ -828,6 +833,62 @@ function Test-ProtectedZipExtraction {
     }
 }
 
+function Test-ProvenanceValidation {
+    $testRoot = Join-Path (
+        [IO.Path]::GetTempPath()
+    ) "konclave-provenance-test-$([Guid]::NewGuid().ToString('N'))"
+    $archivePath = Join-Path $testRoot 'candidate.zip'
+    $sourceCommit = '0000000000000000000000000000000000000000'
+    New-Item -ItemType Directory -Path $testRoot | Out-Null
+    try {
+        [IO.File]::WriteAllText(
+            $archivePath,
+            'candidate',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $digest = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+        $statement = @{
+            subject = @(
+                @{
+                    name = [IO.Path]::GetFileName($archivePath)
+                    digest = @{ sha256 = $digest }
+                }
+            )
+            predicate = @{
+                buildDefinition = @{
+                    resolvedDependencies = @(
+                        @{ digest = @{ sha256 = $digest } },
+                        @{ digest = @{ gitCommit = $sourceCommit } }
+                    )
+                }
+            }
+        }
+        [IO.File]::WriteAllText(
+            "$archivePath.intoto.jsonl",
+            ($statement | ConvertTo-Json -Depth 20 -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Test-ProvenanceDigest $archivePath $sourceCommit
+        [IO.File]::AppendAllText($archivePath, 'tampered')
+        $rejected = $false
+        try {
+            Test-ProvenanceDigest $archivePath $sourceCommit
+        }
+        catch {
+            $rejected = $true
+        }
+        if (-not $rejected) {
+            throw 'Provenance validation accepted a tampered archive.'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $testRoot) {
+            Remove-Item -LiteralPath $testRoot -Recurse -Force
+        }
+    }
+}
+
 if ($Validate) {
     foreach ($command in @('gh', 'git', 'copilot')) {
         if ($null -eq (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -835,6 +896,15 @@ if ($Validate) {
         }
     }
     [void](Invoke-RequiredCommand gh @('auth', 'status'))
+    $runListType = Invoke-RequiredCommand gh @(
+        'api',
+        $workflowRunsApiPath,
+        '--jq',
+        '.workflow_runs | type'
+    )
+    if (($runListType -join '').Trim() -cne 'array') {
+        throw 'Package workflow run API did not return an array.'
+    }
     if (-not (Test-Path -LiteralPath (
         Join-Path $projectRoot '.github' 'workflows' 'package-validation.yml'
     ) -PathType Leaf)) {
@@ -842,6 +912,7 @@ if ($Validate) {
     }
     Test-DemoStopPath
     Test-ProtectedZipExtraction
+    Test-ProvenanceValidation
     Write-Output 'Konclave local demo prerequisites and release contract are valid.'
     return
 }
