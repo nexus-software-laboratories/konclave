@@ -59,7 +59,8 @@ macOS before loading the included systemd or launchd definition.
 ## Run the Community Relay
 
 Relay archives contain a standalone native binary under `bin/`. Configure the access
-document and SQLite path described in
+document and protected enrollment source with `konclave relay-bootstrap`. Configure
+the SQLite path described in
 `<relay-root>/share/konclave/relay/container.md`, then place trusted TLS termination
 in front of every non-loopback listener.
 
@@ -82,3 +83,14 @@ The operating system cannot verify publisher identity from a code signature.
 
 Artifact signing and notarization are post-MVP hardening work. Do not bypass operating
 system warnings by weakening machine-wide security policy.
+
+See [Packaged clean-install acceptance](acceptance.md) for the automated evidence
+covering native and containerized self-hosting.
+
+## Uninstall an archive installation
+
+Stop running daemon processes, uninstall the cached plugin with
+`copilot plugin uninstall konclave`, and remove the extracted installation directory.
+Profiles live under the separate platform profile root and are retained for a later
+installation. Remove that profile root explicitly only when permanent local data loss
+is intended.
