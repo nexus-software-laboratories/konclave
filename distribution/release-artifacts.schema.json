@@ -17,7 +17,7 @@
     "release": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "channel", "signatureStatus"],
+      "required": ["version", "channel", "signatureStatus", "toolchains"],
       "properties": {
         "version": {
           "type": "string",
@@ -30,6 +30,44 @@
         "signatureStatus": {
           "type": "string",
           "const": "unsigned"
+        },
+        "toolchains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "rust",
+            "node",
+            "npm",
+            "powershellMinimum",
+            "syft",
+            "syftLinuxAmd64Sha256"
+          ],
+          "properties": {
+            "rust": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "node": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "npm": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "powershellMinimum": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+$"
+            },
+            "syft": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "syftLinuxAmd64Sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
         }
       }
     },

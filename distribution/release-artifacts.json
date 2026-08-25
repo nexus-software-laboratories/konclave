@@ -4,7 +4,15 @@
   "release": {
     "version": "0.1.0",
     "channel": "prerelease",
-    "signatureStatus": "unsigned"
+    "signatureStatus": "unsigned",
+    "toolchains": {
+      "rust": "1.98.0",
+      "node": "24.19.0",
+      "npm": "11.17.0",
+      "powershellMinimum": "7.4",
+      "syft": "1.51.0",
+      "syftLinuxAmd64Sha256": "2a2e837a2c8d59ec9af5472ee22d3b04ee463c4e44476ecf993fd1e5ab6ebc7f"
+    }
   },
   "artifacts": [
     {

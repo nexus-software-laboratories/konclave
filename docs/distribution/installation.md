@@ -20,6 +20,9 @@ Choose the artifact matching the machine:
 Extract the archive into an owner-controlled directory. The extracted top-level
 directory is the installation root used by the commands below.
 
+Before extraction, verify the complete downloaded release set as described in
+[Verify release integrity and contents](integrity.md).
+
 ## Install the Copilot plugin
 
 Install the unpacked plugin directory:

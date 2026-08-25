@@ -23,10 +23,12 @@
     "version": "node scripts/sync-version.mjs && git add plugin.json",
     "verify:package": "node scripts/verify-package.mjs"
   },
+  "dependencies": {
+    "@github/copilot-sdk": "^1.0.11"
+  },
   "devDependencies": {
     "@eslint/config-helpers": "^0.7.0",
     "@eslint/js": "^10.0.1",
-    "@github/copilot-sdk": "^1.0.11",
     "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.10",
     "esbuild": "0.28.2",

@@ -180,6 +180,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/distribution/integrity.md",
+        "title": "Verify release integrity and contents",
+        "section": "Guides",
+        "order": 15,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/ux-design.md",
         "title": "UX and design resilience",
         "section": "Guides",

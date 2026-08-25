@@ -1,9 +1,9 @@
-FROM rust:1.89-bookworm AS build
+FROM rust:1.98.0-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7 AS build
 WORKDIR /workspace
 COPY . .
 RUN cargo build --locked --release -p KonclaveCommunityRelay
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 RUN useradd --system --uid 10001 --create-home appuser
 RUN install -d -o appuser -g appuser /var/lib/konclave
 WORKDIR /app
