@@ -1,6 +1,6 @@
 ---
 title: Separate harness delivery from the daemon through an outbound local adapter channel
-status: Accepted
+status: Superseded
 date: 2026-08-22
 authors:
   - Konclave maintainers
@@ -11,7 +11,8 @@ tags:
   - ipc
   - security
 supersedes: []
-superseded_by: []
+superseded_by:
+  - adr-0008-shared-local-service
 ---
 
 # Separate harness delivery from the daemon through an outbound local adapter channel

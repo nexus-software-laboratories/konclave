@@ -54,6 +54,20 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0007-outbound-relay-principal-enrollment.md",
+        "title": "ADR 0007: Outbound relay principal enrollment",
+        "section": "Architecture",
+        "order": 75,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/adr/adr-0008-shared-local-service.md",
+        "title": "ADR 0008: Shared per-user local service",
+        "section": "Architecture",
+        "order": 80,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

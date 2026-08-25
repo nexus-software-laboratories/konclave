@@ -13,7 +13,8 @@ evidence that implementations honor both.
 - invitation capabilities and local authorization credentials;
 - pairing capabilities, directional pairing keys, and pairing authorization state;
 - install-scoped enrollment credentials and per-profile relay data-plane tokens;
-- ephemeral local adapter capabilities and authenticated delivery leases;
+- registered local adapter private keys, authenticated service connections, and
+  delivery leases;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;
@@ -38,21 +39,27 @@ tool arguments are validated like hostile network input. An authorized adapter
 necessarily receives plaintext selected for its harness and can disclose that
 plaintext if compromised.
 
-### Local adapter channel
+### Shared local service channel
 
-An adapter owns an operating-system local endpoint and an owner-protected ephemeral
-capability file. It passes the endpoint and capability-file path to the daemon child.
-The daemon validates and reads that file without following links or reparse points,
-then connects outward and mutually authenticates the profile and adapter before
-serving a neutral wait, claim, and acknowledgment API. The endpoint is not a TCP
-listener and is never reachable from the network.
+The per-user service owns one well-known local endpoint: an owner-restricted Windows
+named pipe or a socket inside an owner-only Unix runtime directory. It never opens a
+TCP listener and is never reachable from the network. Platform peer credentials and
+endpoint policy reject other operating-system users.
 
-Endpoint names and capability-file paths are not credentials. Unix filesystem
-permissions and Windows named-pipe access policy reduce local exposure, while a
-256-bit capability and versioned challenge-response provide peer authentication.
-The capability file exists only for the lifetime of the adapter endpoint and is
-never copied into harness session configuration, profile persistence, or logs. A
-failed or absent adapter cannot cause an unauthenticated fallback.
+Operating-system identity alone does not authorize profile access. Each installed
+harness adapter has a registered Ed25519 client identity. Its private key remains in
+an owner-protected ordinary file; the service stores only the public key, adapter
+identifier, finite harness kind, allowed profile namespace, key version, and status.
+
+Every connection performs a versioned challenge-response signed by the registered
+adapter key. The transcript binds both fresh challenges, adapter and client instance,
+harness kind, requested profile, and protocol version. The service verifies the
+transport peer account, signature, active key version, harness kind, and profile
+namespace before opening or attaching the profile. The resulting profile binding
+cannot change on that connection. Revocation closes active connections and rejects
+reconnect. A failed or absent credential never falls back to operating-system identity
+alone, another adapter, another profile, anonymous access, or per-session daemon
+spawning.
 
 The adapter-delivery journal is independent of relay cursors. Relay acknowledgment
 means the daemon durably processed an envelope; adapter acknowledgment means a
@@ -219,9 +226,10 @@ the mutually supported maximum.
 | Offline database theft | Sealed secret blobs; no plaintext-key fallback |
 | Secret disclosure through diagnostics | No `Debug`, serialization, logs, telemetry, panic text, or snapshots containing keys/plaintext |
 | Malicious model/tool input | Schema validation, local authorization, bounded values, and explicit user-controlled policy |
-| Local adapter impersonation | Adapter-owned random endpoint, exclusive owner-protected capability file, strict ownership/link validation, mutually authenticated challenge-response, profile binding, and zeroized capability buffers |
-| Capability-file substitution | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, profile-bound proofs, exact-path cleanup, and no unauthenticated fallback |
-| Endpoint squatting after adapter failure | Adapter creates the endpoint before daemon launch; mutual proof prevents a replacement endpoint from authenticating; stale endpoints fail closed |
+| Local service client impersonation | Owner-restricted service endpoint, verified platform peer account, registered Ed25519 adapter identity, signed fresh transcript, immutable profile binding, finite harness/profile grants, rotation, and revocation |
+| Adapter-key substitution or theft | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, public-key registration through an installer-owned administrative path, key versioning, exact-path cleanup, and no OS-identity-only fallback |
+| Shared-service endpoint squatting | Owner-protected well-known endpoint, single-instance service ownership, authenticated service/client transcript, and fail-closed startup when endpoint identity conflicts |
+| Cross-profile local attachment | Registered profile namespace, signed requested profile, immutable per-connection binding, per-request authorization, duplicate-consumer policy, and no profile-switch request |
 | Delivery cursor or lease tampering | Sealed profile-global event state, consumer-bound lease identifiers and generations, checked expiry, idempotent acknowledgment, and stale-ack rejection |
 | Adapter crash before harness delivery | Pending or expired claim is reclaimed without advancing adapter acknowledgment |
 | Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
@@ -252,7 +260,7 @@ the mutually supported maximum.
 - No automatic harness delivery occurs while its adapter is absent. Enabled backlog
   may eventually pause relay replay rather than be dropped.
 - Root, administrator, process-injection, or same-account active-memory compromise can
-  obtain the ephemeral local adapter capability and is outside the local
+  obtain the registered adapter private key and is outside the local
   confidentiality guarantee.
 - Peer content is delivered as untrusted data; Konclave cannot prevent a model from
   making a poor decision after correctly receiving that data.
