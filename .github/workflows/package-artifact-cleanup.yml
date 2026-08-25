@@ -1,0 +1,48 @@
+name: Package artifact cleanup
+
+on:
+  workflow_run:
+    workflows:
+      - Package validation
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  delete-run-artifacts:
+    name: Delete package run artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete artifacts from completed package run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          mapfile -t artifact_ids < <(
+            gh api \
+              --paginate \
+              "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
+              --jq '.artifacts[].id'
+          )
+          for artifact_id in "${artifact_ids[@]}"; do
+            gh api \
+              --method DELETE \
+              "repos/$REPOSITORY/actions/artifacts/$artifact_id"
+          done
+          remaining="$(
+            gh api \
+              "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=1" \
+              --jq '.total_count'
+          )"
+          if [ "$remaining" != '0' ]; then
+            echo "::error::Package run still retains $remaining artifact(s)."
+            exit 1
+          fi
+          echo "Deleted ${#artifact_ids[@]} transient package artifact(s)."

@@ -1,6 +1,6 @@
 # Verify release integrity and contents
 
-Each complete unsigned prerelease set contains:
+Each complete unsigned prerelease set assembled during package validation contains:
 
 - all native client and standalone-relay archives declared by `RELEASE.json`;
 - the Docker-loadable Community Relay archive;
@@ -62,3 +62,7 @@ without a trusted signature, it does not independently authenticate its own orig
 Because both `RELEASE.json` and `SHA256SUMS` are unsigned, a party able to replace the
 entire release set can also replace its declared contract. Exact coverage detects
 truncation or coordinated removal only relative to the `RELEASE.json` you obtained.
+
+Package validation currently verifies this set on ephemeral runner storage and does
+not upload or publish the aggregate. These files become a user-facing download only
+after a maintainer explicitly authorizes a public release channel.

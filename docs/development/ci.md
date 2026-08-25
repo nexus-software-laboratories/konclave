@@ -53,8 +53,9 @@ standalone relay, platform service files, and built Copilot plugin according to
 
 The package gate creates each native archive twice and requires byte-identical output,
 extracts it outside the source tree, runs the packaged CLI, and requires `konclave
-doctor` to recognize the packaged daemon and plugin. Candidates are retained as
-short-lived unsigned workflow artifacts; the workflow does not publish a release.
+doctor` to recognize the packaged daemon and plugin. Candidates are uploaded as
+transient unsigned workflow artifacts used only to transfer files between jobs; the
+workflow does not publish a release.
 
 After every native and container lane succeeds, `Release integrity` downloads the
 candidates into one flat release set. It emits target-filtered Rust, npm-lock, and
@@ -62,8 +63,13 @@ container CycloneDX SBOMs; one deterministic SLSA provenance statement per execu
 archive; and an exact SHA-256 manifest. The shipped `RELEASE.json` independently
 defines every required archive and sidecar, so a partial download cannot redefine
 itself as complete merely by omitting a checksum line. Negative tests mutate, remove,
-and add files before the final verifier is allowed to pass. The complete set is
-retained as one short-lived workflow artifact and is not a published release.
+and add files before the final verifier is allowed to pass. The complete set exists
+only on that job's ephemeral filesystem and is never uploaded or published.
+
+The default-branch `Package artifact cleanup` workflow runs after every completed
+package-validation run, including failures and cancellations, and deletes artifacts
+belonging to that exact run. Pull-request code receives no `actions: write`
+permission. One-day retention is only a fallback if trusted cleanup cannot run.
 
 `Packaged clean-install acceptance` then extracts the Linux client and relay archives
 twice, creates temporary trusted TLS, and drives the plugin-bundled daemon through the

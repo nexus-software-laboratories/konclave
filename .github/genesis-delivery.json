@@ -60,7 +60,8 @@
         "ubuntu-latest"
       ],
       "jobs": [
-        "community-relay-container-ci"
+        "community-relay-container-ci",
+        "delete-run-artifacts"
       ]
     }
   ],
@@ -75,6 +76,15 @@
       "requiredChecks": [
         "Package validation"
       ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/package-artifact-cleanup.yml",
+      "roles": [
+        "repository-automation"
+      ],
+      "draftBehavior": "not-applicable",
+      "requiredChecks": []
     }
   ],
   "pullRequestTitle": {
