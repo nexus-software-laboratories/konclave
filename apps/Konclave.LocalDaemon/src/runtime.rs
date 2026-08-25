@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::io::Read as _;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use KonclaveClientLibrary::{
     HttpRelayEnrollmentTransport, RELAY_INSTALLATION_CONFIG_FILE, RelayAccessCredential,
@@ -15,14 +14,14 @@ use KonclaveSecretStorage::{
     SealedSqliteMlsStorage, SecretSealer,
 };
 use anyhow::{Context, bail};
-use tokio::sync::watch;
 use zeroize::Zeroizing;
 
+use crate::adapter::AdapterLaunchConfig;
 use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
 use crate::pairing_service::PairingService;
 use crate::persistence::{LockedProfile, ProfileId, ProfileStore, ProfileStoreError};
-use crate::service::Service;
+use crate::profile_runtime::ProfileRuntime;
 
 pub(crate) async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
 where
@@ -30,95 +29,19 @@ where
 {
     let _telemetry_guard = crate::observability::init()?;
     let config = ProfileConfig::from_environment()?;
+    let adapter_config = read_legacy_adapter_config();
     let profile = initialize_profile(config).await?;
-    run_with_capabilities(profile, shutdown).await
+    crate::profile_runtime::run_legacy_until(profile, adapter_config, shutdown).await
 }
 
-async fn run_with_capabilities<F>(profile: RuntimeProfile, shutdown: F) -> anyhow::Result<()>
-where
-    F: Future<Output = ()>,
-{
-    let health = crate::health::DeliveryHealth::default();
-    let mcp_server = crate::mcp::StdioServer::new(
-        profile.conversations.clone(),
-        profile.applications.clone(),
-        profile.pairings.clone(),
-        health.clone(),
-        crate::mcp::local_stdio_authorization(profile.allow_mcp_write),
-    );
-    let service_applications = profile.applications.clone();
-    let pairing_service = profile.pairings.clone();
-    let pairing_retry_seed = profile
-        .conversations
-        .device_id()
-        .context("loading pairing retry identity")?;
-    let adapter_store = profile.conversations.store();
-    let adapter_health = health.clone();
-    let adapter_profile = profile.profile_id.clone();
-    let _profile = profile;
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let external_shutdown_tx = shutdown_tx.clone();
-    let external_shutdown_rx = shutdown_rx.clone();
-    let external_shutdown = async move {
-        tokio::select! {
-            _ = shutdown => {
-                let _ = external_shutdown_tx.send(true);
-            }
-            _ = wait_for_shutdown(external_shutdown_rx) => {}
+fn read_legacy_adapter_config() -> Option<AdapterLaunchConfig> {
+    match AdapterLaunchConfig::from_environment() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Adapter configuration rejected: {error:#}");
+            None
         }
-        anyhow::Result::<()>::Ok(())
-    };
-    let mcp_shutdown_tx = shutdown_tx.clone();
-    let mcp_shutdown_rx = shutdown_rx.clone();
-    let mcp_server = async move {
-        let result = crate::mcp::run_stdio_server(mcp_server, mcp_shutdown_rx).await;
-        let _ = mcp_shutdown_tx.send(true);
-        result
-    };
-    let service_shutdown_tx = shutdown_tx.clone();
-    let service_shutdown_rx = shutdown_rx.clone();
-    let service = async move {
-        let result = Service::new(service_applications, Duration::from_secs(30), health)
-            .run_until(wait_for_shutdown(service_shutdown_rx))
-            .await;
-        let _ = service_shutdown_tx.send(true);
-        result
-    };
-
-    let pairing_shutdown_tx = shutdown_tx.clone();
-    let pairing_shutdown_rx = shutdown_rx.clone();
-    let pairing = async move {
-        let result =
-            crate::pairing_supervisor::PairingSupervisor::new(pairing_service, pairing_retry_seed)
-                .run_until(wait_for_shutdown(pairing_shutdown_rx))
-                .await;
-        let _ = pairing_shutdown_tx.send(true);
-        result
-    };
-
-    let adapter_shutdown_rx = shutdown_rx.clone();
-    let adapter = async move {
-        crate::adapter::run_adapter_channel(
-            adapter_store,
-            &adapter_profile,
-            adapter_health,
-            adapter_shutdown_rx,
-        )
-        .await;
-        anyhow::Result::<()>::Ok(())
-    };
-
-    tokio::try_join!(service, pairing, mcp_server, adapter, external_shutdown)?;
-
-    Ok(())
-}
-
-struct RuntimeProfile {
-    conversations: ConversationCoordinator,
-    applications: Option<ApplicationService<RelayClient>>,
-    pairings: Option<PairingService<RelayClient>>,
-    allow_mcp_write: bool,
-    profile_id: String,
+    }
 }
 
 struct ProfileConfig {
@@ -235,7 +158,7 @@ fn parse_mcp_allow_write(value: Option<&std::ffi::OsStr>) -> anyhow::Result<bool
     }
 }
 
-async fn initialize_profile(config: ProfileConfig) -> anyhow::Result<RuntimeProfile> {
+async fn initialize_profile(config: ProfileConfig) -> anyhow::Result<ProfileRuntime> {
     let mut opened = tokio::task::spawn_blocking(move || open_profile(config))
         .await
         .context("joining daemon profile open")??;
@@ -299,7 +222,7 @@ fn open_profile(config: ProfileConfig) -> anyhow::Result<OpenedProfile> {
     })
 }
 
-fn finish_profile(opened: OpenedProfile) -> anyhow::Result<RuntimeProfile> {
+fn finish_profile(opened: OpenedProfile) -> anyhow::Result<ProfileRuntime> {
     let OpenedProfile {
         store,
         mls_storage,
@@ -330,7 +253,7 @@ fn finish_profile(opened: OpenedProfile) -> anyhow::Result<RuntimeProfile> {
         }
         None => (None, None),
     };
-    Ok(RuntimeProfile {
+    Ok(ProfileRuntime {
         conversations,
         applications,
         pairings,
@@ -439,17 +362,6 @@ fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
     }
 }
 
-async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
-    loop {
-        if *shutdown.borrow() {
-            return;
-        }
-        if shutdown.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +396,38 @@ mod tests {
         drop(first);
         let reopened = initialize_profile(config()).await.unwrap();
         assert_eq!(reopened.conversations.device_id().unwrap(), first_device);
+    }
+
+    #[tokio::test]
+    async fn distinct_profiles_open_concurrently_in_one_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("wrapping.key");
+        let root = directory.path().join("profiles");
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        let config = |profile: &str| ProfileConfig {
+            root: root.clone(),
+            profile_id: ProfileId::parse(profile).unwrap(),
+            wrapping_key_file: Some(key_path.clone()),
+            relay_provisioning: None,
+            relay_installation: None,
+            allow_mcp_write: false,
+        };
+
+        let (first, second) = tokio::join!(
+            initialize_profile(config("concurrent-a")),
+            initialize_profile(config("concurrent-b"))
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_eq!(first.profile_id, "concurrent-a");
+        assert_eq!(second.profile_id, "concurrent-b");
+        assert_ne!(
+            first.conversations.device_id().unwrap(),
+            second.conversations.device_id().unwrap()
+        );
+        assert!(LockedProfile::acquire(&root, ProfileId::parse("concurrent-a").unwrap()).is_err());
+        assert!(LockedProfile::acquire(&root, ProfileId::parse("concurrent-b").unwrap()).is_err());
     }
 
     #[test]
