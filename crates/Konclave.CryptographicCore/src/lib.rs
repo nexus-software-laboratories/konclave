@@ -4,6 +4,7 @@
 mod error;
 mod hmac;
 mod identity;
+mod local_service;
 mod mls;
 mod pairing;
 
@@ -14,6 +15,7 @@ pub use identity::{
     verify_device_credential_binding, verify_invitation, verify_pairing_control,
     verify_pairing_offer,
 };
+pub use local_service::{LocalServiceIdentity, verify_local_service_signature};
 pub use mls::{
     AppliedMembershipCommit, DecryptedApplicationMessage, MlsApplicationMessage, MlsCommit,
     MlsConversation, MlsConversationClient, MlsWelcome, OutboundMembershipCommit,

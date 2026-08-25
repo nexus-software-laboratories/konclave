@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage"]
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
 
 [workspace.dependencies]
 async-trait = "0.1.92"
@@ -25,4 +25,5 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls"], default-feature
 thiserror = "2.0.20"
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2.5.8"
+windows-sys = "0.61.2"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }

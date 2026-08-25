@@ -4,7 +4,7 @@ use crate::transcript::{
 };
 
 /// Bytes carried by a frame length header.
-pub const FRAME_HEADER_LENGTH: usize = 4;
+pub const FRAME_HEADER_LENGTH: usize = KonclaveLocalFraming::FRAME_HEADER_LENGTH;
 
 /// Hard limit for a frame accepted before the peer is authenticated.
 ///
@@ -43,14 +43,7 @@ pub fn decode_frame_length(
     header: [u8; FRAME_HEADER_LENGTH],
     limit: usize,
 ) -> Result<usize, AdapterTransportError> {
-    let declared = u32::from_be_bytes(header) as usize;
-    if declared == 0 {
-        return Err(AdapterTransportError::MalformedFrame);
-    }
-    if declared > limit {
-        return Err(AdapterTransportError::FrameTooLarge);
-    }
-    Ok(declared)
+    KonclaveLocalFraming::decode_frame_length(header, limit).map_err(AdapterTransportError::from)
 }
 
 /// Prefixes a payload with its length header.
@@ -59,17 +52,7 @@ pub fn decode_frame_length(
 ///
 /// Returns [`AdapterTransportError::FrameTooLarge`] when the payload exceeds `limit`.
 pub fn encode_frame(payload: &[u8], limit: usize) -> Result<Vec<u8>, AdapterTransportError> {
-    if payload.is_empty() {
-        return Err(AdapterTransportError::MalformedFrame);
-    }
-    if payload.len() > limit {
-        return Err(AdapterTransportError::FrameTooLarge);
-    }
-    let length = u32::try_from(payload.len()).map_err(|_| AdapterTransportError::FrameTooLarge)?;
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LENGTH + payload.len());
-    frame.extend_from_slice(&length.to_be_bytes());
-    frame.extend_from_slice(payload);
-    Ok(frame)
+    KonclaveLocalFraming::encode_frame(payload, limit).map_err(AdapterTransportError::from)
 }
 
 /// The three messages exchanged before any event data may flow.
