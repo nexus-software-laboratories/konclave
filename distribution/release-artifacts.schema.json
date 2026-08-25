@@ -34,7 +34,14 @@
         "toolchains": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["rust", "node", "npm", "powershellMinimum", "syft"],
+          "required": [
+            "rust",
+            "node",
+            "npm",
+            "powershellMinimum",
+            "syft",
+            "syftLinuxAmd64Sha256"
+          ],
           "properties": {
             "rust": {
               "type": "string",
@@ -55,6 +62,10 @@
             "syft": {
               "type": "string",
               "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "syftLinuxAmd64Sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
             }
           }
         }

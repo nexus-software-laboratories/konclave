@@ -182,6 +182,7 @@ jobs:
           "CONTAINER_RELEASE_IMAGE=$($artifacts[0].image)" >>$env:GITHUB_ENV
           "artifact-id=$($artifacts[0].id)" >>$env:GITHUB_OUTPUT
           "syft=$($release.release.toolchains.syft)" >>$env:GITHUB_OUTPUT
+          "syft-sha256=$($release.release.toolchains.syftLinuxAmd64Sha256)" >>$env:GITHUB_OUTPUT
       - name: Verify Compose and container contracts
         shell: bash
         run: |
@@ -224,9 +225,31 @@ jobs:
           cp distribution/UNSIGNED-PRERELEASE.txt target/release-container/
       - name: Download pinned Syft
         id: syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          syft-version: v${{ steps.container-contract.outputs.syft }}
+        shell: bash
+        env:
+          SYFT_VERSION: ${{ steps.container-contract.outputs.syft }}
+          SYFT_SHA256: ${{ steps.container-contract.outputs.syft-sha256 }}
+        run: |
+          set -euo pipefail
+          syft_root="$RUNNER_TEMP/syft-$SYFT_VERSION"
+          archive="$RUNNER_TEMP/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          install -d -m 0700 "$syft_root"
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --tlsv1.2 \
+            --output "$archive" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$SYFT_SHA256" "$archive" | sha256sum --check --strict -
+          tar -xzf "$archive" -C "$syft_root" syft
+          chmod 0700 "$syft_root/syft"
+          actual_version="$("$syft_root/syft" version -o json | jq -er '.version')"
+          if [ "$actual_version" != "$SYFT_VERSION" ]; then
+            echo '::error::Downloaded Syft version does not match the release contract.'
+            exit 1
+          fi
+          printf 'cmd=%s\n' "$syft_root/syft" >>"$GITHUB_OUTPUT"
       - name: Emit container SBOM and provenance
         shell: pwsh
         run: |
