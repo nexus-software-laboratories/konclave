@@ -10,6 +10,7 @@ import {
 import { createDeliveryCoordinator } from './adapter/delivery.js';
 import { startDeliveryRuntime, type AdapterIntegration } from './adapter/runtime.js';
 import { resolveDaemonCommand } from './daemon-path.js';
+import { resolveInstalledProfileRoot } from './runtime-config.js';
 
 /**
  * Directory of the running module itself, used to locate a daemon bundled beside
@@ -348,7 +349,10 @@ export function createExtensionJoinConfig(
     daemonEnvironment.KONCLAVE_ADAPTER_CONSUMER_ID = rendezvous.consumerId;
   }
 
-  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_PROFILE_ROOT');
+  const profileRoot = resolveInstalledProfileRoot(environment, runtimeModuleDir);
+  if (profileRoot) {
+    daemonEnvironment.KONCLAVE_PROFILE_ROOT = profileRoot;
+  }
   copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_WRAPPING_KEY_FILE');
   copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_RELAY_ENDPOINT');
   copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_RELAY_CREDENTIAL_FILE');

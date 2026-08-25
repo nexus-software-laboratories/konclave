@@ -18,15 +18,17 @@ The raw session ID is never passed to the daemon.
 
 The daemon command is resolved in priority order: an explicit non-empty
 `KONCLAVE_DAEMON_PATH` overrides everything and is never forwarded to the daemon's
-own environment; otherwise the extension looks for a daemon bundled beside the
-installed plugin at `<plugin-root>/bin/KonclaveLocalDaemon` (`.exe` on Windows),
-selecting it only when that path exists and is a regular file; otherwise the bare
+own environment; otherwise the extension first looks for a daemon under `bin/`
+beside a user-scoped extension, then for one under the installed plugin root. Each is
+selected only when that path exists and is a regular file; otherwise the bare
 binary name (`KonclaveLocalDaemon` or `KonclaveLocalDaemon.exe`) is resolved against
-the system `PATH`. The plugin root is derived from the compiled extension module's
-own on-disk location (`import.meta.url`), never from `process.cwd()` or by probing
-ancestor directories, because Copilot CLI caches installed plugins at an
-unpredictable path unrelated to the original release install root. Optional
-`KONCLAVE_PROFILE_ROOT` and
+the system `PATH`. Both fixed layouts are derived from the compiled extension module's
+own on-disk location (`import.meta.url`), never from `process.cwd()` or an unbounded
+ancestor search.
+
+`KONCLAVE_PROFILE_ROOT` takes precedence when present. Otherwise a user-scoped
+installation reads the absolute profile root from the bounded, non-secret
+`konclave.runtime.json` sidecar beside `extension.mjs`. Optional
 `KONCLAVE_WRAPPING_KEY_FILE` paths are forwarded; secret file contents and relay
 credentials never cross the extension boundary. For first-run relay provisioning,
 the extension also forwards `KONCLAVE_RELAY_ENDPOINT` and
@@ -39,11 +41,11 @@ therefore treats any stdout write as a bug.
 
 ## Experimental and trust requirements
 
-GitHub currently documents Copilot CLI extensions as experimental. Users must start the
-CLI with `--experimental` or enable experimental mode in-session before plugin-loaded
-extensions will run.
+GitHub currently documents Copilot CLI extensions as experimental. The local demo
+enables the persistent experimental setting when necessary and restores its prior
+value when the extension is explicitly removed.
 
-Extensions execute with the local user's privileges. Installing the plugin is
+Extensions execute with the local user's privileges. Installing the extension is
 equivalent to running trusted local code. The paved-path extension explicitly enables
 the daemon's write-capable MCP methods; the daemon itself remains read-only when
 started without `KONCLAVE_MCP_ALLOW_WRITE=true`.
@@ -52,7 +54,7 @@ started without `KONCLAVE_MCP_ALLOW_WRITE=true`.
 
 - `extensions/Konclave.Extension/extension.mjs` — bundled extension entry loaded
   by Copilot CLI
-- `plugin.json` — plugin manifest that exposes the extension and maintenance skill
+- `plugin.json` — distribution metadata for future marketplace delivery
 - `skills/copilot-cli-extension-maintainer/SKILL.md` — optional skill for safely
   evolving the extension
 - `build/outputs/<plugin-name>-<version>.zip` — deterministic release bundle

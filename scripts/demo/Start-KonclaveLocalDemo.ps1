@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-    Prepares or stops a local Konclave relay and Copilot plugin demo on Windows.
+    Prepares or stops a local Konclave relay and Copilot extension demo on Windows.
 #>
 [CmdletBinding()]
 param(
@@ -14,7 +14,8 @@ param(
 
     [switch]$Stop,
 
-    [switch]$UninstallPlugin
+    [Alias('UninstallPlugin')]
+    [switch]$UninstallExtension
 )
 
 Set-StrictMode -Version Latest
@@ -23,8 +24,8 @@ $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) {
     throw 'The local Copilot demo script currently supports Windows only.'
 }
-if ($UninstallPlugin -and -not $Stop) {
-    throw '-UninstallPlugin requires -Stop.'
+if ($UninstallExtension -and -not $Stop) {
+    throw '-UninstallExtension requires -Stop.'
 }
 
 function Stop-PackageWorkflowAndDeleteArtifacts {
@@ -138,6 +139,7 @@ $profileRoot = Join-Path $demoRoot 'profiles'
 $relayStateRoot = Join-Path $demoRoot 'relay'
 $statusPath = Join-Path $demoRoot 'demo-status.json'
 $profileRootBackupPath = Join-Path $demoRoot 'original-profile-root.json'
+$copilotExperimentalBackupPath = Join-Path $demoRoot 'original-copilot-experimental.json'
 $installParent = Join-Path $localAppData 'Programs' 'Konclave'
 $installRoot = Join-Path $installParent 'demo'
 $releaseManifest = Get-Content -LiteralPath (
@@ -161,6 +163,26 @@ $relayRoot = Join-Path $installRoot $relayRootName
 $cliPath = Join-Path $clientRoot 'bin' 'konclave.exe'
 $relayExecutable = Join-Path $relayRoot 'bin' 'KonclaveCommunityRelay.exe'
 $pluginRoot = Join-Path $clientRoot 'share' 'konclave' 'plugin'
+$extensionSource = Join-Path $pluginRoot 'extensions' 'Konclave.Extension' 'extension.mjs'
+$extensionDaemonSource = Join-Path $pluginRoot 'bin' 'KonclaveLocalDaemon.exe'
+$copilotHomeValue = $env:COPILOT_HOME
+if ([string]::IsNullOrWhiteSpace($copilotHomeValue)) {
+    $userProfile = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::UserProfile
+    )
+    if ([string]::IsNullOrWhiteSpace($userProfile)) {
+        throw 'The user profile directory is unavailable.'
+    }
+    $copilotHome = Join-Path $userProfile '.copilot'
+}
+elseif (-not [IO.Path]::IsPathRooted($copilotHomeValue)) {
+    throw 'COPILOT_HOME must be an absolute path.'
+}
+else {
+    $copilotHome = [IO.Path]::GetFullPath($copilotHomeValue)
+}
+$copilotSettingsPath = Join-Path $copilotHome 'settings.json'
+$copilotExtensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
 $endpoint = "http://127.0.0.1:$Port"
 
 function Invoke-RequiredCommand {
@@ -285,34 +307,309 @@ function Read-OriginalProfileRoot {
     return $value
 }
 
-function Get-OrCreateOriginalProfileRoot {
-    if (Test-Path -LiteralPath $profileRootBackupPath -PathType Leaf) {
-        return Read-OriginalProfileRoot
+function Restore-LegacyProfileRoot {
+    $configuredRoot = [Environment]::GetEnvironmentVariable(
+        'KONCLAVE_PROFILE_ROOT',
+        'User'
+    )
+    if (-not (Test-Path -LiteralPath $profileRootBackupPath -PathType Leaf)) {
+        if ($configuredRoot -eq $profileRoot) {
+            throw 'Demo profile root is configured but its restoration backup is missing.'
+        }
+        return
     }
-    $current = [Environment]::GetEnvironmentVariable('KONCLAVE_PROFILE_ROOT', 'User')
-    if ($current -eq $profileRoot) {
-        throw 'Demo profile root is already configured but its restoration backup is missing.'
+    if ($configuredRoot -eq $profileRoot) {
+        [Environment]::SetEnvironmentVariable(
+            'KONCLAVE_PROFILE_ROOT',
+            (Read-OriginalProfileRoot),
+            'User'
+        )
     }
-    New-Item -ItemType Directory -Path $demoRoot -Force | Out-Null
-    $backup = [ordered]@{
-        schemaVersion = 1
-        value = $current
+    Remove-Item -LiteralPath $profileRootBackupPath -Force
+}
+
+function Read-JsonObject {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [ordered]@{}
     }
-    $temporary = "$profileRootBackupPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $item = Get-Item -LiteralPath $Path
+    if (
+        $item.Attributes -band
+        [IO.FileAttributes]::ReparsePoint
+    ) {
+        throw "JSON configuration must not be a reparse point: $Path"
+    }
+    if ($item.Length -gt 1048576) {
+        throw "JSON configuration exceeds its size limit: $Path"
+    }
+    $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    if ($document -isnot [Collections.IDictionary]) {
+        throw "JSON configuration must contain an object: $Path"
+    }
+    return $document
+}
+
+function Write-AtomicJsonObject {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [Collections.IDictionary]$Value,
+
+        [switch]$NoClobber
+    )
+
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
     [IO.File]::WriteAllText(
         $temporary,
-        ($backup | ConvertTo-Json -Depth 10) + "`n",
+        ($Value | ConvertTo-Json -Depth 100) + "`n",
         [Text.UTF8Encoding]::new($false)
     )
     try {
-        [IO.File]::Move($temporary, $profileRootBackupPath, $false)
+        [IO.File]::Move($temporary, $Path, -not $NoClobber)
     }
     finally {
         if (Test-Path -LiteralPath $temporary) {
             Remove-Item -LiteralPath $temporary -Force
         }
     }
-    return $current
+}
+
+function Enable-CopilotExperimentalExtensions {
+    $settings = Read-JsonObject -Path $copilotSettingsPath
+    $propertyExists = $settings.Contains('experimental')
+    if ($propertyExists -and $settings['experimental'] -isnot [bool]) {
+        throw 'Copilot experimental setting must be a boolean.'
+    }
+    if ($propertyExists -and [bool]$settings['experimental']) {
+        return $false
+    }
+
+    if (-not (Test-Path -LiteralPath $copilotExperimentalBackupPath -PathType Leaf)) {
+        Write-AtomicJsonObject `
+            -Path $copilotExperimentalBackupPath `
+            -Value ([ordered]@{
+                schemaVersion = 1
+                propertyExisted = $propertyExists
+                value = if ($propertyExists) { [bool]$settings['experimental'] } else { $null }
+            }) `
+            -NoClobber
+    }
+    $settings['experimental'] = $true
+    Write-AtomicJsonObject -Path $copilotSettingsPath -Value $settings
+    return $true
+}
+
+function Restore-CopilotExperimentalSetting {
+    if (-not (Test-Path -LiteralPath $copilotExperimentalBackupPath -PathType Leaf)) {
+        return
+    }
+    $backup = Read-JsonObject -Path $copilotExperimentalBackupPath
+    if (
+        [int64]$backup['schemaVersion'] -ne 1 -or
+        $backup['propertyExisted'] -isnot [bool]
+    ) {
+        throw 'Copilot experimental setting backup is malformed.'
+    }
+    $settings = Read-JsonObject -Path $copilotSettingsPath
+    if ($settings.Contains('experimental') -and [bool]$settings['experimental']) {
+        if ([bool]$backup['propertyExisted']) {
+            if ($backup['value'] -isnot [bool]) {
+                throw 'Copilot experimental setting backup value is malformed.'
+            }
+            $settings['experimental'] = [bool]$backup['value']
+        }
+        else {
+            $settings.Remove('experimental')
+        }
+        Write-AtomicJsonObject -Path $copilotSettingsPath -Value $settings
+    }
+    Remove-Item -LiteralPath $copilotExperimentalBackupPath -Force
+}
+
+function Install-CopilotExtension {
+    foreach ($source in @($extensionSource, $extensionDaemonSource)) {
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Packaged extension asset is missing: $source"
+        }
+        if (
+            (Get-Item -LiteralPath $source).Attributes -band
+            [IO.FileAttributes]::ReparsePoint
+        ) {
+            throw "Packaged extension asset must not be a reparse point: $source"
+        }
+    }
+
+    $experimentalChanged = Enable-CopilotExperimentalExtensions
+    $extensionParent = [IO.Path]::GetDirectoryName($copilotExtensionRoot)
+    $stagingRoot = Join-Path (
+        $extensionParent
+    ) ".konclave.$([Guid]::NewGuid().ToString('N')).tmp"
+    $previousRoot = Join-Path (
+        $extensionParent
+    ) ".konclave.$([Guid]::NewGuid().ToString('N')).previous"
+    $previousMoved = $false
+    $installed = $false
+    try {
+        # A running prior extension can keep its renamed executable locked.
+        # Cleanup is retried on every setup but never invalidates a completed swap.
+        foreach ($stale in Get-ChildItem `
+            -LiteralPath $extensionParent `
+            -Directory `
+            -Filter '.konclave.*.previous' `
+            -ErrorAction SilentlyContinue) {
+            if (
+                $stale.Name -notmatch '^\.konclave\.[0-9a-f]{32}\.previous$' -or
+                $stale.Attributes -band [IO.FileAttributes]::ReparsePoint
+            ) {
+                continue
+            }
+            try {
+                Remove-Item -LiteralPath $stale.FullName -Recurse -Force
+            }
+            catch {
+                Write-Warning "A prior Konclave extension backup is still in use: $($stale.FullName)"
+            }
+        }
+        New-Item -ItemType Directory -Path (Join-Path $stagingRoot 'bin') -Force |
+            Out-Null
+        Copy-Item -LiteralPath $extensionSource -Destination (
+            Join-Path $stagingRoot 'extension.mjs'
+        )
+        Copy-Item -LiteralPath $extensionDaemonSource -Destination (
+            Join-Path $stagingRoot 'bin' 'KonclaveLocalDaemon.exe'
+        )
+        Write-AtomicJsonObject `
+            -Path (Join-Path $stagingRoot 'konclave.runtime.json') `
+            -Value ([ordered]@{
+                schemaVersion = 1
+                profileRoot = [IO.Path]::GetFullPath($profileRoot)
+            })
+
+        if (Test-Path -LiteralPath $copilotExtensionRoot) {
+            $existing = Get-Item -LiteralPath $copilotExtensionRoot
+            if (
+                -not $existing.PSIsContainer -or
+                $existing.Attributes -band [IO.FileAttributes]::ReparsePoint
+            ) {
+                throw 'Installed Konclave extension root is unsafe to replace.'
+            }
+            Move-Item -LiteralPath $copilotExtensionRoot -Destination $previousRoot
+            $previousMoved = $true
+        }
+        Move-Item -LiteralPath $stagingRoot -Destination $copilotExtensionRoot
+        $installed = $true
+    }
+    catch {
+        if (-not $installed) {
+            try {
+                if (
+                    $previousMoved -and
+                    -not (Test-Path -LiteralPath $copilotExtensionRoot) -and
+                    (Test-Path -LiteralPath $previousRoot -PathType Container)
+                ) {
+                    Move-Item -LiteralPath $previousRoot -Destination $copilotExtensionRoot
+                    $previousMoved = $false
+                }
+            }
+            finally {
+                if ($experimentalChanged) {
+                    Restore-CopilotExperimentalSetting
+                }
+            }
+        }
+        throw
+    }
+    finally {
+        foreach ($path in @($stagingRoot, $previousRoot)) {
+            if (Test-Path -LiteralPath $path -PathType Container) {
+                try {
+                    Remove-Item -LiteralPath $path -Recurse -Force
+                }
+                catch {
+                    if ($path -eq $stagingRoot -or -not $installed) {
+                        throw
+                    }
+                    Write-Warning "A prior Konclave extension backup remains in use: $path"
+                }
+            }
+        }
+    }
+}
+
+function Remove-CopilotExtension {
+    if (Test-Path -LiteralPath $copilotExtensionRoot) {
+        $extension = Get-Item -LiteralPath $copilotExtensionRoot
+        if (
+            -not $extension.PSIsContainer -or
+            $extension.Attributes -band [IO.FileAttributes]::ReparsePoint
+        ) {
+            throw 'Installed Konclave extension root is unsafe to remove.'
+        }
+        Remove-Item -LiteralPath $copilotExtensionRoot -Recurse -Force
+    }
+    Restore-CopilotExperimentalSetting
+}
+
+function Remove-LegacyKonclavePlugin {
+    try {
+        $directRoot = Join-Path $copilotHome 'installed-plugins' '_direct'
+        if (-not (Test-Path -LiteralPath $directRoot -PathType Container)) {
+            return
+        }
+        $found = $false
+        foreach ($directory in Get-ChildItem -LiteralPath $directRoot -Directory) {
+            $manifestPath = Join-Path $directory.FullName 'plugin.json'
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                continue
+            }
+            try {
+                $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+                    ConvertFrom-Json -Depth 20
+            }
+            catch {
+                Write-Verbose "Skipping unreadable direct plugin manifest: $manifestPath"
+                continue
+            }
+            if (
+                $manifest.PSObject.Properties['name'] -and
+                [string]$manifest.name -ceq 'konclave'
+            ) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            return
+        }
+
+        if ($null -eq (Get-Command copilot -ErrorAction SilentlyContinue)) {
+            Write-Warning 'The obsolete Konclave direct plugin remains because Copilot CLI is unavailable.'
+            return
+        }
+        $output = & copilot plugin uninstall konclave 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning (
+                'The runnable extension is installed, but removal of the obsolete ' +
+                "direct plugin failed: $($output -join ' ')"
+            )
+        }
+    }
+    catch {
+        Write-Warning (
+            'The runnable extension is installed, but obsolete direct-plugin ' +
+            "cleanup failed: $($_.Exception.Message)"
+        )
+    }
 }
 
 function Test-PortAvailable {
@@ -625,6 +922,13 @@ function Install-DemoPackages {
         }
     }
     [void](Invoke-RequiredCommand gh @('auth', 'status'))
+    $settings = Read-JsonObject -Path $copilotSettingsPath
+    if (
+        $settings.Contains('experimental') -and
+        $settings['experimental'] -isnot [bool]
+    ) {
+        throw 'Copilot experimental setting must be a boolean.'
+    }
     $localHead = (
         Invoke-RequiredCommand git @('-C', $projectRoot, 'rev-parse', 'HEAD')
     ).Trim()
@@ -919,147 +1223,83 @@ if ($Validate) {
 
 if ($Stop) {
     Stop-DemoRelay
-    $configuredRoot = [Environment]::GetEnvironmentVariable(
-        'KONCLAVE_PROFILE_ROOT',
-        'User'
-    )
-    if ($configuredRoot -eq $profileRoot) {
-        if (-not (Test-Path -LiteralPath $profileRootBackupPath -PathType Leaf)) {
-            throw 'Demo profile root is configured but its restoration backup is missing.'
-        }
-        [Environment]::SetEnvironmentVariable(
-            'KONCLAVE_PROFILE_ROOT',
-            (Read-OriginalProfileRoot),
-            'User'
-        )
-    }
-    if (Test-Path -LiteralPath $profileRootBackupPath -PathType Leaf) {
-        Remove-Item -LiteralPath $profileRootBackupPath -Force
-    }
-    if ($UninstallPlugin) {
-        [void](Invoke-RequiredCommand copilot @('plugin', 'uninstall', 'konclave'))
+    Restore-LegacyProfileRoot
+    if ($UninstallExtension) {
+        Remove-CopilotExtension
+        Remove-LegacyKonclavePlugin
     }
     Write-Output 'Konclave local demo stopped. Profile and relay state were preserved.'
     return
 }
 
-$originalProfileRoot = Get-OrCreateOriginalProfileRoot
-$setupSucceeded = $false
-try {
-    Stop-DemoRelay
-    $configuredRoot = [Environment]::GetEnvironmentVariable(
-        'KONCLAVE_PROFILE_ROOT',
-        'User'
-    )
-    if ($configuredRoot -eq $profileRoot) {
-        [Environment]::SetEnvironmentVariable(
-            'KONCLAVE_PROFILE_ROOT',
-            $originalProfileRoot,
-            'User'
-        )
-    }
-    Test-PortAvailable $Port
-    if ($Refresh -or -not (
-        (Test-Path -LiteralPath $cliPath -PathType Leaf) -and
-        (Test-Path -LiteralPath $relayExecutable -PathType Leaf)
-    )) {
-        Install-DemoPackages
-    }
+Stop-DemoRelay
+Restore-LegacyProfileRoot
+Test-PortAvailable $Port
+if ($Refresh -or -not (
+    (Test-Path -LiteralPath $cliPath -PathType Leaf) -and
+    (Test-Path -LiteralPath $relayExecutable -PathType Leaf)
+)) {
+    Install-DemoPackages
+}
 
-    New-Item -ItemType Directory -Path $relayStateRoot, $profileRoot -Force |
-        Out-Null
+New-Item -ItemType Directory -Path $relayStateRoot, $profileRoot -Force |
+    Out-Null
+[void](Invoke-RequiredCommand $cliPath @(
+    'relay-bootstrap',
+    '--relay-endpoint',
+    $endpoint,
+    '--access-document',
+    (Join-Path $relayStateRoot 'access.json'),
+    '--profile-root',
+    $profileRoot
+))
+
+$relayProcess = Start-Process `
+    -FilePath $relayExecutable `
+    -Environment @{
+        SERVICE_HTTP_ADDRESS = "127.0.0.1:$Port"
+        SERVICE_HEALTH_ADDRESS = "127.0.0.1:$Port"
+        KONCLAVE_RELAY_ACCESS_FILE = (Join-Path $relayStateRoot 'access.json')
+        KONCLAVE_RELAY_DATABASE_PATH = (Join-Path $relayStateRoot 'relay.sqlite')
+    } `
+    -RedirectStandardOutput (Join-Path $relayStateRoot 'stdout.log') `
+    -RedirectStandardError (Join-Path $relayStateRoot 'stderr.log') `
+    -WindowStyle Hidden `
+    -PassThru
+try {
+    Wait-RelayHealth -Process $relayProcess
     [void](Invoke-RequiredCommand $cliPath @(
-        'relay-bootstrap',
+        'init',
         '--relay-endpoint',
         $endpoint,
-        '--access-document',
-        (Join-Path $relayStateRoot 'access.json'),
         '--profile-root',
         $profileRoot
     ))
-
-    $relayProcess = Start-Process `
-        -FilePath $relayExecutable `
-        -Environment @{
-            SERVICE_HTTP_ADDRESS = "127.0.0.1:$Port"
-            SERVICE_HEALTH_ADDRESS = "127.0.0.1:$Port"
-            KONCLAVE_RELAY_ACCESS_FILE = (Join-Path $relayStateRoot 'access.json')
-            KONCLAVE_RELAY_DATABASE_PATH = (Join-Path $relayStateRoot 'relay.sqlite')
-        } `
-        -RedirectStandardOutput (Join-Path $relayStateRoot 'stdout.log') `
-        -RedirectStandardError (Join-Path $relayStateRoot 'stderr.log') `
-        -WindowStyle Hidden `
-        -PassThru
-    $environmentChanged = $false
-    try {
-        Wait-RelayHealth -Process $relayProcess
-        [void](Invoke-RequiredCommand $cliPath @(
-            'init',
-            '--relay-endpoint',
-            $endpoint,
-            '--profile-root',
-            $profileRoot
-        ))
-        [void](Invoke-RequiredCommand $cliPath @(
-            'doctor',
-            '--profile-root',
-            $profileRoot,
-            '--install-root',
-            $clientRoot
-        ))
-        [void](Invoke-RequiredCommand copilot @('plugin', 'install', $pluginRoot))
-        [Environment]::SetEnvironmentVariable(
-            'KONCLAVE_PROFILE_ROOT',
-            $profileRoot,
-            'User'
-        )
-        $environmentChanged = $true
-        Write-DemoStatus -RelayProcess $relayProcess
-    }
-    catch {
-        if (-not $relayProcess.HasExited) {
-            Stop-Process -Id $relayProcess.Id
-            [void]$relayProcess.WaitForExit(10000)
-        }
-        if ($environmentChanged) {
-            [Environment]::SetEnvironmentVariable(
-                'KONCLAVE_PROFILE_ROOT',
-                $originalProfileRoot,
-                'User'
-            )
-        }
-        throw
-    }
-    $setupSucceeded = $true
+    [void](Invoke-RequiredCommand $cliPath @(
+        'doctor',
+        '--profile-root',
+        $profileRoot,
+        '--install-root',
+        $clientRoot
+    ))
+    Install-CopilotExtension
+    Remove-LegacyKonclavePlugin
+    Write-DemoStatus -RelayProcess $relayProcess
 }
-finally {
-    if (-not $setupSucceeded) {
-        try {
-            $configuredRoot = [Environment]::GetEnvironmentVariable(
-                'KONCLAVE_PROFILE_ROOT',
-                'User'
-            )
-            if ($configuredRoot -eq $profileRoot) {
-                [Environment]::SetEnvironmentVariable(
-                    'KONCLAVE_PROFILE_ROOT',
-                    $originalProfileRoot,
-                    'User'
-                )
-            }
-        }
-        finally {
-            if (Test-Path -LiteralPath $profileRootBackupPath -PathType Leaf) {
-                Remove-Item -LiteralPath $profileRootBackupPath -Force
-            }
-        }
+catch {
+    if (-not $relayProcess.HasExited) {
+        Stop-Process -Id $relayProcess.Id
+        [void]$relayProcess.WaitForExit(10000)
     }
+    throw
 }
 
 Write-Output ''
 Write-Output 'Konclave local demo is ready.'
 Write-Output "Relay endpoint: $endpoint"
 Write-Output "Relay process ID: $($relayProcess.Id)"
-Write-Output 'Close any existing Copilot CLI processes, then open fresh sessions in two repositories.'
+Write-Output "Copilot extension: $copilotExtensionRoot"
+Write-Output 'Close existing Copilot CLI sessions, then open fresh sessions in two repositories.'
 Write-Output 'In one session, ask: Use Konclave to create a pairing capability requesting member role.'
 Write-Output 'Give that one capability to the other session and ask it to redeem and authorize the joiner.'
 Write-Output 'Back in the first session, review and authorize the inviter. Automatic delivery is then active.'

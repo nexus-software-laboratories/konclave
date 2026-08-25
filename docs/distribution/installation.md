@@ -2,7 +2,7 @@
 
 Konclave packaging produces native archives for supported Linux, Windows, and macOS
 targets. Each client archive contains the CLI, local daemon, platform service files,
-and a built Copilot CLI plugin. Relay archives contain the standalone Community Relay
+and a built Copilot CLI extension payload. Relay archives contain the standalone Community Relay
 binary and its self-hosting examples. No source checkout or compiler is required after
 extraction.
 
@@ -32,17 +32,17 @@ directory is the installation root used by the commands below.
 Before extraction, verify the complete downloaded release set as described in
 [Verify release integrity and contents](integrity.md).
 
-## Install the Copilot plugin
+## Install the Copilot extension
 
-Install the unpacked plugin directory:
+Copilot discovers user-scoped extensions under
+`~/.copilot/extensions/konclave/`. A complete installation contains
+`extension.mjs`, the matching daemon under `bin/`, and a bounded
+`konclave.runtime.json` sidecar naming the absolute profile root.
 
-```shell
-copilot plugin install <install-root>/share/konclave/plugin
-```
-
-Copilot CLI caches installed plugin contents. Platform client packages therefore
-include the matching daemon inside the plugin itself; no per-session daemon path or
-relay environment variable is required.
+The [Local Copilot demo](local-demo.md) performs this installation atomically on
+Windows and enables experimental extension support when necessary. Direct
+`copilot plugin install` is not the extension installation path: current Copilot CLI
+versions can cache the plugin payload without mounting its extension.
 
 ## Initialize the installation
 
@@ -98,8 +98,8 @@ covering native and containerized self-hosting.
 
 ## Uninstall an archive installation
 
-Stop running daemon processes, uninstall the cached plugin with
-`copilot plugin uninstall konclave`, and remove the extracted installation directory.
+Stop running daemon processes, remove the user extension directory, and remove the
+extracted installation directory.
 Profiles live under the separate platform profile root and are retained for a later
 installation. Remove that profile root explicitly only when permanent local data loss
 is intended.

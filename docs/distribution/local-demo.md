@@ -1,6 +1,6 @@
 # Local Copilot demo
 
-The Windows demo script prepares a real local relay and packaged Copilot plugin
+The Windows demo script prepares a real local relay and user-scoped Copilot extension
 without Docker, a local Rust toolchain, or manual credential handling.
 
 ## Prerequisites
@@ -34,11 +34,12 @@ The first run:
 4. deletes every artifact belonging to that exact workflow run and confirms zero
    remain;
 5. rejects unsafe or oversized ZIP entries, then extracts the CLI, daemon, relay, and
-   built plugin beneath the current user's local application-data directories;
+   built extension payload beneath the current user's local application-data directories;
 6. generates enrollment authority directly into Windows native credential custody;
 7. starts the loopback relay as a hidden process;
 8. runs `init` and `doctor`;
-9. installs the Copilot plugin; and
+9. atomically installs the extension and its matching daemon under the user's Copilot
+   extension directory, enabling experimental extension support when necessary; and
 10. records only non-secret process/path status for exact shutdown.
 
 The unsigned provenance provides digest consistency and binds the package to the
@@ -51,8 +52,9 @@ Later runs reuse the installed candidate. Use `-Refresh` to rebuild and replace 
 pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1 -Refresh
 ```
 
-Close existing Copilot processes after setup so new sessions receive the dedicated
-demo profile root.
+Close existing Copilot sessions after setup so fresh sessions discover the extension.
+The extension reads the dedicated demo profile root from its bounded local sidecar, so
+the parent terminal does not need to be restarted to inherit environment changes.
 
 ## Pair two sessions
 
@@ -81,16 +83,18 @@ pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1 -Stop
 ```
 
 Stop mode terminates only the recorded relay process after verifying its executable
-and restores the user profile-root environment setting from a separate no-clobber
-backup created before setup. Stop fails safely rather than guessing when the demo
-environment is active but that backup is unavailable. Profile, relay state, installed
-files, and the cached plugin remain for the next demo run.
+and start time. Profile, relay state, installed files, and the user-scoped extension
+remain for the next demo run.
 
-To remove the cached plugin explicitly:
+To remove the user-scoped extension explicitly:
 
 ```powershell
-pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1 -Stop -UninstallPlugin
+pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1 -Stop -UninstallExtension
 ```
+
+If setup enabled Copilot's experimental setting, explicit extension removal restores
+the prior setting. The script also removes the obsolete direct-plugin registration
+created by earlier demo versions.
 
 The demo uses an HTTP loopback relay. Packaged acceptance separately proves the same
 flows through trusted TLS and the Docker-loaded relay candidate.
