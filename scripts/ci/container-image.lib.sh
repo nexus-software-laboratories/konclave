@@ -106,16 +106,42 @@ container_image_manifest() {
     done
 }
 
+container_image_config() {
+    local archive="$1"
+    local manifest config_digest
+
+    manifest="$(container_image_manifest "$archive")"
+    config_digest="$(jq -er '.config.digest' <<<"$manifest")"
+    tar -xOf "$archive" "blobs/sha256/${config_digest#sha256:}"
+}
+
+container_image_assert_public_release_config() {
+    local archive="$1"
+    local run_identity="$2"
+    local image_config
+
+    image_config="$(container_image_config "$archive")"
+    if jq -e \
+        --arg label "$CONTAINER_VALIDATION_OWNER_LABEL" \
+        '.config.Labels[$label] != null' <<<"$image_config" >/dev/null; then
+        echo '::error::Release image contains the validation ownership label.'
+        return 1
+    fi
+    if grep -Fq "$run_identity" <<<"$image_config"; then
+        echo '::error::Release image contains its CI validation run identity.'
+        return 1
+    fi
+}
+
 container_image_assert_archive() {
     local archive="$1"
     local architecture="$2"
 
     test -s "$archive"
 
-    local manifest config_digest image_config
+    local manifest image_config
     manifest="$(container_image_manifest "$archive")"
-    config_digest="$(jq -er '.config.digest' <<<"$manifest")"
-    image_config="$(tar -xOf "$archive" "blobs/sha256/${config_digest#sha256:}")"
+    image_config="$(container_image_config "$archive")"
 
     if [ "$(jq -r '.architecture' <<<"$image_config")" != "$architecture" ]; then
         echo "::error::OCI config architecture does not match $architecture."

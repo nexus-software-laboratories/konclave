@@ -36,11 +36,13 @@ install -d -m 0700 "$CONTAINER_VALIDATION_ROOT"
 archive="$CONTAINER_VALIDATION_ROOT/${image_name}-${architecture}.tar"
 image_reference="local/${image_name}:validation-${run_identity}-${architecture}"
 outputs=(--output "type=oci,dest=$archive")
+image_labels=(--label "${CONTAINER_VALIDATION_OWNER_LABEL}=${run_identity}")
 release_archive=''
 if [ "$#" -eq 3 ]; then
     image_reference="$(container_image_release_reference "$image_name" "$3")"
     release_archive="$CONTAINER_VALIDATION_ROOT/${image_name}-${architecture}-docker.tar"
     outputs+=(--output "type=docker,dest=$release_archive")
+    image_labels=()
 fi
 
 # An OCI archive export requires the container driver; the default docker driver
@@ -60,7 +62,7 @@ docker buildx build \
     --platform "linux/$architecture" \
     --provenance=false \
     --sbom=false \
-    --label "${CONTAINER_VALIDATION_OWNER_LABEL}=${run_identity}" \
+    "${image_labels[@]}" \
     --tag "$image_reference" \
     "${outputs[@]}" \
     "$workspace_root"
@@ -69,6 +71,9 @@ container_image_assert_archive "$archive" "$architecture"
 if [ -n "$release_archive" ] && [ ! -s "$release_archive" ]; then
     echo '::error::Docker-loadable release archive was not created.'
     exit 1
+fi
+if [ -n "$release_archive" ]; then
+    container_image_assert_public_release_config "$archive" "$run_identity"
 fi
 container_image_write_summary \
     "$image_name" \
