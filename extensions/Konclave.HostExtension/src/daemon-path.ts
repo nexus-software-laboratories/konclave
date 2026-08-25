@@ -29,6 +29,14 @@ export function pluginRootFromModuleDir(moduleDir: string): string {
   return dirname(dirname(moduleDir));
 }
 
+/** Computes the daemon path bundled beside a user-scoped extension. */
+export function resolveUserExtensionDaemonPath(
+  moduleDir: string,
+  platform: NodeJS.Platform,
+): string {
+  return join(moduleDir, 'bin', defaultDaemonCommand(platform));
+}
+
 /** Computes the daemon path bundled inside the installed plugin, if one exists. */
 export function resolveBundledDaemonPath(moduleDir: string, platform: NodeJS.Platform): string {
   const pluginRoot = pluginRootFromModuleDir(moduleDir);
@@ -53,9 +61,13 @@ export function resolveDaemonCommand(
     return override;
   }
 
-  const bundledPath = resolveBundledDaemonPath(moduleDir, platform);
-  if (isRegularFile(bundledPath)) {
-    return bundledPath;
+  for (const bundledPath of [
+    resolveUserExtensionDaemonPath(moduleDir, platform),
+    resolveBundledDaemonPath(moduleDir, platform),
+  ]) {
+    if (isRegularFile(bundledPath)) {
+      return bundledPath;
+    }
   }
 
   return defaultDaemonCommand(platform);

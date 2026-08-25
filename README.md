@@ -52,7 +52,7 @@ The Copilot CLI host extension is packaged from
 
 ### Initialize an installation
 
-After installing the CLI, daemon, and Copilot plugin, configure relay enrollment once:
+After installing the CLI, daemon, and Copilot extension, configure relay enrollment once:
 
 ```shell
 konclave init --relay-endpoint https://relay.example.com
@@ -75,13 +75,13 @@ printf '%s\n' '<enrollment-credential>' | konclave init --relay-endpoint https:/
 ```
 
 Later Copilot sessions create independent profiles and enroll automatically without
-receiving the credential through their environment or plugin configuration. Repeating
+receiving the credential through their environment or extension configuration. Repeating
 `init` is idempotent for the same endpoint and source; conflicting setup fails.
 
 ### Run the local Copilot demo
 
 On Windows, one script builds the Windows candidate on public CI, deletes its
-transient artifact after download, installs the plugin, starts a hidden loopback
+transient artifact after download, installs a user-scoped extension, starts a hidden loopback
 relay, and runs `init` plus `doctor`:
 
 ```powershell

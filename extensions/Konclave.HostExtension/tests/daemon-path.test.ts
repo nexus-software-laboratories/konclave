@@ -8,6 +8,7 @@ import {
   pluginRootFromModuleDir,
   resolveBundledDaemonPath,
   resolveDaemonCommand,
+  resolveUserExtensionDaemonPath,
 } from '../src/daemon-path.js';
 
 const linuxModuleDir = join(
@@ -53,13 +54,25 @@ describe('resolveDaemonCommand', () => {
     expect(blank).toBe('KonclaveLocalDaemon');
   });
 
-  it('selects the bundled daemon path when it exists as a regular file', () => {
+  it('selects a daemon bundled beside a user-scoped extension first', () => {
     const isRegularFile = vi.fn().mockReturnValue(true);
 
     const command = resolveDaemonCommand({}, 'linux', linuxModuleDir, isRegularFile);
 
+    expect(command).toBe(resolveUserExtensionDaemonPath(linuxModuleDir, 'linux'));
+    expect(isRegularFile).toHaveBeenCalledWith(
+      resolveUserExtensionDaemonPath(linuxModuleDir, 'linux'),
+    );
+  });
+
+  it('selects the plugin-bundled daemon when no user-extension daemon exists', () => {
+    const isRegularFile = vi.fn(
+      (path: string) => path === resolveBundledDaemonPath(linuxModuleDir, 'linux'),
+    );
+
+    const command = resolveDaemonCommand({}, 'linux', linuxModuleDir, isRegularFile);
+
     expect(command).toBe(resolveBundledDaemonPath(linuxModuleDir, 'linux'));
-    expect(isRegularFile).toHaveBeenCalledWith(resolveBundledDaemonPath(linuxModuleDir, 'linux'));
   });
 
   it('falls back to the system PATH binary name when the bundled path is not a regular file', () => {
@@ -72,19 +85,16 @@ describe('resolveDaemonCommand', () => {
     expect(windows).toBe('KonclaveLocalDaemon.exe');
   });
 
-  it('does not probe ancestor directories for a release install root', () => {
-    // A module directory nested arbitrarily deep must still only ever climb the
-    // fixed two levels from `<plugin-root>/extensions/Konclave.Extension`; it
-    // must never walk further up looking for other markers.
+  it('only probes the two fixed package layouts', () => {
     const isRegularFile = vi.fn().mockReturnValue(false);
 
     resolveDaemonCommand({}, 'linux', linuxModuleDir, isRegularFile);
 
-    expect(isRegularFile).toHaveBeenCalledTimes(1);
-    const probedPath = isRegularFile.mock.calls[0]?.[0] as string;
-    expect(probedPath).toBe(
+    expect(isRegularFile).toHaveBeenCalledTimes(2);
+    expect(isRegularFile.mock.calls.map(([path]) => path)).toEqual([
+      join(linuxModuleDir, 'bin', 'KonclaveLocalDaemon'),
       join('cache', 'plugins', 'konclave-abc123', 'bin', 'KonclaveLocalDaemon'),
-    );
+    ]);
   });
 });
 
@@ -98,6 +108,16 @@ describe('resolveBundledDaemonPath', () => {
     const path = resolveBundledDaemonPath(linuxModuleDir, 'linux');
 
     expect(path).toBe(join('cache', 'plugins', 'konclave-abc123', 'bin', 'KonclaveLocalDaemon'));
+  });
+
+  describe('resolveUserExtensionDaemonPath', () => {
+    it('resolves a daemon directly beside a user-scoped extension', () => {
+      const moduleDir = join('home', 'tester', '.copilot', 'extensions', 'konclave');
+
+      expect(resolveUserExtensionDaemonPath(moduleDir, 'win32')).toBe(
+        join(moduleDir, 'bin', 'KonclaveLocalDaemon.exe'),
+      );
+    });
   });
 
   it('produces the Windows binary name under a Windows-shaped cached plugin path', () => {
@@ -196,6 +216,19 @@ describe('resolveDaemonCommand cache-relative integration', () => {
     writeFileSync(bundledDaemonPath, '');
 
     const command = resolveDaemonCommand({}, 'linux', moduleDir);
+
+    expect(command).toBe(bundledDaemonPath);
+  });
+
+  it('selects a real user-extension daemon file on disk', () => {
+    const root = mkdtempSync(join(thisDir, 'fixture-user-extension-'));
+    fixtureRoots.push(root);
+    const binDir = join(root, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const bundledDaemonPath = join(binDir, 'KonclaveLocalDaemon');
+    writeFileSync(bundledDaemonPath, '');
+
+    const command = resolveDaemonCommand({}, 'linux', root);
 
     expect(command).toBe(bundledDaemonPath);
   });
