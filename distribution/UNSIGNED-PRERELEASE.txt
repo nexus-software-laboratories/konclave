@@ -6,3 +6,7 @@ Do not treat its origin as verified by the operating system.
 Konclave publishes unsigned prereleases so code-signing enrollment does not block
 the open self-hosted MVP. Integrity manifests, software bills of materials, and
 build provenance are separate release metadata and do not replace a code signature.
+
+SHA-256 verification detects changed or incomplete files after obtaining a release
+set. It does not prove who created that release set. Review the recorded source
+revision and obtain artifacts through a channel you trust.

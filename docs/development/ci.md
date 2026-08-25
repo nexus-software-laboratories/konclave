@@ -56,6 +56,15 @@ extracts it outside the source tree, runs the packaged CLI, and requires `koncla
 doctor` to recognize the packaged daemon and plugin. Candidates are retained as
 short-lived unsigned workflow artifacts; the workflow does not publish a release.
 
+After every native and container lane succeeds, `Release integrity` downloads the
+candidates into one flat release set. It emits target-filtered Rust, npm-lock, and
+container CycloneDX SBOMs; one deterministic SLSA provenance statement per executable
+archive; and an exact SHA-256 manifest. The shipped `RELEASE.json` independently
+defines every required archive and sidecar, so a partial download cannot redefine
+itself as complete merely by omitting a checksum line. Negative tests mutate, remove,
+and add files before the final verifier is allowed to pass. The complete set is
+retained as one short-lived workflow artifact and is not a published release.
+
 ## OCI validation
 
 Container validation builds one `linux/amd64` OCI archive for the Community
