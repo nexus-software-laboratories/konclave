@@ -1,10 +1,15 @@
 # Install an unsigned prerelease
 
-Konclave prereleases provide native archives for supported Linux, Windows, and macOS
+Konclave packaging produces native archives for supported Linux, Windows, and macOS
 targets. Each client archive contains the CLI, local daemon, platform service files,
 and a built Copilot CLI plugin. Relay archives contain the standalone Community Relay
 binary and its self-hosting examples. No source checkout or compiler is required after
 extraction.
+
+Package-validation artifacts are transient CI transport and are deleted immediately
+after each run. No public release download is currently published. A maintainer must
+build the package set locally or explicitly authorize a separate public release
+channel before end users can download these archives.
 
 ## Select and extract an archive
 
