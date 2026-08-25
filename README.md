@@ -78,6 +78,18 @@ Later Copilot sessions create independent profiles and enroll automatically with
 receiving the credential through their environment or plugin configuration. Repeating
 `init` is idempotent for the same endpoint and source; conflicting setup fails.
 
+### Run the local Copilot demo
+
+On Windows, one script builds the Windows candidate on public CI, deletes its
+transient artifact after download, installs the plugin, starts a hidden loopback
+relay, and runs `init` plus `doctor`:
+
+```powershell
+pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1
+```
+
+See [Local Copilot demo](docs/distribution/local-demo.md) for pairing and cleanup.
+
 ## Architecture
 
 Konclave separates the trusted local agent boundary from relay transport:

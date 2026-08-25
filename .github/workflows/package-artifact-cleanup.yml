@@ -32,9 +32,13 @@ jobs:
               --jq '.artifacts[].id'
           )
           for artifact_id in "${artifact_ids[@]}"; do
-            gh api \
+            if ! gh api \
               --method DELETE \
-              "repos/$REPOSITORY/actions/artifacts/$artifact_id"
+              "repos/$REPOSITORY/actions/artifacts/$artifact_id"; then
+              # The local demo has an authenticated exact-run fallback and may
+              # win this deletion race; the final count remains authoritative.
+              echo "::notice::Artifact $artifact_id was already handled by the caller."
+            fi
           done
           remaining="$(
             gh api \

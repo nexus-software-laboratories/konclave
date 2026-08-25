@@ -11,6 +11,10 @@ after each run. No public release download is currently published. A maintainer 
 build the package set locally or explicitly authorize a separate public release
 channel before end users can download these archives.
 
+Repository contributors on Windows can use the one-command
+[Local Copilot demo](local-demo.md), which downloads the transient Windows candidate
+before cleanup and performs setup automatically.
+
 ## Select and extract an archive
 
 Choose the artifact matching the machine:
