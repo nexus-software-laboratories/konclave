@@ -216,20 +216,14 @@ fn acquire_attachment(
 /// because losing the harness connection must not stop relay processing. There is no
 /// fallback to an unauthenticated channel.
 pub(crate) async fn run_adapter_channel(
+    config: Option<AdapterLaunchConfig>,
     store: std::sync::Arc<ProfileStore>,
     profile: &str,
     health: DeliveryHealth,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let config = match AdapterLaunchConfig::from_environment() {
-        Ok(Some(config)) => config,
-        Ok(None) => return,
-        Err(error) => {
-            // A malformed set is reported once and then left alone; retrying cannot
-            // repair the environment of a running process.
-            eprintln!("Adapter configuration rejected: {error:#}");
-            return;
-        }
+    let Some(config) = config else {
+        return;
     };
 
     let clock = SystemUnixClock;
@@ -1041,6 +1035,7 @@ mod tests {
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             super::run_adapter_channel(
+                None,
                 store,
                 "alice",
                 super::DeliveryHealth::default(),

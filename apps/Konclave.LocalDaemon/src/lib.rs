@@ -17,6 +17,7 @@ mod pairing_service;
 mod pairing_supervisor;
 #[allow(dead_code)]
 mod persistence;
+mod profile_runtime;
 mod runtime;
 mod service;
 #[cfg(test)]
