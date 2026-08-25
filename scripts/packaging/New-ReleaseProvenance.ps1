@@ -122,7 +122,7 @@ else {
         (Get-Content -LiteralPath (
             Join-Path $projectRootPath 'apps' 'Konclave.CommunityRelay' 'Dockerfile'
         ) -Raw),
-        '(?m)^FROM rust:([^@\s]+)@sha256:[0-9a-f]{64}\s'
+        '(?m)^FROM rust:([0-9]+\.[0-9]+\.[0-9]+)(?:-[^@\s]+)?@sha256:[0-9a-f]{64}\s'
     )
     if (-not $rustBase.Success) {
         throw 'Container Dockerfile does not identify its pinned Rust compiler.'
