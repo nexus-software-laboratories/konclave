@@ -11,7 +11,8 @@ $ErrorActionPreference = 'Stop'
 $workspaceRoots = @(
     'packages/Konclave.ProtocolContracts.TypeScript',
     'apps/Konclave.AdminConsole',
-    'extensions/Konclave.HostExtension'
+    'extensions/Konclave.HostExtension',
+    'tools/Konclave.CopilotSmoke'
 )
 
 foreach ($workspaceRoot in $workspaceRoots) {
@@ -20,7 +21,17 @@ foreach ($workspaceRoot in $workspaceRoots) {
     }
     Push-Location $workspaceRoot
     try {
-        if (Test-Path package-lock.json -PathType Leaf) { npm ci } else { npm install }
+        if (Test-Path package-lock.json -PathType Leaf) {
+            if ($workspaceRoot -eq 'tools/Konclave.CopilotSmoke') {
+                npm ci --ignore-scripts
+            }
+            else {
+                npm ci
+            }
+        }
+        else {
+            npm install
+        }
         if ($LASTEXITCODE -ne 0) { throw "npm install failed for $workspaceRoot." }
         npm run build --if-present
         if ($LASTEXITCODE -ne 0) { throw "npm run build failed for $workspaceRoot." }

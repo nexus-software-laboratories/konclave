@@ -76,6 +76,33 @@ Back in the first session:
 After both sides report completion, ask either session to send a message through the
 conversation. The idle peer should receive it automatically.
 
+## Automated two-session smoke
+
+Run the complete local agent scenario with one command:
+
+```powershell
+pwsh -NoProfile -File .\scripts\demo\Invoke-KonclaveCopilotSmoke.ps1
+```
+
+The entry point composes the deterministic installer with a typed Copilot SDK runner.
+It creates two isolated headless Copilot sessions using the current developer's local
+authentication, allows only the session-scoped Konclave MCP server, transfers the
+capability without printing it, completes both authorization paths, and verifies an
+exact message plus reply.
+
+The final JSON report contains session, pairing, conversation, message, phase, tool,
+duration, and token evidence. It never includes the capability, prompts, model
+responses, tool arguments, credentials, or user content.
+
+This is deliberately a local development smoke. Both the PowerShell entry point and
+the TypeScript runner refuse recognized CI environments. No repository workflow
+invokes it, and its live result must never be uploaded as an Actions artifact. CI
+only compiles, lints, and unit-tests the deterministic runner with no Copilot
+inference.
+
+Use `-SkipSetup` to reuse an already-running relay or `-Refresh` to rebuild the
+packaged Windows candidate before the smoke.
+
 ## Stop
 
 ```powershell
