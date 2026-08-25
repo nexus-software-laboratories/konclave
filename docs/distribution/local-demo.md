@@ -10,6 +10,12 @@ without Docker, a local Rust toolchain, or manual credential handling.
 - an installed and authenticated Copilot CLI; and
 - a local checkout of the current `main` commit containing the script.
 
+Validate prerequisites and the local safety checks without changing demo state:
+
+```powershell
+pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1 -Validate
+```
+
 ## Start
 
 From the repository root:
