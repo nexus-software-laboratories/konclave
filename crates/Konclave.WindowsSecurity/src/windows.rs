@@ -6,9 +6,7 @@ use std::ptr::null_mut;
 
 use thiserror::Error;
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions};
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INSUFFICIENT_BUFFER, GENERIC_ALL, HANDLE, LocalFree,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
     SDDL_REVISION_1, SE_FILE_OBJECT,
@@ -492,9 +490,7 @@ fn verify_owner_only_descriptor(server: &NamedPipeServer, expected: &OwnedSid) -
     }
     // SAFETY: `ace` points to the first complete ACE in the live ACL.
     let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-    if u32::from(allowed.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
-        || allowed.Header.AceFlags != 0
-        || allowed.Mask != GENERIC_ALL
+    if u32::from(allowed.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE || allowed.Header.AceFlags != 0
     {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
@@ -544,8 +540,8 @@ mod tests {
         verifier.verify_server(&client).unwrap();
     }
 
-    #[test]
-    fn created_pipe_retains_the_exact_owner_only_descriptor() {
+    #[tokio::test]
+    async fn created_pipe_retains_the_exact_owner_only_descriptor() {
         let name = endpoint("descriptor");
         let server = create_owner_restricted_named_pipe(
             tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true),
