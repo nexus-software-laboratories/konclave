@@ -21,6 +21,10 @@ pub enum KonclaveCryptographicError {
     #[error("pairing control signature is not authentic")]
     InvalidPairingControl,
 
+    /// A local-service handshake signature does not authenticate its transcript.
+    #[error("local service signature is not authentic")]
+    InvalidLocalServiceSignature,
+
     /// An invitation was presented at or after its expiration time.
     #[error("invitation is expired")]
     ExpiredInvitation,
@@ -143,6 +147,7 @@ impl KonclaveCryptographicError {
             Self::InvalidCredentialBinding => "invalid_credential_binding",
             Self::InvalidInvitationSignature => "invalid_invitation_signature",
             Self::InvalidPairingControl => "invalid_pairing_control",
+            Self::InvalidLocalServiceSignature => "invalid_local_service_signature",
             Self::ExpiredInvitation => "expired_invitation",
             Self::InvitationDeviceMismatch => "invitation_device_mismatch",
             Self::InvitationConversationMismatch => "invitation_conversation_mismatch",

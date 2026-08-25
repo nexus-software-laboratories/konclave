@@ -30,7 +30,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 thiserror.workspace = true
 tower = { version = "0.5.3", features = ["limit", "util"] }
 windows-service = { version = "0.8.1", optional = true }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"], optional = true }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"], optional = true }
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -1,5 +1,5 @@
 ---
-applyTo: "crates/Konclave.AdapterTransport/**/*.rs,crates/Konclave.ProtocolContracts/**/*.rs,crates/Konclave.CryptographicCore/**/*.rs,crates/Konclave.SecretStorage/**/*.rs,crates/Konclave.DomainCore/**/*.rs,crates/Konclave.ClientLibrary/**/*.rs,apps/Konclave.LocalDaemon/**/*.rs,apps/Konclave.CommunityRelay/**/*.rs,extensions/Konclave.HostExtension/**/*.{ts,tsx},packages/Konclave.ProtocolContracts.TypeScript/**/*.{ts,tsx},**/*.proto,fixtures/adapter/**,fuzz/**"
+applyTo: "crates/Konclave.AdapterTransport/**/*.rs,crates/Konclave.LocalFraming/**/*.rs,crates/Konclave.LocalServiceTransport/**/*.rs,crates/Konclave.WindowsSecurity/**/*.rs,crates/Konclave.ProtocolContracts/**/*.rs,crates/Konclave.CryptographicCore/**/*.rs,crates/Konclave.SecretStorage/**/*.rs,crates/Konclave.DomainCore/**/*.rs,crates/Konclave.ClientLibrary/**/*.rs,apps/Konclave.LocalDaemon/**/*.rs,apps/Konclave.CommunityRelay/**/*.rs,extensions/Konclave.HostExtension/**/*.{ts,tsx},packages/Konclave.ProtocolContracts.TypeScript/**/*.{ts,tsx},**/*.proto,fixtures/adapter/**,fixtures/local-service/**,fuzz/**"
 scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter boundaries"
 ---
 
@@ -49,6 +49,10 @@ scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter bo
   application layer.
 - Apply hard pre-allocation bounds to every untrusted collection, frame, string,
   decompression, page, queue, and watch.
+- Windows named-pipe endpoints use an explicit current-account DACL on every
+  instance, verify both connected process SIDs, reject lower-integrity peers, and
+  execute those checks on Windows. There is no unenforced verifier or default-DACL
+  fallback.
 - Add focused negative, compatibility, and adversarial tests with every security
   behavior change. Cryptography, identity, authorization, wire parsing, secret
   persistence, and relay metadata changes require specialized security review before

@@ -1,5 +1,5 @@
 [package]
-name = "KonclaveAdapterTransport"
+name = "KonclaveLocalServiceTransport"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
@@ -7,15 +7,17 @@ rust-version = "1.85"
 
 [dependencies]
 KonclaveCryptographicCore = { path = "../Konclave.CryptographicCore" }
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveLocalFraming = { path = "../Konclave.LocalFraming" }
-base64.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["io-util", "net", "time"] }
-zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+KonclaveWindowsSecurity = { path = "../Konclave.WindowsSecurity" }
+
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

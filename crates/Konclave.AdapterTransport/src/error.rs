@@ -106,3 +106,13 @@ impl AdapterTransportError {
         }
     }
 }
+
+impl From<KonclaveLocalFraming::FrameError> for AdapterTransportError {
+    fn from(error: KonclaveLocalFraming::FrameError) -> Self {
+        match error {
+            KonclaveLocalFraming::FrameError::TooLarge => Self::FrameTooLarge,
+            KonclaveLocalFraming::FrameError::Malformed => Self::MalformedFrame,
+            KonclaveLocalFraming::FrameError::Closed => Self::ChannelClosed,
+        }
+    }
+}

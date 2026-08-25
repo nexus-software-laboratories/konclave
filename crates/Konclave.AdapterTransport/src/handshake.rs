@@ -1,12 +1,9 @@
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::AdapterTransportError;
-use crate::frame::{
-    FRAME_HEADER_LENGTH, HandshakeMessage, MAX_PREAUTH_FRAME_BYTES, decode_frame_length,
-    encode_frame,
-};
+use crate::frame::{HandshakeMessage, MAX_PREAUTH_FRAME_BYTES};
 use crate::transcript::{
     ADAPTER_PROTOCOL_VERSION, AuthChallenge, AuthTranscript, CHALLENGE_LENGTH,
 };
@@ -223,18 +220,9 @@ pub async fn read_frame<S>(stream: &mut S, limit: usize) -> Result<Vec<u8>, Adap
 where
     S: AsyncRead + Unpin,
 {
-    let mut header = [0_u8; FRAME_HEADER_LENGTH];
-    stream
-        .read_exact(&mut header)
+    KonclaveLocalFraming::read_frame(stream, limit)
         .await
-        .map_err(|_| AdapterTransportError::ChannelClosed)?;
-    let length = decode_frame_length(header, limit)?;
-    let mut payload = vec![0_u8; length];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .map_err(|_| AdapterTransportError::ChannelClosed)?;
-    Ok(payload)
+        .map_err(AdapterTransportError::from)
 }
 
 /// Writes one length-prefixed frame, refusing a payload above `limit`.
@@ -251,15 +239,9 @@ pub async fn write_frame<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    let frame = encode_frame(payload, limit)?;
-    stream
-        .write_all(&frame)
+    KonclaveLocalFraming::write_frame(stream, payload, limit)
         .await
-        .map_err(|_| AdapterTransportError::ChannelClosed)?;
-    stream
-        .flush()
-        .await
-        .map_err(|_| AdapterTransportError::ChannelClosed)
+        .map_err(AdapterTransportError::from)
 }
 
 async fn write_message<S>(

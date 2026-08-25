@@ -1,0 +1,21 @@
+[package]
+name = "KonclaveWindowsSecurity"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[target.'cfg(windows)'.dependencies]
+thiserror.workspace = true
+tokio = { version = "1.53.1", features = ["net"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread"] }

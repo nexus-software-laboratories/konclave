@@ -7,6 +7,7 @@ name = "KonclaveAdapterTransport"
 version = "0.1.0"
 dependencies = [
  "KonclaveCryptographicCore",
+ "KonclaveLocalFraming",
  "base64 0.22.1",
  "rustix",
  "tempfile",
@@ -162,6 +163,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveLocalFraming"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "KonclaveLocalServiceTransport"
+version = "0.1.0"
+dependencies = [
+ "KonclaveCryptographicCore",
+ "KonclaveDomainCore",
+ "KonclaveLocalFraming",
+ "KonclaveWindowsSecurity",
+ "rustix",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "KonclaveProtocolContracts"
 version = "0.1.0"
 dependencies = [
@@ -207,6 +230,15 @@ dependencies = [
  "tempfile",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "KonclaveWindowsSecurity"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

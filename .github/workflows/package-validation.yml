@@ -98,6 +98,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw 'Native release build failed.'
           }
+      - name: Exercise Windows local security boundaries
+        if: ${{ matrix.target == 'x86_64-pc-windows-msvc' && !inputs.demo_windows_only }}
+        shell: pwsh
+        run: |
+          cargo test `
+            --locked `
+            --release `
+            --target '${{ matrix.target }}' `
+            -p KonclaveWindowsSecurity
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows account and DACL tests failed.'
+          }
+          cargo test `
+            --locked `
+            --release `
+            --target '${{ matrix.target }}' `
+            -p KonclaveLocalServiceTransport `
+            --test windows_endpoint
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows local-service endpoint tests failed.'
+          }
       - name: Build and verify Copilot plugin
         shell: pwsh
         working-directory: extensions/Konclave.HostExtension
