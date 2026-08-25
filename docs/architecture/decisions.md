@@ -9,9 +9,15 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0002: Seal local secrets with explicit platform or operator key custody](../adr/adr-0002-sealed-local-secret-custody.md)
 - [ADR 0003: Keep relay authentication deployment-provided with a hashed bearer-token adapter](../adr/adr-0003-relay-transport-authentication.md)
 - [ADR 0004: Use locked split-schema profile storage with sealed crash journals](../adr/adr-0004-daemon-profile-journal.md)
-- [ADR 0005: Separate harness delivery from the daemon through an outbound local adapter channel](../adr/adr-0005-harness-neutral-adapter-boundary.md)
 - [ADR 0006: Pair sessions through joiner-issued, self-authenticating capabilities](../adr/adr-0006-joiner-issued-pairing-capabilities.md)
 - [ADR 0007: Provision per-profile relay principals through an outbound enrollment control plane](../adr/adr-0007-outbound-relay-principal-enrollment.md)
+- [ADR 0008: Host logical agent profiles in one per-user local service](../adr/adr-0008-shared-local-service.md)
+
+## Superseded records
+
+- [ADR 0005: Separate harness delivery from the daemon through an outbound local adapter channel](../adr/adr-0005-harness-neutral-adapter-boundary.md) —
+  superseded by ADR 0008 after the per-session process model proved unsuitable for
+  workstations with many concurrent agent sessions.
 
 ## When to write one
 
