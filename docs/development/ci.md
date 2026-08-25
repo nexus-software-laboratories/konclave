@@ -83,7 +83,9 @@ does not run the image.
 SBOM attestations, and asserts the archive. Package validation can request a
 deterministically tagged Docker-loadable archive as a second exporter from the same
 build result. That candidate is uploaded before exact cleanup; it is never loaded,
-pushed, or deployed by CI.
+pushed, or deployed by CI. The release export omits the ephemeral validation-ownership
+label, and the shared OCI assertion rejects any release config containing that label
+or the current run identity before staging.
 
 ### Bounded local Docker validation
 
