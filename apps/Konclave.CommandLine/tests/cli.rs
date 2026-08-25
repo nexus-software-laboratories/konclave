@@ -3,7 +3,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use predicates::prelude::PredicateBooleanExt as _;
 use predicates::str::contains;
-use KonclaveClientLibrary::RelayEndpoint;
+use KonclaveClientLibrary::{RelayEndpoint, RelayEnrollmentCredential};
 
 #[test]
 fn version_subcommand_prints_version() {
@@ -134,4 +134,65 @@ fn doctor_checks_installation_source_layout_and_relay() {
         .stdout(contains("PASS copilot_plugin"))
         .stdout(contains("WARN profiles"));
     server.join().unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn relay_bootstrap_creates_idempotent_access_and_protected_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profiles");
+    let source = directory.path().join("enrollment.credential");
+    let access = directory.path().join("relay-access.json");
+    let endpoint = RelayEndpoint::parse("http://127.0.0.1:43123").unwrap();
+
+    for _ in 0..2 {
+        let mut bootstrap = Command::cargo_bin("KonclaveCommandLine").unwrap();
+        bootstrap
+            .arg("relay-bootstrap")
+            .arg("--relay-endpoint")
+            .arg(endpoint.as_str())
+            .arg("--access-document")
+            .arg(&access)
+            .arg("--external-source")
+            .arg(&source)
+            .assert()
+            .success()
+            .stdout(contains("external_file custody"));
+    }
+
+    let access_document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&access).unwrap()).unwrap();
+    let authority = access_document["enrollment"]["authority"].as_str().unwrap();
+    let credential = RelayEnrollmentCredential::from_bound_reader(
+        std::fs::File::open(&source).unwrap(),
+        &endpoint,
+    )
+    .unwrap();
+    assert_eq!(
+        authority,
+        URL_SAFE_NO_PAD.encode(credential.authority_id().as_bytes())
+    );
+
+    let mut init = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    init.arg("init")
+        .arg("--relay-endpoint")
+        .arg(endpoint.as_str())
+        .arg("--profile-root")
+        .arg(&root)
+        .arg("--external-source")
+        .arg(&source)
+        .assert()
+        .success();
+
+    let mut conflict = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    conflict
+        .arg("relay-bootstrap")
+        .arg("--relay-endpoint")
+        .arg("http://127.0.0.1:43124")
+        .arg("--access-document")
+        .arg(&access)
+        .arg("--external-source")
+        .arg(&source)
+        .assert()
+        .failure();
 }

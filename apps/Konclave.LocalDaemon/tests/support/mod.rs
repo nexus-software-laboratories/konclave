@@ -168,7 +168,7 @@ impl TestRelay {
 #[cfg(unix)]
 pub use adapter_host::{AdapterHost, AdapterSession};
 #[cfg(unix)]
-pub use daemon_fixture::{DaemonClient, DaemonFixture, TestClient};
+pub use daemon_fixture::{DaemonClient, DaemonFixture, TestClient, connect_daemon};
 
 /// Reads the text out of a delivered payload, failing loudly on any other kind.
 #[cfg(unix)]
@@ -230,6 +230,126 @@ pub async fn join_conversation(inviter: &DaemonClient, joiner: &DaemonClient) ->
         )
         .await;
     conversation_id
+}
+
+/// Pairs two daemons through one capability and returns the created conversation.
+#[cfg(unix)]
+pub async fn pair_with_capability(
+    inviter: &DaemonClient,
+    joiner: &DaemonClient,
+) -> (String, zeroize::Zeroizing<String>) {
+    const POLL_ATTEMPTS: usize = 80;
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+    async fn await_phase(
+        client: &DaemonClient,
+        pairing_id: &str,
+        expected_phase: &str,
+    ) -> serde_json::Value {
+        for _ in 0..POLL_ATTEMPTS {
+            let status = client
+                .require("get_pairing_status", json!({"pairing_id": pairing_id}))
+                .await;
+            if status["phase"] == expected_phase {
+                return status;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        panic!(
+            "pairing {pairing_id} never reached {expected_phase}; diagnostics: {}",
+            client.diagnostics()
+        );
+    }
+
+    fn assert_high_level(value: &serde_json::Value) {
+        for forbidden in [
+            "invitation",
+            "join_proof",
+            "welcome",
+            "cursor",
+            "routing_id",
+            "peer_bindings",
+            "issuer_public_key",
+        ] {
+            assert!(
+                value.get(forbidden).is_none(),
+                "pairing result exposed raw field {forbidden}"
+            );
+        }
+    }
+
+    let inviter_identity = inviter
+        .require("get_identity", serde_json::Value::Null)
+        .await;
+    let joiner_identity = joiner
+        .require("get_identity", serde_json::Value::Null)
+        .await;
+    let created = joiner
+        .require(
+            "create_pairing_capability",
+            json!({"requested_role": "member"}),
+        )
+        .await;
+    let pairing_id = created["pairing"]["pairing_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let capability = zeroize::Zeroizing::new(created["capability"].as_str().unwrap().to_string());
+    assert_high_level(&created["pairing"]);
+
+    let redeemed = inviter
+        .require(
+            "redeem_pairing_capability",
+            json!({"capability": capability.as_str()}),
+        )
+        .await;
+    assert_eq!(redeemed["pairing_id"], pairing_id);
+    assert_eq!(redeemed["joiner_device_id"], joiner_identity["device_id"]);
+    assert_eq!(redeemed["requested_role"], "member");
+    assert_high_level(&redeemed);
+
+    let conversation = inviter
+        .require("create_conversation", serde_json::Value::Null)
+        .await;
+    let conversation_id = conversation["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    inviter
+        .require(
+            "authorize_pairing_joiner",
+            json!({
+                "pairing_id": pairing_id,
+                "conversation_id": conversation_id,
+                "granted_role": "member"
+            }),
+        )
+        .await;
+
+    let awaiting = await_phase(joiner, &pairing_id, "joiner_awaiting_inviter_authorization").await;
+    assert_eq!(awaiting["inviter_device_id"], inviter_identity["device_id"]);
+    assert_eq!(awaiting["conversation_id"], conversation_id);
+    assert_eq!(awaiting["granted_role"], "member");
+    assert_high_level(&awaiting);
+    joiner
+        .require(
+            "authorize_pairing_inviter",
+            json!({
+                "pairing_id": pairing_id,
+                "inviter_device_id": awaiting["inviter_device_id"],
+                "conversation_id": awaiting["conversation_id"],
+                "granted_role": awaiting["granted_role"]
+            }),
+        )
+        .await;
+
+    let joiner_completed = await_phase(joiner, &pairing_id, "completed").await;
+    let inviter_completed = await_phase(inviter, &pairing_id, "completed").await;
+    assert_eq!(joiner_completed["conversation_id"], conversation_id);
+    assert_eq!(inviter_completed["conversation_id"], conversation_id);
+    assert!(!inviter.diagnostics().contains(capability.as_str()));
+    assert!(!joiner.diagnostics().contains(capability.as_str()));
+    (conversation_id, capability)
 }
 
 #[cfg(unix)]
@@ -309,52 +429,80 @@ mod daemon_fixture {
 
         /// Starts one daemon child and completes the MCP handshake with it.
         pub async fn connect(&self, profile_id: &str, host: Option<&AdapterHost>) -> DaemonClient {
-            let profile_root = self.profile_root.clone();
-            let profile_id = profile_id.to_string();
-            let wrapping_key_file = self.wrapping_key_file.clone();
-            let relay_endpoint = self.relay.endpoint().to_string();
-            let relay_credential_file = self.relay_credential_file.clone();
-            let adapter_environment: Vec<(&str, std::ffi::OsString)> = host
-                .map(|host| host.launch_environment().to_vec())
-                .unwrap_or_default();
-            let (transport, diagnostics_pipe) = TokioChildProcess::builder(
-                Command::new(env!("CARGO_BIN_EXE_KonclaveLocalDaemon")).configure(move |command| {
-                    command
-                        .env("KONCLAVE_PROFILE_ROOT", profile_root)
-                        .env("KONCLAVE_PROFILE_ID", profile_id)
-                        .env("KONCLAVE_WRAPPING_KEY_FILE", wrapping_key_file)
-                        .env("KONCLAVE_RELAY_ENDPOINT", relay_endpoint)
-                        .env("KONCLAVE_RELAY_CREDENTIAL_FILE", relay_credential_file)
-                        .env("KONCLAVE_MCP_ALLOW_WRITE", "true")
-                        .envs(adapter_environment);
-                }),
+            connect_daemon(
+                std::path::Path::new(env!("CARGO_BIN_EXE_KonclaveLocalDaemon")),
+                &self.profile_root,
+                profile_id,
+                &self.wrapping_key_file,
+                vec![
+                    (
+                        std::ffi::OsString::from("KONCLAVE_RELAY_ENDPOINT"),
+                        std::ffi::OsString::from(self.relay.endpoint()),
+                    ),
+                    (
+                        std::ffi::OsString::from("KONCLAVE_RELAY_CREDENTIAL_FILE"),
+                        self.relay_credential_file.clone().into_os_string(),
+                    ),
+                ],
+                host,
             )
+            .await
+        }
+    }
+
+    /// Starts one selected daemon binary and completes the MCP handshake with it.
+    pub async fn connect_daemon(
+        binary: &std::path::Path,
+        profile_root: &std::path::Path,
+        profile_id: &str,
+        wrapping_key_file: &std::path::Path,
+        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        host: Option<&AdapterHost>,
+    ) -> DaemonClient {
+        let binary = binary.to_path_buf();
+        let profile_root = profile_root.to_path_buf();
+        let profile_id = profile_id.to_string();
+        let wrapping_key_file = wrapping_key_file.to_path_buf();
+        let adapter_environment: Vec<(&str, std::ffi::OsString)> = host
+            .map(|host| host.launch_environment().to_vec())
+            .unwrap_or_default();
+        let (transport, diagnostics_pipe) =
+            TokioChildProcess::builder(Command::new(binary).configure(move |command| {
+                command
+                    .env_remove("KONCLAVE_RELAY_ENDPOINT")
+                    .env_remove("KONCLAVE_RELAY_CREDENTIAL_FILE")
+                    .env("KONCLAVE_PROFILE_ROOT", profile_root)
+                    .env("KONCLAVE_PROFILE_ID", profile_id)
+                    .env("KONCLAVE_WRAPPING_KEY_FILE", wrapping_key_file)
+                    .env("KONCLAVE_MCP_ALLOW_WRITE", "true")
+                    .envs(environment)
+                    .envs(adapter_environment);
+            }))
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-            let process_id = transport.id();
-            let diagnostics = Arc::new(Mutex::new(String::new()));
-            // Diagnostics are captured rather than inherited so a test can assert what
-            // the daemon is allowed to write, and are echoed so a failure still
-            // explains itself.
-            if let Some(pipe) = diagnostics_pipe {
-                let sink = Arc::clone(&diagnostics);
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(pipe).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        eprintln!("[daemon] {line}");
-                        if let Ok(mut sink) = sink.lock() {
-                            sink.push_str(&line);
-                            sink.push('\n');
-                        }
+        let process_id = transport.id();
+        let diagnostics = Arc::new(Mutex::new(String::new()));
+        // Diagnostics are captured rather than inherited so a test can assert what
+        // the daemon is allowed to write, and are echoed so a failure still
+        // explains itself.
+        if let Some(pipe) = diagnostics_pipe {
+            let sink = Arc::clone(&diagnostics);
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(pipe).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("[daemon] {line}");
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push_str(&line);
+                        sink.push('\n');
                     }
-                });
-            }
-            DaemonClient {
-                service: TestClient.serve(transport).await.unwrap(),
-                process_id,
-                diagnostics,
-            }
+                }
+            });
+        }
+        DaemonClient {
+            service: TestClient.serve(transport).await.unwrap(),
+            process_id,
+            diagnostics,
         }
     }
 
@@ -372,6 +520,11 @@ mod daemon_fixture {
                 .lock()
                 .map(|captured| captured.clone())
                 .unwrap_or_default()
+        }
+
+        pub fn process_id(&self) -> u32 {
+            self.process_id
+                .expect("a spawned daemon must expose a process identifier")
         }
 
         /// Invokes one tool and returns the raw result, errors included.

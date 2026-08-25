@@ -440,6 +440,75 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+  packaged-acceptance:
+    name: Packaged clean-install acceptance
+    needs:
+      - package-native
+      - package-container
+      - release-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Resolve pinned release toolchains
+        id: release-toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "rust=$($release.release.toolchains.rust)" >>$env:GITHUB_OUTPUT
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.release-toolchains.outputs.rust }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: packaged-acceptance
+          cache-on-failure: false
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.release-toolchains.outputs.node }}
+          npm-cache-scope: packaged-acceptance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Download Linux native candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: konclave-x86_64-unknown-linux-gnu-unsigned
+          path: target/packaged-acceptance
+      - name: Download Linux container candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: konclave-linux-amd64-container-unsigned
+          path: target/packaged-acceptance
+      - name: Exercise clean native and container installations
+        shell: bash
+        run: |
+          set -euo pipefail
+          release='distribution/release-artifacts.json'
+          client="$(
+            jq -er '.artifacts[] | select(.id == "konclave-client-linux-x64") | .fileName' "$release"
+          )"
+          relay="$(
+            jq -er '.artifacts[] | select(.id == "konclave-relay-linux-x64") | .fileName' "$release"
+          )"
+          container="$(
+            jq -er \
+              '.artifacts[] | select(.id == "konclave-community-relay-container-linux-amd64") | .fileName' \
+              "$release"
+          )"
+          image="$(
+            jq -er \
+              '.artifacts[] | select(.id == "konclave-community-relay-container-linux-amd64") | .image' \
+              "$release"
+          )"
+          bash ./scripts/packaging/Test-PackagedAcceptance.sh \
+            "target/packaged-acceptance/$client" \
+            "target/packaged-acceptance/$relay" \
+            "target/packaged-acceptance/$container" \
+            "$image"
+
   package-validation:
     name: Package validation
     if: always()
@@ -447,6 +516,7 @@ jobs:
       - package-native
       - package-container
       - release-integrity
+      - packaged-acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -456,6 +526,7 @@ jobs:
           NATIVE_RESULT: ${{ needs.package-native.result }}
           CONTAINER_RESULT: ${{ needs.package-container.result }}
           INTEGRITY_RESULT: ${{ needs.release-integrity.result }}
+          ACCEPTANCE_RESULT: ${{ needs.packaged-acceptance.result }}
         run: |
           set -eu
           if [ "$NATIVE_RESULT" != 'success' ]; then
@@ -470,4 +541,8 @@ jobs:
             echo "::error::Release integrity concluded with $INTEGRITY_RESULT."
             exit 1
           fi
-          echo 'Native, container, and release-integrity validation passed.'
+          if [ "$ACCEPTANCE_RESULT" != 'success' ]; then
+            echo "::error::Packaged acceptance concluded with $ACCEPTANCE_RESULT."
+            exit 1
+          fi
+          echo 'Native, container, integrity, and packaged acceptance passed.'

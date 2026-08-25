@@ -187,6 +187,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/distribution/acceptance.md",
+        "title": "Packaged clean-install acceptance",
+        "section": "Guides",
+        "order": 17,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/ux-design.md",
         "title": "UX and design resilience",
         "section": "Guides",

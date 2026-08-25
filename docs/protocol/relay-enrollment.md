@@ -30,6 +30,16 @@ environment variables, URLs, logs, or plugin configuration. Replacing or removin
 the verifier and restarting the relay rotates or disables enrollment. Existing
 data-plane principals remain independently active or revoked.
 
+The packaged CLI creates both bootstrap files without printing the credential:
+
+```shell
+konclave relay-bootstrap --relay-endpoint https://relay.example.com --access-document ./relay-access.json --external-source /run/secrets/konclave-enrollment
+```
+
+Omitting `--external-source` uses native operating-system custody and initializes the
+default shared profile root. Supplying an external source is the Unix headless path;
+a later `konclave init` validates and adopts it without stdin or secret copy/paste.
+
 ## Client installation source
 
 The daemon reads the non-secret `relay-installation.conf` file once from the shared

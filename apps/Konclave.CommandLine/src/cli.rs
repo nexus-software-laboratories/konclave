@@ -16,6 +16,8 @@ pub enum Command {
     Version,
     /// Configure protected relay enrollment for later session profiles
     Init(InitArgs),
+    /// Create a self-hosted relay access document and protected enrollment source
+    RelayBootstrap(RelayBootstrapArgs),
     /// Check installation, custody, profile, and relay health
     Doctor(DoctorArgs),
 }
@@ -29,6 +31,22 @@ pub struct InitArgs {
     #[arg(long)]
     pub profile_root: Option<PathBuf>,
     /// Absolute path for an endpoint-bound Unix headless credential record
+    #[arg(long)]
+    pub external_source: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct RelayBootstrapArgs {
+    /// Relay base URL; TLS is required outside loopback
+    #[arg(long)]
+    pub relay_endpoint: String,
+    /// Non-secret relay access document to create
+    #[arg(long)]
+    pub access_document: PathBuf,
+    /// Shared profile root for native custody; defaults to the platform data directory
+    #[arg(long)]
+    pub profile_root: Option<PathBuf>,
+    /// Owner-protected Unix enrollment source; omit to use native custody
     #[arg(long)]
     pub external_source: Option<PathBuf>,
 }

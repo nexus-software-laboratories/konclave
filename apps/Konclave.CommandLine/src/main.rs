@@ -2,6 +2,7 @@ mod cli;
 mod doctor;
 mod init;
 mod installation;
+mod relay_bootstrap;
 
 use std::process::ExitCode;
 
@@ -24,6 +25,7 @@ async fn run() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Version => print_version(),
         Command::Init(args) => init::run(args)?,
+        Command::RelayBootstrap(args) => relay_bootstrap::run(args)?,
         Command::Doctor(args) => doctor::run(args).await?,
     }
     Ok(())

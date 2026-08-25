@@ -1,7 +1,10 @@
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 use KonclaveClientLibrary::{
     default_profile_root, RelayEnrollmentCredential, RelayEnrollmentSourceConfig,
     RelayInstallationConfig, RELAY_INSTALLATION_CONFIG_FILE,
@@ -44,6 +47,25 @@ pub(crate) fn matches(left: &RelayInstallationConfig, right: &RelayInstallationC
     left.endpoint().as_str() == right.endpoint().as_str() && left.source() == right.source()
 }
 
+pub(crate) fn require_existing_match(
+    existing: &RelayInstallationConfig,
+    endpoint: &KonclaveClientLibrary::RelayEndpoint,
+    external_source: Option<&Path>,
+) -> anyhow::Result<()> {
+    if existing.endpoint().as_str() != endpoint.as_str() {
+        bail!("relay installation already targets another endpoint");
+    }
+    match (existing.source(), external_source) {
+        (RelayEnrollmentSourceConfig::ExternalFile { path }, Some(requested))
+            if path == requested =>
+        {
+            Ok(())
+        }
+        (RelayEnrollmentSourceConfig::Native { .. }, None) => Ok(()),
+        _ => bail!("relay installation already uses another protected source"),
+    }
+}
+
 pub(crate) fn load_credential(
     config: &RelayInstallationConfig,
 ) -> anyhow::Result<RelayEnrollmentCredential> {
@@ -64,6 +86,17 @@ pub(crate) fn load_credential(
         .context("validating native enrollment credential")
 }
 
+pub(crate) fn native_installation_id(
+    credential: &RelayEnrollmentCredential,
+    endpoint: &KonclaveClientLibrary::RelayEndpoint,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"konclave:relay-enrollment-installation:1\0");
+    digest.update(credential.authority_id().as_bytes());
+    digest.update(endpoint.as_str().as_bytes());
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
 pub(crate) fn write_exact(root: &Path, config: &RelayInstallationConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("creating profile root {}", root.display()))?;
@@ -76,31 +109,66 @@ pub(crate) fn write_exact(root: &Path, config: &RelayInstallationConfig) -> anyh
     let bytes = config
         .encode()
         .context("encoding relay installation configuration")?;
-    let mut temporary = tempfile::NamedTempFile::new_in(root)
-        .with_context(|| format!("creating temporary config in {}", root.display()))?;
+    write_exact_file(
+        &root.join(RELAY_INSTALLATION_CONFIG_FILE),
+        &bytes,
+        "relay installation configuration",
+    )
+}
+
+pub(crate) fn write_exact_file(
+    destination: &Path,
+    bytes: &[u8],
+    description: &'static str,
+) -> anyhow::Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{description} path has no parent"))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating {description} parent {}", parent.display()))?;
+    if existing_file_matches(destination, bytes)? {
+        return Ok(());
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating temporary {description} in {}", parent.display()))?;
     temporary
-        .write_all(&bytes)
-        .context("writing relay installation configuration")?;
+        .write_all(bytes)
+        .with_context(|| format!("writing {description}"))?;
     temporary
         .as_file()
         .sync_all()
-        .context("syncing relay installation configuration")?;
-    let destination = root.join(RELAY_INSTALLATION_CONFIG_FILE);
-    match temporary.persist_noclobber(&destination) {
+        .with_context(|| format!("syncing {description}"))?;
+    match temporary.persist_noclobber(destination) {
         Ok(_) => Ok(()),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = load(root)?
-                .ok_or_else(|| anyhow::anyhow!("relay installation configuration raced"))?;
-            if matches(&existing, config) {
+            if existing_file_matches(destination, bytes)? {
                 Ok(())
             } else {
-                bail!("relay installation configuration raced with different values")
+                bail!("{description} already exists with different bytes")
             }
         }
         Err(error) => {
             Err(error.error).with_context(|| format!("persisting {}", destination.display()))
         }
     }
+}
+
+fn existing_file_matches(path: &Path, expected: &[u8]) -> anyhow::Result<bool> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("opening {}", path.display())),
+    };
+    let maximum = expected
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("expected file length overflow"))?;
+    let mut actual = Vec::with_capacity(maximum);
+    std::io::Read::by_ref(&mut file)
+        .take(maximum as u64)
+        .read_to_end(&mut actual)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(actual == expected)
 }
 
 pub(crate) fn source_label(source: &RelayEnrollmentSourceConfig) -> &'static str {
@@ -137,5 +205,10 @@ mod tests {
         )
         .unwrap();
         assert!(write_exact(root.path(), &second).is_err());
+
+        let exact = root.path().join("exact.json");
+        write_exact_file(&exact, b"same", "test record").unwrap();
+        write_exact_file(&exact, b"same", "test record").unwrap();
+        assert!(write_exact_file(&exact, b"different", "test record").is_err());
     }
 }

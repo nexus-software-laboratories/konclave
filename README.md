@@ -59,6 +59,13 @@ konclave init --relay-endpoint https://relay.example.com
 konclave doctor
 ```
 
+Self-hosted operators can create the verifier-only relay access document and protected
+enrollment source without copying a raw credential:
+
+```shell
+konclave relay-bootstrap --relay-endpoint https://relay.example.com --access-document ./relay-access.json --external-source /run/secrets/konclave-enrollment
+```
+
 Native setup prompts without echo and stores an endpoint-bound credential in the
 operating system credential store. Unix headless setup can create an owner-owned,
 mode-`0600` external record from bounded stdin:

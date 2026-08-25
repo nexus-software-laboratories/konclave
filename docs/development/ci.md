@@ -65,6 +65,13 @@ itself as complete merely by omitting a checksum line. Negative tests mutate, re
 and add files before the final verifier is allowed to pass. The complete set is
 retained as one short-lived workflow artifact and is not a published release.
 
+`Packaged clean-install acceptance` then extracts the Linux client and relay archives
+twice, creates temporary trusted TLS, and drives the plugin-bundled daemon through the
+same MCP and authenticated adapter contracts used by Copilot. It repeats the same
+pairing, delivery, restart, cancellation, enrollment, and opacity assertions against
+the Docker-loaded relay candidate. The Docker path captures a baseline and removes
+only its exact labelled container and loaded release image.
+
 ## OCI validation
 
 Container validation builds one `linux/amd64` OCI archive for the Community

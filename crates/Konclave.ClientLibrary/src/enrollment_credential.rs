@@ -1,5 +1,6 @@
 use std::io::Read;
 
+use KonclaveCryptographicCore::fill_random;
 use KonclaveRelayAuthentication::RelayEnrollmentAuthorityId;
 use reqwest::header::HeaderValue;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -26,6 +27,18 @@ impl RelayEnrollmentCredential {
     #[must_use]
     pub const fn from_bytes(bytes: [u8; Self::LENGTH]) -> Self {
         Self(bytes)
+    }
+
+    /// Generates one high-entropy enrollment credential with the project random source.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cryptographic generation error when operating-system randomness is
+    /// unavailable.
+    pub fn generate() -> Result<Self, KonclaveClientError> {
+        let mut bytes = Zeroizing::new([0_u8; Self::LENGTH]);
+        fill_random(bytes.as_mut())?;
+        Ok(Self(*bytes))
     }
 
     /// Returns the non-secret verifier derived from this credential.
@@ -141,6 +154,13 @@ mod tests {
         );
         assert!(RelayEnrollmentCredential::from_base64("short").is_err());
         assert!(RelayEnrollmentCredential::from_base64(&format!("{encoded}=")).is_err());
+        assert!(
+            RelayEnrollmentCredential::generate()
+                .unwrap()
+                .authorization_header()
+                .unwrap()
+                .is_sensitive()
+        );
         let endpoint = RelayEndpoint::parse("https://relay.example.com/base").unwrap();
         let record = credential.encode_bound(&endpoint).unwrap();
         assert!(
