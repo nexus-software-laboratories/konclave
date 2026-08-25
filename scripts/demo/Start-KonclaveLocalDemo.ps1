@@ -183,6 +183,7 @@ else {
 }
 $copilotSettingsPath = Join-Path $copilotHome 'settings.json'
 $copilotExtensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
+$copilotExtensionStateRoot = Join-Path $copilotHome '.konclave-extension-state'
 $endpoint = "http://127.0.0.1:$Port"
 
 function Invoke-RequiredCommand {
@@ -451,35 +452,85 @@ function Install-CopilotExtension {
 
     $experimentalChanged = Enable-CopilotExperimentalExtensions
     $extensionParent = [IO.Path]::GetDirectoryName($copilotExtensionRoot)
+    New-Item -ItemType Directory -Path $extensionParent -Force | Out-Null
+    New-Item -ItemType Directory -Path $copilotExtensionStateRoot -Force | Out-Null
+    # A running prior extension can keep its renamed executable locked.
+    # Move legacy backups out of Copilot's discovery root before cleanup.
+    foreach ($stale in Get-ChildItem `
+        -LiteralPath $extensionParent `
+        -Directory `
+        -Filter '.konclave.*.previous') {
+        if (
+            $stale.Name -notmatch '^\.konclave\.[0-9a-f]{32}\.previous$' -or
+            $stale.Attributes -band [IO.FileAttributes]::ReparsePoint
+        ) {
+            continue
+        }
+        try {
+            Move-Item -LiteralPath $stale.FullName -Destination (
+                Join-Path $copilotExtensionStateRoot $stale.Name
+            )
+        }
+        catch {
+            Write-Warning "A prior Konclave extension backup could not be quarantined: $($stale.FullName)"
+        }
+    }
+    foreach ($stale in Get-ChildItem `
+        -LiteralPath $copilotExtensionStateRoot `
+        -Directory `
+        -Filter '.konclave.*.previous') {
+        if (
+            $stale.Name -notmatch '^\.konclave\.[0-9a-f]{32}\.previous$' -or
+            $stale.Attributes -band [IO.FileAttributes]::ReparsePoint
+        ) {
+            continue
+        }
+        try {
+            Remove-Item -LiteralPath $stale.FullName -Recurse -Force
+        }
+        catch {
+            Write-Warning "A quarantined Konclave extension backup remains in use: $($stale.FullName)"
+        }
+    }
+
+    if (Test-Path -LiteralPath $copilotExtensionRoot -PathType Container) {
+        $installedExtension = Join-Path $copilotExtensionRoot 'extension.mjs'
+        $installedDaemon = Join-Path $copilotExtensionRoot 'bin' 'KonclaveLocalDaemon.exe'
+        $installedConfig = Join-Path $copilotExtensionRoot 'konclave.runtime.json'
+        if (
+            (Test-Path -LiteralPath $installedExtension -PathType Leaf) -and
+            (Test-Path -LiteralPath $installedDaemon -PathType Leaf) -and
+            (Test-Path -LiteralPath $installedConfig -PathType Leaf)
+        ) {
+            try {
+                $runtimeConfig = Read-JsonObject -Path $installedConfig
+                if (
+                    [int64]$runtimeConfig['schemaVersion'] -eq 1 -and
+                    [string]$runtimeConfig['profileRoot'] -eq
+                        [IO.Path]::GetFullPath($profileRoot) -and
+                    (Get-FileHash -LiteralPath $installedExtension -Algorithm SHA256).Hash -eq
+                        (Get-FileHash -LiteralPath $extensionSource -Algorithm SHA256).Hash -and
+                    (Get-FileHash -LiteralPath $installedDaemon -Algorithm SHA256).Hash -eq
+                        (Get-FileHash -LiteralPath $extensionDaemonSource -Algorithm SHA256).Hash
+                ) {
+                    return
+                }
+            }
+            catch {
+                Write-Verbose 'Installed extension validation failed; replacing it from the verified package.'
+            }
+        }
+    }
+
     $stagingRoot = Join-Path (
-        $extensionParent
+        $copilotExtensionStateRoot
     ) ".konclave.$([Guid]::NewGuid().ToString('N')).tmp"
     $previousRoot = Join-Path (
-        $extensionParent
+        $copilotExtensionStateRoot
     ) ".konclave.$([Guid]::NewGuid().ToString('N')).previous"
     $previousMoved = $false
     $installed = $false
     try {
-        # A running prior extension can keep its renamed executable locked.
-        # Cleanup is retried on every setup but never invalidates a completed swap.
-        foreach ($stale in Get-ChildItem `
-            -LiteralPath $extensionParent `
-            -Directory `
-            -Filter '.konclave.*.previous' `
-            -ErrorAction SilentlyContinue) {
-            if (
-                $stale.Name -notmatch '^\.konclave\.[0-9a-f]{32}\.previous$' -or
-                $stale.Attributes -band [IO.FileAttributes]::ReparsePoint
-            ) {
-                continue
-            }
-            try {
-                Remove-Item -LiteralPath $stale.FullName -Recurse -Force
-            }
-            catch {
-                Write-Warning "A prior Konclave extension backup is still in use: $($stale.FullName)"
-            }
-        }
         New-Item -ItemType Directory -Path (Join-Path $stagingRoot 'bin') -Force |
             Out-Null
         Copy-Item -LiteralPath $extensionSource -Destination (
@@ -556,6 +607,16 @@ function Remove-CopilotExtension {
             throw 'Installed Konclave extension root is unsafe to remove.'
         }
         Remove-Item -LiteralPath $copilotExtensionRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $copilotExtensionStateRoot) {
+        $stateRoot = Get-Item -LiteralPath $copilotExtensionStateRoot
+        if (
+            -not $stateRoot.PSIsContainer -or
+            $stateRoot.Attributes -band [IO.FileAttributes]::ReparsePoint
+        ) {
+            throw 'Konclave extension state root is unsafe to remove.'
+        }
+        Remove-Item -LiteralPath $copilotExtensionStateRoot -Recurse -Force
     }
     Restore-CopilotExperimentalSetting
 }

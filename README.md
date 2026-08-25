@@ -90,6 +90,15 @@ pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1
 
 See [Local Copilot demo](docs/distribution/local-demo.md) for pairing and cleanup.
 
+Run the local-only two-session agent smoke after setup:
+
+```powershell
+pwsh -NoProfile -File .\scripts\demo\Invoke-KonclaveCopilotSmoke.ps1
+```
+
+The smoke uses the current developer's local Copilot authentication and is prohibited
+from running in CI.
+
 ## Architecture
 
 Konclave separates the trusted local agent boundary from relay transport:
@@ -117,6 +126,7 @@ apps/Konclave.AdminConsole/      # React administration console
 extensions/Konclave.HostExtension/ # Copilot CLI extension
 crates/                          # Shared Rust protocol, crypto, domain, and client crates
 scripts/                         # Repository validation orchestration
+tools/Konclave.CopilotSmoke/     # Local-only two-session SDK smoke runner
 ```
 <!-- genesis:structure:end -->
 

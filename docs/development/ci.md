@@ -78,6 +78,14 @@ pairing, delivery, restart, cancellation, enrollment, and opacity assertions aga
 the Docker-loaded relay candidate. The Docker path captures a baseline and removes
 only its exact labelled container and loaded release image.
 
+## Local Copilot inference boundary
+
+The two-session Copilot smoke is outside the CI execution contract. Workflows may
+compile, lint, and unit-test `tools/Konclave.CopilotSmoke`, but must never execute
+`Invoke-KonclaveCopilotSmoke.ps1`, start Copilot SDK sessions, or consume a
+developer's Copilot authentication. Both live entry points reject recognized CI
+environment markers before inference begins.
+
 ## OCI validation
 
 Container validation builds one `linux/amd64` OCI archive for the Community
