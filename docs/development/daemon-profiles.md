@@ -246,6 +246,102 @@ decrypt pre-membership history.
 Any failure stops startup. There is no replacement key, plaintext database, anonymous
 relay, or unlocked fallback.
 
+## Profile configuration inputs
+
+Every profile is opened from explicit inputs: a profile root, a validated profile
+identifier, a stated wrapping-key custody, an optional relay installation record, an
+optional first-run relay provisioning pair, and the local write authorization. Custody
+is `Native` or an external wrapping-key file, and an external-custody profile whose
+file is unavailable fails closed rather than falling back to native custody.
+
+Only the compatibility stdio host reads process environment. It parses its variables
+once, resolves the same explicit configuration the shared service resolves per
+profile, and passes it in. Nothing below that boundary reads process-global state, so
+one process can open unrelated profiles without any of them inheriting another
+profile's custody, relay, or authorization settings.
+
+## Profile runtime and hosts
+
+One initialized profile owns one supervised task set: relay watch supervision and
+pairing supervision, plus any attachments its host adds. The compatibility stdio host
+adds the MCP stdio server and the outbound adapter channel as attachments over that
+same task set, so the shared service and the compatibility host cannot drift apart.
+
+A component ending means the profile is stopping: the compatibility host exits when
+its stdio peer disconnects, and a permanent relay or pairing failure must not leave a
+half-supervised profile behind. Remaining components are asked to stop and drained
+within a bounded deadline, and every component failure is reported rather than only
+the first one. A session that launched no adapter is not a finished component; the
+profile keeps serving MCP and relay recovery.
+
+The task set is owned rather than detached. Coordinated shutdown drains it and reports
+its aggregated outcome; dropping a running host without that shutdown, including while
+a panic unwinds, signals and aborts the task set instead of leaving supervised tasks
+and an exclusive profile lock behind with no owner.
+
+## Shared-service profile registry
+
+ADR 0008 hosts many logical profiles in one per-user service process. The registry
+keyed by validated profile identifier owns that lifecycle:
+
+- **Lazy open.** A profile is opened on its first client and not before.
+- **Coalescing.** Concurrent requests for one profile wait on one open, so a profile
+  is never locked, recovered, or hosted twice inside the process.
+- **Isolation.** Each hosted profile keeps its own lock, `profile.sqlite`,
+  `mls.sqlite`, sealer, device identity, relay principal, journals, and tasks.
+  Consolidation is process-level only.
+- **Bounds.** The number of profiles the registry holds resources for — hosted,
+  opening, or closing — is capped and refuses further profiles when reached.
+  Concurrent opens are admitted through a bounded permit set, so a burst of first
+  connections queues instead of starting every lock, custody load, database open, and
+  journal recovery at once. Each profile also bounds its attached clients.
+- **Failure isolation.** A failed task set marks that profile failed and is reported
+  to its clients and to the supervising loop. Unrelated profiles keep running. A
+  failed profile is never silently replaced while a client still holds it; once its
+  clients detach it is closed, its lock is released, and a later request reopens it.
+- **Retention and eviction.** A profile is retained while any client holds it. It is
+  evicted only when no client is attached, no supervised pairing or relay recovery
+  operation is running, no adapter claim is outstanding, and the idle window has
+  elapsed. Pairing sweeps and received relay pages are admitted through the profile's
+  operation gate and stay admitted for their whole duration. Eviction closes that gate
+  and publishes the closing slot in one transition under the registry lock, so it
+  either wins outright — after which no operation is admitted again — or loses to a
+  running operation and the profile is retained. Eviction then stops the task set,
+  closes both databases, and releases the lock. It removes no durable state, and
+  reopening returns the same device identity.
+- **Operation admission.** An operation that is refused because the profile is closing
+  fails closed and leaves its durable state untouched: an unprocessed relay page is
+  left unacknowledged for exact redelivery, and a refused pairing sweep leaves every
+  record for the next open. A refusal is a coordinated stop, not a failure, however it
+  surfaces. Admission is taken only by top-level operations, so an admitted operation
+  never waits on the gate again from inside itself. Closing a relay watch session on
+  one of those coordinated exits is best effort: a transport error there is a
+  diagnostic, not a profile failure, while processing failures still propagate.
+- **Revocation.** A lease holds no service handle of its own. Closing a profile —
+  through shutdown, eviction, or a failed runtime — denies further operations and
+  revokes lease access as one transition before anything is awaited, so a client that
+  still holds its lease object cannot start work while the close drains.
+- **Draining.** A close waits, within a bounded deadline, for operations that were
+  already admitted before it dropped the profile's stores. Exceeding that deadline is
+  reported as an explicit failure rather than closing underneath a running operation.
+- **Configuration.** Zero active-profile, open-admission, or client bounds are
+  rejected when the supervisor is built. A zero bound is not a stricter policy: it
+  refuses or stalls every request.
+- **Shutdown.** Shutdown refuses new attaches, releases waiting opens as a stopping
+  service rather than a failed open, waits for in-flight opens so none of them leaks a
+  lock, closes every hosted runtime exactly once, waits for any close another caller
+  already owns, and aggregates every failure it observed — including a concurrent
+  close that failed or was abandoned. Close and eviction counts report only profiles
+  that actually released their runtime and lock.
+- **Duplicate ownership.** A profile whose lock is held by another owner — a second
+  service, or a stuck operation that has not released its handles — is refused with a
+  stable locked outcome rather than an opaque open failure, and the refusal discloses
+  no path or root.
+- **Diagnostics.** Registry events log a bounded profile identifier and a stable
+  outcome code. Local paths, endpoints, and error chains stay in returned errors,
+  which the failed-open variant retains as an internal cause rather than in its
+  message or its `Debug` output.
+
 ## Conversation lifecycle
 
 Conversation creation generates the conversation and routing identifiers through the

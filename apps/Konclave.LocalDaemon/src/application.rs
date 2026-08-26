@@ -413,6 +413,18 @@ where
         limit: u32,
         now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
+        // Recovery is one of the operations ADR 0008 retains a profile for. Admission
+        // is refused once the profile is closing, so this never starts work against
+        // stores a closer is about to drop. The durable cursor is unchanged, so the
+        // same replay is exact when the profile is opened again.
+        //
+        // This is a top-level operation: no callee takes a second admission, so an
+        // admitted replay never waits on the gate again.
+        let _admitted = self
+            .conversations
+            .activity()
+            .try_begin()
+            .map_err(|_| ApplicationServiceError::ProfileClosing)?;
         let (request, routing_id, after_cursor) =
             self.replay_request(conversation_id, limit).await?;
         let page = self.transport.replay(request).await?;
@@ -500,12 +512,27 @@ where
             let page = tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        watch_session.close().await?;
-                        return Ok(WatchConnectionExit::Shutdown);
+                        return Ok(clean_watch_exit(
+                            watch_session.close().await,
+                            WatchConnectionExit::Shutdown,
+                        ));
                     }
                     continue;
                 }
                 page = watch_session.next_page() => page?,
+            };
+            // Waiting on the relay is idle time; holding a page is not. Admission is
+            // taken before anything reads the page, and a closing profile refuses it:
+            // the page is left unacknowledged and the durable cursor unchanged, so the
+            // relay delivers it again after the profile reopens.
+            //
+            // This is a top-level operation: nothing reached from `process_page` takes
+            // a second admission, so an admitted page never waits on the gate again.
+            let Ok(admitted) = self.conversations.activity().try_begin() else {
+                return Ok(clean_watch_exit(
+                    watch_session.close().await,
+                    WatchConnectionExit::Shutdown,
+                ));
             };
             observe_page(&page);
             let next_cursor = page.next_cursor();
@@ -518,9 +545,13 @@ where
             )
             .await?;
             after_cursor = next_cursor;
-            if !self.is_local_member(conversation_id).await? {
-                watch_session.close().await?;
-                return Ok(WatchConnectionExit::LocalMemberRemoved);
+            let still_member = self.is_local_member(conversation_id).await?;
+            drop(admitted);
+            if !still_member {
+                return Ok(clean_watch_exit(
+                    watch_session.close().await,
+                    WatchConnectionExit::LocalMemberRemoved,
+                ));
             }
         }
     }
@@ -893,6 +924,33 @@ pub(crate) enum ApplicationServiceError {
     SystemTimeUnavailable,
     #[error("watchable conversation capacity is exceeded")]
     WatchCapacityExceeded,
+    #[error("the profile is closing and admits no further operations")]
+    ProfileClosing,
+}
+
+/// Reports a clean watch exit regardless of how the close frame fared.
+///
+/// Shutdown, refused admission, and local membership removal all finish the session.
+/// Nothing after these decisions depends on the relay seeing the close frame.
+/// Returning a transport failure here would turn a valid terminal state into a
+/// failed task set. Failures on the processing path are unaffected and still
+/// propagate.
+fn clean_watch_exit(
+    closed: Result<(), KonclaveClientError>,
+    exit: WatchConnectionExit,
+) -> WatchConnectionExit {
+    if let Err(error) = closed {
+        let outcome = match exit {
+            WatchConnectionExit::Shutdown => "shutdown",
+            WatchConnectionExit::LocalMemberRemoved => "local_member_removed",
+        };
+        tracing::debug!(
+            error_code = error.code(),
+            outcome,
+            "relay watch close failed after a clean exit"
+        );
+    }
+    exit
 }
 
 fn current_unix_seconds() -> Result<u64, ApplicationServiceError> {
@@ -907,7 +965,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use KonclaveClientLibrary::{
         RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
@@ -1710,9 +1768,15 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let watch_service = bob_service.clone();
         let mut empty_page_tx = Some(empty_page_tx);
+        // A page in hand is an in-flight profile operation: the shared service must
+        // not evict the profile between arrival and durable processing.
+        let watched_activity = bob_service.conversations.activity().clone();
+        let observed_in_flight = Arc::new(AtomicUsize::new(0));
+        let recorded_in_flight = Arc::clone(&observed_in_flight);
         let watcher = tokio::spawn(async move {
             watch_service
                 .watch_connection_until_observed(conversation_id, shutdown_rx, move |page| {
+                    recorded_in_flight.fetch_max(watched_activity.in_flight(), Ordering::SeqCst);
                     if page.envelopes().is_empty()
                         && page.next_cursor() == 0
                         && let Some(sender) = empty_page_tx.take()
@@ -1739,6 +1803,10 @@ mod tests {
         let history = bob_service.read(conversation_id, 0, 10).await.unwrap();
         assert_eq!(history.messages.len(), 1);
         assert_eq!(history.messages[0].sender, alice_device_id);
+        assert!(
+            observed_in_flight.load(Ordering::SeqCst) >= 1,
+            "a received page must mark the profile busy while it is processed"
+        );
         assert!(matches!(
             history.messages[0].message.content(),
             ApplicationContent::Text(body) if body == "arrived after empty watch page"
@@ -1752,7 +1820,56 @@ mod tests {
                 .unwrap(),
             WatchConnectionExit::Shutdown
         );
+        // Asserted after the worker has stopped: while it runs, the count reflects
+        // whichever page it is holding rather than a settled value.
+        assert_eq!(
+            bob_service.conversations.activity().in_flight(),
+            0,
+            "a stopped watch worker must leave no operation admitted"
+        );
         relay.stop().await;
+    }
+
+    #[test]
+    fn a_failed_close_does_not_change_a_clean_watch_exit() {
+        // A relay that never sees the close frame changes nothing durable: the page
+        // was not processed, the cursor did not move, and the profile is stopping.
+        assert_eq!(
+            clean_watch_exit(
+                Err(KonclaveClientError::TransportUnavailable),
+                WatchConnectionExit::Shutdown,
+            ),
+            WatchConnectionExit::Shutdown
+        );
+        assert_eq!(
+            clean_watch_exit(
+                Err(KonclaveClientError::Timeout),
+                WatchConnectionExit::LocalMemberRemoved,
+            ),
+            WatchConnectionExit::LocalMemberRemoved
+        );
+        assert_eq!(
+            clean_watch_exit(Ok(()), WatchConnectionExit::Shutdown),
+            WatchConnectionExit::Shutdown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closing_profile_refuses_replay_without_touching_durable_state() {
+        let (_root, alice, _bob, conversation_id, _device) = paired_coordinators();
+        let service = ApplicationService::new(alice.clone(), RecordingRelay::new(false));
+        alice.activity().begin_closing();
+
+        assert!(matches!(
+            service
+                .replay_once(conversation_id, 100, 1_800_000_000)
+                .await,
+            Err(ApplicationServiceError::ProfileClosing)
+        ));
+        assert!(
+            service.transport.replay_requests.lock().unwrap().is_empty(),
+            "a refused replay must not reach the relay"
+        );
     }
 
     #[tokio::test]

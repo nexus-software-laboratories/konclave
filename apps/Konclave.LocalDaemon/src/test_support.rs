@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use KonclaveClientLibrary::RelayEnrollmentAuthorityId;
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
@@ -9,6 +11,87 @@ use serde_json::json;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
+
+use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
+use crate::runtime::{ProfileConfig, ProfileCustody, ProfileSource, ServiceProfileSettings};
+
+/// An isolated profile root whose profiles use an owner-supplied wrapping key.
+///
+/// Tests never touch native platform custody: it is machine state that would leak
+/// between runs and is unavailable on a headless runner.
+pub(crate) struct TestProfileRoot {
+    directory: tempfile::TempDir,
+    root: PathBuf,
+    key_path: PathBuf,
+}
+
+impl TestProfileRoot {
+    pub(crate) fn new() -> Self {
+        Self::with_key([5_u8; 32])
+    }
+
+    pub(crate) fn with_key(key: [u8; 32]) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("profiles");
+        let key_path = directory.path().join("wrapping.key");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&key_path, key).unwrap();
+        Self {
+            directory,
+            root,
+            key_path,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn key_path(&self) -> &Path {
+        &self.key_path
+    }
+
+    pub(crate) fn settings(&self) -> ServiceProfileSettings {
+        ServiceProfileSettings::new(
+            self.root.clone(),
+            ProfileCustody::ExternalFile(self.key_path.clone()),
+            false,
+        )
+    }
+
+    pub(crate) fn config(&self, profile: &str) -> ProfileConfig {
+        self.settings()
+            .configure(&ProfileId::parse(profile).unwrap())
+            .unwrap()
+    }
+
+    /// Reports whether one profile's exclusive lock is currently held.
+    pub(crate) fn is_locked(&self, profile: &str) -> bool {
+        matches!(
+            LockedProfile::acquire(&self.root, ProfileId::parse(profile).unwrap()),
+            Err(ProfileStoreError::ProfileLocked)
+        )
+    }
+
+    /// Waits for one profile's lock to be released, within a bounded deadline.
+    ///
+    /// Aborting a task is asynchronous: the runtime drops its future after the abort
+    /// is requested. A deadline is therefore the only way to assert the release, and
+    /// it yields rather than sleeps so a correct implementation converges at once.
+    pub(crate) async fn wait_until_unlocked(&self, profile: &str) {
+        let released = timeout(Duration::from_secs(5), async {
+            while self.is_locked(profile) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(released.is_ok(), "{profile} lock was never released");
+    }
+}
 
 pub(crate) struct TestRelay {
     _directory: tempfile::TempDir,

@@ -21,14 +21,14 @@ use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
 use crate::pairing_service::PairingService;
 use crate::persistence::{LockedProfile, ProfileId, ProfileStore, ProfileStoreError};
-use crate::profile_runtime::ProfileRuntime;
+use crate::profile_runtime::{ProfileHostOptions, ProfileRuntime};
 
 pub(crate) async fn run_until<F>(shutdown: F) -> anyhow::Result<()>
 where
     F: Future<Output = ()>,
 {
     let _telemetry_guard = crate::observability::init()?;
-    let config = ProfileConfig::from_environment()?;
+    let config = legacy_profile_config_from_environment()?;
     let adapter_config = read_legacy_adapter_config();
     let profile = initialize_profile(config).await?;
     crate::profile_runtime::run_legacy_until(profile, adapter_config, shutdown).await
@@ -44,13 +44,88 @@ fn read_legacy_adapter_config() -> Option<AdapterLaunchConfig> {
     }
 }
 
-struct ProfileConfig {
+/// Every explicit input required to open exactly one profile.
+///
+/// Nothing here is read from the process environment. The compatibility host parses
+/// the environment once and hands the result over, and the shared service resolves
+/// the same values per profile, so one process can open many profiles without any of
+/// them inheriting another profile's custody, relay, or authorization settings.
+pub(crate) struct ProfileConfig {
     root: PathBuf,
     profile_id: ProfileId,
-    wrapping_key_file: Option<PathBuf>,
+    custody: ProfileCustody,
     relay_provisioning: Option<RelayProvisioning>,
     relay_installation: Option<RelayInstallationConfig>,
     allow_mcp_write: bool,
+}
+
+/// Where one profile's wrapping key is loaded from.
+///
+/// Custody is stated per profile rather than inferred. ADR 0002 and ADR 0008 both
+/// require an external-custody profile to fail closed when its source is unavailable;
+/// an implicit fallback to native custody would silently create a second, weaker key
+/// custody for an already-provisioned profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProfileCustody {
+    /// Native platform custody keyed by the profile identifier.
+    Native,
+    /// An owner-protected external wrapping-key file.
+    ExternalFile(PathBuf),
+}
+
+/// Resolves the explicit inputs one host needs to open and supervise a profile.
+///
+/// The shared service asks for these values per profile instead of reading process
+/// environment, which is what allows one process to host unrelated profiles.
+pub(crate) trait ProfileSource: Send + Sync + 'static {
+    /// Returns the explicit configuration for one profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the profile cannot be configured, which fails the open
+    /// rather than substituting defaults.
+    fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig>;
+
+    /// Returns the extra supervised work this host attaches to one profile.
+    fn host_options(&self, _profile: &ProfileId) -> ProfileHostOptions {
+        ProfileHostOptions::default()
+    }
+}
+
+/// Service-wide settings that resolve into explicit per-profile inputs.
+pub(crate) struct ServiceProfileSettings {
+    root: PathBuf,
+    custody: ProfileCustody,
+    allow_mcp_write: bool,
+}
+
+impl ServiceProfileSettings {
+    /// Records the profile root, custody policy, and local write authorization.
+    pub(crate) fn new(root: PathBuf, custody: ProfileCustody, allow_mcp_write: bool) -> Self {
+        Self {
+            root,
+            custody,
+            allow_mcp_write,
+        }
+    }
+}
+
+impl ProfileSource for ServiceProfileSettings {
+    fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig> {
+        // The installation record is re-read per profile because enrollment is a
+        // per-profile operation whose source may be added, rotated, or withdrawn
+        // while the service is already hosting other profiles.
+        let relay_installation = read_relay_installation(&self.root)
+            .context("reading the relay installation for the requested profile")?;
+        Ok(ProfileConfig {
+            root: self.root.clone(),
+            profile_id: profile.clone(),
+            custody: self.custody.clone(),
+            relay_provisioning: None,
+            relay_installation,
+            allow_mcp_write: self.allow_mcp_write,
+        })
+    }
 }
 
 struct RelayProvisioning {
@@ -74,38 +149,6 @@ struct EnrollmentPlan {
 }
 
 impl ProfileConfig {
-    fn from_environment() -> anyhow::Result<Self> {
-        let profile_id = ProfileId::parse(
-            std::env::var("KONCLAVE_PROFILE_ID").unwrap_or_else(|_| "default".to_string()),
-        )
-        .context("validating KONCLAVE_PROFILE_ID")?;
-        let root = match std::env::var_os("KONCLAVE_PROFILE_ROOT") {
-            Some(root) if !root.is_empty() => PathBuf::from(root),
-            Some(_) => bail!("KONCLAVE_PROFILE_ROOT cannot be empty"),
-            None => default_profile_root()?,
-        };
-        let wrapping_key_file = match std::env::var_os("KONCLAVE_WRAPPING_KEY_FILE") {
-            Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
-            Some(_) => bail!("KONCLAVE_WRAPPING_KEY_FILE cannot be empty"),
-            None => None,
-        };
-        let allow_mcp_write =
-            parse_mcp_allow_write(std::env::var_os("KONCLAVE_MCP_ALLOW_WRITE").as_deref())?;
-        let relay_installation = read_relay_installation(&root)?;
-        let relay_provisioning = Self::parse_relay_provisioning(
-            std::env::var_os("KONCLAVE_RELAY_ENDPOINT").as_deref(),
-            std::env::var_os("KONCLAVE_RELAY_CREDENTIAL_FILE").as_deref(),
-        )?;
-        Ok(Self {
-            root,
-            profile_id,
-            wrapping_key_file,
-            relay_provisioning,
-            relay_installation,
-            allow_mcp_write,
-        })
-    }
-
     fn parse_relay_provisioning(
         endpoint: Option<&std::ffi::OsStr>,
         credential_file: Option<&std::ffi::OsStr>,
@@ -129,6 +172,42 @@ impl ProfileConfig {
             ),
         }
     }
+}
+
+/// Reads the one profile the compatibility stdio host owns from its environment.
+///
+/// Only this host reads process environment. It produces the same explicit
+/// [`ProfileConfig`] the shared service resolves per profile, so the two hosts open
+/// profiles through one code path.
+///
+/// # Errors
+///
+/// Returns a validation error for any malformed or partially supplied variable.
+fn legacy_profile_config_from_environment() -> anyhow::Result<ProfileConfig> {
+    let profile_id = ProfileId::parse(
+        std::env::var("KONCLAVE_PROFILE_ID").unwrap_or_else(|_| "default".to_string()),
+    )
+    .context("validating KONCLAVE_PROFILE_ID")?;
+    let root = match std::env::var_os("KONCLAVE_PROFILE_ROOT") {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        Some(_) => bail!("KONCLAVE_PROFILE_ROOT cannot be empty"),
+        None => default_profile_root()?,
+    };
+    let custody = match std::env::var_os("KONCLAVE_WRAPPING_KEY_FILE") {
+        Some(path) if !path.is_empty() => ProfileCustody::ExternalFile(PathBuf::from(path)),
+        Some(_) => bail!("KONCLAVE_WRAPPING_KEY_FILE cannot be empty"),
+        None => ProfileCustody::Native,
+    };
+    let allow_mcp_write =
+        parse_mcp_allow_write(std::env::var_os("KONCLAVE_MCP_ALLOW_WRITE").as_deref())?;
+    let mut config = ServiceProfileSettings::new(root, custody, allow_mcp_write)
+        .configure(&profile_id)
+        .context("resolving the compatibility host profile")?;
+    config.relay_provisioning = ProfileConfig::parse_relay_provisioning(
+        std::env::var_os("KONCLAVE_RELAY_ENDPOINT").as_deref(),
+        std::env::var_os("KONCLAVE_RELAY_CREDENTIAL_FILE").as_deref(),
+    )?;
+    Ok(config)
 }
 
 fn read_relay_installation(
@@ -158,7 +237,13 @@ fn parse_mcp_allow_write(value: Option<&std::ffi::OsStr>) -> anyhow::Result<bool
     }
 }
 
-async fn initialize_profile(config: ProfileConfig) -> anyhow::Result<ProfileRuntime> {
+/// Opens, enrolls if required, and finishes exactly one profile.
+///
+/// # Errors
+///
+/// Returns a configuration, custody, lock, persistence, enrollment, or recovery
+/// failure. Every failure leaves the profile closed and its lock released.
+pub(crate) async fn initialize_profile(config: ProfileConfig) -> anyhow::Result<ProfileRuntime> {
     let mut opened = tokio::task::spawn_blocking(move || open_profile(config))
         .await
         .context("joining daemon profile open")??;
@@ -346,15 +431,15 @@ fn read_relay_credential(path: &std::path::Path) -> anyhow::Result<RelayAccessCr
 }
 
 fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
-    match &config.wrapping_key_file {
-        Some(path) => {
+    match &config.custody {
+        ProfileCustody::ExternalFile(path) => {
             let file = std::fs::File::open(path)
                 .with_context(|| format!("opening wrapping key file {}", path.display()))?;
             let provider =
                 ExternalWrappingKeyProvider::from_reader(file).context("reading external key")?;
             SecretSealer::from_provider(provider).context("loading external wrapping key")
         }
-        None => {
+        ProfileCustody::Native => {
             let provider = NativeWrappingKeyProvider::new(config.profile_id.as_str())
                 .context("configuring native wrapping key")?;
             SecretSealer::from_provider(provider).context("loading native wrapping key")
@@ -365,7 +450,7 @@ fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TestRelay;
+    use crate::test_support::{TestProfileRoot, TestRelay};
 
     #[test]
     fn mcp_write_policy_is_explicit_and_fail_closed() {
@@ -377,45 +462,37 @@ mod tests {
 
     #[tokio::test]
     async fn external_key_profile_initializes_and_reopens() {
-        let directory = tempfile::tempdir().unwrap();
-        let key_path = directory.path().join("wrapping.key");
-        let root = directory.path().join("profiles");
-        std::fs::write(&key_path, [5_u8; 32]).unwrap();
-        let config = || ProfileConfig {
-            root: root.clone(),
-            profile_id: ProfileId::parse("runtime-test").unwrap(),
-            wrapping_key_file: Some(key_path.clone()),
-            relay_provisioning: None,
-            relay_installation: None,
-            allow_mcp_write: false,
-        };
-        let first = initialize_profile(config()).await.unwrap();
+        let root = TestProfileRoot::new();
+        let first = initialize_profile(root.config("runtime-test"))
+            .await
+            .unwrap();
         let first_device = first.conversations.device_id().unwrap();
-        assert!(root.join("runtime-test").join("profile.sqlite").is_file());
-        assert!(root.join("runtime-test").join("mls.sqlite").is_file());
+        assert!(
+            root.root()
+                .join("runtime-test")
+                .join("profile.sqlite")
+                .is_file()
+        );
+        assert!(
+            root.root()
+                .join("runtime-test")
+                .join("mls.sqlite")
+                .is_file()
+        );
         drop(first);
-        let reopened = initialize_profile(config()).await.unwrap();
+        let reopened = initialize_profile(root.config("runtime-test"))
+            .await
+            .unwrap();
         assert_eq!(reopened.conversations.device_id().unwrap(), first_device);
     }
 
     #[tokio::test]
     async fn distinct_profiles_open_concurrently_in_one_process() {
-        let directory = tempfile::tempdir().unwrap();
-        let key_path = directory.path().join("wrapping.key");
-        let root = directory.path().join("profiles");
-        std::fs::write(&key_path, [5_u8; 32]).unwrap();
-        let config = |profile: &str| ProfileConfig {
-            root: root.clone(),
-            profile_id: ProfileId::parse(profile).unwrap(),
-            wrapping_key_file: Some(key_path.clone()),
-            relay_provisioning: None,
-            relay_installation: None,
-            allow_mcp_write: false,
-        };
+        let root = TestProfileRoot::new();
 
         let (first, second) = tokio::join!(
-            initialize_profile(config("concurrent-a")),
-            initialize_profile(config("concurrent-b"))
+            initialize_profile(root.config("concurrent-a")),
+            initialize_profile(root.config("concurrent-b"))
         );
         let first = first.unwrap();
         let second = second.unwrap();
@@ -426,8 +503,8 @@ mod tests {
             first.conversations.device_id().unwrap(),
             second.conversations.device_id().unwrap()
         );
-        assert!(LockedProfile::acquire(&root, ProfileId::parse("concurrent-a").unwrap()).is_err());
-        assert!(LockedProfile::acquire(&root, ProfileId::parse("concurrent-b").unwrap()).is_err());
+        assert!(root.is_locked("concurrent-a"));
+        assert!(root.is_locked("concurrent-b"));
     }
 
     #[test]
@@ -463,20 +540,17 @@ mod tests {
 
     #[tokio::test]
     async fn relay_provisioning_is_first_run_only_and_endpoint_bound() {
-        let directory = tempfile::tempdir().unwrap();
-        let key_path = directory.path().join("wrapping.key");
-        let credential_path = directory.path().join("relay.credential");
-        let root = directory.path().join("profiles");
-        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        let root = TestProfileRoot::new();
+        let credential_path = root.path().join("relay.credential");
         std::fs::write(
             &credential_path,
             "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\n",
         )
         .unwrap();
         let config = |endpoint: &str| ProfileConfig {
-            root: root.clone(),
+            root: root.root().to_path_buf(),
             profile_id: ProfileId::parse("relay-provisioning").unwrap(),
-            wrapping_key_file: Some(key_path.clone()),
+            custody: ProfileCustody::ExternalFile(root.key_path().to_path_buf()),
             relay_provisioning: Some(RelayProvisioning {
                 endpoint: RelayEndpoint::parse(endpoint).unwrap(),
                 credential_file: credential_path.clone(),
@@ -623,13 +697,12 @@ mod tests {
         key_path: &std::path::Path,
         profile: &str,
     ) -> ProfileConfig {
-        ProfileConfig {
-            root: root.to_path_buf(),
-            profile_id: ProfileId::parse(profile).unwrap(),
-            wrapping_key_file: Some(key_path.to_path_buf()),
-            relay_provisioning: None,
-            relay_installation: read_relay_installation(root).unwrap(),
-            allow_mcp_write: false,
-        }
+        ServiceProfileSettings::new(
+            root.to_path_buf(),
+            ProfileCustody::ExternalFile(key_path.to_path_buf()),
+            false,
+        )
+        .configure(&ProfileId::parse(profile).unwrap())
+        .unwrap()
     }
 }
