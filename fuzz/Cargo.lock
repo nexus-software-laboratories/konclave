@@ -73,11 +73,22 @@ dependencies = [
 name = "KonclaveSecretStorage"
 version = "0.1.0"
 dependencies = [
+ "KonclaveWindowsSecurity",
  "aws-lc-rs",
  "mls-rs-core",
  "rusqlite",
+ "rustix",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "KonclaveWindowsSecurity"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -320,8 +320,8 @@ if [ "$native_profiles" -ne 2 ] || [ "$container_profiles" -ne 2 ]; then
 fi
 
 rm -rf -- "$acceptance_root/client-a" "$acceptance_root/client-b" "$acceptance_root/relay-install"
-if [ ! -f "$native_state/profiles/alice/profile.sqlite" ] ||
-    [ ! -f "$container_state/profiles/bob/profile.sqlite" ]; then
+if [ ! -f "$native_state/profiles/session-packaged-a/profile.sqlite" ] ||
+    [ ! -f "$container_state/profiles/session-packaged-b/profile.sqlite" ]; then
     echo '::error::Removing installed artifacts also removed durable profile state.' >&2
     exit 1
 fi

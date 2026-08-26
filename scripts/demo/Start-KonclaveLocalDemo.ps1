@@ -492,7 +492,8 @@ function Test-ProcessUsesExecutable {
     )
 
     $expected = [IO.Path]::GetFullPath($ExecutablePath)
-    foreach ($process in Get-CimInstance Win32_Process) {
+    $name = [IO.Path]::GetFileName($expected).Replace("'", "''")
+    foreach ($process in Get-CimInstance Win32_Process -Filter "Name = '$name'") {
         if (
             -not [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -and
             [IO.Path]::GetFullPath([string]$process.ExecutablePath).Equals(

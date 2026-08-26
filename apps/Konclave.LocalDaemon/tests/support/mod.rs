@@ -425,18 +425,20 @@ mod daemon_fixture {
     impl DaemonFixture {
         pub async fn start(service: &str) -> Self {
             let directory = tempfile::tempdir().unwrap();
-            let profile_root = directory.path().join("profiles");
-            let wrapping_key_file = directory.path().join("wrapping.key");
-            let relay_credential_file = directory.path().join("relay.credential");
+            let state_root = directory.path().join("private");
+            KonclaveSecretStorage::ensure_owner_protected_directory(&state_root).unwrap();
+            let profile_root = state_root.join("profiles");
+            let wrapping_key_file = state_root.join("wrapping.key");
+            let relay_credential_file = state_root.join("relay.credential");
             let token = [11_u8; RelayPrincipalId::LENGTH];
             KonclaveSecretStorage::create_or_verify_owner_protected_file(
                 &wrapping_key_file,
                 &[3_u8; 32],
             )
             .unwrap();
-            std::fs::write(
+            KonclaveSecretStorage::create_or_verify_owner_protected_file(
                 &relay_credential_file,
-                format!("{}\n", URL_SAFE_NO_PAD.encode(token)),
+                format!("{}\n", URL_SAFE_NO_PAD.encode(token)).as_bytes(),
             )
             .unwrap();
             let relay = TestRelay::start(token, service).await;
