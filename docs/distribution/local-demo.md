@@ -44,6 +44,11 @@ The first run:
 10. runs `doctor` through the live owner-authenticated named pipe; and
 11. records the exact relay and service process identities for safe shutdown.
 
+When upgrading from the per-session daemon build, setup replaces the extension entry
+point in place so fresh sessions use the thin client. If an existing session still
+holds the old executable open, setup defers deletion of only that legacy `bin`
+directory and retries exact removal on later runs after the session exits.
+
 The unsigned provenance provides digest consistency and binds the package to the
 checked-out source revision. It does not establish publisher authenticity or replace
 the future signing and attestation work.

@@ -203,9 +203,15 @@ function Invoke-RequiredCommand {
         [string[]]$Arguments
     )
 
-    $output = & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Command failed with exit code $LASTEXITCODE."
+    $output = & $Command @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $failures = @($output | Where-Object { "$_".StartsWith('FAIL ') })
+        $diagnostics = @($failures + @($output | Select-Object -Last 20) | Select-Object -Unique)
+        throw (
+            "$Command failed with exit code $exitCode.$([Environment]::NewLine)" +
+            ($diagnostics -join [Environment]::NewLine)
+        )
     }
     return $output
 }
@@ -479,13 +485,124 @@ function Restore-CopilotExperimentalSetting {
     Remove-Item -LiteralPath $copilotExperimentalBackupPath -Force
 }
 
+function Test-ProcessUsesExecutable {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ExecutablePath
+    )
+
+    $expected = [IO.Path]::GetFullPath($ExecutablePath)
+    foreach ($process in Get-CimInstance Win32_Process) {
+        if (
+            -not [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -and
+            [IO.Path]::GetFullPath([string]$process.ExecutablePath).Equals(
+                $expected,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-OwnerOnlyDirectoryAcl {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.DirectorySecurity]$Acl,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$Identity
+    )
+
+    $rules = @($Acl.Access)
+    return (
+        $Acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value -ceq $Identity.Value -and
+        $Acl.AreAccessRulesProtected -and
+        $rules.Count -eq 1 -and
+        $rules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $rules[0].FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+        -not $rules[0].IsInherited -and
+        $rules[0].InheritanceFlags -eq (
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        ) -and
+        $rules[0].PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
+        $rules[0].IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value -ceq $Identity.Value
+    )
+}
+
+function Protect-ExistingExtensionRoot {
+    if (-not (Test-Path -LiteralPath $copilotExtensionRoot)) {
+        return
+    }
+    $extension = Get-Item -LiteralPath $copilotExtensionRoot
+    if (
+        -not $extension.PSIsContainer -or
+        $extension.Attributes -band [IO.FileAttributes]::ReparsePoint
+    ) {
+        throw 'Existing Konclave extension root is unsafe to migrate.'
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if (Test-OwnerOnlyDirectoryAcl -Acl (Get-Acl -LiteralPath $copilotExtensionRoot) -Identity $identity) {
+        return
+    }
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetOwner($identity)
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $identity,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        (
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        ),
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    [IO.FileSystemAclExtensions]::SetAccessControl($extension, $acl)
+
+    $verified = Get-Acl -LiteralPath $copilotExtensionRoot
+    if (-not (Test-OwnerOnlyDirectoryAcl -Acl $verified -Identity $identity)) {
+        throw 'Existing Konclave extension root could not be owner-protected.'
+    }
+}
+
 function Remove-LegacyExtensionAssets {
     foreach ($legacy in @(
         (Join-Path $copilotExtensionRoot 'konclave.runtime.json'),
         (Join-Path $copilotExtensionRoot 'bin')
     )) {
         if (Test-Path -LiteralPath $legacy) {
-            Remove-Item -LiteralPath $legacy -Recurse -Force
+            try {
+                Remove-Item -LiteralPath $legacy -Recurse -Force
+            }
+            catch {
+                $legacyDaemon = Join-Path $legacy 'KonclaveLocalDaemon.exe'
+                if (
+                    [IO.Path]::GetFullPath($legacy).Equals(
+                        [IO.Path]::GetFullPath((Join-Path $copilotExtensionRoot 'bin')),
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -and
+                    (Test-Path -LiteralPath $legacyDaemon -PathType Leaf) -and
+                    (Test-ProcessUsesExecutable -ExecutablePath $legacyDaemon)
+                ) {
+                    # Existing sessions may drain under the old process model. Fresh
+                    # sessions use the replaced thin extension, and the next setup run
+                    # retries exact deletion after those image handles close.
+                    Write-Warning (
+                        'Legacy Konclave daemon cleanup is deferred until existing ' +
+                        'Copilot sessions exit.'
+                    )
+                    continue
+                }
+                throw
+            }
         }
     }
 }
@@ -1349,14 +1466,7 @@ try {
     Wait-RelayHealth -Process $relayProcess
     $extensionParent = [IO.Path]::GetDirectoryName($copilotExtensionRoot)
     New-Item -ItemType Directory -Path $extensionParent -Force | Out-Null
-    if (
-        (Test-Path -LiteralPath $copilotExtensionRoot -PathType Container) -and
-        -not (Test-Path -LiteralPath (
-            Join-Path $copilotExtensionRoot 'konclave.service.json'
-        ) -PathType Leaf)
-    ) {
-        Remove-Item -LiteralPath $copilotExtensionRoot -Recurse -Force
-    }
+    Protect-ExistingExtensionRoot
     [void](Invoke-RequiredCommand $cliPath @(
         'init',
         '--relay-endpoint',
