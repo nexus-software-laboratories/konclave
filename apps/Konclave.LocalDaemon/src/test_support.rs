@@ -56,8 +56,12 @@ impl TestProfileSettings {
     pub(crate) fn ensure_key(&self, profile: &str) -> PathBuf {
         let path = self.key_path(profile);
         if !path.exists() {
-            std::fs::create_dir_all(&self.keys).unwrap();
-            std::fs::write(&path, Self::key_bytes(profile)).unwrap();
+            KonclaveSecretStorage::ensure_owner_protected_directory(&self.keys).unwrap();
+            KonclaveSecretStorage::create_or_verify_owner_protected_file(
+                &path,
+                &Self::key_bytes(profile),
+            )
+            .unwrap();
         }
         path
     }
@@ -92,7 +96,7 @@ impl TestProfileRoot {
         let root = directory.path().join("profiles");
         let keys = directory.path().join("keys");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(&keys).unwrap();
+        KonclaveSecretStorage::ensure_owner_protected_directory(&keys).unwrap();
         Self {
             directory,
             root,

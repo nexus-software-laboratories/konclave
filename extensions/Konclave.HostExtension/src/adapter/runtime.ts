@@ -1,6 +1,10 @@
-import type { AdapterChannel, AdapterListener, AdapterRendezvous } from './channel.js';
 import { createDeliveryCoordinator, type DeliveryCoordinator } from './delivery.js';
-import type { AdapterResponse, DeliveredEvent } from './session.js';
+import {
+  maxClaimBatch,
+  type AdapterChannel,
+  type AdapterResponse,
+  type DeliveredEvent,
+} from './session.js';
 
 /**
  * How long one wait-and-claim blocks before the daemon answers empty.
@@ -11,15 +15,9 @@ import type { AdapterResponse, DeliveredEvent } from './session.js';
 const claimWaitMilliseconds = 20_000;
 
 /** Largest batch requested in one wait. */
-const claimBatchSize = 20;
-
 /** Default backoff after a rejected claim, so a broken channel cannot spin. */
 export const defaultClaimRetryMilliseconds = 1_000;
-
-export interface AdapterIntegration {
-  createRendezvous(platform: NodeJS.Platform): Promise<AdapterRendezvous>;
-  listen(rendezvous: AdapterRendezvous, platform: NodeJS.Platform): Promise<AdapterListener>;
-}
+export const maximumClaimRetryMilliseconds = 30_000;
 
 export interface DeliveryRuntimeOptions {
   readonly channel: AdapterChannel;
@@ -52,6 +50,15 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
       }));
   const retryMilliseconds = options.retryMilliseconds ?? defaultClaimRetryMilliseconds;
   let running = true;
+  let consecutiveFailures = 0;
+
+  const retryDelay = (): number => {
+    const exponent = Math.min(Math.max(0, consecutiveFailures - 1), 10);
+    const raw = Math.min(maximumClaimRetryMilliseconds, retryMilliseconds * 2 ** exponent);
+    const profileSpread =
+      [...options.channel.profile].reduce((sum, value) => sum + value.charCodeAt(0), 0) % 401;
+    return Math.min(maximumClaimRetryMilliseconds, Math.round(raw * (0.8 + profileSpread / 1_000)));
+  };
 
   const completed = (async () => {
     while (running) {
@@ -59,32 +66,40 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
       try {
         response = await options.channel.request({
           kind: 'wait-and-claim',
-          maxEvents: claimBatchSize,
+          maxEvents: maxClaimBatch,
           waitMilliseconds: claimWaitMilliseconds,
         });
       } catch (error) {
-        // A closed channel ends the loop; the extension reconnects by restarting.
+        if (!running) {
+          return;
+        }
         options.diagnostics.error(`Konclave claim failed: ${describeError(error)}`);
-        return;
+        consecutiveFailures += 1;
+        await sleep(retryDelay());
+        continue;
       }
 
       if (response.kind === 'failure') {
         options.diagnostics.error(`Konclave rejected a claim: ${response.code}`);
-        await sleep(retryMilliseconds);
+        consecutiveFailures += 1;
+        await sleep(retryDelay());
         continue;
       }
 
       if (response.kind !== 'batch') {
         options.diagnostics.error('Konclave answered a claim with an unexpected response.');
-        await sleep(retryMilliseconds);
+        consecutiveFailures += 1;
+        await sleep(retryDelay());
         continue;
       }
 
       if (response.events.length === 0) {
+        consecutiveFailures = 0;
         // An expired wait is not an event, so the loop simply reissues.
         continue;
       }
 
+      consecutiveFailures = 0;
       enqueue(options.coordinator, response.events, options.diagnostics);
       await options.coordinator.flush();
     }

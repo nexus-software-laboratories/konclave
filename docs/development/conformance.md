@@ -102,6 +102,15 @@ crash or excessive-allocation case becomes a permanent regression input.
 ### Daemon and adapter authorization
 
 - reject unauthorized local peers and malformed model-generated tool arguments;
+- authenticate shared-service clients with exact registered key versions, immutable
+  harness/profile bindings, fresh transcript challenges, and active-registration
+  rechecks that close revoked connections;
+- bound shared-service request payload plus cached-response reservations, publish a
+  finite failure for abandoned execution, reject conflicting idempotency-key reuse,
+  and return one recorded outcome across reconnect;
+- keep `fixtures/local-service/v1/copilot-tools.json` byte-semantically aligned with
+  the Rust router and consume that generated input schema from the Copilot SDK
+  adapter;
 - prove tools expose no raw identity key, MLS secret, or storage wrapping key;
 - test cancellation, backpressure, bounded watches, reconnect, and daemon restart;
 - verify CLI and Copilot adapters produce the same domain outcomes through the public
@@ -130,10 +139,12 @@ sessions can:
 
 The test records no plaintext or secrets in relay diagnostics.
 
-`multi_process_relay_e2e` exercises this milestone with two daemon child processes
-over the Community Relay HTTP API. It covers invitation/Welcome handoff, bidirectional
-messages, daemon disconnect and profile reopen, missed replay, duplicate suppression,
-removal, post-removal decryption failure, and post-removal send denial.
+`shared_service_process` exercises the current process model with 20 clients and one
+service PID over the Community Relay HTTP API. It covers pairing, bidirectional
+messages, client disconnect, offline replay, service restart, identity recovery,
+process/descriptor/memory bounds, and relay opacity. The deeper legacy
+`multi_process_relay_e2e` remains supplemental domain regression coverage for removal
+and post-removal denial until those cases move into the shared-process harness.
 
 ## Determinism
 

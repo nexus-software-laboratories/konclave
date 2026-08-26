@@ -47,8 +47,8 @@ target.
 ## Native package validation
 
 `.github/workflows/package-validation.yml` builds Linux x64, Windows x64, macOS
-Apple-silicon, and macOS Intel binaries. Each lane packages the CLI, daemon,
-standalone relay, platform service files, and built Copilot plugin according to
+Apple-silicon, and macOS Intel binaries. Each lane packages the CLI, shared local
+service, standalone relay, platform service files, and built Copilot plugin according to
 `distribution/release-artifacts.json`.
 
 The package gate creates each native archive twice and requires byte-identical output,
@@ -72,11 +72,11 @@ belonging to that exact run. Pull-request code receives no `actions: write`
 permission. One-day retention is only a fallback if trusted cleanup cannot run.
 
 `Packaged clean-install acceptance` then extracts the Linux client and relay archives
-twice, creates temporary trusted TLS, and drives the plugin-bundled daemon through the
-same MCP and authenticated adapter contracts used by Copilot. It repeats the same
-pairing, delivery, restart, cancellation, enrollment, and opacity assertions against
-the Docker-loaded relay candidate. The Docker path captures a baseline and removes
-only its exact labelled container and loaded release image.
+twice, creates temporary trusted TLS, and drives the packaged shared local service
+through the same authenticated thin-client contract used by Copilot. It repeats the
+same pairing, delivery, restart, cancellation, enrollment, and opacity assertions
+against the Docker-loaded relay candidate. The Docker path captures a baseline and
+removes only its exact labelled container and loaded release image.
 
 ## Local Copilot inference boundary
 

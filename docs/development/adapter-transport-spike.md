@@ -1,5 +1,9 @@
 # Harness-neutral adapter transport spike
 
+> **Historical spike.** ADR 0008 supersedes the selected per-session process model.
+> These probes remain evidence for why extension-owned tools are feasible and why a
+> harness-neutral local boundary matters; they are not the current Copilot runtime.
+
 Issue [#26](https://github.com/nexus-software-laboratories/konclave/issues/26)
 requires executable evidence before Konclave freezes a local adapter contract. This
 spike compares extension-owned tool proxying with a separate adapter-owned local
@@ -74,9 +78,9 @@ frames, and apply the claim lease defined by that ADR.
 
 ## Decision
 
-Konclave will keep native harness MCP ownership and add a separate harness-neutral
-adapter channel. The adapter owns a local named-pipe or Unix-domain-socket listener;
-the daemon connects outbound with an ephemeral capability supplied at process launch.
+ADR 0005 originally selected native harness MCP ownership plus a separate
+harness-neutral adapter channel. ADR 0008 later superseded that process model with one
+per-user local service and thin harness clients.
 
 This choice:
 
@@ -87,6 +91,6 @@ This choice:
 - scopes adapter restart to a new endpoint and capability while daemon restart can
   reconnect to the existing adapter.
 
-The following ADR owns the normative protocol, authentication, lease, lifecycle, and
-threat-model decisions. These spike files are executable evidence, not a stable
-adapter API.
+ADR 0008 now owns the normative process, authentication, lease, lifecycle, and
+threat-model decisions. These spike files are executable historical evidence, not a
+stable adapter API.

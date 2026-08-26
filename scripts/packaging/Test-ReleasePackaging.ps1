@@ -114,18 +114,18 @@ function Assert-ReleaseLayout {
     if ([string]$Artifact.kind -ceq 'client') {
         foreach ($relative in @(
             "bin/konclave$suffix",
-            "bin/KonclaveLocalDaemon$suffix",
+            "bin/KonclaveLocalService$suffix",
             'share/konclave/plugin/plugin.json',
-            'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs',
-            "share/konclave/plugin/bin/KonclaveLocalDaemon$suffix"
+            'share/konclave/plugin/extensions/Konclave.Extension/client.mjs',
+            'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs'
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf)) {
                 throw "Client package is missing $relative."
             }
         }
         $serviceRelative = switch ([string]$Artifact.operatingSystem) {
-            'linux' { 'share/konclave/service/systemd/KonclaveLocalDaemon-daemon.service' }
-            'macos' { 'share/konclave/service/launchd/com.genesis.KonclaveLocalDaemon.plist' }
+            'linux' { 'share/konclave/service/systemd/KonclaveLocalService.service' }
+            'macos' { 'share/konclave/service/launchd/com.genesis.KonclaveLocalService.plist' }
             'windows' { 'share/konclave/service/windows/install-service.ps1' }
             default { throw "Unsupported release operating system: $($Artifact.operatingSystem)" }
         }
@@ -136,15 +136,28 @@ function Assert-ReleaseLayout {
         ) {
             throw "Client package is missing $serviceRelative."
         }
+        $managerRelative = switch ([string]$Artifact.operatingSystem) {
+            'linux' { 'share/konclave/service/systemd/manage-user-service.sh' }
+            'macos' { 'share/konclave/service/launchd/manage-agent.sh' }
+            'windows' { 'share/konclave/service/windows/install-service.ps1' }
+            default { throw "Unsupported release operating system: $($Artifact.operatingSystem)" }
+        }
+        if (
+            -not (
+                Test-Path -LiteralPath (Join-Path $ExtractedRoot $managerRelative) -PathType Leaf
+            )
+        ) {
+            throw "Client package is missing $managerRelative."
+        }
         if (
             [string]$Artifact.operatingSystem -ceq 'windows' -and
             -not (
                 Test-Path -LiteralPath (
-                    Join-Path $ExtractedRoot 'bin/KonclaveLocalDaemonService.exe'
+                    Join-Path $ExtractedRoot 'bin/KonclaveLocalServiceHost.exe'
                 ) -PathType Leaf
             )
         ) {
-            throw 'Windows client package is missing its service host.'
+            throw 'Windows client package is missing its shared-service host.'
         }
     }
     else {
@@ -212,8 +225,7 @@ try {
             if ([string]$artifact.operatingSystem -cne 'windows') {
                 foreach ($relative in @(
                     "bin/konclave$suffix",
-                    "bin/KonclaveLocalDaemon$suffix",
-                    "share/konclave/plugin/bin/KonclaveLocalDaemon$suffix"
+                    "bin/KonclaveLocalService$suffix"
                 )) {
                     $mode = (Get-Item -LiteralPath (Join-Path $payloadRoot $relative)).UnixFileMode
                     if (($mode -band [IO.UnixFileMode]::UserExecute) -eq 0) {
@@ -246,10 +258,10 @@ try {
             $doctorText = $doctorOutput -join "`n"
             if (
                 $doctorExitCode -eq 0 -or
-                $doctorText -notmatch 'PASS daemon_binary:' -or
+                $doctorText -notmatch 'PASS local_service_binary:' -or
                 $doctorText -notmatch 'PASS copilot_plugin:'
             ) {
-                throw 'Extracted CLI did not recognize the packaged daemon and plugin.'
+                throw 'Extracted CLI did not recognize the packaged shared service and plugin.'
             }
         }
 

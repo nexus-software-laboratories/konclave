@@ -49,6 +49,9 @@ name = "KonclaveCommandLine"
 version = "0.1.0"
 dependencies = [
  "KonclaveClientLibrary",
+ "KonclaveCryptographicCore",
+ "KonclaveDomainCore",
+ "KonclaveLocalServiceTransport",
  "KonclaveSecretStorage",
  "anyhow",
  "assert_cmd",
@@ -131,6 +134,7 @@ dependencies = [
  "KonclaveCommunityRelay",
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
+ "KonclaveLocalServiceTransport",
  "KonclaveProtocolContracts",
  "KonclaveRelayCore",
  "KonclaveSecretStorage",
@@ -180,6 +184,8 @@ dependencies = [
  "KonclaveLocalFraming",
  "KonclaveWindowsSecurity",
  "rustix",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -224,10 +230,12 @@ dependencies = [
 name = "KonclaveSecretStorage"
 version = "0.1.0"
 dependencies = [
+ "KonclaveWindowsSecurity",
  "aws-lc-rs",
  "keyring",
  "mls-rs-core",
  "rusqlite",
+ "rustix",
  "tempfile",
  "thiserror",
  "zeroize",
@@ -237,6 +245,7 @@ dependencies = [
 name = "KonclaveWindowsSecurity"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "thiserror",
  "tokio",
  "windows-sys 0.61.2",

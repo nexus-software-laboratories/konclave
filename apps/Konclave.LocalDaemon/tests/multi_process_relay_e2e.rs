@@ -119,7 +119,8 @@ async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
     let wrapping_key_file = directory.path().join("wrapping.key");
     let relay_credential_file = directory.path().join("relay.credential");
     let token = [7_u8; RelayPrincipalId::LENGTH];
-    std::fs::write(&wrapping_key_file, [5_u8; 32]).unwrap();
+    KonclaveSecretStorage::create_or_verify_owner_protected_file(&wrapping_key_file, &[5_u8; 32])
+        .unwrap();
     std::fs::write(
         &relay_credential_file,
         format!("{}\n", URL_SAFE_NO_PAD.encode(token)),

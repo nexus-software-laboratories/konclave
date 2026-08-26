@@ -144,6 +144,15 @@ async fn an_authorized_client_and_the_service_agree_on_one_immutable_binding() {
     let client = client.unwrap();
     let service = service.unwrap();
     assert_eq!(client.binding(), service.binding());
+    assert!(client.service_registration().is_none());
+    assert_eq!(
+        service.service_registration(),
+        Some(&AdapterRegistration::new(
+            fixture.client_identity.public_key(),
+            HarnessKind::Copilot,
+            ProfileAuthorization::Profile(profile("alice")),
+        ))
+    );
 
     let binding = client.binding();
     assert_eq!(binding.version(), LOCAL_SERVICE_PROTOCOL_VERSION);

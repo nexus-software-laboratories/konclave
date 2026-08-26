@@ -22,7 +22,7 @@ mod service_host {
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::{Result, service_dispatcher};
 
-    const SERVICE_NAME: &str = "KonclaveLocalDaemon";
+    const SERVICE_NAME: &str = "KonclaveLocalService";
     const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
     define_windows_service!(ffi_service_main, service_main);
@@ -36,6 +36,9 @@ mod service_host {
     }
 
     fn run_service() -> anyhow::Result<()> {
+        let installation_path = konclave_local_daemon::parse_shared_service_installation_path(
+            std::env::args_os().skip(1),
+        )?;
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let event_handler = move |control| match control {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -59,9 +62,12 @@ mod service_host {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let service_result = runtime.block_on(konclave_local_daemon::run_until(async move {
-            let _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()).await;
-        }));
+        let service_result = runtime.block_on(konclave_local_daemon::run_shared_until(
+            &installation_path,
+            async move {
+                let _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()).await;
+            },
+        ));
         let exit_code = if service_result.is_ok() {
             ServiceExitCode::Win32(0)
         } else {

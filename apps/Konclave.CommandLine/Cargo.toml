@@ -6,6 +6,9 @@ license = "Apache-2.0"
 
 [dependencies]
 KonclaveClientLibrary = { path = "../../crates/Konclave.ClientLibrary" }
+KonclaveCryptographicCore = { path = "../../crates/Konclave.CryptographicCore" }
+KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }
+KonclaveLocalServiceTransport = { path = "../../crates/Konclave.LocalServiceTransport" }
 KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
 anyhow = "1.0.104"
 base64.workspace = true

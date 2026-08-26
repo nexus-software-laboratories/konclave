@@ -6,6 +6,7 @@ use crate::{SecretStorageError, WrappingKeyProvider};
 
 const SERVICE_NAME: &str = "Konclave";
 const ENROLLMENT_SERVICE_NAME: &str = "Konclave Relay Enrollment";
+const LOCAL_SERVICE_IDENTITY_SERVICE_NAME: &str = "Konclave Local Service";
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_INSTALLATION_ID_BYTES: usize = 64;
 const MAX_ENROLLMENT_RECORD_BYTES: usize = 4 * 1024;
@@ -26,6 +27,43 @@ pub struct NativeWrappingKeyProvider {
 /// so concurrent writers for one identifier can only supply identical bytes.
 pub struct NativeEnrollmentCredentialStore {
     account_name: String,
+}
+
+/// Dedicated operating-system credential-store entry for the shared service identity.
+///
+/// The installation record pins the corresponding public key, while only this native
+/// entry holds the private seed.
+pub struct NativeLocalServiceIdentityStore;
+
+impl NativeLocalServiceIdentityStore {
+    const ACCOUNT_NAME: &'static str = "local-service:identity:1";
+
+    /// Loads the bounded service signing seed without creating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, unavailable, or malformed native credential error.
+    pub fn load(&self) -> Result<Zeroizing<Vec<u8>>, SecretStorageError> {
+        let entry = KeyringEntry(
+            keyring::Entry::new(LOCAL_SERVICE_IDENTITY_SERVICE_NAME, Self::ACCOUNT_NAME)
+                .map_err(|_| SecretStorageError::NativeCustodyUnavailable)?,
+        );
+        load_bounded_from(&entry)
+    }
+
+    /// Creates or verifies the exact service signing seed.
+    ///
+    /// # Errors
+    ///
+    /// An existing different value is never overwritten. Returns a bounded-record,
+    /// mismatch, or native credential-store error.
+    pub fn store(&self, secret: &[u8]) -> Result<(), SecretStorageError> {
+        let entry = KeyringEntry(
+            keyring::Entry::new(LOCAL_SERVICE_IDENTITY_SERVICE_NAME, Self::ACCOUNT_NAME)
+                .map_err(|_| SecretStorageError::NativeCustodyUnavailable)?,
+        );
+        store_bounded_to(&entry, secret)
+    }
 }
 
 impl NativeEnrollmentCredentialStore {

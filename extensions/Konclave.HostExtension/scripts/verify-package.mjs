@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { unzipSync } from 'fflate';
 import {
   extensionEntryPath,
+  clientEntryPath,
   getArchivePath,
   maintainerSkillPath,
   manifestExtensionPath,
@@ -85,10 +86,36 @@ for (const filePath of packageFiles) {
 const compiledExtension = existsSync(extensionEntryPath)
   ? readFileSync(extensionEntryPath, 'utf8')
   : '';
+const compiledClient = existsSync(clientEntryPath) ? readFileSync(clientEntryPath, 'utf8') : '';
 
 check(
   compiledExtension.includes('joinSession'),
   'Compiled extension is missing the joinSession lifecycle.',
+);
+check(
+  compiledClient.includes('connectInstalledService') &&
+    compiledClient.includes('createKonclaveTools'),
+  'Compiled client bundle is missing the shared connector or SDK tools.',
+);
+check(
+  !compiledClient.includes('KonclaveLocalDaemon') && !compiledClient.includes('type: "stdio"'),
+  'Compiled client bundle must not contain a per-session daemon path.',
+);
+check(
+  !compiledClient.includes('console.log(') && !compiledClient.includes('process.stdout'),
+  'Compiled client bundle must not write to stdout.',
+);
+check(
+  compiledExtension.includes('delivery.claim'),
+  'Compiled extension is missing shared-service automatic delivery.',
+);
+check(
+  compiledExtension.includes('name: "konclave"'),
+  'Compiled extension is missing deterministic Konclave commands.',
+);
+check(
+  compiledExtension.includes('createKonclaveTools'),
+  'Compiled extension is missing native SDK tool registration.',
 );
 check(
   !compiledExtension.includes('console.log('),
@@ -97,6 +124,14 @@ check(
 check(
   !compiledExtension.includes('process.stdout'),
   'Compiled extension must not write to process.stdout.',
+);
+check(
+  !compiledExtension.includes('KonclaveLocalDaemon'),
+  'Compiled extension must not name or launch a per-session daemon.',
+);
+check(
+  !compiledExtension.includes('type: "stdio"'),
+  'Compiled extension must not declare a stdio MCP server.',
 );
 
 const skillText = existsSync(maintainerSkillPath) ? readFileSync(maintainerSkillPath, 'utf8') : '';

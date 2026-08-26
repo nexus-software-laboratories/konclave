@@ -2,6 +2,8 @@
 build/
 extensions/*/extension.mjs
 extensions/*/extension.mjs.map
+extensions/*/client.mjs
+extensions/*/client.mjs.map
 
 # Dependencies
 node_modules/

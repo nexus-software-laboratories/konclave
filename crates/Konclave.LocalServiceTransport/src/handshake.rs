@@ -109,6 +109,7 @@ pub struct ClientHandshakeRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedLocalChannel {
     binding: LocalServiceBinding,
+    service_registration: Option<AdapterRegistration>,
 }
 
 impl AuthenticatedLocalChannel {
@@ -116,6 +117,15 @@ impl AuthenticatedLocalChannel {
     #[must_use]
     pub const fn binding(&self) -> &LocalServiceBinding {
         &self.binding
+    }
+
+    /// Returns the exact registration verified by the service side of the handshake.
+    ///
+    /// Client-side handshakes return `None` because a client neither owns nor receives
+    /// the installation's authorization record.
+    #[must_use]
+    pub const fn service_registration(&self) -> Option<&AdapterRegistration> {
+        self.service_registration.as_ref()
     }
 }
 
@@ -213,6 +223,7 @@ where
 
     Ok(AuthenticatedLocalChannel {
         binding: transcript.into_binding(),
+        service_registration: None,
     })
 }
 
@@ -319,6 +330,7 @@ where
 
     Ok(AuthenticatedLocalChannel {
         binding: transcript.into_binding(),
+        service_registration: Some(registration),
     })
 }
 

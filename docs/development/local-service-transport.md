@@ -20,8 +20,10 @@ profiles it may attach to. Ordinary clients cannot create or broaden a record.
 `KonclaveCryptographicCore::LocalServiceIdentity` generates the key pair through the
 project's configured provider and signs already-canonical bytes. It is deliberately
 not `Clone`, not `Debug`, and not serializable, so the private key cannot be copied by
-accident or reach a log, snapshot, or configuration record. This build keeps
-identities in memory only; persistent owner-protected custody is separate work.
+accident or reach a log, snapshot, or configuration record. Service composition
+reconstructs the identity from exactly 32 bytes loaded through native credential
+custody or an explicitly configured owner-protected external file. The transport
+crate never chooses or persists that custody.
 
 The service resolves a registration through the injected
 `AdapterAuthorizationRegistry`. Rotation registers a new version before the old one is
@@ -174,9 +176,12 @@ additional ACE, non-allow ACE, or another SID fails creation.
 
 The service obtains the connecting process identifier from each accepted pipe,
 opens its query-only process token, and requires the same user SID and an integrity
-level at least as high as the service. The client performs the symmetric check against
-the server process before writing a handshake byte. A missing process, inaccessible
-token, malformed SID, another account, or lower-integrity peer fails closed.
+level at least as high as the service. Native Rust clients perform the symmetric check
+against the server process before writing a handshake byte. Thin clients without a
+native token API pin the installation-specific service public key and authenticate
+the service proof before sending any operation request or plaintext. A missing
+process, inaccessible token, malformed SID, another account, lower-integrity peer, or
+invalid service proof fails closed.
 
 The Win32 FFI, owned-handle cleanup, aligned token buffers, SID copying, security
 descriptor lifetime, and DACL inspection live behind the safe

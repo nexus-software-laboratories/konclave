@@ -1,10 +1,81 @@
+use std::io::{Read, Write};
+
 use KonclaveDomainCore::{Ed25519PublicKey, Ed25519Signature};
+use aws_lc_rs::rand::{SecureRandom as _, SystemRandom};
+use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use mls_rs::CipherSuiteProvider;
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
 use mls_rs_crypto_awslc::AwsLcCryptoProvider;
+use zeroize::Zeroizing;
 
 use crate::KonclaveCryptographicError;
 use crate::identity::{cipher_suite, configured_provider};
+
+/// Byte length of an Ed25519 seed accepted by every local-service client.
+pub const LOCAL_SERVICE_SIGNING_SEED_LENGTH: usize = 32;
+
+/// Exportable installation seed for a local-service participant.
+///
+/// Installation writes this value only to an owner-protected custody record. The
+/// wrapper is intentionally not cloneable, debuggable, or serializable and clears its
+/// bytes on drop.
+pub struct LocalServiceSigningSeed(Zeroizing<[u8; LOCAL_SERVICE_SIGNING_SEED_LENGTH]>);
+
+impl LocalServiceSigningSeed {
+    /// Generates a seed from the operating-system random source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KonclaveCryptographicError::ProviderFailure`] when secure random
+    /// generation fails.
+    pub fn generate() -> Result<Self, KonclaveCryptographicError> {
+        let mut bytes = Zeroizing::new([0_u8; LOCAL_SERVICE_SIGNING_SEED_LENGTH]);
+        SystemRandom::new().fill(bytes.as_mut()).map_err(|_| {
+            KonclaveCryptographicError::ProviderFailure {
+                operation: "local service seed generation",
+            }
+        })?;
+        Ok(Self(bytes))
+    }
+
+    /// Reads exactly one raw seed from a bounded reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns a secret-storage failure when the reader does not contain exactly 32
+    /// bytes or cannot be read.
+    pub fn from_reader(mut reader: impl Read) -> Result<Self, KonclaveCryptographicError> {
+        let mut bytes = Zeroizing::new(Vec::with_capacity(LOCAL_SERVICE_SIGNING_SEED_LENGTH + 1));
+        reader
+            .by_ref()
+            .take((LOCAL_SERVICE_SIGNING_SEED_LENGTH + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| KonclaveCryptographicError::SecretStorageFailure {
+                operation: "local service seed read",
+            })?;
+        let seed: [u8; LOCAL_SERVICE_SIGNING_SEED_LENGTH] =
+            bytes.as_slice().try_into().map_err(|_| {
+                KonclaveCryptographicError::SecretStorageFailure {
+                    operation: "local service seed length",
+                }
+            })?;
+        Ok(Self(Zeroizing::new(seed)))
+    }
+
+    /// Writes the raw seed to an already owner-protected destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns a secret-storage failure when the destination rejects the complete
+    /// write.
+    pub fn write_to(&self, mut writer: impl Write) -> Result<(), KonclaveCryptographicError> {
+        writer.write_all(self.0.as_ref()).map_err(|_| {
+            KonclaveCryptographicError::SecretStorageFailure {
+                operation: "local service seed write",
+            }
+        })
+    }
+}
 
 /// Ed25519 signing identity for one local-service participant.
 ///
@@ -42,6 +113,35 @@ impl LocalServiceIdentity {
             }
         })?;
         let public_key = Ed25519PublicKey::from_slice(public_key.as_bytes())?;
+        Ok(Self {
+            provider,
+            secret_key,
+            public_key,
+        })
+    }
+
+    /// Imports a zeroizing installation seed through the configured Ed25519 provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider or domain validation error when the seed cannot produce a
+    /// canonical Ed25519 key pair.
+    pub fn from_signing_seed(
+        seed: &LocalServiceSigningSeed,
+    ) -> Result<Self, KonclaveCryptographicError> {
+        let provider = configured_provider();
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(seed.0.as_ref()).map_err(|_| {
+            KonclaveCryptographicError::ProviderFailure {
+                operation: "local service public key derivation",
+            }
+        })?;
+        let public_key = Ed25519PublicKey::from_slice(key_pair.public_key().as_ref())?;
+        let mut secret = Zeroizing::new(Vec::with_capacity(
+            LOCAL_SERVICE_SIGNING_SEED_LENGTH + Ed25519PublicKey::LENGTH,
+        ));
+        secret.extend_from_slice(seed.0.as_ref());
+        secret.extend_from_slice(public_key.as_bytes());
+        let secret_key = SignatureSecretKey::new(secret.as_slice().to_vec());
         Ok(Self {
             provider,
             secret_key,
@@ -104,7 +204,10 @@ pub fn verify_local_service_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalServiceIdentity, verify_local_service_signature};
+    use super::{
+        LOCAL_SERVICE_SIGNING_SEED_LENGTH, LocalServiceIdentity, LocalServiceSigningSeed,
+        verify_local_service_signature,
+    };
     use crate::KonclaveCryptographicError;
     use KonclaveDomainCore::{Ed25519PublicKey, Ed25519Signature};
 
@@ -114,6 +217,35 @@ mod tests {
         let signature = identity.sign(b"canonical transcript").unwrap();
         verify_local_service_signature(identity.public_key(), b"canonical transcript", &signature)
             .unwrap();
+    }
+
+    #[test]
+    fn a_seed_round_trips_and_matches_the_cross_language_ed25519_vector() {
+        let bytes: Vec<u8> = (0..LOCAL_SERVICE_SIGNING_SEED_LENGTH)
+            .map(|value| u8::try_from(value).unwrap())
+            .collect();
+        let seed = LocalServiceSigningSeed::from_reader(bytes.as_slice()).unwrap();
+        let identity = LocalServiceIdentity::from_signing_seed(&seed).unwrap();
+        assert_eq!(
+            identity.public_key().as_bytes(),
+            &[
+                0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce, 0x10, 0xbe, 0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b,
+                0xc0, 0x99, 0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5, 0x0d, 0x5f, 0x1d, 0xdc, 0x86, 0x64,
+                0x12, 0x55, 0x31, 0xb8,
+            ]
+        );
+        let signature = identity.sign(b"seed-imported transcript").unwrap();
+        verify_local_service_signature(
+            identity.public_key(),
+            b"seed-imported transcript",
+            &signature,
+        )
+        .unwrap();
+        let mut encoded = Vec::new();
+        seed.write_to(&mut encoded).unwrap();
+        assert_eq!(encoded, bytes);
+        assert!(LocalServiceSigningSeed::from_reader([0_u8; 31].as_slice()).is_err());
+        assert!(LocalServiceSigningSeed::from_reader([0_u8; 33].as_slice()).is_err());
     }
 
     #[test]

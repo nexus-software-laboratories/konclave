@@ -4,8 +4,9 @@ import { runSmoke } from "./scenario.js";
 
 const parsed = parseArgs({
   options: {
-    daemon: { type: "string" },
-    "profile-root": { type: "string" },
+    "client-module": { type: "string" },
+    "service-config": { type: "string" },
+    "service-pid": { type: "string" },
     "working-directory": { type: "string" },
     model: { type: "string" },
     "timeout-ms": { type: "string", default: "180000" },
@@ -15,7 +16,8 @@ const parsed = parseArgs({
 });
 
 function required(
-  name: "daemon" | "profile-root" | "working-directory",
+  name:
+    "client-module" | "service-config" | "service-pid" | "working-directory",
 ): string {
   const value = parsed.values[name];
   if (!value) {
@@ -43,8 +45,9 @@ try {
     );
   }
   const report = await runSmoke({
-    daemonPath: required("daemon"),
-    profileRoot: required("profile-root"),
+    clientModulePath: required("client-module"),
+    serviceConfigPath: required("service-config"),
+    servicePid: positiveNumber(required("service-pid"), "--service-pid"),
     workingDirectory: required("working-directory"),
     model: parsed.values.model,
     timeoutMs: positiveNumber(parsed.values["timeout-ms"], "--timeout-ms"),

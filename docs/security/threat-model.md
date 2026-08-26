@@ -50,6 +50,10 @@ Operating-system identity alone does not authorize profile access. Each installe
 harness adapter has a registered Ed25519 client identity. Its private key remains in
 an owner-protected ordinary file; the service stores only the public key, adapter
 identifier, finite harness kind, allowed profile namespace, key version, and status.
+The service signing seed uses native operating-system custody by default; an explicit
+headless installation may bind it to one owner-protected external file. The
+installation record pins the derived service public key, so missing or substituted
+custody fails before the endpoint opens.
 
 Every connection performs a versioned challenge-response signed by the registered
 adapter key. The transcript binds both fresh challenges, adapter and client instance,

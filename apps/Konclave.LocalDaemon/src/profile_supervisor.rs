@@ -1512,7 +1512,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_open_is_reported_to_every_caller_and_an_exact_retry_recovers() {
         let root = TestProfileRoot::new();
-        let broken_key = root.path().join("missing.key");
+        let broken_key = root.key_path("broken");
         let supervisor = ProfileSupervisor::new(
             Arc::new(RepairableSource {
                 inner: root.settings(),
@@ -1560,7 +1560,8 @@ mod tests {
         );
         assert!(!root.is_locked("broken"));
 
-        std::fs::write(&broken_key, [7_u8; 32]).unwrap();
+        KonclaveSecretStorage::create_or_verify_owner_protected_file(&broken_key, &[7_u8; 32])
+            .unwrap();
         let repaired = supervisor.attach("broken").await.unwrap();
 
         assert_eq!(repaired.profile_id(), "broken");

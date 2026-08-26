@@ -139,7 +139,8 @@ export class SmokeParticipant {
     }
     const unexpected = starts.filter(
       (call) =>
-        call.serverName !== "konclave" || call.toolName !== expectedTool,
+        (call.serverName !== undefined && call.serverName !== "konclave") ||
+        call.toolName !== expectedTool,
     );
     if (unexpected.length > 0 || (!allowRepeated && starts.length !== 1)) {
       const names = starts.map(

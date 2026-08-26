@@ -7,6 +7,7 @@ mod key;
 mod mls_storage;
 #[cfg(feature = "native-keyring")]
 mod native;
+mod owner_file;
 mod sealed_blob;
 #[cfg(feature = "sqlite")]
 mod sqlite;
@@ -19,7 +20,13 @@ pub use error::SecretStorageError;
 pub use key::{ExternalWrappingKeyProvider, WrappingKeyProvider};
 pub use mls_storage::SealedMlsStorage;
 #[cfg(feature = "native-keyring")]
-pub use native::{NativeEnrollmentCredentialStore, NativeWrappingKeyProvider};
+pub use native::{
+    NativeEnrollmentCredentialStore, NativeLocalServiceIdentityStore, NativeWrappingKeyProvider,
+};
+pub use owner_file::{
+    create_or_verify_owner_protected_file, ensure_owner_protected_directory,
+    open_owner_protected_file,
+};
 pub use sealed_blob::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
 };

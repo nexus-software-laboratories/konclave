@@ -191,14 +191,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check Windows Service host source
         working-directory: apps/Konclave.LocalDaemon
-        run: cargo check --bin windows_service
-      - name: Validate daemon package definitions
+        run: cargo check --bin windows_service --bin KonclaveLocalService
+      - name: Validate shared-service package definitions
         shell: pwsh
         working-directory: apps/Konclave.LocalDaemon
         run: |
-          $unit = 'packaging/systemd/KonclaveLocalDaemon-daemon.service'
+          $unit = 'packaging/systemd/KonclaveLocalService.service'
           $unitLines = Get-Content -LiteralPath $unit
-          foreach ($expected in @('Type=simple', 'Restart=on-failure')) {
+          foreach ($expected in @(
+            'Type=simple',
+            'Restart=on-failure',
+            'WantedBy=default.target'
+          )) {
             if ($expected -cnotin $unitLines) {
               throw "systemd unit is missing '$expected'."
             }
@@ -207,11 +211,19 @@ jobs:
             throw 'systemd unit is missing ExecStart.'
           }
 
-          $plistPath = 'packaging/launchd/com.genesis.KonclaveLocalDaemon.plist'
+          if ($unitLines -contains 'DynamicUser=yes') {
+            throw 'Per-user service must not use a dynamic system identity.'
+          }
+          bash -n packaging/systemd/manage-user-service.sh
+          if ($LASTEXITCODE -ne 0) { throw 'systemd manager has invalid shell syntax.' }
+
+          $plistPath = 'packaging/launchd/com.genesis.KonclaveLocalService.plist'
           [xml]$plist = Get-Content -LiteralPath $plistPath -Raw
           if ($plist.plist.version -ne '1.0' -or $null -eq $plist.plist.dict) {
             throw 'launchd property list is not a plist dictionary.'
           }
+          bash -n packaging/launchd/manage-agent.sh
+          if ($LASTEXITCODE -ne 0) { throw 'launchd manager has invalid shell syntax.' }
 
           $installer = 'packaging/windows/install-service.ps1'
           $tokens = $null

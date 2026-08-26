@@ -37,6 +37,7 @@ mod endpoint;
 mod error;
 mod handshake;
 mod identifiers;
+mod installation;
 mod message;
 mod registry;
 mod rpc;
@@ -57,6 +58,11 @@ pub use identifiers::{
     AdapterKeyId, AdapterKeyVersion, CHALLENGE_LENGTH, ClientInstanceId, HarnessKind,
     LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceChallenge, MAX_PROFILE_ID_LENGTH,
     ProfileAuthorization, ServiceProfileId,
+};
+pub use installation::{
+    COPILOT_SERVICE_CONFIG_FILE, CopilotServiceConfig, InstalledAdapterRegistration,
+    LOCAL_SERVICE_INSTALLATION_FILE, LocalServiceIdentitySource, LocalServiceInstallation,
+    LocalServiceInstallationError, LocalServiceProfileCustody,
 };
 pub use message::{HandshakeMessage, MAX_HANDSHAKE_FRAME_BYTES};
 pub use registry::{InMemoryAdapterRegistry, MAX_ADAPTER_REGISTRATIONS};

@@ -2,6 +2,7 @@ mod cli;
 mod doctor;
 mod init;
 mod installation;
+mod local_service_installation;
 mod relay_bootstrap;
 
 use std::process::ExitCode;

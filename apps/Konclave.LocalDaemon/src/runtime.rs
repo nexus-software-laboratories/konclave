@@ -94,23 +94,39 @@ pub(crate) trait ProfileSource: Send + Sync + 'static {
 
 /// Service-wide settings that resolve into explicit per-profile inputs.
 ///
-/// The shared service resolves native per-profile custody. It never reuses one
-/// external wrapping-key file across profiles: an external-custody profile is bound
-/// to its own source through the explicit per-profile rebind that ADR 0008 assigns to
-/// distribution, and until that binding exists the service opens the profile under
-/// its own native custody or fails. There is no shared-key fallback.
-#[allow(dead_code)]
+/// Native custody uses one credential-store entry per profile. Explicit headless
+/// custody resolves one owner-protected `<profile>.key` file per canonical profile.
+/// No path can hand unrelated profiles one shared wrapping key.
 pub(crate) struct ServiceProfileSettings {
     root: PathBuf,
+    custody: ServiceProfileCustody,
     allow_mcp_write: bool,
 }
 
-#[allow(dead_code)]
+pub(crate) enum ServiceProfileCustody {
+    Native,
+    ExternalDirectory(PathBuf),
+}
+
 impl ServiceProfileSettings {
     /// Records the profile root and local write authorization.
     pub(crate) fn new(root: PathBuf, allow_mcp_write: bool) -> Self {
         Self {
             root,
+            custody: ServiceProfileCustody::Native,
+            allow_mcp_write,
+        }
+    }
+
+    /// Records an owner-protected directory containing one key per profile.
+    pub(crate) fn with_external_custody(
+        root: PathBuf,
+        directory: PathBuf,
+        allow_mcp_write: bool,
+    ) -> Self {
+        Self {
+            root,
+            custody: ServiceProfileCustody::ExternalDirectory(directory),
             allow_mcp_write,
         }
     }
@@ -123,10 +139,16 @@ impl ProfileSource for ServiceProfileSettings {
         // while the service is already hosting other profiles.
         let relay_installation = read_relay_installation(&self.root)
             .context("reading the relay installation for the requested profile")?;
+        let custody = match &self.custody {
+            ServiceProfileCustody::Native => ProfileCustody::Native,
+            ServiceProfileCustody::ExternalDirectory(directory) => {
+                ProfileCustody::ExternalFile(directory.join(format!("{}.key", profile.as_str())))
+            }
+        };
         Ok(ProfileConfig::for_profile(
             self.root.clone(),
             profile.clone(),
-            ProfileCustody::Native,
+            custody,
             relay_installation,
             self.allow_mcp_write,
         ))
@@ -466,8 +488,8 @@ fn read_relay_credential(path: &std::path::Path) -> anyhow::Result<RelayAccessCr
 fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
     match &config.custody {
         ProfileCustody::ExternalFile(path) => {
-            let file = std::fs::File::open(path)
-                .with_context(|| format!("opening wrapping key file {}", path.display()))?;
+            let file = KonclaveSecretStorage::open_owner_protected_file(path)
+                .context("opening owner-protected wrapping key file")?;
             let provider =
                 ExternalWrappingKeyProvider::from_reader(file).context("reading external key")?;
             SecretSealer::from_provider(provider).context("loading external wrapping key")
@@ -540,6 +562,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reopened.conversations.device_id().unwrap(), first_device);
+    }
+
+    #[tokio::test]
+    async fn shared_service_external_rebind_preserves_identity_and_missing_key_fails_closed() {
+        let root = TestProfileRoot::new();
+        let first = initialize_profile(root.config("external-rebind"))
+            .await
+            .unwrap();
+        let device = first.conversations.device_id().unwrap();
+        drop(first);
+
+        let key_directory = root
+            .key_path("external-rebind")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let settings = ServiceProfileSettings::with_external_custody(
+            root.root().to_path_buf(),
+            key_directory,
+            false,
+        );
+        let reopened = initialize_profile(
+            settings
+                .configure(&ProfileId::parse("external-rebind").unwrap())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.conversations.device_id().unwrap(), device);
+        drop(reopened);
+
+        let missing = ServiceProfileSettings::with_external_custody(
+            root.root().to_path_buf(),
+            root.path().join("missing-profile-keys"),
+            false,
+        );
+        assert!(
+            initialize_profile(
+                missing
+                    .configure(&ProfileId::parse("external-rebind").unwrap())
+                    .unwrap(),
+            )
+            .await
+            .is_err()
+        );
+        let exact = initialize_profile(
+            settings
+                .configure(&ProfileId::parse("external-rebind").unwrap())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact.conversations.device_id().unwrap(), device);
     }
 
     #[tokio::test]

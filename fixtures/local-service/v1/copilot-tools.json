@@ -1,0 +1,1465 @@
+[
+  {
+    "name": "accept_welcome",
+    "description": "Accept an encrypted Welcome for a durable pending join.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "welcome": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "welcome",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "routing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "routing_id",
+        "epoch"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "add_member",
+    "description": "Validate a JoinProof and submit its encrypted membership Commit.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "join_proof": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "join_proof"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "welcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "operation_id",
+        "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "authorize_pairing_inviter",
+    "description": "Approve the displayed inviter identity, conversation, and granted role.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "granted_role": {
+          "type": "string"
+        },
+        "inviter_device_id": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "inviter_device_id",
+        "conversation_id",
+        "granted_role"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authorization_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completion_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inviter_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joiner_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "local_role",
+        "phase",
+        "joiner_device_id",
+        "requested_role",
+        "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "authorize_pairing_joiner",
+    "description": "Approve the requesting device for one conversation and role.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "granted_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "conversation_id",
+        "granted_role"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authorization_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completion_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inviter_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joiner_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "local_role",
+        "phase",
+        "joiner_device_id",
+        "requested_role",
+        "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "cancel_pairing",
+    "description": "Cancel an active pairing and safely undo membership when required.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "pairing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authorization_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completion_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inviter_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joiner_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "local_role",
+        "phase",
+        "joiner_device_id",
+        "requested_role",
+        "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "change_member_role",
+    "description": "Submit an encrypted Commit changing one conversation device role.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "device_id",
+        "role"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "welcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "operation_id",
+        "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create_conversation",
+    "description": "Create a sealed MLS conversation owned by this device.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "routing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "routing_id",
+        "epoch"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create_invitation",
+    "description": "Create a signed one-time invitation package for one expected device.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "expected_device_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "expected_device_id",
+        "role"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "invitation": {
+          "type": "string"
+        },
+        "issuer_public_key": {
+          "type": "string"
+        },
+        "peer_bindings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "routing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "invitation",
+        "routing_id",
+        "issuer_public_key",
+        "peer_bindings"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create_join_proof",
+    "description": "Validate an invitation package and create a durable one-time JoinProof.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "invitation": {
+          "type": "string"
+        },
+        "issuer_public_key": {
+          "type": "string"
+        },
+        "peer_bindings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "routing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "invitation",
+        "routing_id",
+        "issuer_public_key",
+        "peer_bindings"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "join_proof": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "join_proof"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create_pairing_capability",
+    "description": "Create the one short-lived capability another session needs to start pairing.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requested_role"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "PairingStatusResult": {
+          "properties": {
+            "authorization_deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "completion_deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "granted_role": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inviter_device_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "joiner_device_id": {
+              "type": "string"
+            },
+            "local_role": {
+              "type": "string"
+            },
+            "pairing_id": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "requested_role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pairing_id",
+            "local_role",
+            "phase",
+            "joiner_device_id",
+            "requested_role",
+            "authorization_deadline_unix_seconds"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "pairing": {
+          "$ref": "#/$defs/PairingStatusResult"
+        }
+      },
+      "required": [
+        "pairing",
+        "capability"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "delivery_status",
+    "description": "Report automatic delivery health, and one conversation's mute state when given.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_delivery_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "claimed_events": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "delivery_degraded": {
+          "type": "boolean"
+        },
+        "pending_events": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "watched_conversations": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pending_events",
+        "claimed_events",
+        "watched_conversations",
+        "delivery_degraded"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_identity",
+    "description": "Return this profile's public device identifier.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "device_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_pairing_status",
+    "description": "Show the authenticated identities, authorization decision, and progress for one pairing.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "pairing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authorization_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completion_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inviter_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joiner_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "local_role",
+        "phase",
+        "joiner_device_id",
+        "requested_role",
+        "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_conversations",
+    "description": "List a bounded page of local sealed conversation identifiers.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "after_conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "conversation_ids"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_messages",
+    "description": "Read a bounded cursor-ordered page of sealed local message history.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "after_cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "MessageResult": {
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "direction": {
+              "type": "string"
+            },
+            "duplicate": {
+              "type": "boolean"
+            },
+            "envelope_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "reply_to_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sender_counter": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sender_device_id": {
+              "type": "string"
+            },
+            "sent_at_unix_milliseconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "message_id",
+            "envelope_id",
+            "sender_device_id",
+            "epoch",
+            "sender_counter",
+            "sent_at_unix_milliseconds",
+            "cursor",
+            "direction",
+            "text",
+            "duplicate"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/MessageResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "has_more"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "redeem_pairing_capability",
+    "description": "Open an authorization request from a capability received from another session.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "capability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authorization_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completion_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inviter_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joiner_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "local_role",
+        "phase",
+        "joiner_device_id",
+        "requested_role",
+        "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "remove_member",
+    "description": "Submit an encrypted Commit removing one conversation device.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "device_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "device_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "welcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "operation_id",
+        "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "send_message",
+    "description": "Encrypt, journal, and submit one text message using a caller-stable 16-byte message_id.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "reply_to_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message_id",
+        "text"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "sender_counter": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message_id",
+        "sender_counter",
+        "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_auto_delivery",
+    "description": "Enable or mute automatic delivery of remote events for one conversation.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_delivery_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "claimed_events": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "delivery_degraded": {
+          "type": "boolean"
+        },
+        "pending_events": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "watched_conversations": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pending_events",
+        "claimed_events",
+        "watched_conversations",
+        "delivery_degraded"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "sync_messages",
+    "description": "Replay, decrypt, persist, and acknowledge one bounded relay page.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "MessageResult": {
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "direction": {
+              "type": "string"
+            },
+            "duplicate": {
+              "type": "boolean"
+            },
+            "envelope_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "reply_to_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sender_counter": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sender_device_id": {
+              "type": "string"
+            },
+            "sent_at_unix_milliseconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "message_id",
+            "envelope_id",
+            "sender_device_id",
+            "epoch",
+            "sender_counter",
+            "sent_at_unix_milliseconds",
+            "cursor",
+            "direction",
+            "text",
+            "duplicate"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/MessageResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "has_more"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "sync_pairing",
+    "description": "Process the next available pairing records and return current progress.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "pairing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "PairingStatusResult": {
+          "properties": {
+            "authorization_deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "completion_deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "granted_role": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inviter_device_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "joiner_device_id": {
+              "type": "string"
+            },
+            "local_role": {
+              "type": "string"
+            },
+            "pairing_id": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "requested_role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pairing_id",
+            "local_role",
+            "phase",
+            "joiner_device_id",
+            "requested_role",
+            "authorization_deadline_unix_seconds"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "pairing": {
+          "$ref": "#/$defs/PairingStatusResult"
+        },
+        "processed_records": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pairing",
+        "processed_records"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "watch_messages",
+    "description": "Wait for, persist, and acknowledge one bounded relay watch page.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "MessageResult": {
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "direction": {
+              "type": "string"
+            },
+            "duplicate": {
+              "type": "boolean"
+            },
+            "envelope_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "reply_to_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sender_counter": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sender_device_id": {
+              "type": "string"
+            },
+            "sent_at_unix_milliseconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "message_id",
+            "envelope_id",
+            "sender_device_id",
+            "epoch",
+            "sender_counter",
+            "sent_at_unix_milliseconds",
+            "cursor",
+            "direction",
+            "text",
+            "duplicate"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/MessageResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "has_more"
+      ],
+      "type": "object"
+    }
+  }
+]

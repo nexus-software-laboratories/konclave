@@ -9,6 +9,7 @@ use KonclaveSecretStorage::NativeEnrollmentCredentialStore;
 
 use crate::cli::InitArgs;
 use crate::installation;
+use crate::local_service_installation;
 
 pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
     let root = installation::resolve_profile_root(args.profile_root)?;
@@ -26,47 +27,58 @@ pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
             "Relay enrollment is already initialized using {} custody.",
             installation::source_label(existing.source())
         );
-        return Ok(());
+    } else {
+        let config = match args.external_source {
+            Some(path) => {
+                let config = RelayInstallationConfig::new(
+                    endpoint.clone(),
+                    RelayEnrollmentSourceConfig::ExternalFile { path: path.clone() },
+                )
+                .context("validating external enrollment source")?;
+                if !path.exists() {
+                    let credential = read_enrollment_credential()?;
+                    config
+                        .create_external_credential(&credential)
+                        .context("creating protected external enrollment source")?;
+                }
+                installation::load_credential(&config)
+                    .context("validating endpoint-bound external enrollment source")?;
+                config
+            }
+            None => {
+                let credential = read_enrollment_credential()?;
+                let installation_id = installation::native_installation_id(&credential, &endpoint);
+                let record = credential
+                    .encode_bound(&endpoint)
+                    .context("binding enrollment credential to endpoint")?;
+                NativeEnrollmentCredentialStore::new(installation_id.clone())
+                    .context("creating native enrollment custody")?
+                    .store(&record)
+                    .context("storing native enrollment credential")?;
+                RelayInstallationConfig::new(
+                    endpoint,
+                    RelayEnrollmentSourceConfig::Native { installation_id },
+                )
+                .context("building relay installation configuration")?
+            }
+        };
+        installation::write_exact(&root, &config)?;
+        println!(
+            "Initialized relay enrollment using {} custody.",
+            installation::source_label(config.source())
+        );
     }
 
-    let config = match args.external_source {
-        Some(path) => {
-            let config = RelayInstallationConfig::new(
-                endpoint.clone(),
-                RelayEnrollmentSourceConfig::ExternalFile { path: path.clone() },
-            )
-            .context("validating external enrollment source")?;
-            if !path.exists() {
-                let credential = read_enrollment_credential()?;
-                config
-                    .create_external_credential(&credential)
-                    .context("creating protected external enrollment source")?;
-            }
-            installation::load_credential(&config)
-                .context("validating endpoint-bound external enrollment source")?;
-            config
-        }
-        None => {
-            let credential = read_enrollment_credential()?;
-            let installation_id = installation::native_installation_id(&credential, &endpoint);
-            let record = credential
-                .encode_bound(&endpoint)
-                .context("binding enrollment credential to endpoint")?;
-            NativeEnrollmentCredentialStore::new(installation_id.clone())
-                .context("creating native enrollment custody")?
-                .store(&record)
-                .context("storing native enrollment credential")?;
-            RelayInstallationConfig::new(
-                endpoint,
-                RelayEnrollmentSourceConfig::Native { installation_id },
-            )
-            .context("building relay installation configuration")?
-        }
-    };
-    installation::write_exact(&root, &config)?;
+    let local = local_service_installation::install(
+        &root,
+        args.copilot_extension_root,
+        args.local_service_endpoint.as_deref(),
+        args.local_service_identity_file,
+        args.local_service_profile_key_directory,
+    )?;
     println!(
-        "Initialized relay enrollment using {} custody.",
-        installation::source_label(config.source())
+        "Initialized shared local service for the Copilot extension at {}.",
+        local.extension_root.display()
     );
     Ok(())
 }

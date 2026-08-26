@@ -1,8 +1,9 @@
 # Install an unsigned prerelease
 
 Konclave packaging produces native archives for supported Linux, Windows, and macOS
-targets. Each client archive contains the CLI, local daemon, platform service files,
-and a built Copilot CLI extension payload. Relay archives contain the standalone Community Relay
+targets. Each client archive contains the CLI, one shared local-service binary,
+platform lifecycle managers, and a thin Copilot CLI extension payload. The extension
+contains no daemon binary. Relay archives contain the standalone Community Relay
 binary and its self-hosting examples. No source checkout or compiler is required after
 extraction.
 
@@ -35,14 +36,19 @@ Before extraction, verify the complete downloaded release set as described in
 ## Install the Copilot extension
 
 Copilot discovers user-scoped extensions under
-`~/.copilot/extensions/konclave/`. A complete installation contains
-`extension.mjs`, the matching daemon under `bin/`, and a bounded
-`konclave.runtime.json` sidecar naming the absolute profile root.
+`~/.copilot/extensions/konclave/`. A complete installation contains `extension.mjs`, the reusable `client.mjs`, and the
+installer-created `konclave.service.json` sidecar. No executable lives under the
+extension directory.
 
 The [Local Copilot demo](local-demo.md) performs this installation atomically on
 Windows and enables experimental extension support when necessary. Direct
 `copilot plugin install` is not the extension installation path: current Copilot CLI
 versions can cache the plugin payload without mounting its extension.
+
+On Linux or macOS, run `init` first so the owner-protected extension directory and
+sidecar exist, then copy `extension.mjs` and `client.mjs` from
+`<install-root>/share/konclave/plugin/extensions/Konclave.Extension/` into that
+directory. Do not copy an executable or create a `bin/` child under the extension.
 
 ## Initialize the installation
 
@@ -55,15 +61,57 @@ Run the packaged CLI once:
 
 `init` prompts without echo and stores the endpoint-bound enrollment credential in
 native operating-system custody. Unix headless installations may instead use the
-explicit external-source flow documented in the repository README.
+explicit external-source flow documented in the repository README. Headless service
+identity and per-profile wrapping-key custody are also explicit:
+
+```shell
+<install-root>/bin/konclave init \
+  --relay-endpoint https://relay.example.com \
+  --external-source /run/secrets/konclave-enrollment \
+  --local-service-identity-file /run/secrets/konclave-service-identity \
+  --local-service-profile-key-directory /run/secrets/konclave-profile-keys
+```
+
+`init` creates or verifies one service identity, one Copilot adapter identity, the
+finite adapter registration, the service configuration, and the extension sidecar.
+Repeating the exact command is idempotent; a conflicting endpoint, custody source, or
+existing file fails without replacement.
 
 ## Run as a service
 
-Platform service definitions are under
-`<install-root>/share/konclave/service/`. The Windows installer accepts the packaged
-service-host path explicitly. For system service installation, place the extracted
-client directory at `/opt/konclave` on Linux or `/usr/local/libexec/konclave` on
-macOS before loading the included systemd or launchd definition.
+Platform service definitions and idempotent lifecycle managers are under
+`<install-root>/share/konclave/service/`.
+
+```shell
+# Linux user service
+bash <install-root>/share/konclave/service/systemd/manage-user-service.sh install <install-root>
+
+# macOS launch agent
+bash <install-root>/share/konclave/service/launchd/manage-agent.sh install <install-root>
+```
+
+On Windows, run `install-service.ps1 -Action Install -Credential <current-user>` for
+an SCM-managed per-user service, or use the local demo's hidden owner-session process.
+All managers also support start, stop, status, and uninstall actions and reject an
+existing conflicting definition.
+
+## Upgrade and rollback
+
+Before replacing a compatibility build, close old harness sessions and stop every
+recorded per-session daemon. Install the new archive, rerun the exact `init` command,
+then start the shared service. Native-custody profiles reopen without data conversion
+or re-enrollment.
+
+An external-custody profile must have its original key copied to
+`<profile-key-directory>/<profile-id>.key` before the shared service opens it. Every
+file is owner protected and each profile resolves only its own canonical name; a
+missing or wrong key fails closed without replacing identity or state. Never point
+multiple profiles at one launch-scoped key as a migration shortcut.
+
+Rollback stops the shared service and reinstalls the complete prior archive. It is
+not a selectable runtime mode inside the new thin extension. Profile databases,
+native custody, relay principals, and external key files remain outside the
+installation root and are retained through either direction.
 
 ## Run the Community Relay
 
@@ -98,8 +146,8 @@ covering native and containerized self-hosting.
 
 ## Uninstall an archive installation
 
-Stop running daemon processes, remove the user extension directory, and remove the
-extracted installation directory.
+Stop the shared service through its platform manager, remove the user extension
+directory, and remove the extracted installation directory.
 Profiles live under the separate platform profile root and are retained for a later
 installation. Remove that profile root explicitly only when permanent local data loss
 is intended.

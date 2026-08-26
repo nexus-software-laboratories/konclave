@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
-import type { AdapterChannel } from '../src/adapter/channel.js';
 import {
   createDeliveryCoordinator,
   defaultWakeBudget,
   type WakeBudget,
 } from '../src/adapter/delivery.js';
 import { frameDelivery, untrustedContentMarkers } from '../src/adapter/framing.js';
-import type { AdapterRequest, AdapterResponse, DeliveredEvent } from '../src/adapter/session.js';
+import type {
+  AdapterChannel,
+  AdapterRequest,
+  AdapterResponse,
+  DeliveredEvent,
+} from '../src/adapter/session.js';
 
 function event(
   overrides: Partial<DeliveredEvent> & { text?: string; conversation?: Buffer } = {},

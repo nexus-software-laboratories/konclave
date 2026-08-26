@@ -8,8 +8,11 @@
     reason = "shared support module is built into several test binaries"
 )]
 
+pub mod shared_service;
+
 use std::process::Command;
 
+use KonclaveClientLibrary::RelayEnrollmentAuthorityId;
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
 use KonclaveCommunityRelay::http::{HttpState, router};
@@ -33,7 +36,8 @@ impl TestProfile {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("profiles");
         let key_file = directory.path().join("wrapping.key");
-        std::fs::write(&key_file, [7_u8; 32]).unwrap();
+        KonclaveSecretStorage::create_or_verify_owner_protected_file(&key_file, &[7_u8; 32])
+            .unwrap();
         Self {
             _directory: directory,
             root,
@@ -71,12 +75,9 @@ pub struct TestRelay {
 impl TestRelay {
     /// Starts a relay that grants one principal every permission on every route.
     pub async fn start(token: [u8; RelayPrincipalId::LENGTH], service: &str) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let access_path = directory.path().join("access.json");
         let principal = RelayPrincipalId::from_access_token(&token);
-        std::fs::write(
-            &access_path,
-            serde_json::to_vec(&json!({
+        Self::start_with_access(
+            json!({
                 "version": 1,
                 "principals": [{
                     "principal": URL_SAFE_NO_PAD.encode(principal.as_bytes()),
@@ -85,10 +86,35 @@ impl TestRelay {
                         "permissions": ["send", "replay", "acknowledge"]
                     }]
                 }]
-            }))
-            .unwrap(),
+            }),
+            service,
         )
-        .unwrap();
+        .await
+    }
+
+    /// Starts a relay whose control plane enrolls bounded per-profile principals.
+    pub async fn start_enrollment(
+        token: [u8; RelayEnrollmentAuthorityId::LENGTH],
+        service: &str,
+    ) -> Self {
+        let authority = RelayEnrollmentAuthorityId::from_enrollment_token(&token);
+        Self::start_with_access(
+            json!({
+                "version": 2,
+                "principals": [],
+                "enrollment": {
+                    "authority": URL_SAFE_NO_PAD.encode(authority.as_bytes())
+                }
+            }),
+            service,
+        )
+        .await
+    }
+
+    async fn start_with_access(access_document: serde_json::Value, service: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let access_path = directory.path().join("access.json");
+        std::fs::write(&access_path, serde_json::to_vec(&access_document).unwrap()).unwrap();
         let access = StaticRelayAccess::load(&access_path).unwrap();
         let application =
             RelayApplication::connect(&directory.path().join("relay.sqlite"), access.clone())
@@ -403,7 +429,11 @@ mod daemon_fixture {
             let wrapping_key_file = directory.path().join("wrapping.key");
             let relay_credential_file = directory.path().join("relay.credential");
             let token = [11_u8; RelayPrincipalId::LENGTH];
-            std::fs::write(&wrapping_key_file, [3_u8; 32]).unwrap();
+            KonclaveSecretStorage::create_or_verify_owner_protected_file(
+                &wrapping_key_file,
+                &[3_u8; 32],
+            )
+            .unwrap();
             std::fs::write(
                 &relay_credential_file,
                 format!("{}\n", URL_SAFE_NO_PAD.encode(token)),
