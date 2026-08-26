@@ -34,8 +34,10 @@ pub struct TestProfile {
 impl TestProfile {
     pub fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("profiles");
-        let key_file = directory.path().join("wrapping.key");
+        let state_root = directory.path().join("private");
+        KonclaveSecretStorage::ensure_owner_protected_directory(&state_root).unwrap();
+        let root = state_root.join("profiles");
+        let key_file = state_root.join("wrapping.key");
         KonclaveSecretStorage::create_or_verify_owner_protected_file(&key_file, &[7_u8; 32])
             .unwrap();
         Self {

@@ -115,15 +115,17 @@ fn structured(result: rmcp::model::CallToolResult) -> Value {
 #[tokio::test]
 async fn two_daemons_join_exchange_reconnect_replay_and_remove() {
     let directory = tempfile::tempdir().unwrap();
-    let profile_root = directory.path().join("profiles");
-    let wrapping_key_file = directory.path().join("wrapping.key");
-    let relay_credential_file = directory.path().join("relay.credential");
+    let state_root = directory.path().join("private");
+    KonclaveSecretStorage::ensure_owner_protected_directory(&state_root).unwrap();
+    let profile_root = state_root.join("profiles");
+    let wrapping_key_file = state_root.join("wrapping.key");
+    let relay_credential_file = state_root.join("relay.credential");
     let token = [7_u8; RelayPrincipalId::LENGTH];
     KonclaveSecretStorage::create_or_verify_owner_protected_file(&wrapping_key_file, &[5_u8; 32])
         .unwrap();
-    std::fs::write(
+    KonclaveSecretStorage::create_or_verify_owner_protected_file(
         &relay_credential_file,
-        format!("{}\n", URL_SAFE_NO_PAD.encode(token)),
+        format!("{}\n", URL_SAFE_NO_PAD.encode(token)).as_bytes(),
     )
     .unwrap();
     let relay = TestRelay::start(token, "daemon-e2e").await;
