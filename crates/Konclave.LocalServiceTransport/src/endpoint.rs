@@ -235,14 +235,19 @@ impl LocalServiceListener {
     #[cfg(windows)]
     pub async fn accept(&mut self) -> Result<LocalServiceServerStream, LocalServiceTransportError> {
         loop {
+            let connection = self
+                .server
+                .as_ref()
+                .ok_or(LocalServiceTransportError::EndpointUnavailable)?
+                .connect()
+                .await;
             let server = self
                 .server
                 .take()
                 .ok_or(LocalServiceTransportError::EndpointUnavailable)?;
-            if server.connect().await.is_err() {
-                drop(server);
+            if connection.is_err() {
                 self.server = Some(
-                    create_windows_server(&self.endpoint, true)
+                    create_windows_server(&self.endpoint, false)
                         .map_err(|_| LocalServiceTransportError::EndpointUnavailable)?,
                 );
                 continue;
