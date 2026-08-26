@@ -998,18 +998,18 @@ function Install-DemoPackages {
     $localHead = (
         Invoke-RequiredCommand git @('-C', $projectRoot, 'rev-parse', 'HEAD')
     ).Trim()
-    $publishedMain = (
+    $publishedHead = (
         Invoke-RequiredCommand gh @(
             'api',
-            "repos/$repository/commits/main",
+            "repos/$repository/commits/$workflowBranch",
             '--jq',
             '.sha'
         )
     ).Trim()
-    if ($localHead -cne $publishedMain) {
+    if ($localHead -cne $publishedHead) {
         throw (
-            'This checkout must be at the current published main revision before ' +
-            'building a demo package.'
+            'This checkout must match the pushed revision of its current branch ' +
+            'before building a demo package.'
         )
     }
 
