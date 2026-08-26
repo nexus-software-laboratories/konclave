@@ -53,6 +53,11 @@ paths:
 - Daemon profiles acquire their exclusive lock before key custody or database open.
   Daemon and MLS schemas stay separately owned; incoming plaintext is journaled
   idempotently before receiver-ratchet persistence and relay acknowledgment.
+- Profile identifiers are canonical lowercase ASCII letters, digits, `-`, and `_` at
+  every boundary: transport authorization, service registry keys, key custody
+  identifiers, and filesystem paths. Reject a non-canonical value; never fold, alias,
+  or normalize one, because a case-insensitive filesystem would otherwise resolve two
+  spellings to one profile directory, lock, and owner.
 - Membership changes are application-authorized on every client; MLS validity alone
   does not authorize them.
 - Bind invitations to an independently verified expected `DeviceId` and enforce

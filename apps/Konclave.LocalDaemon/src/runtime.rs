@@ -93,18 +93,24 @@ pub(crate) trait ProfileSource: Send + Sync + 'static {
 }
 
 /// Service-wide settings that resolve into explicit per-profile inputs.
+///
+/// The shared service resolves native per-profile custody. It never reuses one
+/// external wrapping-key file across profiles: an external-custody profile is bound
+/// to its own source through the explicit per-profile rebind that ADR 0008 assigns to
+/// distribution, and until that binding exists the service opens the profile under
+/// its own native custody or fails. There is no shared-key fallback.
+#[allow(dead_code)]
 pub(crate) struct ServiceProfileSettings {
     root: PathBuf,
-    custody: ProfileCustody,
     allow_mcp_write: bool,
 }
 
+#[allow(dead_code)]
 impl ServiceProfileSettings {
-    /// Records the profile root, custody policy, and local write authorization.
-    pub(crate) fn new(root: PathBuf, custody: ProfileCustody, allow_mcp_write: bool) -> Self {
+    /// Records the profile root and local write authorization.
+    pub(crate) fn new(root: PathBuf, allow_mcp_write: bool) -> Self {
         Self {
             root,
-            custody,
             allow_mcp_write,
         }
     }
@@ -117,14 +123,13 @@ impl ProfileSource for ServiceProfileSettings {
         // while the service is already hosting other profiles.
         let relay_installation = read_relay_installation(&self.root)
             .context("reading the relay installation for the requested profile")?;
-        Ok(ProfileConfig {
-            root: self.root.clone(),
-            profile_id: profile.clone(),
-            custody: self.custody.clone(),
-            relay_provisioning: None,
+        Ok(ProfileConfig::for_profile(
+            self.root.clone(),
+            profile.clone(),
+            ProfileCustody::Native,
             relay_installation,
-            allow_mcp_write: self.allow_mcp_write,
-        })
+            self.allow_mcp_write,
+        ))
     }
 }
 
@@ -149,6 +154,28 @@ struct EnrollmentPlan {
 }
 
 impl ProfileConfig {
+    /// Builds the explicit inputs for one profile.
+    ///
+    /// First-run relay provisioning is deliberately absent: it is a compatibility
+    /// host concern read from that host's own environment, not something a shared
+    /// service applies to profiles it opens.
+    pub(crate) fn for_profile(
+        root: PathBuf,
+        profile_id: ProfileId,
+        custody: ProfileCustody,
+        relay_installation: Option<RelayInstallationConfig>,
+        allow_mcp_write: bool,
+    ) -> Self {
+        Self {
+            root,
+            profile_id,
+            custody,
+            relay_provisioning: None,
+            relay_installation,
+            allow_mcp_write,
+        }
+    }
+
     fn parse_relay_provisioning(
         endpoint: Option<&std::ffi::OsStr>,
         credential_file: Option<&std::ffi::OsStr>,
@@ -176,9 +203,10 @@ impl ProfileConfig {
 
 /// Reads the one profile the compatibility stdio host owns from its environment.
 ///
-/// Only this host reads process environment. It produces the same explicit
-/// [`ProfileConfig`] the shared service resolves per profile, so the two hosts open
-/// profiles through one code path.
+/// Only this host reads process environment, and only this host binds a profile to an
+/// external wrapping-key file supplied per launch. The shared service never inherits
+/// that binding: reusing one launch-scoped key across profiles would give unrelated
+/// profiles one custody root.
 ///
 /// # Errors
 ///
@@ -200,9 +228,14 @@ fn legacy_profile_config_from_environment() -> anyhow::Result<ProfileConfig> {
     };
     let allow_mcp_write =
         parse_mcp_allow_write(std::env::var_os("KONCLAVE_MCP_ALLOW_WRITE").as_deref())?;
-    let mut config = ServiceProfileSettings::new(root, custody, allow_mcp_write)
-        .configure(&profile_id)
-        .context("resolving the compatibility host profile")?;
+    let relay_installation = read_relay_installation(&root)?;
+    let mut config = ProfileConfig::for_profile(
+        root,
+        profile_id,
+        custody,
+        relay_installation,
+        allow_mcp_write,
+    );
     config.relay_provisioning = ProfileConfig::parse_relay_provisioning(
         std::env::var_os("KONCLAVE_RELAY_ENDPOINT").as_deref(),
         std::env::var_os("KONCLAVE_RELAY_CREDENTIAL_FILE").as_deref(),
@@ -210,7 +243,7 @@ fn legacy_profile_config_from_environment() -> anyhow::Result<ProfileConfig> {
     Ok(config)
 }
 
-fn read_relay_installation(
+pub(crate) fn read_relay_installation(
     root: &std::path::Path,
 ) -> anyhow::Result<Option<RelayInstallationConfig>> {
     let path = root.join(RELAY_INSTALLATION_CONFIG_FILE);
@@ -460,6 +493,29 @@ mod tests {
         assert!(parse_mcp_allow_write(Some(std::ffi::OsStr::new("yes"))).is_err());
     }
 
+    #[test]
+    fn the_shared_service_resolves_native_custody_for_every_profile() {
+        let root = TestProfileRoot::new();
+        let settings = ServiceProfileSettings::new(root.root().to_path_buf(), false);
+
+        let first = settings
+            .configure(&ProfileId::parse("service-a").unwrap())
+            .unwrap();
+        let second = settings
+            .configure(&ProfileId::parse("service-b").unwrap())
+            .unwrap();
+
+        // The shared service binds every profile to its own native custody. It never
+        // hands two profiles one external wrapping-key file, and it never inherits a
+        // launch-scoped key: an external-custody profile needs an explicit rebind.
+        assert_eq!(first.custody, ProfileCustody::Native);
+        assert_eq!(second.custody, ProfileCustody::Native);
+        assert_eq!(first.profile_id.as_str(), "service-a");
+        assert_eq!(second.profile_id.as_str(), "service-b");
+        assert!(first.relay_provisioning.is_none());
+        assert!(second.relay_provisioning.is_none());
+    }
+
     #[tokio::test]
     async fn external_key_profile_initializes_and_reopens() {
         let root = TestProfileRoot::new();
@@ -550,7 +606,7 @@ mod tests {
         let config = |endpoint: &str| ProfileConfig {
             root: root.root().to_path_buf(),
             profile_id: ProfileId::parse("relay-provisioning").unwrap(),
-            custody: ProfileCustody::ExternalFile(root.key_path().to_path_buf()),
+            custody: ProfileCustody::ExternalFile(root.ensure_key("relay-provisioning")),
             relay_provisioning: Some(RelayProvisioning {
                 endpoint: RelayEndpoint::parse(endpoint).unwrap(),
                 credential_file: credential_path.clone(),
@@ -581,12 +637,8 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn installation_source_enrolls_distinct_profiles_automatically() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("profiles");
-        let key_path = directory.path().join("wrapping.key");
-        let credential_path = directory.path().join("enrollment.credential");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        let root = TestProfileRoot::new();
+        let credential_path = root.path().join("enrollment.credential");
         let enrollment_token = [11_u8; RelayEnrollmentCredential::LENGTH];
         let relay = TestRelay::start_enrollment(enrollment_token).await;
         let endpoint = RelayEndpoint::parse(&relay.endpoint).unwrap();
@@ -601,12 +653,12 @@ mod tests {
             .create_external_credential(&RelayEnrollmentCredential::from_bytes(enrollment_token))
             .unwrap();
         std::fs::write(
-            root.join(RELAY_INSTALLATION_CONFIG_FILE),
+            root.root().join(RELAY_INSTALLATION_CONFIG_FILE),
             installation.encode().unwrap(),
         )
         .unwrap();
 
-        let first = initialize_profile(external_profile_config(&root, &key_path, "automatic-a"))
+        let first = initialize_profile(external_profile_config(&root, "automatic-a"))
             .await
             .unwrap();
         let first_principal = first
@@ -620,7 +672,7 @@ mod tests {
         assert!(first.pairings.is_some());
         drop(first);
 
-        let second = initialize_profile(external_profile_config(&root, &key_path, "automatic-b"))
+        let second = initialize_profile(external_profile_config(&root, "automatic-b"))
             .await
             .unwrap();
         let second_principal = second
@@ -634,7 +686,7 @@ mod tests {
         drop(second);
 
         std::fs::remove_file(&credential_path).unwrap();
-        let reopened = initialize_profile(external_profile_config(&root, &key_path, "automatic-a"))
+        let reopened = initialize_profile(external_profile_config(&root, "automatic-a"))
             .await
             .unwrap();
         assert!(reopened.applications.is_some());
@@ -644,12 +696,8 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn missing_external_source_fails_closed_and_exact_retry_recovers() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("profiles");
-        let key_path = directory.path().join("wrapping.key");
-        let credential_path = directory.path().join("missing-enrollment.credential");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&key_path, [6_u8; 32]).unwrap();
+        let root = TestProfileRoot::new();
+        let credential_path = root.path().join("missing-enrollment.credential");
         let enrollment_token = [12_u8; RelayEnrollmentCredential::LENGTH];
         let relay = TestRelay::start_enrollment(enrollment_token).await;
         let endpoint = RelayEndpoint::parse(&relay.endpoint).unwrap();
@@ -662,17 +710,17 @@ mod tests {
         .unwrap();
         let installation_bytes = installation.encode().unwrap();
         std::fs::write(
-            root.join(RELAY_INSTALLATION_CONFIG_FILE),
+            root.root().join(RELAY_INSTALLATION_CONFIG_FILE),
             &installation_bytes,
         )
         .unwrap();
-        let config = || external_profile_config(&root, &key_path, "missing-source");
+        let config = || external_profile_config(&root, "missing-source");
 
         assert!(initialize_profile(config()).await.is_err());
-        std::fs::remove_file(root.join(RELAY_INSTALLATION_CONFIG_FILE)).unwrap();
+        std::fs::remove_file(root.root().join(RELAY_INSTALLATION_CONFIG_FILE)).unwrap();
         assert!(initialize_profile(config()).await.is_err());
         std::fs::write(
-            root.join(RELAY_INSTALLATION_CONFIG_FILE),
+            root.root().join(RELAY_INSTALLATION_CONFIG_FILE),
             installation_bytes,
         )
         .unwrap();
@@ -692,17 +740,8 @@ mod tests {
         relay.stop().await;
     }
 
-    fn external_profile_config(
-        root: &std::path::Path,
-        key_path: &std::path::Path,
-        profile: &str,
-    ) -> ProfileConfig {
-        ServiceProfileSettings::new(
-            root.to_path_buf(),
-            ProfileCustody::ExternalFile(key_path.to_path_buf()),
-            false,
-        )
-        .configure(&ProfileId::parse(profile).unwrap())
-        .unwrap()
+    /// Builds one enrollment-test profile with its own external wrapping key.
+    fn external_profile_config(root: &TestProfileRoot, profile: &str) -> ProfileConfig {
+        root.config(profile)
     }
 }

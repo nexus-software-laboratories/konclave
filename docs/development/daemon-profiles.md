@@ -15,6 +15,11 @@ One validated profile identifier selects:
   mls.sqlite
 ```
 
+The identifier is canonical: bounded lowercase ASCII letters, digits, `-`, and `_`.
+Uppercase is rejected rather than folded, because the identifier is also a directory
+name and a case-insensitive filesystem would otherwise resolve two spellings to one
+profile with two locks and two owners.
+
 `profile.lock` is acquired exclusively and without waiting. The daemon holds it until
 shutdown. Native wrapping-key load-or-create occurs only while that lock is held.
 
@@ -254,11 +259,20 @@ optional first-run relay provisioning pair, and the local write authorization. C
 is `Native` or an external wrapping-key file, and an external-custody profile whose
 file is unavailable fails closed rather than falling back to native custody.
 
-Only the compatibility stdio host reads process environment. It parses its variables
-once, resolves the same explicit configuration the shared service resolves per
-profile, and passes it in. Nothing below that boundary reads process-global state, so
-one process can open unrelated profiles without any of them inheriting another
-profile's custody, relay, or authorization settings.
+The shared service resolves native per-profile custody. It never reuses one external
+wrapping-key file across profiles: an external-custody profile is bound to its own
+source through the explicit per-profile rebind ADR 0008 assigns to distribution, and
+until that binding exists the service opens the profile under its own native custody
+or fails. There is no shared-key fallback and no silent inheritance of a launch-scoped
+key.
+
+Only the compatibility stdio host reads process environment, and only that host binds
+its single profile to the external wrapping-key file named by
+`KONCLAVE_WRAPPING_KEY_FILE`. It builds that profile's configuration directly,
+including its relay installation and first-run provisioning, so a launch-scoped key
+can never become a service-wide custody root. Nothing below that boundary reads
+process-global state, so one process can open unrelated profiles without any of them
+inheriting another profile's custody, relay, or authorization settings.
 
 ## Profile runtime and hosts
 

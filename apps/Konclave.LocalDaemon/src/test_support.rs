@@ -8,38 +8,95 @@ use KonclaveRelayCore::RelayPrincipalId;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
-use crate::runtime::{ProfileConfig, ProfileCustody, ProfileSource, ServiceProfileSettings};
+use crate::runtime::{ProfileConfig, ProfileCustody, ProfileSource, read_relay_installation};
 
-/// An isolated profile root whose profiles use an owner-supplied wrapping key.
+/// Domain separator for test wrapping keys.
+///
+/// This is a test fixture, not a key-derivation contract: it exists so every test
+/// profile gets its own distinct external key without a shared file, and it never
+/// derives production custody.
+const TEST_KEY_DOMAIN: &[u8] = b"konclave.test.profile-wrapping-key.v1\0";
+
+/// A profile source that binds every profile to its own external wrapping key.
+///
+/// Production resolves native per-profile custody, which needs a platform keychain a
+/// headless runner does not have. Tests therefore supply external custody, but they
+/// supply it the way production must: one key per profile, never one file shared
+/// across profiles.
+pub(crate) struct TestProfileSettings {
+    root: PathBuf,
+    keys: PathBuf,
+}
+
+impl TestProfileSettings {
+    pub(crate) fn new(root: PathBuf, keys: PathBuf) -> Self {
+        Self { root, keys }
+    }
+
+    /// Returns the wrapping-key path this source binds to one profile.
+    pub(crate) fn key_path(&self, profile: &str) -> PathBuf {
+        self.keys.join(format!("{profile}.key"))
+    }
+
+    /// Returns the deterministic, distinct key bytes for one profile.
+    pub(crate) fn key_bytes(profile: &str) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(TEST_KEY_DOMAIN);
+        digest.update(profile.as_bytes());
+        digest.finalize().into()
+    }
+
+    /// Creates the profile's key file if it does not exist yet.
+    pub(crate) fn ensure_key(&self, profile: &str) -> PathBuf {
+        let path = self.key_path(profile);
+        if !path.exists() {
+            std::fs::create_dir_all(&self.keys).unwrap();
+            std::fs::write(&path, Self::key_bytes(profile)).unwrap();
+        }
+        path
+    }
+}
+
+impl ProfileSource for TestProfileSettings {
+    fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig> {
+        let key = self.ensure_key(profile.as_str());
+        Ok(ProfileConfig::for_profile(
+            self.root.clone(),
+            profile.clone(),
+            ProfileCustody::ExternalFile(key),
+            read_relay_installation(&self.root)?,
+            false,
+        ))
+    }
+}
+
+/// An isolated profile root whose profiles each own an external wrapping key.
 ///
 /// Tests never touch native platform custody: it is machine state that would leak
 /// between runs and is unavailable on a headless runner.
 pub(crate) struct TestProfileRoot {
     directory: tempfile::TempDir,
     root: PathBuf,
-    key_path: PathBuf,
+    keys: PathBuf,
 }
 
 impl TestProfileRoot {
     pub(crate) fn new() -> Self {
-        Self::with_key([5_u8; 32])
-    }
-
-    pub(crate) fn with_key(key: [u8; 32]) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("profiles");
-        let key_path = directory.path().join("wrapping.key");
+        let keys = directory.path().join("keys");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&key_path, key).unwrap();
+        std::fs::create_dir_all(&keys).unwrap();
         Self {
             directory,
             root,
-            key_path,
+            keys,
         }
     }
 
@@ -51,16 +108,18 @@ impl TestProfileRoot {
         &self.root
     }
 
-    pub(crate) fn key_path(&self) -> &Path {
-        &self.key_path
+    /// Returns the wrapping-key path bound to one profile.
+    pub(crate) fn key_path(&self, profile: &str) -> PathBuf {
+        self.settings().key_path(profile)
     }
 
-    pub(crate) fn settings(&self) -> ServiceProfileSettings {
-        ServiceProfileSettings::new(
-            self.root.clone(),
-            ProfileCustody::ExternalFile(self.key_path.clone()),
-            false,
-        )
+    /// Creates one profile's wrapping key and returns its path.
+    pub(crate) fn ensure_key(&self, profile: &str) -> PathBuf {
+        self.settings().ensure_key(profile)
+    }
+
+    pub(crate) fn settings(&self) -> TestProfileSettings {
+        TestProfileSettings::new(self.root.clone(), self.keys.clone())
     }
 
     pub(crate) fn config(&self, profile: &str) -> ProfileConfig {

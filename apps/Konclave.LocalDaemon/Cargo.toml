@@ -46,6 +46,7 @@ KonclaveCommunityRelay = { path = "../Konclave.CommunityRelay" }
 KonclaveRelayCore = { path = "../../crates/Konclave.RelayCore" }
 axum = "0.8.9"
 rmcp = { version = "3.1.2", features = ["transport-child-process"] }
+sha2.workspace = true
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["process", "test-util"] }
 tokio-tungstenite = "0.30.0"

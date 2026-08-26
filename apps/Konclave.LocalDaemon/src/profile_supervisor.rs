@@ -1145,8 +1145,8 @@ mod tests {
     use super::*;
     use crate::activity::ProfileActivityError;
     use crate::profile_runtime::ProfileHostOptions;
-    use crate::runtime::{ProfileConfig, ProfileCustody, ServiceProfileSettings};
-    use crate::test_support::TestProfileRoot;
+    use crate::runtime::{ProfileConfig, ProfileCustody};
+    use crate::test_support::{TestProfileRoot, TestProfileSettings};
 
     /// The number of concurrent profiles ADR 0008 and issue #121 require.
     const REQUIRED_CONCURRENT_PROFILES: usize = 20;
@@ -1161,7 +1161,7 @@ mod tests {
 
     /// Counts how often a profile is configured, which is once per real open.
     struct CountingSource {
-        inner: ServiceProfileSettings,
+        inner: TestProfileSettings,
         configured: Arc<AtomicUsize>,
     }
 
@@ -1174,27 +1174,32 @@ mod tests {
 
     /// Refuses one named profile until its custody source is repaired.
     struct RepairableSource {
+        inner: TestProfileSettings,
         root: std::path::PathBuf,
-        key_path: std::path::PathBuf,
         broken_profile: String,
         broken_key: std::path::PathBuf,
     }
 
     impl ProfileSource for RepairableSource {
         fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig> {
-            let key = if profile.as_str() == self.broken_profile {
-                self.broken_key.clone()
-            } else {
-                self.key_path.clone()
-            };
-            ServiceProfileSettings::new(self.root.clone(), ProfileCustody::ExternalFile(key), false)
-                .configure(profile)
+            if profile.as_str() != self.broken_profile {
+                return self.inner.configure(profile);
+            }
+            // The broken profile is bound to its own custody source, which does not
+            // exist yet. It never falls back to another profile's key.
+            Ok(ProfileConfig::for_profile(
+                self.root.clone(),
+                profile.clone(),
+                ProfileCustody::ExternalFile(self.broken_key.clone()),
+                None,
+                false,
+            ))
         }
     }
 
     /// Blocks every open until the test releases it, and records open concurrency.
     struct GatedSource {
-        inner: ServiceProfileSettings,
+        inner: TestProfileSettings,
         entered: tokio::sync::mpsc::UnboundedSender<String>,
         release: Mutex<mpsc::Receiver<()>>,
         concurrent: AtomicUsize,
@@ -1215,7 +1220,7 @@ mod tests {
 
     /// Fails one profile's task set the first time that profile is hosted.
     struct FailingRuntimeSource {
-        inner: ServiceProfileSettings,
+        inner: TestProfileSettings,
         failing_profile: String,
         trigger: Mutex<Option<oneshot::Receiver<()>>>,
     }
@@ -1245,7 +1250,7 @@ mod tests {
 
     /// Holds one profile's task set open until the test releases its shutdown.
     struct BlockedShutdownSource {
-        inner: ServiceProfileSettings,
+        inner: TestProfileSettings,
         stopping: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
         release: Mutex<Option<oneshot::Receiver<()>>>,
     }
@@ -1298,6 +1303,7 @@ mod tests {
         assert_eq!(leases.len(), REQUIRED_CONCURRENT_PROFILES);
         assert_eq!(supervisor.active_profiles(), REQUIRED_CONCURRENT_PROFILES);
         let mut devices = std::collections::HashSet::new();
+        let mut keys = std::collections::HashSet::new();
         for lease in &leases {
             assert!(
                 devices.insert(
@@ -1309,6 +1315,14 @@ mod tests {
                         .unwrap()
                 ),
                 "profiles must not share a device identity"
+            );
+            // Custody is per profile: distinct key files holding distinct key bytes.
+            let key_path = root.key_path(lease.profile_id());
+            let key = std::fs::read(&key_path).unwrap();
+            assert_eq!(key.len(), 32);
+            assert!(
+                keys.insert((key_path, key)),
+                "profiles must not share a wrapping key"
             );
             assert_eq!(lease.run_state(), ProfileRunState::Running);
             // Another owner of the same profile, in this or any other process, is
@@ -1501,8 +1515,8 @@ mod tests {
         let broken_key = root.path().join("missing.key");
         let supervisor = ProfileSupervisor::new(
             Arc::new(RepairableSource {
+                inner: root.settings(),
                 root: root.root().to_path_buf(),
-                key_path: root.key_path().to_path_buf(),
                 broken_profile: "broken".to_string(),
                 broken_key: broken_key.clone(),
             }),

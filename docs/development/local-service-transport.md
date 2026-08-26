@@ -50,8 +50,11 @@ Both peers authenticate one canonical byte string:
 The single variable-length field carries an explicit length and every other field is
 fixed width, so no two distinct transcripts share an encoding.
 
-A profile identifier is bounded to 32 bytes of ASCII alphanumerics, `-`, and `_`,
-which is exactly what the daemon runtime accepts. Path traversal and control
+A profile identifier is bounded to 32 bytes of lowercase ASCII letters, digits, `-`,
+and `_`, which is exactly what the daemon runtime accepts. Uppercase is rejected
+rather than folded: the identifier becomes a profile directory name, so accepting two
+spellings would let a case-insensitive filesystem resolve one profile through two
+authorizations, two registry entries, and two locks. Path traversal and control
 characters therefore cannot enter an authenticated field or pass transport
 authentication only to fail a second, narrower runtime check. The harness is a closed
 enumeration rather than free text, so an unimplemented value is rejected instead of
