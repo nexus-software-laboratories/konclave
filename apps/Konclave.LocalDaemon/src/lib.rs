@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+mod activity;
+#[allow(dead_code)]
 mod adapter;
 #[allow(dead_code)]
 mod application;
@@ -18,6 +20,8 @@ mod pairing_supervisor;
 #[allow(dead_code)]
 mod persistence;
 mod profile_runtime;
+#[allow(dead_code)]
+mod profile_supervisor;
 mod runtime;
 mod service;
 #[cfg(test)]

@@ -278,6 +278,18 @@ where
         &self,
         now_unix_seconds: u64,
     ) -> Result<usize, PairingServiceError> {
+        // A pairing sweep is one of the operations ADR 0008 retains a profile for.
+        // Admission is refused once the profile is closing; every pairing record stays
+        // durable, so the next sweep after reopening is exact rather than repeated.
+        //
+        // This is a top-level operation: the sweep drives pairing replay directly
+        // through the transport and store, so nothing it reaches takes a second
+        // admission while this one is held.
+        let _admitted = self
+            .conversations
+            .activity()
+            .try_begin()
+            .map_err(|_| PairingServiceError::ProfileClosing)?;
         self.recover(now_unix_seconds).await?;
         let mut processed = 0_usize;
         let store = Arc::clone(&self.store);
@@ -1586,6 +1598,8 @@ pub(crate) enum PairingServiceError {
     InvalidRelayResponse,
     #[error("blocking pairing task failed")]
     Task,
+    #[error("the profile is closing and admits no further operations")]
+    ProfileClosing,
     #[error(transparent)]
     Application(#[from] ApplicationServiceError),
     #[error(transparent)]

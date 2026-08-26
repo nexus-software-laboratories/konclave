@@ -84,6 +84,11 @@ where
                     failures = 0;
                     delay = self.config.poll_interval;
                 }
+                // The profile stopped admitting operations, which is a coordinated
+                // close rather than a pairing failure. Every record stays durable for
+                // the next open. The refusal is reported the same way whether the
+                // sweep itself was refused or a nested application operation was.
+                Err(error) if is_coordinated_profile_stop(&error) => return Ok(()),
                 Err(error) if is_transient_pairing_error(&error) => {
                     failures = failures.saturating_add(1);
                     delay = bounded_retry_delay(
@@ -133,6 +138,19 @@ fn is_transient_client_error(error: &KonclaveClientError) -> bool {
     }
 }
 
+/// Reports whether a pairing failure is really this profile closing.
+///
+/// A sweep can be refused directly, or a nested application operation can be refused
+/// inside it and surface wrapped. Both mean the same thing: the profile stopped
+/// admitting operations, and every pairing record stays durable for the next open.
+fn is_coordinated_profile_stop(error: &PairingServiceError) -> bool {
+    matches!(
+        error,
+        PairingServiceError::ProfileClosing
+            | PairingServiceError::Application(ApplicationServiceError::ProfileClosing)
+    )
+}
+
 fn transient_pairing_error_code(error: &PairingServiceError) -> &str {
     match error {
         PairingServiceError::Client(error)
@@ -143,6 +161,9 @@ fn transient_pairing_error_code(error: &PairingServiceError) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use KonclaveClientLibrary::{RelayEndpoint, RelayWatchSession};
     use KonclaveDomainCore::{
         AcknowledgeRequest, ConversationRole, RelayEnvelope, ReplayPage, ReplayRequest,
@@ -153,12 +174,15 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::activity::ProfileActivity;
     use crate::application::ApplicationService;
     use crate::service::tests::coordinator;
 
     struct FailingPairingRelay {
         attempts: mpsc::Sender<()>,
         permanent: bool,
+        activity: ProfileActivity,
+        observed_in_flight: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -171,6 +195,10 @@ mod tests {
         }
 
         async fn replay(&self, _: ReplayRequest) -> Result<ReplayPage, KonclaveClientError> {
+            // Recorded from inside the sweep, which is the only moment the profile is
+            // genuinely busy with pairing work.
+            self.observed_in_flight
+                .fetch_max(self.activity.in_flight(), Ordering::SeqCst);
             let _ = self.attempts.try_send(());
             if self.permanent {
                 Err(KonclaveClientError::RelayRejected {
@@ -203,16 +231,20 @@ mod tests {
         tempfile::TempDir,
         PairingSupervisor<FailingPairingRelay>,
         mpsc::Receiver<()>,
+        Arc<AtomicUsize>,
     ) {
         let root = tempfile::tempdir().unwrap();
         let conversations = coordinator(root.path(), "pairing-supervisor");
         let device_id = conversations.device_id().unwrap();
         let (attempts, receiver) = mpsc::channel(4);
+        let observed_in_flight = Arc::new(AtomicUsize::new(0));
         let applications = ApplicationService::new(
             conversations.clone(),
             FailingPairingRelay {
                 attempts,
                 permanent,
+                activity: conversations.activity().clone(),
+                observed_in_flight: Arc::clone(&observed_in_flight),
             },
         );
         let pairings = PairingService::new(
@@ -237,6 +269,7 @@ mod tests {
                 },
             },
             receiver,
+            observed_in_flight,
         )
     }
 
@@ -253,7 +286,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn transient_failures_back_off_and_shutdown_is_observed() {
-        let (_root, supervisor, mut attempts) = supervisor(false).await;
+        let (_root, supervisor, mut attempts, observed_in_flight) = supervisor(false).await;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(supervisor.run_until(async move {
             let _ = shutdown_rx.await;
@@ -268,11 +301,16 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        // A sweep is one of the operations the shared service must not evict through.
+        assert!(
+            observed_in_flight.load(Ordering::SeqCst) >= 1,
+            "a pairing sweep must mark the profile busy while it runs"
+        );
     }
 
     #[tokio::test]
     async fn permanent_relay_rejection_stops_the_supervisor() {
-        let (_root, supervisor, _attempts) = supervisor(true).await;
+        let (_root, supervisor, _attempts, _in_flight) = supervisor(true).await;
         let error = timeout(
             Duration::from_secs(1),
             supervisor.run_until(std::future::pending()),
@@ -281,6 +319,23 @@ mod tests {
         .unwrap()
         .unwrap_err();
         assert!(error.to_string().contains("relay rejected"));
+    }
+
+    #[test]
+    fn a_closing_profile_is_a_coordinated_stop_however_it_surfaces() {
+        assert!(is_coordinated_profile_stop(
+            &PairingServiceError::ProfileClosing
+        ));
+        assert!(is_coordinated_profile_stop(
+            &PairingServiceError::Application(ApplicationServiceError::ProfileClosing)
+        ));
+        assert!(!is_coordinated_profile_stop(&PairingServiceError::Expired));
+        assert!(!is_coordinated_profile_stop(
+            &PairingServiceError::Application(ApplicationServiceError::Task)
+        ));
+        assert!(!is_coordinated_profile_stop(&PairingServiceError::Client(
+            KonclaveClientError::TransportUnavailable
+        )));
     }
 
     #[test]

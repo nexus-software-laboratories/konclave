@@ -19,6 +19,7 @@ use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::activity::ProfileActivity;
 use crate::pairing::PairingOperationState;
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
@@ -38,6 +39,7 @@ pub(crate) struct ConversationCoordinator {
     device: Arc<Mutex<DeviceIdentity>>,
     operations: Arc<Mutex<()>>,
     membership_changed: Arc<tokio::sync::Notify>,
+    activity: ProfileActivity,
 }
 
 impl ConversationCoordinator {
@@ -53,7 +55,16 @@ impl ConversationCoordinator {
             device: Arc::new(Mutex::new(device)),
             operations: Arc::new(Mutex::new(())),
             membership_changed: Arc::new(tokio::sync::Notify::new()),
+            activity: ProfileActivity::default(),
         }
+    }
+
+    /// Returns the profile's in-flight operation signal.
+    ///
+    /// Supervised pairing and relay recovery work marks itself here so the shared
+    /// service never evicts a profile that is mid-operation.
+    pub(crate) fn activity(&self) -> &ProfileActivity {
+        &self.activity
     }
 
     /// Signals when this profile joins a conversation it was not previously in.

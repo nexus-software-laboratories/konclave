@@ -6,7 +6,7 @@ use crate::{SecretStorageError, WrappingKeyProvider};
 
 const SERVICE_NAME: &str = "Konclave";
 const ENROLLMENT_SERVICE_NAME: &str = "Konclave Relay Enrollment";
-const MAX_PROFILE_ID_BYTES: usize = 64;
+const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_INSTALLATION_ID_BYTES: usize = 64;
 const MAX_ENROLLMENT_RECORD_BYTES: usize = 4 * 1024;
 
@@ -87,13 +87,15 @@ impl NativeWrappingKeyProvider {
     /// # Errors
     ///
     /// Returns a validation error when the identifier is empty, oversized, or
-    /// contains characters unsafe for a portable credential name.
+    /// contains a character outside lowercase ASCII letters, digits, `-`, and `_`.
+    /// Uppercase is rejected rather than folded so credential-store lookup cannot
+    /// alias a filesystem profile under another spelling.
     pub fn new(profile_id: &str) -> Result<Self, SecretStorageError> {
         if profile_id.is_empty()
             || profile_id.len() > MAX_PROFILE_ID_BYTES
-            || !profile_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !profile_id.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
         {
             return Err(SecretStorageError::InvalidRecordIdentifier {
                 maximum: MAX_PROFILE_ID_BYTES,
@@ -244,6 +246,9 @@ mod tests {
     #[test]
     fn profile_identifier_is_portable_and_bounded() {
         assert!(NativeWrappingKeyProvider::new("default-profile").is_ok());
+        assert!(NativeWrappingKeyProvider::new(&"a".repeat(MAX_PROFILE_ID_BYTES)).is_ok());
+        assert!(NativeWrappingKeyProvider::new("Default-Profile").is_err());
+        assert!(NativeWrappingKeyProvider::new(&"a".repeat(MAX_PROFILE_ID_BYTES + 1)).is_err());
         assert!(NativeEnrollmentCredentialStore::new("installation-a").is_ok());
         assert!(NativeEnrollmentCredentialStore::new("../credential").is_err());
         assert!(NativeEnrollmentCredentialStore::new("profile:victim:wrapping-key:1").is_err());

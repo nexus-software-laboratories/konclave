@@ -196,27 +196,28 @@ impl HarnessKind {
 ///
 /// The accepted characters and length match the daemon runtime identifier, so this
 /// value can address a real profile without any further escaping, path joining, or
-/// normalization.
+/// normalization. Uppercase is rejected rather than folded: a profile identifier
+/// becomes a directory name, and on a case-insensitive filesystem two spellings would
+/// otherwise reach one profile through two registry entries and two locks.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ServiceProfileId(String);
 
 impl ServiceProfileId {
-    /// Parses a bounded profile identifier.
+    /// Parses a bounded canonical profile identifier.
     ///
     /// # Errors
     ///
     /// Returns [`LocalServiceTransportError::InvalidIdentifier`] when the value is
     /// empty, longer than [`MAX_PROFILE_ID_LENGTH`], or contains a character outside
-    /// ASCII alphanumerics, `-`, and `_`.
+    /// lowercase ASCII letters, digits, `-`, and `_`.
     pub fn parse(value: &str) -> Result<Self, LocalServiceTransportError> {
         let bytes = value.as_bytes();
         if bytes.is_empty() || bytes.len() > MAX_PROFILE_ID_LENGTH {
             return Err(LocalServiceTransportError::InvalidIdentifier { field: "profile" });
         }
-        if !bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
+        if !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        }) {
             return Err(LocalServiceTransportError::InvalidIdentifier { field: "profile" });
         }
         Ok(Self(value.to_string()))
@@ -342,6 +343,33 @@ mod tests {
                 "value must not parse: {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_profile_identifier_is_canonical_lowercase() {
+        // A case variant is refused rather than folded: on a case-insensitive
+        // filesystem two spellings would otherwise address one profile directory
+        // through two authorizations, two registry entries, and two locks.
+        for value in ["Alice", "ALICE", "alicE", "Team-Alice"] {
+            assert_eq!(
+                ServiceProfileId::parse(value).unwrap_err(),
+                LocalServiceTransportError::InvalidIdentifier { field: "profile" },
+                "value must not parse: {value:?}"
+            );
+        }
+        assert_eq!(profile("alice").as_str(), "alice");
+        assert_ne!(profile("alice"), profile("alice-1"));
+    }
+
+    #[test]
+    fn an_authorization_cannot_be_reached_through_a_case_alias() {
+        let authorization = ProfileAuthorization::Profile(profile("alice"));
+        assert!(authorization.permits(&profile("alice")));
+        assert!(ServiceProfileId::parse("Alice").is_err());
+
+        let namespace = ProfileAuthorization::Namespace(profile("team"));
+        assert!(namespace.permits(&profile("team-alice")));
+        assert!(ServiceProfileId::parse("TEAM-alice").is_err());
     }
 
     #[test]

@@ -122,22 +122,28 @@ type RemoteEventStorageMetadata = (
 );
 
 /// Portable, filesystem-safe local profile identifier.
+///
+/// The identifier is canonical lowercase. It becomes a directory name, so accepting
+/// two spellings would let one profile be opened twice on a case-insensitive
+/// filesystem: two registry entries, two locks, and two owners of one database.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProfileId(String);
 
 impl ProfileId {
-    /// Parses a non-empty ASCII profile identifier.
+    /// Parses a non-empty canonical ASCII profile identifier.
     ///
     /// # Errors
     ///
-    /// Returns a validation error for unsafe characters or excessive length.
+    /// Returns a validation error for uppercase, unsafe characters, or excessive
+    /// length. A non-canonical value is rejected rather than folded, so a caller
+    /// cannot address one profile under two names.
     pub(crate) fn parse(value: impl Into<String>) -> Result<Self, ProfileStoreError> {
         let value = value.into();
         if value.is_empty()
             || value.len() > MAX_PROFILE_ID_BYTES
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
         {
             return Err(ProfileStoreError::InvalidProfileId);
         }
@@ -9730,6 +9736,11 @@ mod tests {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap()
     }
 
+    /// Builds a sealer whose wrapping key is distinct per test key byte.
+    fn sealer_with_key(key: u8) -> SecretSealer {
+        SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([key; 32])).unwrap()
+    }
+
     struct ConversationFixture {
         root: tempfile::TempDir,
         profile_id: ProfileId,
@@ -12338,6 +12349,93 @@ mod tests {
         assert_eq!(
             store.relay_configuration().err(),
             Some(ProfileStoreError::Credential)
+        );
+    }
+
+    #[test]
+    fn a_profile_identifier_is_canonical_lowercase() {
+        assert_eq!(
+            ProfileId::parse("alice-01_b").unwrap().as_str(),
+            "alice-01_b"
+        );
+        // Uppercase is refused rather than folded. The identifier becomes a directory
+        // name, so a case-insensitive filesystem would otherwise let two spellings
+        // lock and open one profile twice.
+        for value in ["Alice", "ALICE", "alicE", "Team-Alice"] {
+            assert_eq!(
+                ProfileId::parse(value).err(),
+                Some(ProfileStoreError::InvalidProfileId),
+                "value must not parse: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_case_alias_cannot_reach_one_profile_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("alias").unwrap();
+        let _locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
+
+        // The only way to reach that directory is its canonical identifier, and the
+        // canonical identifier is already locked.
+        assert_eq!(
+            ProfileId::parse("Alias").err(),
+            Some(ProfileStoreError::InvalidProfileId)
+        );
+        assert_eq!(
+            LockedProfile::acquire(root.path(), ProfileId::parse("alias").unwrap()).err(),
+            Some(ProfileStoreError::ProfileLocked)
+        );
+    }
+
+    #[test]
+    fn wrong_custody_fails_closed_without_touching_the_device_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("custody").unwrap();
+        let store = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer_with_key(1))
+            .unwrap();
+        let original = store.load_or_create_device().unwrap().device_id();
+        let sealed = store
+            .read_profile_blob(
+                "SELECT length(sealed_device_identity) FROM daemon_profile WHERE singleton_id = 1",
+                "SELECT sealed_device_identity FROM daemon_profile WHERE singleton_id = 1",
+            )
+            .unwrap()
+            .unwrap();
+        drop(store);
+
+        // A sealer that cannot unseal this profile must fail closed. It must never
+        // look like a profile that has no identity yet and generate a second one.
+        let wrong = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer_with_key(2))
+            .unwrap();
+        assert_eq!(
+            wrong.load_or_create_device().err(),
+            Some(ProfileStoreError::Cryptographic)
+        );
+        drop(wrong);
+
+        let reopened = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer_with_key(1))
+            .unwrap();
+        assert_eq!(
+            reopened.load_or_create_device().unwrap().device_id(),
+            original
+        );
+        let after = reopened
+            .read_profile_blob(
+                "SELECT length(sealed_device_identity) FROM daemon_profile WHERE singleton_id = 1",
+                "SELECT sealed_device_identity FROM daemon_profile WHERE singleton_id = 1",
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.as_bytes() == sealed.as_bytes(),
+            "a refused open must leave the sealed identity byte-identical"
         );
     }
 
