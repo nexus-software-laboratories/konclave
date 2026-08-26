@@ -20,6 +20,10 @@ Uppercase is rejected rather than folded, because the identifier is also a direc
 name and a case-insensitive filesystem would otherwise resolve two spellings to one
 profile with two locks and two owners.
 
+An existing mixed-case profile is not opened through a lowercase alias. It requires
+an explicit migration of both its directory and native custody record; automatic
+renaming or case folding is forbidden because it cannot prove the intended identity.
+
 `profile.lock` is acquired exclusively and without waiting. The daemon holds it until
 shutdown. Native wrapping-key load-or-create occurs only while that lock is held.
 
