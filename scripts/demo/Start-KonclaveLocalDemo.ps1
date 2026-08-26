@@ -812,8 +812,9 @@ function Wait-LocalService {
     if (-not $pipeEndpoint.StartsWith($pipePrefix, [StringComparison]::Ordinal)) {
         throw 'Installed local-service endpoint is not a Windows named pipe.'
     }
-    $pipeName = $pipeEndpoint.Substring($pipePrefix.Length)
-    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    $lastOutput = @()
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
         if ($Process.HasExited) {
             $diagnostics = if (Test-Path -LiteralPath (
                 Join-Path $demoRoot 'service-stderr.log'
@@ -827,23 +828,22 @@ function Wait-LocalService {
             }
             throw "Konclave shared service exited during startup. $diagnostics"
         }
-        $pipe = [IO.Pipes.NamedPipeClientStream]::new(
-            '.',
-            $pipeName,
-            [IO.Pipes.PipeDirection]::InOut
-        )
-        try {
-            $pipe.Connect(100)
-            return
+        $lastOutput = @(& $cliPath doctor `
+            --profile-root $profileRoot `
+            --install-root $clientRoot 2>&1)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return $lastOutput
         }
-        catch [TimeoutException] {
-            Start-Sleep -Milliseconds 100
-        }
-        finally {
-            $pipe.Dispose()
-        }
+        Start-Sleep -Milliseconds 100
     }
-    throw 'Konclave shared-service pipe did not become ready.'
+    $failures = @($lastOutput | Where-Object { "$_".StartsWith('FAIL ') })
+    throw (
+        'Konclave shared service did not become ready.' +
+        [Environment]::NewLine +
+        (($failures + @($lastOutput | Select-Object -Last 20) | Select-Object -Unique) -join
+            [Environment]::NewLine)
+    )
 }
 
 function Get-PackageWorkflowRun {
@@ -1486,14 +1486,7 @@ try {
         -RedirectStandardError (Join-Path $demoRoot 'service-stderr.log') `
         -WindowStyle Hidden `
         -PassThru
-    Wait-LocalService -Process $serviceProcess
-    [void](Invoke-RequiredCommand $cliPath @(
-        'doctor',
-        '--profile-root',
-        $profileRoot,
-        '--install-root',
-        $clientRoot
-    ))
+    [void](Wait-LocalService -Process $serviceProcess)
     Remove-LegacyKonclavePlugin
     Write-DemoStatus -RelayProcess $relayProcess -ServiceProcess $serviceProcess
 }
