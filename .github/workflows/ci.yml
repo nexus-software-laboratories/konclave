@@ -190,19 +190,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check Windows Service host source
-        working-directory: apps/Konclave.LocalDaemon
-        run: cargo check --bin windows_service --bin KonclaveLocalService
-      - name: Validate shared-service package definitions
         shell: pwsh
         working-directory: apps/Konclave.LocalDaemon
         run: |
-          $unit = 'packaging/systemd/KonclaveLocalService.service'
+          $arguments = @('check', '--bin', 'windows_service')
+          if (Test-Path -LiteralPath 'src/bin/shared_service.rs') {
+            $arguments += @('--bin', 'KonclaveLocalService')
+          }
+          & cargo @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows and shared-service host checks failed.'
+          }
+      - name: Validate daemon package definitions
+        shell: pwsh
+        working-directory: apps/Konclave.LocalDaemon
+        run: |
+          $sharedService = Test-Path -LiteralPath 'packaging/systemd/KonclaveLocalService.service'
+          $unit = if ($sharedService) {
+            'packaging/systemd/KonclaveLocalService.service'
+          }
+          else {
+            'packaging/systemd/KonclaveLocalDaemon-daemon.service'
+          }
           $unitLines = Get-Content -LiteralPath $unit
-          foreach ($expected in @(
-            'Type=simple',
-            'Restart=on-failure',
-            'WantedBy=default.target'
-          )) {
+          $expectedLines = @('Type=simple', 'Restart=on-failure')
+          if ($sharedService) {
+            $expectedLines += 'WantedBy=default.target'
+          }
+          foreach ($expected in $expectedLines) {
             if ($expected -cnotin $unitLines) {
               throw "systemd unit is missing '$expected'."
             }
@@ -211,19 +226,32 @@ jobs:
             throw 'systemd unit is missing ExecStart.'
           }
 
-          if ($unitLines -contains 'DynamicUser=yes') {
-            throw 'Per-user service must not use a dynamic system identity.'
+          if ($sharedService) {
+            if ($unitLines -contains 'DynamicUser=yes') {
+              throw 'Per-user service must not use a dynamic system identity.'
+            }
+            bash -n packaging/systemd/manage-user-service.sh
+            if ($LASTEXITCODE -ne 0) {
+              throw 'systemd manager has invalid shell syntax.'
+            }
           }
-          bash -n packaging/systemd/manage-user-service.sh
-          if ($LASTEXITCODE -ne 0) { throw 'systemd manager has invalid shell syntax.' }
 
-          $plistPath = 'packaging/launchd/com.genesis.KonclaveLocalService.plist'
+          $plistPath = if ($sharedService) {
+            'packaging/launchd/com.genesis.KonclaveLocalService.plist'
+          }
+          else {
+            'packaging/launchd/com.genesis.KonclaveLocalDaemon.plist'
+          }
           [xml]$plist = Get-Content -LiteralPath $plistPath -Raw
           if ($plist.plist.version -ne '1.0' -or $null -eq $plist.plist.dict) {
             throw 'launchd property list is not a plist dictionary.'
           }
-          bash -n packaging/launchd/manage-agent.sh
-          if ($LASTEXITCODE -ne 0) { throw 'launchd manager has invalid shell syntax.' }
+          if ($sharedService) {
+            bash -n packaging/launchd/manage-agent.sh
+            if ($LASTEXITCODE -ne 0) {
+              throw 'launchd manager has invalid shell syntax.'
+            }
+          }
 
           $installer = 'packaging/windows/install-service.ps1'
           $tokens = $null
