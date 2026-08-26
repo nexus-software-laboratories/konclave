@@ -78,6 +78,22 @@ async fn two_clients_attach_in_turn_and_keep_separate_bindings() {
 }
 
 #[tokio::test]
+async fn an_early_probe_disconnect_does_not_stop_the_next_accept() {
+    let endpoint = endpoint("probe-disconnect");
+    let mut listener = LocalServiceListener::bind(&endpoint).await.unwrap();
+
+    let probe = connect_local_service(&endpoint).await.unwrap();
+    drop(probe);
+
+    let service = async { listener.accept().await.unwrap() };
+    let client = async { connect_local_service(&endpoint).await.unwrap() };
+    let (accepted, connected) = tokio::join!(service, client);
+
+    drop(accepted);
+    drop(connected);
+}
+
+#[tokio::test]
 async fn connecting_to_an_absent_endpoint_fails_closed() {
     let endpoint = endpoint("absent");
     let error = connect_local_service(&endpoint).await.unwrap_err();
