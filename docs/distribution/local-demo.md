@@ -97,6 +97,13 @@ with:
 /konclave send -- <message text>
 ```
 
+That selection is stored in the session's durable profile, so implicit send continues
+to target the same conversation after the Copilot session is restarted or resumed.
+Profiles upgraded from an earlier candidate deliberately do not guess among existing
+conversations. If `/konclave conversations` shows no active selection, choose the
+intended identifier once with `/konclave use <conversation-id>`. Selection does not
+change that conversation's automatic-delivery mute state.
+
 The two-command flow is an explicit `AccountTrusted` convenience policy. Capability
 creation and redemption are treated as the two same-account approval actions; status
 states that no independent identity verification occurred, and only the `member` role
@@ -107,7 +114,10 @@ The capability remains terminal-visible and may appear in local CLI input histor
 is protected by short expiry, one-time consumption, and daemon-side zeroization, not
 by the ephemeral display flag. Do not paste it into logs or public artifacts.
 
-The idle peer receives messages automatically. `/konclave messages
+The idle peer receives messages automatically. On resume, the extension waits through
+a five-second startup grace before treating a session with no observed user, assistant,
+or tool activity as idle; observed activity cancels that inference, and the next
+explicit idle event remains authoritative. `/konclave messages
 <conversation-id>` performs an explicit bounded sync/read when diagnosing delivery,
 and `/konclave reply <conversation-id> <reply-to-message-id> [message-id] --
 <message text>` records a reply relationship when desired. Both commands print the

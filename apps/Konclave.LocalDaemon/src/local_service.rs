@@ -1044,6 +1044,7 @@ fn is_tool_operation(operation: &str) -> bool {
             | "authorize_pairing_inviter"
             | "sync_pairing"
             | "cancel_pairing"
+            | "set_active_conversation"
             | "set_auto_delivery"
             | "delivery_status"
     )

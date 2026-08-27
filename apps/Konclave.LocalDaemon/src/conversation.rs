@@ -526,6 +526,31 @@ impl ConversationCoordinator {
         }
     }
 
+    /// Returns the conversation selected for implicit profile operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile corruption or storage error.
+    pub(crate) fn active_conversation_id(
+        &self,
+    ) -> Result<Option<ConversationId>, ConversationCoordinatorError> {
+        self.store.active_conversation_id().map_err(Into::into)
+    }
+
+    /// Selects one existing conversation for implicit profile operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile integrity, missing-conversation, sealing, or storage error.
+    pub(crate) fn set_active_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ConversationCoordinatorError> {
+        self.store
+            .set_active_conversation(conversation_id)
+            .map_err(Into::into)
+    }
+
     /// Lists one bounded page of local conversation identifiers.
     ///
     /// # Errors
@@ -2452,6 +2477,10 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(
+            coordinator.active_conversation_id().unwrap(),
+            Some(created.conversation_id)
+        );
+        assert_eq!(
             coordinator.conversation_ids(None, 10).unwrap(),
             vec![created.conversation_id]
         );
@@ -2828,6 +2857,10 @@ pub(crate) mod tests {
             bob.store
                 .adapter_delivery_enabled(created.conversation_id)
                 .unwrap()
+        );
+        assert_eq!(
+            bob.active_conversation_id().unwrap(),
+            Some(created.conversation_id)
         );
         assert!(bob.store.pending_join_ids(None, 10).unwrap().is_empty());
     }

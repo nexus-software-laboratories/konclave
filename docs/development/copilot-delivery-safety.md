@@ -33,7 +33,9 @@ message and two agents cannot wake each other indefinitely.
 Events are queued while the session is active and injected only once it is idle.
 Copilot's extension guidance warns against injecting into an active session, and at
 most one synthetic turn is outstanding at a time, so a second cannot compound the
-first.
+first. The extension submits synthetic turns with the SDK's explicit `enqueue` mode;
+if activity begins after an idle observation, the peer turn waits behind that work
+rather than interrupting it.
 
 ## Delivery is at least once
 
@@ -73,12 +75,13 @@ That choice is deliberate. Requiring a separate opt-in call after joining would 
 a session silently undelivered every time it forgot the extra step, which is the
 failure this project exists to remove.
 
-Two daemon tools control and observe this afterwards. `set_auto_delivery` mutes or
-re-enables one conversation and is write-authorized, because it decides whether peer
-content can enter a session. `delivery_status` is read-authorized and reports queued
-and in-flight event counts, how many conversations currently have a live watch worker,
-whether delivery is degraded, and — when a conversation is named — whether that
-conversation is muted.
+Three daemon tools control and observe this afterwards. `set_active_conversation`
+selects the target for later implicit sends without changing delivery policy.
+`set_auto_delivery` mutes or re-enables one conversation and is write-authorized,
+because it decides whether peer content can enter a session. `delivery_status` is
+read-authorized and reports queued and in-flight event counts, how many conversations
+currently have a live watch worker, whether delivery is degraded, and — when a
+conversation is named — whether that conversation is muted.
 
 Muting suppresses delivery for as long as it is set. A message that arrives while a
 conversation is muted is never delivered into a session, and re-enabling delivery

@@ -88,6 +88,11 @@ interface MessageSummary {
   readonly duplicate: boolean;
 }
 
+interface ConversationSelection {
+  readonly conversationIds: readonly string[];
+  readonly activeConversationId: string | undefined;
+}
+
 interface ParsedCommand {
   readonly subcommand: string;
   readonly argumentsText: string;
@@ -136,6 +141,7 @@ const helpLines = [
   '  /konclave reply <conversation> <reply-to> [message-id] -- <text>',
   '                                                       Reply or retry with an explicit ID.',
   '  /konclave messages <conversation> [after-cursor]    Sync and show a bounded message page.',
+  '  /konclave use <conversation>                        Select the implicit send target.',
   '  /konclave mute <conversation>                       Mute automatic delivery.',
   '  /konclave unmute <conversation>                     Resume automatic delivery.',
 ];
@@ -643,18 +649,16 @@ async function requireSingleConversation(
   if (activeConversationId) {
     return activeConversationId;
   }
-  const list = conversations(await client.request('list_conversations', {}));
-  if (list.length === 0) {
+  const selection = conversations(await client.request('list_conversations', {}));
+  if (selection.activeConversationId) {
+    return selection.activeConversationId;
+  }
+  if (selection.conversationIds.length === 0) {
     throw new Error('no conversation is available; run /konclave connect first');
   }
-  if (list.length > 1) {
-    throw new Error('multiple conversations exist; provide the conversation identifier');
-  }
-  const conversation = list[0];
-  if (!conversation) {
-    throw new Error('the local service conversation response is malformed');
-  }
-  return conversation;
+  throw new Error(
+    'no active conversation is selected; run /konclave conversations, then /konclave use <conversation>',
+  );
 }
 
 function parseCursor(value: string | undefined): number {
@@ -706,7 +710,7 @@ function identity(value: unknown): string {
   );
 }
 
-function conversations(value: unknown): readonly string[] {
+function conversations(value: unknown): ConversationSelection {
   if (
     !isRecord(value) ||
     !Array.isArray(value.conversation_ids) ||
@@ -720,7 +724,37 @@ function conversations(value: unknown): readonly string[] {
   ) {
     throw new Error('the local service conversation response is malformed');
   }
-  return value.conversation_ids;
+  const activeConversationId =
+    value.active_conversation_id === null || value.active_conversation_id === undefined
+      ? undefined
+      : requireHexIdentifier(
+          typeof value.active_conversation_id === 'string'
+            ? value.active_conversation_id
+            : undefined,
+          conversationIdCharacters,
+          'active conversation identifier',
+        );
+  return {
+    conversationIds: value.conversation_ids,
+    activeConversationId,
+  };
+}
+
+function selectedConversation(value: unknown): string {
+  if (!isRecord(value)) {
+    throw new Error('the local service active-conversation response is malformed');
+  }
+  return requireHexIdentifier(
+    typeof value.active_conversation_id === 'string' ? value.active_conversation_id : undefined,
+    conversationIdCharacters,
+    'active conversation identifier',
+  );
+}
+
+function parseConversationArgument(argumentsText: string, usage: string): string {
+  const parts = parseCommandArguments(argumentsText);
+  requireArgumentCount(parts, 1, 1, usage);
+  return requireHexIdentifier(parts[0], conversationIdCharacters, 'conversation identifier');
 }
 
 export function createKonclaveCommands(dependencies: CommandDependencies): RegisteredCommand[] {
@@ -774,12 +808,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       }
       case 'conversations': {
         requireNoArguments(argumentsText, subcommand);
-        const list = conversations(await client.request('list_conversations', {}));
-        if (list.length === 0) {
+        const selection = conversations(await client.request('list_conversations', {}));
+        activeConversationId = selection.activeConversationId;
+        if (selection.activeConversationId) {
+          await output.write(`active: ${selection.activeConversationId}`);
+        }
+        if (selection.conversationIds.length === 0) {
           await output.write('no conversations yet');
           return;
         }
-        for (const conversation of list.slice(0, 20)) {
+        for (const conversation of selection.conversationIds.slice(0, 20)) {
           await output.write(bounded(conversation));
         }
         return;
@@ -1029,6 +1067,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         );
         let conversationId: string;
         let suppliedMessageId: string | undefined;
+        let explicitlySelectedConversation = isReply || parsed.identifiers.length === 2;
         if (isReply || parsed.identifiers.length === 2) {
           conversationId = requireHexIdentifier(
             parsed.identifiers[0],
@@ -1039,6 +1078,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         } else if (parsed.identifiers.length === 1) {
           const identifier = parsed.identifiers[0];
           if (identifier?.length === conversationIdCharacters) {
+            explicitlySelectedConversation = true;
             conversationId = requireHexIdentifier(
               identifier,
               conversationIdCharacters,
@@ -1084,6 +1124,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         );
         if (sent.conversationId !== conversationId || sent.messageId !== messageId) {
           throw new Error('the local service sent-message identity does not match the request');
+        }
+        if (explicitlySelectedConversation) {
+          const selected = selectedConversation(
+            await client.request('set_active_conversation', {
+              conversation_id: conversationId,
+            }),
+          );
+          if (selected !== conversationId) {
+            throw new Error('the local service selected a different active conversation');
+          }
         }
         activeConversationId = conversationId;
         await output.write(`conversation: ${sent.conversationId}`);
@@ -1135,14 +1185,28 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'use': {
+        const conversation = parseConversationArgument(
+          argumentsText,
+          '/konclave use <conversation>',
+        );
+        const selected = selectedConversation(
+          await client.request('set_active_conversation', {
+            conversation_id: conversation,
+          }),
+        );
+        if (selected !== conversation) {
+          throw new Error('the local service selected a different active conversation');
+        }
+        activeConversationId = conversation;
+        await output.write(`active conversation selected: ${conversation}`);
+        return;
+      }
       case 'mute':
       case 'unmute': {
-        const parts = parseCommandArguments(argumentsText);
-        requireArgumentCount(parts, 1, 1, `/konclave ${subcommand} <conversation>`);
-        const conversation = requireHexIdentifier(
-          parts[0],
-          conversationIdCharacters,
-          'conversation identifier',
+        const conversation = parseConversationArgument(
+          argumentsText,
+          `/konclave ${subcommand} <conversation>`,
         );
         await client.request('set_auto_delivery', {
           conversation_id: conversation,

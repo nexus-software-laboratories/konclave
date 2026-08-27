@@ -31,6 +31,7 @@ interface Harness {
   readonly channel: AdapterChannel;
   readonly requests: AdapterRequest[];
   readonly sent: string[];
+  readonly sendModes: Array<'enqueue' | 'immediate'>;
   readonly errors: string[];
   failSend: boolean;
   now: number;
@@ -40,6 +41,7 @@ function harness(overrides: { failSend?: boolean } = {}): Harness {
   const state: Harness = {
     requests: [],
     sent: [],
+    sendModes: [],
     errors: [],
     failSend: overrides.failSend ?? false,
     now: 1_000,
@@ -63,7 +65,8 @@ function coordinator(state: Harness, budget?: WakeBudget) {
         if (state.failSend) {
           throw new Error('session rejected the send');
         }
-        state.sent.push(message);
+        state.sent.push(message.prompt);
+        state.sendModes.push(message.mode);
         return 'message-id';
       },
     },
@@ -147,6 +150,7 @@ describe('delivery coordinator', () => {
 
     await delivery.markIdle();
     expect(state.sent).toHaveLength(1);
+    expect(state.sendModes).toEqual(['enqueue']);
     expect(delivery.pending).toBe(0);
   });
 
@@ -202,7 +206,8 @@ describe('delivery coordinator', () => {
       channel: state.channel,
       session: {
         async send(message) {
-          state.sent.push(message);
+          state.sent.push(message.prompt);
+          state.sendModes.push(message.mode);
           await gate;
           return 'message-id';
         },
@@ -319,7 +324,8 @@ describe('delivery coordinator', () => {
       },
       session: {
         async send(message) {
-          state.sent.push(message);
+          state.sent.push(message.prompt);
+          state.sendModes.push(message.mode);
           return 'message-id';
         },
       },

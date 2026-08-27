@@ -9,6 +9,7 @@
 
 /** Operations that back the agent tool surface, named exactly as the tools are. */
 export const toolOperations = [
+  'set_active_conversation',
   'set_auto_delivery',
   'delivery_status',
   'get_identity',
