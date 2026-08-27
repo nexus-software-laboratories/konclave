@@ -317,14 +317,24 @@ container_validation_assert_baseline_intact "$container_baseline"
 
 native_profiles="$(find "$native_state/profiles" -name profile.sqlite -type f | wc -l)"
 container_profiles="$(find "$container_state/profiles" -name profile.sqlite -type f | wc -l)"
-if [ "$native_profiles" -ne 2 ] || [ "$container_profiles" -ne 2 ]; then
-    echo '::error::Packaged sessions did not preserve two profile databases per relay mode.' >&2
+if [ "$native_profiles" -ne 3 ] || [ "$container_profiles" -ne 3 ]; then
+    echo '::error::Packaged clients did not preserve three profile databases per relay mode.' >&2
     exit 1
 fi
+for state_root in "$native_state" "$container_state"; do
+    for profile in session-packaged-a session-packaged-b generic-packaged; do
+        if [ ! -f "$state_root/profiles/$profile/profile.sqlite" ]; then
+            echo "::error::Packaged client profile is missing: $profile." >&2
+            exit 1
+        fi
+    done
+done
 
 rm -rf -- "$acceptance_root/client-a" "$acceptance_root/client-b" "$acceptance_root/relay-install"
 if [ ! -f "$native_state/profiles/session-packaged-a/profile.sqlite" ] ||
-    [ ! -f "$container_state/profiles/session-packaged-b/profile.sqlite" ]; then
+    [ ! -f "$container_state/profiles/session-packaged-b/profile.sqlite" ] ||
+    [ ! -f "$native_state/profiles/generic-packaged/profile.sqlite" ] ||
+    [ ! -f "$container_state/profiles/generic-packaged/profile.sqlite" ]; then
     echo '::error::Removing installed artifacts also removed durable profile state.' >&2
     exit 1
 fi
