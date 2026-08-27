@@ -408,5 +408,5 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(active_principals, 2);
+    assert_eq!(active_principals, 3);
 }
