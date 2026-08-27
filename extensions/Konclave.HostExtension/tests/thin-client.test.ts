@@ -19,7 +19,11 @@ import {
   serviceSigningMessage,
 } from '../src/service/transcript.js';
 import { createKonclaveTools, konclaveTools } from '../src/service/tools.js';
-import { createKonclaveCommands, parseCommandArguments } from '../src/service/commands.js';
+import {
+  createKonclaveCommands,
+  parseCommandArguments,
+  type CommandOutputOptions,
+} from '../src/service/commands.js';
 import {
   toolOperations,
   isKnownOperation,
@@ -60,6 +64,27 @@ function serviceStatus(overrides: Partial<ServiceStatusResult> = {}): ServiceSta
     grantLimit: 256,
     grantLimitPerIssuer: 128,
     grantLimitPerProfile: 32,
+    ...overrides,
+  };
+}
+
+const pairingId = '11'.repeat(16);
+const conversationId = '22'.repeat(32);
+const joinerDeviceId = '33'.repeat(32);
+const inviterDeviceId = '44'.repeat(32);
+
+function pairingStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    pairing_id: pairingId,
+    local_role: 'joiner',
+    phase: 'joiner_awaiting_invitation',
+    joiner_device_id: joinerDeviceId,
+    requested_role: 'member',
+    inviter_device_id: null,
+    granted_role: null,
+    conversation_id: null,
+    authorization_deadline_unix_seconds: 1_787_805_388,
+    completion_deadline_unix_seconds: null,
     ...overrides,
   };
 }
@@ -374,7 +399,7 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('unknown subcommand');
   });
 
-  it('executes every deterministic command without creating a model turn', async () => {
+  it('executes core read and delivery-control commands without creating a model turn', async () => {
     const request = vi.fn(async (operation: string) => {
       switch (operation) {
         case 'get_identity':
@@ -412,8 +437,8 @@ describe('deterministic commands', () => {
       'status',
       'identity',
       'conversations',
-      `mute ${'01'.repeat(16)}`,
-      `unmute ${'01'.repeat(16)}`,
+      `mute ${'01'.repeat(32)}`,
+      `unmute ${'01'.repeat(32)}`,
     ]) {
       await command?.handler(commandContext(args));
     }
@@ -422,18 +447,380 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('delivery: degraded');
     expect(lines.join('\n')).toContain('no conversations yet');
     expect(request).toHaveBeenCalledWith('set_auto_delivery', {
-      conversation_id: '01'.repeat(16),
+      conversation_id: '01'.repeat(32),
       enabled: false,
     });
     expect(request).toHaveBeenCalledWith('set_auto_delivery', {
-      conversation_id: '01'.repeat(16),
+      conversation_id: '01'.repeat(32),
       enabled: true,
     });
   });
 
+  it('creates a bounded ephemeral pairing capability', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation !== 'create_pairing_capability') {
+        throw new Error('unexpected operation');
+      }
+      return {
+        pairing: pairingStatus({ requested_role: 'administrator' }),
+        capability: 'pairing_capability-1',
+      };
+    });
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line, options) => {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('pair administrator'));
+
+    expect(request).toHaveBeenCalledWith('create_pairing_capability', {
+      requested_role: 'administrator',
+    });
+    expect(entries.some((entry) => entry.line === `pairing: ${pairingId}`)).toBe(true);
+    expect(entries).toContainEqual({
+      line: 'pairing_capability-1',
+      options: { ephemeral: true },
+    });
+  });
+
+  it('redeems, creates, and approves an inviter-side pairing explicitly', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'redeem_pairing_capability':
+        case 'get_pairing_status':
+          return pairingStatus({
+            local_role: 'inviter',
+            phase: 'inviter_awaiting_authorization',
+            requested_role: 'administrator',
+          });
+        case 'create_conversation':
+          return { conversation_id: conversationId, routing_id: '55'.repeat(32), epoch: 0 };
+        case 'authorize_pairing_joiner':
+          return pairingStatus({
+            local_role: 'inviter',
+            phase: 'inviter_awaiting_join_proof',
+            conversation_id: conversationId,
+            granted_role: 'member',
+            inviter_device_id: inviterDeviceId,
+          });
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('join pairing_capability-1'));
+    await command?.handler(commandContext('new'));
+    await command?.handler(commandContext(`approve ${pairingId} ${conversationId}`));
+
+    expect(request).toHaveBeenCalledWith('redeem_pairing_capability', {
+      capability: 'pairing_capability-1',
+    });
+    expect(request).toHaveBeenCalledWith('create_conversation', {});
+    expect(request).toHaveBeenCalledWith('authorize_pairing_joiner', {
+      pairing_id: pairingId,
+      conversation_id: conversationId,
+      granted_role: 'member',
+    });
+    expect(lines.join('\n')).toContain(`joiner device: ${joinerDeviceId}`);
+    expect(lines.join('\n')).toContain(`conversation: ${conversationId}`);
+    expect(lines.join('\n')).toContain('phase: inviter_awaiting_join_proof');
+  });
+
+  it('approves a joiner-side pairing and exposes bounded progress controls', async () => {
+    const awaitingInviter = pairingStatus({
+      phase: 'joiner_awaiting_inviter_authorization',
+      inviter_device_id: inviterDeviceId,
+      conversation_id: conversationId,
+      granted_role: 'member',
+    });
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'get_pairing_status':
+          return awaitingInviter;
+        case 'authorize_pairing_inviter':
+          return pairingStatus({
+            ...awaitingInviter,
+            phase: 'joiner_awaiting_welcome',
+          });
+        case 'sync_pairing':
+          return {
+            pairing: pairingStatus({
+              ...awaitingInviter,
+              phase: 'completed',
+            }),
+            processed_records: 2,
+          };
+        case 'cancel_pairing':
+          return pairingStatus({
+            ...awaitingInviter,
+            phase: 'cancelled',
+          });
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`pairing ${pairingId}`));
+    await command?.handler(
+      commandContext(`approve ${pairingId} ${'55'.repeat(32)} ${conversationId} member`),
+    );
+    await command?.handler(
+      commandContext(`approve ${pairingId} ${inviterDeviceId} ${conversationId} member`),
+    );
+    await command?.handler(commandContext(`sync ${pairingId}`));
+    await command?.handler(commandContext(`cancel ${pairingId}`));
+
+    expect(request).toHaveBeenCalledWith('authorize_pairing_inviter', {
+      pairing_id: pairingId,
+      inviter_device_id: inviterDeviceId,
+      conversation_id: conversationId,
+      granted_role: 'member',
+    });
+    expect(lines.join('\n')).toContain(
+      'approval values do not match the authenticated pairing state',
+    );
+    expect(lines.join('\n')).toContain('processed pairing records: 2');
+    expect(lines.join('\n')).toContain('phase: completed');
+    expect(lines.join('\n')).toContain('phase: cancelled');
+  });
+
+  it('sends, replies, and displays synchronized peer text ephemerally', async () => {
+    const replyToMessageId = '66'.repeat(16);
+    const sentMessageId = '88'.repeat(16);
+    const request = vi.fn(async (operation: string, payload: unknown, _options?: unknown) => {
+      if (operation === 'send_message') {
+        if (typeof payload !== 'object' || payload === null || !('message_id' in payload)) {
+          throw new Error('missing message identifier');
+        }
+        return {
+          conversation_id: conversationId,
+          message_id: payload.message_id,
+          sender_counter: 1,
+          cursor: 8,
+        };
+      }
+      if (operation === 'sync_messages') {
+        return { messages: [], has_more: false };
+      }
+      if (operation === 'read_messages') {
+        return {
+          messages: [
+            {
+              conversation_id: conversationId,
+              message_id: replyToMessageId,
+              envelope_id: '77'.repeat(16),
+              sender_device_id: inviterDeviceId,
+              epoch: 1,
+              sender_counter: 2,
+              sent_at_unix_milliseconds: 1,
+              reply_to_message_id: null,
+              cursor: 8,
+              direction: 'inbound',
+              text: 'peer line one\npeer \u202Eline two',
+              duplicate: false,
+            },
+          ],
+          has_more: true,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line, options) => {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(
+      commandContext(`send ${conversationId} ${sentMessageId} -- hello -- contract`),
+    );
+    await command?.handler(
+      commandContext(`reply ${conversationId} ${replyToMessageId} -- acknowledged`),
+    );
+    await command?.handler(commandContext(`messages ${conversationId} 7`));
+
+    const sends = request.mock.calls.filter(([operation]) => operation === 'send_message');
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.[1]).toMatchObject({
+      conversation_id: conversationId,
+      message_id: sentMessageId,
+      text: 'hello -- contract',
+    });
+    expect(sends[1]?.[1]).toMatchObject({
+      conversation_id: conversationId,
+      reply_to_message_id: replyToMessageId,
+      text: 'acknowledged',
+    });
+    expect(
+      sends.every(
+        ([, payload]) =>
+          typeof payload === 'object' &&
+          payload !== null &&
+          'message_id' in payload &&
+          typeof payload.message_id === 'string' &&
+          /^[0-9a-f]{32}$/u.test(payload.message_id),
+      ),
+    ).toBe(true);
+    const requestOptions = sends[0]?.[2];
+    expect(requestOptions).toEqual({ requestId: expect.any(Buffer) });
+    if (
+      typeof requestOptions !== 'object' ||
+      requestOptions === null ||
+      !('requestId' in requestOptions) ||
+      !Buffer.isBuffer(requestOptions.requestId)
+    ) {
+      throw new Error('command did not provide a binary request identifier');
+    }
+    expect(requestOptions.requestId).toHaveLength(16);
+    expect(request).toHaveBeenCalledWith('read_messages', {
+      conversation_id: conversationId,
+      after_cursor: 7,
+      limit: 10,
+    });
+    expect(
+      entries.some(
+        (entry) =>
+          entry.line === 'untrusted peer text: "peer line one\\npeer �line two"' &&
+          entry.options?.ephemeral === true,
+      ),
+    ).toBe(true);
+    expect(entries.some((entry) => entry.line === 'resume after cursor: 8')).toBe(true);
+    expect(entries.some((entry) => entry.line.includes('more messages are available'))).toBe(true);
+  });
+
+  it('rejects unsafe workflow arguments before their side effects', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'get_pairing_status') {
+        return pairingStatus({
+          local_role: 'inviter',
+          phase: 'inviter_awaiting_authorization',
+          requested_role: 'member',
+        });
+      }
+      throw new Error('unexpected operation');
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('join capability with spaces'));
+    await command?.handler(commandContext(`approve ${pairingId} ${conversationId} administrator`));
+    await command?.handler(commandContext(`send ${conversationId} missing-separator`));
+    await command?.handler(commandContext(`messages ${conversationId} unsafe-cursor`));
+
+    expect(lines.join('\n')).toContain('usage: /konclave join');
+    expect(lines.join('\n')).toContain('cannot be elevated');
+    expect(lines.join('\n')).toContain('usage: /konclave send');
+    expect(lines.join('\n')).toContain('after-cursor must be');
+    expect(request).not.toHaveBeenCalledWith('authorize_pairing_joiner', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('send_message', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('sync_messages', expect.anything());
+  });
+
+  it('surfaces malformed workflow results as bounded command failures', async () => {
+    const pairingLines: string[] = [];
+    const pairingCommand = createKonclaveCommands({
+      client: stubClient(
+        vi.fn().mockResolvedValue({
+          pairing: pairingStatus({ phase: 'invented_phase' }),
+          capability: 'pairing_capability-1',
+        }),
+      ),
+      output: {
+        write: (line) => {
+          pairingLines.push(line);
+        },
+      },
+    })[0];
+    await pairingCommand?.handler(commandContext('pair member'));
+
+    const sentLines: string[] = [];
+    const sentCommand = createKonclaveCommands({
+      client: stubClient(
+        vi.fn().mockResolvedValue({
+          conversation_id: conversationId,
+          message_id: '88'.repeat(16),
+          cursor: 'not-an-integer',
+        }),
+      ),
+      output: {
+        write: (line) => {
+          sentLines.push(line);
+        },
+      },
+    })[0];
+    await sentCommand?.handler(
+      commandContext(`send ${conversationId} ${'88'.repeat(16)} -- hello`),
+    );
+
+    const messageLines: string[] = [];
+    const messageRequest = vi
+      .fn()
+      .mockResolvedValueOnce({ messages: [], has_more: false })
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            message_id: '99'.repeat(16),
+            sender_device_id: 'short',
+            cursor: 1,
+            direction: 'inbound',
+            text: 'hello',
+            duplicate: false,
+          },
+        ],
+        has_more: false,
+      });
+    const messageCommand = createKonclaveCommands({
+      client: stubClient(messageRequest),
+      output: {
+        write: (line) => {
+          messageLines.push(line);
+        },
+      },
+    })[0];
+    await messageCommand?.handler(commandContext(`messages ${conversationId}`));
+
+    expect(pairingLines.join('\n')).toContain('pairing phase is malformed');
+    expect(sentLines.join('\n')).toContain('sent-message response is malformed');
+    expect(messageLines.join('\n')).toContain('sender device identifier');
+  });
+
   it('bounds conversation output and reports malformed command results', async () => {
     const conversations = Array.from({ length: 24 }, (_, index) =>
-      index.toString(16).padStart(32, '0'),
+      index.toString(16).padStart(64, '0'),
     );
     const request = vi
       .fn()
@@ -478,11 +865,13 @@ describe('deterministic commands', () => {
 
     await command?.handler(commandContext('mute not-an-id'));
     await command?.handler(commandContext('one two three four five'));
-    await command?.handler(commandContext('x'.repeat(600)));
+    await command?.handler(commandContext(`status ${'x'.repeat(129)}`));
+    await command?.handler(commandContext('x'.repeat(16 * 1024 + 1)));
 
     expect(lines.join('\n')).toContain('conversation identifier is required');
-    expect(lines.join('\n')).toContain('at most four arguments');
-    expect(lines.join('\n')).toContain('arguments are too long');
+    expect(lines.join('\n')).toContain('unknown subcommand');
+    expect(lines.join('\n')).toContain('argument is too long');
+    expect(lines.join('\n')).toContain('command is too long');
   });
 });
 

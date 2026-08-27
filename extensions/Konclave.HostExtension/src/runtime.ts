@@ -252,12 +252,15 @@ export async function bootExtension(
   const platform = options.platform ?? process.platform;
   let client: LocalServiceClient | null = null;
   let joinedSession: ExtensionSession | null = null;
-  const commandOutput = options.commandOutput ?? {
-    async write(line: string) {
+  const commandOutput: CommandOutput = options.commandOutput ?? {
+    async write(line, commandOptions) {
       if (joinedSession === null) {
         throw new Error('Konclave command output requested before the session was joined.');
       }
-      await joinedSession.log(line, { level: 'info' });
+      await joinedSession.log(
+        line,
+        commandOptions?.ephemeral ? { level: 'info', ephemeral: true } : { level: 'info' },
+      );
     },
   };
 

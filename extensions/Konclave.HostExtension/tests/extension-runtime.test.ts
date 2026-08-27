@@ -231,12 +231,13 @@ describe('bootExtension', () => {
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
     const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
+    const client = stubClient();
 
     const controller = await bootExtension({
       diagnostics: diagnostics.diagnostics,
       joinSession,
       processController,
-      connect: async () => stubClient(),
+      connect: async () => client,
     });
 
     expect(controller).not.toBeNull();
@@ -288,12 +289,13 @@ describe('bootExtension', () => {
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
     const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
+    const client = stubClient();
 
     const controller = await bootExtension({
       diagnostics: diagnostics.diagnostics,
       joinSession,
       processController,
-      connect: async () => stubClient(),
+      connect: async () => client,
     });
 
     const config = joinSession.mock.calls[0]?.[0];
@@ -316,10 +318,36 @@ describe('bootExtension', () => {
       'Konclave commands (deterministic; no model inference):',
       { level: 'info' },
     );
-    expect(sessionMock.log).toHaveBeenCalledWith(
-      '  /konclave status               Show profile, delivery, and relay state.',
-      { level: 'info' },
-    );
+    expect(sessionMock.log).toHaveBeenCalledWith(expect.stringContaining('/konclave status'), {
+      level: 'info',
+    });
+    vi.mocked(client.request).mockResolvedValueOnce({
+      pairing: {
+        pairing_id: '11'.repeat(16),
+        local_role: 'joiner',
+        phase: 'joiner_awaiting_invitation',
+        joiner_device_id: '22'.repeat(32),
+        requested_role: 'member',
+        inviter_device_id: null,
+        granted_role: null,
+        conversation_id: null,
+        authorization_deadline_unix_seconds: 1_787_805_388,
+        completion_deadline_unix_seconds: null,
+      },
+      capability: 'pairing_capability-1',
+    });
+
+    await command.handler({
+      args: 'pair',
+      command: '/konclave pair',
+      commandName: 'konclave',
+      sessionId: 'foreground-session-123',
+    });
+
+    expect(sessionMock.log).toHaveBeenCalledWith('pairing_capability-1', {
+      level: 'info',
+      ephemeral: true,
+    });
     expect(diagnostics.stderr).not.toHaveBeenCalled();
 
     controller?.dispose();

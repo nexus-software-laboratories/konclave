@@ -76,21 +76,56 @@ recorded service; profile and conversation state remain.
 
 Open fresh Copilot CLI sessions in two repositories.
 
-In the first session:
+Record `/konclave identity` in both sessions so each authorization can be compared
+with the intended peer. In the first session:
 
-> Use Konclave to create a pairing capability requesting member role.
+```text
+/konclave pair member
+```
 
-Give the single returned capability to the other session:
+Copy the single ephemeral capability to the other session:
 
-> Redeem this Konclave pairing capability. Create a conversation and authorize the
-> observed joiner as a member.
+```text
+/konclave join <capability>
+```
 
-Back in the first session:
+The capability remains terminal-visible and may appear in local CLI input history. It
+is protected by short expiry, one-time consumption, and daemon-side zeroization, not
+by the ephemeral display flag. Do not paste it into logs or public artifacts.
 
-> Review the pending pairing and authorize the observed inviter.
+Verify that the displayed joiner device is the first session's recorded identity.
+Create the conversation and explicitly approve that peer:
 
-After both sides report completion, ask either session to send a message through the
-conversation. The idle peer should receive it automatically.
+```text
+/konclave new
+/konclave approve <pairing-id> <conversation-id>
+```
+
+Back in the first session, process the authorization record, compare the displayed
+inviter device with the second session's recorded identity, and approve it:
+
+```text
+/konclave sync <pairing-id>
+/konclave approve <pairing-id> <inviter-device-id> <conversation-id> <granted-role>
+```
+
+Run `/konclave sync <pairing-id>` in each session until both display `completed`.
+Send from either side with:
+
+```text
+/konclave send <conversation-id> [message-id] -- <message text>
+```
+
+The idle peer receives the message automatically. `/konclave messages
+<conversation-id>` performs an explicit bounded sync/read when diagnosing delivery,
+and `/konclave reply <conversation-id> <reply-to-message-id> [message-id] --
+<message text>` records a reply relationship when desired. Both commands print the
+generated message identifier before sending; reuse it in the optional position after
+a transport failure to reconcile the same operation instead of creating a duplicate.
+
+`/konclave new` creates a durable conversation before approval. If the pairing is
+abandoned, that empty conversation remains visible in `/konclave conversations`; the
+command does not hide this non-atomic boundary.
 
 ## Automated two-session smoke
 
