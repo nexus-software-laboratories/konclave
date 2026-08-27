@@ -32,7 +32,7 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 
 ## Profile store
 
-Schema version 10 stores:
+Schema version 14 stores:
 
 - one profile row with a sealed device root and optional sealed relay credential;
 - normalized non-secret relay endpoint;
@@ -60,9 +60,13 @@ Schema version 10 stores:
   absent;
 - one sealed profile-global remote-event journal with stable notification
   identifiers, event sequence, authenticated journal head, typed source references,
-  and sealed delivery state; and
+  and sealed delivery state;
 - one ephemeral active adapter-consumer lease plus per-event claim generations,
-  expiries, acknowledgments, releases, and restart recovery.
+  expiries, acknowledgments, releases, and restart recovery;
+- durable pairing and relay-enrollment journals;
+- bounded sealed outcomes for exact local-service request reconciliation; and
+- one authenticated, foreign-key-backed active conversation selection for
+  restart-safe implicit sends.
 
 Version 1 through 8 schema changes use explicit transactions. Before changing a v2
 schema, startup rejects ready or accepted outbound rows whose plaintext cannot be
@@ -79,6 +83,13 @@ The version 10 migration adds the remote-event journal and adapter-consumer stat
 one transaction. Existing conversations have no sealed delivery policy and therefore
 remain muted. No legacy history is converted into synthetic adapter events. A failed
 schema change rolls back to version 9.
+
+Versions 11 and 12 add the durable pairing and enrollment journals. Version 13 adds
+sealed local-request outcomes. Version 14 adds the active-conversation singleton.
+Migration does not infer an active conversation from recency or relay progress:
+profiles upgraded from version 13 remain unselected until an operator selects one.
+Each schema change runs in its own transaction and leaves the preceding version
+authoritative if it fails.
 
 Remote application and membership completion create one context-bound event before
 advancing the relay cursor. Local echoes do not create events. Muted conversations

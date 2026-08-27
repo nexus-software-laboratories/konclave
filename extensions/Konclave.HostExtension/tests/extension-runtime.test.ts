@@ -38,8 +38,47 @@ function stubClient(): LocalServiceClient {
   };
 }
 
+function queuedDeliveryClient(): LocalServiceClient {
+  let rejectClaim: ((error: Error) => void) | undefined;
+  let claims = 0;
+  const close = vi.fn(() => rejectClaim?.(new Error('closed')));
+  return {
+    profile: 'session-0123456789abcdef01234567',
+    connected: true,
+    retire: vi.fn(async () => close()),
+    close,
+    request: vi.fn(async (operation) => {
+      if (operation !== 'delivery.claim') {
+        return {};
+      }
+      claims += 1;
+      if (claims === 1) {
+        return {
+          events: [
+            {
+              notificationId: '01'.repeat(16),
+              leaseGeneration: 1,
+              sequence: 1,
+              conversation: '02'.repeat(32),
+              sender: '03'.repeat(32),
+              relayCursor: 1,
+              payload: { kind: 'application_text', text: 'shared hello' },
+            },
+          ],
+        };
+      }
+      return new Promise<never>((_resolve, reject) => {
+        rejectClaim = reject;
+      });
+    }),
+  };
+}
+
 type EventHandlerMap = {
+  'user.message': (event: unknown) => void;
+  'assistant.turn_start': (event: unknown) => void;
   'assistant.message': (event: AssistantMessageEvent) => void;
+  'tool.execution_start': (event: unknown) => void;
   'tool.execution_complete': (event: ToolExecutionCompleteEvent) => void;
   'session.idle': (event: SessionIdleEvent) => void;
   'session.error': (event: SessionErrorEvent) => void;
@@ -250,10 +289,13 @@ describe('bootExtension', () => {
     expect(joined.tools.length).toBeGreaterThan(0);
     expect([...sessionMock.handlers.keys()].sort()).toEqual([
       'assistant.message',
+      'assistant.turn_start',
       'session.error',
       'session.idle',
       'session.shutdown',
       'tool.execution_complete',
+      'tool.execution_start',
+      'user.message',
     ]);
     expect(processController.registeredSignals).toEqual(['SIGINT', 'SIGTERM']);
 
@@ -357,39 +399,7 @@ describe('bootExtension', () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
-    let rejectClaim: ((error: Error) => void) | undefined;
-    let claims = 0;
-    const close = vi.fn(() => rejectClaim?.(new Error('closed')));
-    const client: LocalServiceClient = {
-      profile: 'session-0123456789abcdef01234567',
-      connected: true,
-      retire: vi.fn(async () => close()),
-      close,
-      request: vi.fn(async (operation) => {
-        if (operation !== 'delivery.claim') {
-          return {};
-        }
-        claims += 1;
-        if (claims === 1) {
-          return {
-            events: [
-              {
-                notificationId: '01'.repeat(16),
-                leaseGeneration: 1,
-                sequence: 1,
-                conversation: '02'.repeat(32),
-                sender: '03'.repeat(32),
-                relayCursor: 1,
-                payload: { kind: 'application_text', text: 'shared hello' },
-              },
-            ],
-          };
-        }
-        return new Promise<never>((_resolve, reject) => {
-          rejectClaim = reject;
-        });
-      }),
-    };
+    const client = queuedDeliveryClient();
     const connect = vi.fn().mockResolvedValue(client);
 
     const controller = await bootExtension({
@@ -400,6 +410,10 @@ describe('bootExtension', () => {
     });
     await Promise.resolve();
     await Promise.resolve();
+    expect(sessionMock.send).not.toHaveBeenCalled();
+
+    sessionMock.emit('user.message', {});
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(sessionMock.send).not.toHaveBeenCalled();
 
     sessionMock.emit('session.idle', { data: {}, timestamp: '2026-08-16T00:00:00.000Z' });
@@ -414,6 +428,68 @@ describe('bootExtension', () => {
     expect(connect).toHaveBeenCalledTimes(1);
     expect(client.close).toHaveBeenCalledTimes(1);
   });
+
+  it('restores delivery when a resumed session stays idle after startup', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    const client = queuedDeliveryClient();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+      processController,
+      connect: vi.fn().mockResolvedValue(client),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sessionMock.send).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+    expect(sessionMock.send.mock.calls[0]?.[0]).toContain('shared hello');
+    controller?.dispose();
+    await Promise.resolve();
+    expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['assistant.turn_start', 'tool.execution_start'] as const)(
+    'cancels startup delivery when %s shows the session is active',
+    async (eventType) => {
+      const diagnostics = createDiagnosticsRecorder();
+      const processController = new FakeProcessController();
+      const sessionMock = createSessionMock();
+      const client = queuedDeliveryClient();
+
+      const controller = await bootExtension({
+        diagnostics: diagnostics.diagnostics,
+        joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+        processController,
+        connect: vi.fn().mockResolvedValue(client),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      sessionMock.emit(eventType, {});
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sessionMock.send).not.toHaveBeenCalled();
+      sessionMock.emit('session.idle', {
+        data: {},
+        timestamp: '2026-08-16T00:00:00.000Z',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(sessionMock.send).toHaveBeenCalledTimes(1);
+
+      controller?.dispose();
+      await Promise.resolve();
+      expect(client.close).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('closes the client and reports a failed clean grant retirement', async () => {
     const diagnostics = createDiagnosticsRecorder();

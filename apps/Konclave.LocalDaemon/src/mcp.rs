@@ -156,6 +156,7 @@ struct ConversationResult {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct ConversationListResult {
     conversation_ids: Vec<String>,
+    active_conversation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -687,16 +688,21 @@ impl StdioServer {
             .transpose()?;
         let limit = page_size(request.limit)?;
         let conversations = self.conversations.clone();
-        let identifiers =
-            tokio::task::spawn_blocking(move || conversations.conversation_ids(after, limit))
-                .await
-                .map_err(|_| "task_failed".to_string())?
-                .map_err(tool_error)?;
+        let (identifiers, active) = tokio::task::spawn_blocking(move || {
+            Ok::<_, crate::conversation::ConversationCoordinatorError>((
+                conversations.conversation_ids(after, limit)?,
+                conversations.active_conversation_id()?,
+            ))
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
         Ok(Json(ConversationListResult {
             conversation_ids: identifiers
                 .into_iter()
                 .map(|identifier| encode_hex(identifier.as_bytes()))
                 .collect(),
+            active_conversation_id: active.map(|identifier| encode_hex(identifier.as_bytes())),
         }))
     }
 
@@ -1689,6 +1695,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             listed["conversation_ids"][0].as_str(),
+            Some(conversation_id)
+        );
+        assert_eq!(
+            listed["active_conversation_id"].as_str(),
             Some(conversation_id)
         );
         let pairing_without_relay = client

@@ -834,7 +834,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_local_request_outcome;
+                    "DROP TABLE daemon_active_conversation;
+                     DROP TABLE daemon_local_request_outcome;
                      DROP TABLE daemon_relay_enrollment;
                      PRAGMA user_version = 11;",
                 )
@@ -857,7 +858,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_local_request_outcome;
+                "DROP TABLE daemon_active_conversation;
+                 DROP TABLE daemon_local_request_outcome;
                  DROP TABLE daemon_relay_enrollment;
                  CREATE TABLE daemon_relay_enrollment (sentinel INTEGER);
                  PRAGMA user_version = 11;",

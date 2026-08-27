@@ -37,7 +37,7 @@ pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 13;
+const PROFILE_SCHEMA_VERSION: u32 = 14;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -66,6 +66,7 @@ const REMOTE_EVENT_HEAD_RECORD_SCOPE: u8 = 16;
 const REMOTE_EVENT_POLICY_RECORD_VERSION: u8 = 1;
 const REMOTE_EVENT_POLICY_RECORD_SCOPE: u8 = 17;
 const REMOTE_EVENT_FLOOR_RECORD_SCOPE: u8 = 18;
+const ACTIVE_CONVERSATION_RECORD_SCOPE: u8 = 19;
 const DERIVED_OPERATION_RECORD_CONTEXT_VERSION: &[u8] = b"operation-record-context-v2";
 const MAX_REMOTE_EVENT_BATCH: usize = 50;
 const MAX_REMOTE_EVENT_BATCH_BYTES: usize = 1024 * 1024;
@@ -266,6 +267,7 @@ impl LockedProfile {
             sealer: Arc::new(sealer),
             locked_profile: self,
         };
+        store.active_conversation_id()?;
         store.verify_remote_event_journal()?;
         store.verify_local_request_outcomes()?;
         store.invalidate_remote_event_leases()?;
@@ -529,8 +531,11 @@ impl ProfileStore {
             conversation_id.as_bytes(),
             &encode_remote_event_delivery_policy(enabled),
         )?;
-        let changed = self
-            .lock()?
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let changed = transaction
             .execute(
                 "UPDATE daemon_conversation
                  SET sealed_adapter_delivery_policy = ?1
@@ -538,11 +543,141 @@ impl ProfileStore {
                 params![blob.as_bytes(), conversation_id.as_bytes().as_slice()],
             )
             .map_err(|_| ProfileStoreError::Storage)?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(ProfileStoreError::ConversationNotFound)
+        if changed != 1 {
+            return Err(ProfileStoreError::ConversationNotFound);
         }
+        if enabled {
+            self.set_active_conversation_in(&transaction, conversation_id)?;
+        }
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    /// Returns the conversation selected for implicit profile operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or integrity error when the singleton selection is malformed
+    /// or references a missing conversation.
+    pub(crate) fn active_conversation_id(
+        &self,
+    ) -> Result<Option<ConversationId>, ProfileStoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let selection_count: i64 = transaction
+            .query_row(
+                "SELECT count(*) FROM daemon_active_conversation",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if selection_count == 0 {
+            return Ok(None);
+        }
+        if selection_count != 1 {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let selected: (i64, Option<Vec<u8>>, Option<Vec<u8>>, i64) = transaction
+            .query_row(
+                "SELECT
+                    active.singleton_id,
+                    CASE WHEN length(active.conversation_id) = 32
+                        THEN active.conversation_id END,
+                    CASE WHEN length(conversation.routing_id) = 32
+                        THEN conversation.routing_id END,
+                    length(active.sealed_selection)
+                 FROM daemon_active_conversation AS active
+                 LEFT JOIN daemon_conversation AS conversation
+                    ON conversation.conversation_id = active.conversation_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if selected.0 != 1 {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let conversation_id =
+            ConversationId::from_slice(&selected.1.ok_or(ProfileStoreError::CorruptData)?)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+        let routing_id = RoutingId::from_slice(&selected.2.ok_or(ProfileStoreError::CorruptData)?)
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        validate_blob_length(selected.3)?;
+        let sealed_selection: Vec<u8> = transaction
+            .query_row(
+                "SELECT sealed_selection
+                 FROM daemon_active_conversation
+                 WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if sealed_selection.len()
+            != usize::try_from(selected.3).map_err(|_| ProfileStoreError::CorruptData)?
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        drop(connection);
+        let plaintext = self.open_operation_record(
+            SecretRecordKind::LocalOperation,
+            conversation_id,
+            routing_id,
+            ACTIVE_CONVERSATION_RECORD_SCOPE,
+            conversation_id.as_bytes(),
+            sealed_selection,
+        )?;
+        if plaintext.as_slice() != conversation_id.as_bytes() {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(Some(conversation_id))
+    }
+
+    fn set_active_conversation_in(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+    ) -> Result<(), ProfileStoreError> {
+        let routing_id: Option<Option<Vec<u8>>> = connection
+            .query_row(
+                "SELECT CASE WHEN length(routing_id) = 32 THEN routing_id END
+                 FROM daemon_conversation
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let routing_id = routing_id.ok_or(ProfileStoreError::ConversationNotFound)?;
+        let routing_id = RoutingId::from_slice(&routing_id.ok_or(ProfileStoreError::CorruptData)?)
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let sealed_selection = self.seal_operation_record(
+            SecretRecordKind::LocalOperation,
+            conversation_id,
+            routing_id,
+            ACTIVE_CONVERSATION_RECORD_SCOPE,
+            conversation_id.as_bytes(),
+            conversation_id.as_bytes(),
+        )?;
+        connection
+            .execute(
+                "INSERT INTO daemon_active_conversation (
+                    singleton_id,
+                    conversation_id,
+                    sealed_selection
+                 ) VALUES (1, ?1, ?2)
+                 ON CONFLICT(singleton_id) DO UPDATE
+                 SET conversation_id = excluded.conversation_id,
+                     sealed_selection = excluded.sealed_selection",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    sealed_selection.as_bytes()
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(())
     }
 
     /// Acquires or renews the single active adapter consumer lease.
@@ -2436,6 +2571,9 @@ impl ProfileStore {
                 replay_cursor,
                 receipt.envelope(),
             )?;
+        }
+        if adapter_delivery_enabled == Some(true) {
+            self.set_active_conversation_in(&transaction, conversation_id)?;
         }
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
@@ -8048,6 +8186,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
+        13 => return initialize_active_conversation_schema(connection),
         12 => return initialize_local_request_outcome_schema(connection),
         11 => {
             enrollment::initialize_enrollment_schema(connection)?;
@@ -8285,6 +8424,25 @@ fn initialize_local_request_outcome_schema(
                     request_id
                 );
              PRAGMA user_version = 13;
+             COMMIT;",
+        )
+        .map_err(|_| ProfileStoreError::Storage)?;
+    initialize_active_conversation_schema(connection)
+}
+
+fn initialize_active_conversation_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
+    connection
+        .execute_batch(
+            "BEGIN;
+             CREATE TABLE daemon_active_conversation (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                conversation_id BLOB NOT NULL UNIQUE CHECK (length(conversation_id) = 32),
+                sealed_selection BLOB NOT NULL,
+                FOREIGN KEY (conversation_id)
+                    REFERENCES daemon_conversation(conversation_id)
+                    ON DELETE CASCADE
+             );
+             PRAGMA user_version = 14;
              COMMIT;",
         )
         .map_err(|_| ProfileStoreError::Storage)
@@ -10762,7 +10920,8 @@ mod tests {
     fn downgrade_v10_to_v9(connection: &Connection) {
         connection
             .execute_batch(
-                "DROP TABLE daemon_local_request_outcome;
+                "DROP TABLE daemon_active_conversation;
+                 DROP TABLE daemon_local_request_outcome;
                  DROP TABLE daemon_relay_enrollment;
                  DROP TABLE daemon_pairing;
                  DROP TABLE daemon_adapter_consumer;
@@ -13027,6 +13186,71 @@ mod tests {
     }
 
     #[test]
+    fn profile_schema_migrates_v13_to_current_transactionally() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("active-conversation-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_active_conversation;
+                 PRAGMA user_version = 13;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let version: u32 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert_eq!(store.active_conversation_id().unwrap(), None);
+        drop(store);
+
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_active_conversation;
+                 CREATE TABLE daemon_active_conversation (sentinel INTEGER);
+                 PRAGMA user_version = 13;",
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let sentinel_columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_active_conversation')
+                 WHERE name = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 13);
+        assert_eq!(sentinel_columns, 1);
+    }
+
+    #[test]
     fn profile_schema_migrates_v12_to_current_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("request-outcome-migration").unwrap();
@@ -13040,7 +13264,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_local_request_outcome;
+                "DROP TABLE daemon_active_conversation;
+                 DROP TABLE daemon_local_request_outcome;
                  PRAGMA user_version = 12;",
             )
             .unwrap();
@@ -13061,7 +13286,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_local_request_outcome;
+                "DROP TABLE daemon_active_conversation;
+                 DROP TABLE daemon_local_request_outcome;
                  CREATE TABLE daemon_local_request_outcome (sentinel INTEGER);
                  PRAGMA user_version = 12;",
             )
@@ -13115,6 +13341,7 @@ mod tests {
             "daemon_pending_join",
             "daemon_relay_enrollment",
             "daemon_local_request_outcome",
+            "daemon_active_conversation",
         ] {
             let exists: i64 = store
                 .lock()
@@ -14603,6 +14830,10 @@ mod tests {
                 .adapter_delivery_enabled(fixture.conversation_id)
                 .unwrap()
         );
+        assert_eq!(
+            fixture.store.active_conversation_id().unwrap(),
+            Some(fixture.conversation_id)
+        );
 
         fixture
             .store
@@ -14613,6 +14844,102 @@ mod tests {
                 .store
                 .adapter_delivery_enabled(fixture.conversation_id)
                 .unwrap()
+        );
+        assert_eq!(
+            fixture.store.active_conversation_id().unwrap(),
+            Some(fixture.conversation_id)
+        );
+    }
+
+    #[test]
+    fn active_conversation_selection_is_validated_and_durable() {
+        let fixture = conversation_fixture("active-conversation");
+        assert_eq!(fixture.store.active_conversation_id().unwrap(), None);
+        assert_eq!(
+            fixture
+                .store
+                .set_adapter_delivery_enabled(ConversationId::from_bytes([99; 32]), true),
+            Err(ProfileStoreError::ConversationNotFound)
+        );
+
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        assert_eq!(
+            fixture.store.active_conversation_id().unwrap(),
+            Some(fixture.conversation_id)
+        );
+
+        let identity = fixture.store.load_or_create_device().unwrap();
+        let other_conversation_id = identity.generate_conversation_id().unwrap();
+        let other_material = identity
+            .create_conversation_signing_material(other_conversation_id)
+            .unwrap();
+        let other_state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            other_conversation_id,
+            0,
+            vec![Member::new(
+                identity.device_id(),
+                ConversationRole::Administrator,
+                0,
+            )],
+            vec![],
+        )
+        .unwrap();
+        fixture
+            .store
+            .insert_conversation(
+                RoutingId::from_bytes([42; RoutingId::LENGTH]),
+                &other_material,
+                &other_state,
+                &[other_material.binding().clone()],
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_active_conversation
+                 SET conversation_id = ?1",
+                params![other_conversation_id.as_bytes().as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.active_conversation_id(),
+            Err(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+
+        let profile_id = fixture.profile_id.clone();
+        let conversation_id = fixture.conversation_id;
+        let root = fixture.root;
+        drop(fixture.store);
+        let reopened = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        assert_eq!(
+            reopened.active_conversation_id().unwrap(),
+            Some(conversation_id)
+        );
+        reopened
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_active_conversation
+                 SET sealed_selection = zeroblob(64)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            reopened.active_conversation_id(),
+            Err(ProfileStoreError::CorruptData)
         );
     }
 

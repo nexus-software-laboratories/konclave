@@ -437,6 +437,7 @@ describe('deterministic commands', () => {
       'status',
       'identity',
       'conversations',
+      `use ${'01'.repeat(32)}`,
       `mute ${'01'.repeat(32)}`,
       `unmute ${'01'.repeat(32)}`,
     ]) {
@@ -446,6 +447,7 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('Konclave commands');
     expect(lines.join('\n')).toContain('delivery: degraded');
     expect(lines.join('\n')).toContain('no conversations yet');
+    expect(lines.join('\n')).toContain(`active conversation selected: ${'01'.repeat(32)}`);
     expect(request).toHaveBeenCalledWith('set_auto_delivery', {
       conversation_id: '01'.repeat(32),
       enabled: false,
@@ -1075,6 +1077,93 @@ describe('deterministic commands', () => {
     ).toBe(true);
     expect(entries.some((entry) => entry.line === 'resume after cursor: 8')).toBe(true);
     expect(entries.some((entry) => entry.line.includes('more messages are available'))).toBe(true);
+  });
+
+  it('restores the active conversation for implicit sends after restart', async () => {
+    const otherConversationId = '99'.repeat(32);
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      if (operation === 'list_conversations') {
+        return {
+          conversation_ids: [otherConversationId],
+          active_conversation_id: conversationId,
+        };
+      }
+      if (operation === 'send_message') {
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          !('conversation_id' in payload) ||
+          !('message_id' in payload)
+        ) {
+          throw new Error('missing message identity');
+        }
+        return {
+          conversation_id: payload.conversation_id,
+          message_id: payload.message_id,
+          sender_counter: 1,
+          cursor: 9,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: { write: () => {} },
+    })[0];
+
+    await command?.handler(commandContext('send -- resumed hello'));
+
+    expect(request).toHaveBeenCalledWith('list_conversations', {});
+    expect(request).toHaveBeenCalledWith(
+      'send_message',
+      expect.objectContaining({
+        conversation_id: conversationId,
+        text: 'resumed hello',
+      }),
+      { requestId: expect.any(Buffer) },
+    );
+  });
+
+  it('fails closed when the persisted active conversation is malformed', async () => {
+    const lines: string[] = [];
+    const request = vi.fn().mockResolvedValueOnce({
+      conversation_ids: [conversationId],
+      active_conversation_id: 'short',
+    });
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('send -- malformed active'));
+
+    expect(lines.join('\n')).toContain('active conversation identifier');
+    expect(request).not.toHaveBeenCalledWith('send_message', expect.anything(), expect.anything());
+  });
+
+  it('requires explicit selection when a migrated profile has no active conversation', async () => {
+    const lines: string[] = [];
+    const request = vi.fn().mockResolvedValue({
+      conversation_ids: [conversationId],
+      active_conversation_id: null,
+    });
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('send -- do not guess'));
+
+    expect(lines.join('\n')).toContain('no active conversation is selected');
+    expect(request).not.toHaveBeenCalledWith('send_message', expect.anything(), expect.anything());
   });
 
   it('rejects unsafe workflow arguments before their side effects', async () => {

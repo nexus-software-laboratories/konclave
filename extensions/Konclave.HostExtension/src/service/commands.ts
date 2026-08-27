@@ -88,6 +88,11 @@ interface MessageSummary {
   readonly duplicate: boolean;
 }
 
+interface ConversationSelection {
+  readonly conversationIds: readonly string[];
+  readonly activeConversationId: string | undefined;
+}
+
 interface ParsedCommand {
   readonly subcommand: string;
   readonly argumentsText: string;
@@ -136,6 +141,7 @@ const helpLines = [
   '  /konclave reply <conversation> <reply-to> [message-id] -- <text>',
   '                                                       Reply or retry with an explicit ID.',
   '  /konclave messages <conversation> [after-cursor]    Sync and show a bounded message page.',
+  '  /konclave use <conversation>                        Select a conversation after migration.',
   '  /konclave mute <conversation>                       Mute automatic delivery.',
   '  /konclave unmute <conversation>                     Resume automatic delivery.',
 ];
@@ -643,18 +649,16 @@ async function requireSingleConversation(
   if (activeConversationId) {
     return activeConversationId;
   }
-  const list = conversations(await client.request('list_conversations', {}));
-  if (list.length === 0) {
+  const selection = conversations(await client.request('list_conversations', {}));
+  if (selection.activeConversationId) {
+    return selection.activeConversationId;
+  }
+  if (selection.conversationIds.length === 0) {
     throw new Error('no conversation is available; run /konclave connect first');
   }
-  if (list.length > 1) {
-    throw new Error('multiple conversations exist; provide the conversation identifier');
-  }
-  const conversation = list[0];
-  if (!conversation) {
-    throw new Error('the local service conversation response is malformed');
-  }
-  return conversation;
+  throw new Error(
+    'no active conversation is selected; run /konclave conversations, then /konclave use <conversation>',
+  );
 }
 
 function parseCursor(value: string | undefined): number {
@@ -706,7 +710,7 @@ function identity(value: unknown): string {
   );
 }
 
-function conversations(value: unknown): readonly string[] {
+function conversations(value: unknown): ConversationSelection {
   if (
     !isRecord(value) ||
     !Array.isArray(value.conversation_ids) ||
@@ -720,7 +724,20 @@ function conversations(value: unknown): readonly string[] {
   ) {
     throw new Error('the local service conversation response is malformed');
   }
-  return value.conversation_ids;
+  const activeConversationId =
+    value.active_conversation_id === null || value.active_conversation_id === undefined
+      ? undefined
+      : requireHexIdentifier(
+          typeof value.active_conversation_id === 'string'
+            ? value.active_conversation_id
+            : undefined,
+          conversationIdCharacters,
+          'active conversation identifier',
+        );
+  return {
+    conversationIds: value.conversation_ids,
+    activeConversationId,
+  };
 }
 
 export function createKonclaveCommands(dependencies: CommandDependencies): RegisteredCommand[] {
@@ -774,12 +791,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       }
       case 'conversations': {
         requireNoArguments(argumentsText, subcommand);
-        const list = conversations(await client.request('list_conversations', {}));
-        if (list.length === 0) {
+        const selection = conversations(await client.request('list_conversations', {}));
+        activeConversationId = selection.activeConversationId;
+        if (selection.activeConversationId) {
+          await output.write(`active: ${selection.activeConversationId}`);
+        }
+        if (selection.conversationIds.length === 0) {
           await output.write('no conversations yet');
           return;
         }
-        for (const conversation of list.slice(0, 20)) {
+        for (const conversation of selection.conversationIds.slice(0, 20)) {
           await output.write(bounded(conversation));
         }
         return;
@@ -1135,6 +1156,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'use':
       case 'mute':
       case 'unmute': {
         const parts = parseCommandArguments(argumentsText);
@@ -1146,8 +1168,15 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         );
         await client.request('set_auto_delivery', {
           conversation_id: conversation,
-          enabled: subcommand === 'unmute',
+          enabled: subcommand !== 'mute',
         });
+        if (subcommand !== 'mute') {
+          activeConversationId = conversation;
+        }
+        if (subcommand === 'use') {
+          await output.write(`active conversation selected: ${conversation}`);
+          return;
+        }
         await output.write(
           `automatic delivery ${subcommand === 'unmute' ? 'resumed' : 'muted'} for ${bounded(conversation)}`,
         );

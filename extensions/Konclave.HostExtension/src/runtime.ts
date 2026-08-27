@@ -179,6 +179,7 @@ export interface BootExtensionOptions {
 export { connectInstalledService };
 
 const extensionSignals: readonly ExtensionSignal[] = ['SIGINT', 'SIGTERM'];
+const startupIdleGraceMilliseconds = 5_000;
 
 const defaultTimers: TimerController = {
   setTimeout(handler, delayMs) {
@@ -351,12 +352,53 @@ function attachExtension(
   const signalHandlers = new Map<ExtensionSignal, () => void>();
   const deliveryDisposals: Array<() => void> = [];
   let delivery: DeliveryBinding | null = null;
+  let startupIdleHandle: TimerHandle | undefined;
+  let sessionActivity: 'unobserved' | 'active' | 'idle' = 'unobserved';
   let disposed = false;
 
   const cancelTimer = (handle: TimerHandle) => {
     if (pendingTimers.delete(handle)) {
       timers.clearTimeout(handle);
     }
+  };
+
+  const markActive = () => {
+    sessionActivity = 'active';
+    if (startupIdleHandle !== undefined) {
+      cancelTimer(startupIdleHandle);
+      startupIdleHandle = undefined;
+    }
+    delivery?.markActive();
+  };
+
+  const markIdle = () => {
+    sessionActivity = 'idle';
+    if (startupIdleHandle !== undefined) {
+      cancelTimer(startupIdleHandle);
+      startupIdleHandle = undefined;
+    }
+    void delivery?.markIdle().catch((error: unknown) => {
+      diagnostics.error(`Konclave delivery failed after idle: ${formatError(error)}`);
+    });
+  };
+
+  const scheduleStartupIdle = () => {
+    if (disposed || startupIdleHandle !== undefined || sessionActivity !== 'unobserved') {
+      return;
+    }
+    const handle = timers.setTimeout(() => {
+      cancelTimer(handle);
+      startupIdleHandle = undefined;
+      if (disposed || sessionActivity !== 'unobserved') {
+        return;
+      }
+      sessionActivity = 'idle';
+      void delivery?.markIdle().catch((error: unknown) => {
+        diagnostics.error(`Konclave delivery failed after startup idle: ${formatError(error)}`);
+      });
+    }, startupIdleGraceMilliseconds);
+    startupIdleHandle = handle;
+    pendingTimers.add(handle);
   };
 
   const dispose = () => {
@@ -416,6 +458,15 @@ function attachExtension(
       }
       delivery = coordinator;
       deliveryDisposals.push(disposeDelivery);
+      if (sessionActivity === 'idle') {
+        void coordinator.markIdle().catch((error: unknown) => {
+          diagnostics.error(`Konclave delivery failed after idle: ${formatError(error)}`);
+        });
+      } else if (sessionActivity === 'active') {
+        coordinator.markActive();
+      } else {
+        scheduleStartupIdle();
+      }
     },
     dispose() {
       dispose();
@@ -423,10 +474,25 @@ function attachExtension(
   };
 
   unsubscriptions.push(
+    session.on('user.message', () => {
+      markActive();
+    }),
+  );
+  unsubscriptions.push(
+    session.on('assistant.turn_start', () => {
+      markActive();
+    }),
+  );
+  unsubscriptions.push(
+    session.on('tool.execution_start', () => {
+      markActive();
+    }),
+  );
+  unsubscriptions.push(
     session.on('assistant.message', (event) => {
       const assistantEvent = event as AssistantMessageEvent;
       state.lastAssistantMessageId = assistantEvent.data.messageId;
-      delivery?.markActive();
+      markActive();
     }),
   );
   unsubscriptions.push(
@@ -442,9 +508,7 @@ function attachExtension(
       const idleEvent = event as SessionIdleEvent;
       state.lastIdleAt = idleEvent.timestamp;
       state.lastIdleWasAborted = Boolean(idleEvent.data.aborted);
-      void delivery?.markIdle().catch((error: unknown) => {
-        diagnostics.error(`Konclave delivery failed after idle: ${formatError(error)}`);
-      });
+      markIdle();
     }),
   );
   unsubscriptions.push(
