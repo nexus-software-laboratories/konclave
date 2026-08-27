@@ -531,11 +531,8 @@ impl ProfileStore {
             conversation_id.as_bytes(),
             &encode_remote_event_delivery_policy(enabled),
         )?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|_| ProfileStoreError::Storage)?;
-        let changed = transaction
+        let changed = self
+            .lock()?
             .execute(
                 "UPDATE daemon_conversation
                  SET sealed_adapter_delivery_policy = ?1
@@ -546,10 +543,7 @@ impl ProfileStore {
         if changed != 1 {
             return Err(ProfileStoreError::ConversationNotFound);
         }
-        if enabled {
-            self.set_active_conversation_in(&transaction, conversation_id)?;
-        }
-        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+        Ok(())
     }
 
     /// Returns the conversation selected for implicit profile operations.
@@ -633,6 +627,23 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         Ok(Some(conversation_id))
+    }
+
+    /// Selects one existing conversation for implicit profile operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-conversation, integrity, sealing, or storage error.
+    pub(crate) fn set_active_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ProfileStoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        self.set_active_conversation_in(&transaction, conversation_id)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
 
     fn set_active_conversation_in(
@@ -14830,10 +14841,7 @@ mod tests {
                 .adapter_delivery_enabled(fixture.conversation_id)
                 .unwrap()
         );
-        assert_eq!(
-            fixture.store.active_conversation_id().unwrap(),
-            Some(fixture.conversation_id)
-        );
+        assert_eq!(fixture.store.active_conversation_id().unwrap(), None);
 
         fixture
             .store
@@ -14845,10 +14853,7 @@ mod tests {
                 .adapter_delivery_enabled(fixture.conversation_id)
                 .unwrap()
         );
-        assert_eq!(
-            fixture.store.active_conversation_id().unwrap(),
-            Some(fixture.conversation_id)
-        );
+        assert_eq!(fixture.store.active_conversation_id().unwrap(), None);
     }
 
     #[test]
@@ -14858,13 +14863,13 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .set_adapter_delivery_enabled(ConversationId::from_bytes([99; 32]), true),
+                .set_active_conversation(ConversationId::from_bytes([99; 32])),
             Err(ProfileStoreError::ConversationNotFound)
         );
 
         fixture
             .store
-            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .set_active_conversation(fixture.conversation_id)
             .unwrap();
         assert_eq!(
             fixture.store.active_conversation_id().unwrap(),
@@ -14913,7 +14918,7 @@ mod tests {
         );
         fixture
             .store
-            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .set_active_conversation(fixture.conversation_id)
             .unwrap();
 
         let profile_id = fixture.profile_id.clone();

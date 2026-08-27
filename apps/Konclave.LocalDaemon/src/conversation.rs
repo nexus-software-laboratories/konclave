@@ -537,6 +537,20 @@ impl ConversationCoordinator {
         self.store.active_conversation_id().map_err(Into::into)
     }
 
+    /// Selects one existing conversation for implicit profile operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile integrity, missing-conversation, sealing, or storage error.
+    pub(crate) fn set_active_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ConversationCoordinatorError> {
+        self.store
+            .set_active_conversation(conversation_id)
+            .map_err(Into::into)
+    }
+
     /// Lists one bounded page of local conversation identifiers.
     ///
     /// # Errors

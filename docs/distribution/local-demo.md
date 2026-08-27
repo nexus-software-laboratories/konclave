@@ -101,7 +101,8 @@ That selection is stored in the session's durable profile, so implicit send cont
 to target the same conversation after the Copilot session is restarted or resumed.
 Profiles upgraded from an earlier candidate deliberately do not guess among existing
 conversations. If `/konclave conversations` shows no active selection, choose the
-intended identifier once with `/konclave use <conversation-id>`.
+intended identifier once with `/konclave use <conversation-id>`. Selection does not
+change that conversation's automatic-delivery mute state.
 
 The two-command flow is an explicit `AccountTrusted` convenience policy. Capability
 creation and redemption are treated as the two same-account approval actions; status

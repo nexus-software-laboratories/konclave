@@ -26,6 +26,7 @@ const runtimeModuleDir = dirname(fileURLToPath(import.meta.url));
 export interface PromptMessage {
   prompt: string;
   attachments?: unknown[];
+  mode?: 'enqueue' | 'immediate';
 }
 
 export interface AssistantMessageEvent {

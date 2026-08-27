@@ -36,7 +36,7 @@ export const defaultWakeBudget: WakeBudget = {
 };
 
 export interface DeliverySession {
-  send(message: string): Promise<string>;
+  send(message: { readonly prompt: string; readonly mode: 'enqueue' }): Promise<string>;
 }
 
 export interface DeliveryDiagnostics {
@@ -211,7 +211,7 @@ export function createDeliveryCoordinator(
     turns.push({ at: now, conversation });
 
     try {
-      await options.session.send(frameDelivery(batch));
+      await options.session.send({ prompt: frameDelivery(batch), mode: 'enqueue' });
       await settle(batch, true);
     } catch (error) {
       options.diagnostics.error(`Konclave delivery was not accepted: ${describeError(error)}`);

@@ -421,7 +421,11 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    expect(sessionMock.send.mock.calls[0]?.[0]).toContain('shared hello');
+    expect(sessionMock.send.mock.calls[0]?.[0]).toMatchObject({ mode: 'enqueue' });
+    expect(sessionMock.send.mock.calls[0]?.[0]).toHaveProperty(
+      'prompt',
+      expect.stringContaining('shared hello'),
+    );
 
     controller?.dispose();
     await Promise.resolve();
@@ -450,7 +454,42 @@ describe('bootExtension', () => {
     await Promise.resolve();
 
     expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    expect(sessionMock.send.mock.calls[0]?.[0]).toContain('shared hello');
+    expect(sessionMock.send.mock.calls[0]?.[0]).toMatchObject({ mode: 'enqueue' });
+    expect(sessionMock.send.mock.calls[0]?.[0]).toHaveProperty(
+      'prompt',
+      expect.stringContaining('shared hello'),
+    );
+    controller?.dispose();
+    await Promise.resolve();
+    expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses an explicit idle event instead of the pending startup inference', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    const client = queuedDeliveryClient();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+      processController,
+      connect: vi.fn().mockResolvedValue(client),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    sessionMock.emit('session.idle', {
+      data: {},
+      timestamp: '2026-08-16T00:00:00.000Z',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+
     controller?.dispose();
     await Promise.resolve();
     expect(client.close).toHaveBeenCalledTimes(1);

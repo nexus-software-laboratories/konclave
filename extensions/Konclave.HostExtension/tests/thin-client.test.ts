@@ -400,12 +400,22 @@ describe('deterministic commands', () => {
   });
 
   it('executes core read and delivery-control commands without creating a model turn', async () => {
-    const request = vi.fn(async (operation: string) => {
+    const request = vi.fn(async (operation: string, payload: unknown) => {
       switch (operation) {
         case 'get_identity':
           return { device_id: 'aa'.repeat(32) };
         case 'list_conversations':
           return { conversation_ids: [] };
+        case 'set_active_conversation':
+          return {
+            active_conversation_id:
+              typeof payload === 'object' &&
+              payload !== null &&
+              'conversation_id' in payload &&
+              typeof payload.conversation_id === 'string'
+                ? payload.conversation_id
+                : '',
+          };
         case 'set_auto_delivery':
           return {};
         case 'service.status':
@@ -448,6 +458,9 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('delivery: degraded');
     expect(lines.join('\n')).toContain('no conversations yet');
     expect(lines.join('\n')).toContain(`active conversation selected: ${'01'.repeat(32)}`);
+    expect(request).toHaveBeenCalledWith('set_active_conversation', {
+      conversation_id: '01'.repeat(32),
+    });
     expect(request).toHaveBeenCalledWith('set_auto_delivery', {
       conversation_id: '01'.repeat(32),
       enabled: false,
@@ -456,6 +469,12 @@ describe('deterministic commands', () => {
       conversation_id: '01'.repeat(32),
       enabled: true,
     });
+    expect(
+      request.mock.calls.filter(([operation]) => operation === 'set_active_conversation'),
+    ).toHaveLength(1);
+    expect(
+      request.mock.calls.filter(([operation]) => operation === 'set_auto_delivery'),
+    ).toHaveLength(2);
   });
 
   it('creates a bounded ephemeral pairing capability', async () => {
@@ -984,6 +1003,12 @@ describe('deterministic commands', () => {
       if (operation === 'list_conversations') {
         return { conversation_ids: [conversationId] };
       }
+      if (operation === 'set_active_conversation') {
+        if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
+          throw new Error('missing conversation selection');
+        }
+        return { active_conversation_id: payload.conversation_id };
+      }
       if (operation === 'read_messages') {
         return {
           messages: [
@@ -1042,6 +1067,9 @@ describe('deterministic commands', () => {
       conversation_id: conversationId,
       text: 'implicit hello',
     });
+    expect(
+      request.mock.calls.filter(([operation]) => operation === 'set_active_conversation'),
+    ).toHaveLength(2);
     expect(
       sends.every(
         ([, payload]) =>

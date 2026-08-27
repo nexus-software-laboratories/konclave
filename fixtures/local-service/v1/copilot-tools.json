@@ -1114,6 +1114,34 @@
     }
   },
   {
+    "name": "set_active_conversation",
+    "description": "Select one existing conversation for implicit profile operations.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "active_conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "active_conversation_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "set_auto_delivery",
     "description": "Enable or mute automatic delivery of remote events for one conversation.",
     "inputSchema": {

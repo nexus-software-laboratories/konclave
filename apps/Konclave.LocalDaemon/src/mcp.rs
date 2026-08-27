@@ -160,6 +160,11 @@ struct ConversationListResult {
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ActiveConversationResult {
+    active_conversation_id: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct IdentityResult {
     device_id: String,
 }
@@ -389,6 +394,10 @@ impl StdioServer {
                 self.cancel_pairing(Self::parse_parameters(payload)?)
                     .await?,
             ),
+            "set_active_conversation" => Self::encode_json(
+                self.set_active_conversation(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             "set_auto_delivery" => Self::encode_json(
                 self.set_auto_delivery(Self::parse_parameters(payload)?)
                     .await?,
@@ -399,6 +408,26 @@ impl StdioServer {
             ),
             _ => Err("unknown_operation".to_string()),
         }
+    }
+
+    #[tool(
+        name = "set_active_conversation",
+        description = "Select one existing conversation for implicit profile operations."
+    )]
+    async fn set_active_conversation(
+        &self,
+        Parameters(request): Parameters<ConversationRequest>,
+    ) -> Result<Json<ActiveConversationResult>, String> {
+        self.authorize("set_active_conversation")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let conversations = self.conversations.clone();
+        tokio::task::spawn_blocking(move || conversations.set_active_conversation(conversation_id))
+            .await
+            .map_err(|_| "task_failed".to_string())?
+            .map_err(tool_error)?;
+        Ok(Json(ActiveConversationResult {
+            active_conversation_id: encode_hex(conversation_id.as_bytes()),
+        }))
     }
 
     #[tool(
@@ -1084,6 +1113,7 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "change_member_role"
         | "send_message"
         | "sync_messages"
+        | "set_active_conversation"
         | "set_auto_delivery"
         | "watch_messages"
             if allow_write =>
@@ -1565,6 +1595,10 @@ mod tests {
             method: "cancel_pairing",
         })
         .unwrap();
+        writable(AuthorizationContext {
+            method: "set_active_conversation",
+        })
+        .unwrap();
         assert!(writable(AuthorizationContext { method: "unknown" }).is_err());
     }
 
@@ -1578,6 +1612,12 @@ mod tests {
         assert!(
             read_only(AuthorizationContext {
                 method: "set_auto_delivery",
+            })
+            .is_err()
+        );
+        assert!(
+            read_only(AuthorizationContext {
+                method: "set_active_conversation",
             })
             .is_err()
         );
@@ -1699,6 +1739,23 @@ mod tests {
         );
         assert_eq!(
             listed["active_conversation_id"].as_str(),
+            Some(conversation_id)
+        );
+        let selected = client
+            .call_tool(
+                CallToolRequestParams::new("set_active_conversation").with_arguments(
+                    json!({"conversation_id": conversation_id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            selected["active_conversation_id"].as_str(),
             Some(conversation_id)
         );
         let pairing_without_relay = client
