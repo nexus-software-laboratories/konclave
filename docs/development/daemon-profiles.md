@@ -326,7 +326,9 @@ keyed by validated profile identifier owns that lifecycle:
   either wins outright — after which no operation is admitted again — or loses to a
   running operation and the profile is retained. Eviction then stops the task set,
   closes both databases, and releases the lock. It removes no durable state, and
-  reopening returns the same device identity.
+  reopening returns the same device identity. When the active-profile bound is
+  reached, an attach performs this guarded idle eviction before refusing capacity and
+  retries only when at least one complete slot was released.
 - **Operation admission.** An operation that is refused because the profile is closing
   fails closed and leaves its durable state untouched: an unprocessed relay page is
   left unacknowledged for exact redelivery, and a refused pairing sweep leaves every

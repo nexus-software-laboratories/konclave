@@ -10,7 +10,6 @@ import {
   getArchivePath,
   maintainerSkillPath,
   manifestExtensionPath,
-  manifestSkillsPath,
   packageFiles,
 } from './package-contract.mjs';
 
@@ -77,8 +76,8 @@ check(
   `plugin.json extensions must be "${manifestExtensionPath}".`,
 );
 check(
-  pluginManifest.skills === manifestSkillsPath,
-  `plugin.json skills must be "${manifestSkillsPath}".`,
+  Array.isArray(pluginManifest.skills) && pluginManifest.skills.length === 0,
+  'plugin.json skills must be empty so the unsupported-harness fallback is not auto-loaded.',
 );
 
 for (const filePath of packageFiles) {

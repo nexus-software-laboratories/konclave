@@ -58,15 +58,6 @@ export interface SmokeReport {
   readonly terminationReason: "completed";
 }
 
-interface PairingStatus {
-  readonly pairingId: string;
-  readonly phase: string;
-  readonly requestedRole: string;
-  readonly inviterDeviceId?: string;
-  readonly grantedRole?: string;
-  readonly conversationId?: string;
-}
-
 const instruction =
   "Call exactly the named Konclave tool once with the supplied arguments, then stop. " +
   "Never call shell, filesystem, web, skill, repository, or any other tool. " +
@@ -85,30 +76,13 @@ const scenarioTools = [
   "read_messages",
 ] as const;
 const scenarioToolNames: ReadonlySet<string> = new Set(scenarioTools);
+const smokeProfileA = "session-aaaaaaaaaaaaaaaaaaaaaaaa";
+const smokeProfileB = "session-bbbbbbbbbbbbbbbbbbbbbbbb";
 
 function assertRegularFile(path: string, label: string): void {
   if (!isAbsolute(path) || !lstatSync(path).isFile()) {
     throw new Error(`${label} must be an absolute regular file.`);
   }
-}
-
-function pairingStatus(value: unknown, label: string): PairingStatus {
-  const record = requireRecord(value, label);
-  return {
-    pairingId: requireString(record, "pairing_id", label),
-    phase: requireString(record, "phase", label),
-    requestedRole: requireString(record, "requested_role", label),
-    inviterDeviceId: optionalString(record, "inviter_device_id"),
-    grantedRole: optionalString(record, "granted_role"),
-    conversationId: optionalString(record, "conversation_id"),
-  };
-}
-
-function pairingFrom(
-  record: Record<string, unknown>,
-  label: string,
-): PairingStatus {
-  return pairingStatus(record.pairing ?? record, label);
 }
 
 function prompt(tool: string, argumentsValue: Record<string, unknown>): string {
@@ -157,7 +131,23 @@ export function createSessionConfig(
 }
 
 interface SmokeLocalClient {
+  request(
+    operation: string,
+    payload: unknown,
+    options?:
+      number | { readonly deadlineMs?: number; readonly requestId?: Buffer },
+  ): Promise<unknown>;
   close(): void;
+}
+
+interface SmokeCommand {
+  readonly name: string;
+  handler(context: {
+    readonly sessionId: string;
+    readonly command: string;
+    readonly commandName: string;
+    readonly args: string;
+  }): Promise<void>;
 }
 
 interface ThinClientModule {
@@ -171,6 +161,15 @@ interface ThinClientModule {
     readonly client: SmokeLocalClient;
     readonly toolDeadlineMs?: number;
   }): Tool[];
+  createKonclaveCommands(options: {
+    readonly client: SmokeLocalClient;
+    readonly output: {
+      write(
+        line: string,
+        options?: { readonly ephemeral?: boolean },
+      ): Promise<void> | void;
+    };
+  }): SmokeCommand[];
 }
 
 function isThinClientModule(value: unknown): value is ThinClientModule {
@@ -180,7 +179,9 @@ function isThinClientModule(value: unknown): value is ThinClientModule {
     "connectInstalledService" in value &&
     typeof value.connectInstalledService === "function" &&
     "createKonclaveTools" in value &&
-    typeof value.createKonclaveTools === "function"
+    typeof value.createKonclaveTools === "function" &&
+    "createKonclaveCommands" in value &&
+    typeof value.createKonclaveCommands === "function"
   );
 }
 
@@ -192,18 +193,118 @@ async function loadThinClient(path: string): Promise<ThinClientModule> {
   return loaded;
 }
 
-async function syncPairing(
-  participant: SmokeParticipant,
-  pairingId: string,
+interface CommandCapture {
+  readonly lines: string[];
+  readonly capability: Promise<string>;
+  readonly output: {
+    write(line: string, options?: { readonly ephemeral?: boolean }): void;
+  };
+}
+
+function createCommandCapture(): CommandCapture {
+  const lines: string[] = [];
+  let resolveCapability: ((capability: string) => void) | undefined;
+  const capability = new Promise<string>((resolve) => {
+    resolveCapability = resolve;
+  });
+  return {
+    lines,
+    capability,
+    output: {
+      write(line, options) {
+        lines.push(line);
+        if (
+          options?.ephemeral === true &&
+          line.length >= 64 &&
+          /^[A-Za-z0-9_-]+$/u.test(line)
+        ) {
+          resolveCapability?.(line);
+          resolveCapability = undefined;
+        }
+      },
+    },
+  };
+}
+
+async function withinDeadline<T>(
+  operation: Promise<T>,
   timeoutMs: number,
-): Promise<PairingStatus> {
-  const result = await participant.invoke(
-    "sync_pairing",
-    prompt("sync_pairing", { pairing_id: pairingId }),
-    timeoutMs,
-    true,
+  label: string,
+): Promise<T> {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    handle = setTimeout(
+      () => reject(new Error(`${label} exceeded its deadline.`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (handle) {
+      clearTimeout(handle);
+    }
+  }
+}
+
+function commandValue(
+  lines: readonly string[],
+  prefix: string,
+  label: string,
+): string {
+  const values = new Set(
+    lines
+      .filter((line) => line.startsWith(prefix))
+      .map((line) => line.slice(prefix.length))
+      .filter((value) => value.length > 0),
   );
-  return pairingFrom(result, "sync_pairing result");
+  if (values.size !== 1) {
+    throw new Error(`${label} command output is missing ${prefix.trim()}.`);
+  }
+  const value = values.values().next().value;
+  if (!value) {
+    throw new Error(
+      `${label} command output contains an empty ${prefix.trim()}.`,
+    );
+  }
+  return value;
+}
+
+function assertCommandSucceeded(lines: readonly string[], label: string): void {
+  const failure = lines.find((line) => line.startsWith("konclave:"));
+  if (failure) {
+    throw new Error(`${label} failed with ${failure}`);
+  }
+}
+
+function connectCommand(
+  command: SmokeCommand,
+  args: string,
+  sessionId: string,
+): Promise<void> {
+  return command.handler({
+    sessionId,
+    command: `/konclave connect${args ? ` ${args}` : ""}`,
+    commandName: "konclave",
+    args: `connect${args ? ` ${args}` : ""}`,
+  });
+}
+
+function observePairingSync(
+  client: SmokeLocalClient,
+  onSync: () => void,
+): SmokeLocalClient {
+  return {
+    request(operation, payload, requestOptions) {
+      if (operation === "sync_pairing") {
+        onSync();
+      }
+      return client.request(operation, payload, requestOptions);
+    },
+    close() {
+      client.close();
+    },
+  };
 }
 
 async function receiveMessage(
@@ -337,14 +438,14 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
       const localA = await thinClient.connectInstalledService(
         environment,
         moduleDir,
-        "session-copilot-smoke-a",
+        smokeProfileA,
         process.platform,
       );
       localClients.push(localA);
       const localB = await thinClient.connectInstalledService(
         environment,
         moduleDir,
-        "session-copilot-smoke-b",
+        smokeProfileB,
         process.platform,
       );
       localClients.push(localB);
@@ -383,138 +484,86 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         sessionB: sessionB.sessionId,
       });
 
-      const capabilityResult = await participantA.invoke(
-        "create_pairing_capability",
-        prompt("create_pairing_capability", { requested_role: "member" }),
-        options.timeoutMs,
-      );
-      const capability = requireString(
-        capabilityResult,
-        "capability",
-        "capability result",
-      );
-      const createdStatus = pairingFrom(capabilityResult, "capability result");
-      const pairingId = createdStatus.pairingId;
-      activePairingId = pairingId;
-      if (createdStatus.requestedRole !== "member") {
-        throw new Error("Issued capability did not request the member role.");
-      }
-      progress(options, "capability_created", { pairingId });
-
-      const redeemed = pairingFrom(
-        await participantB.invoke(
-          "redeem_pairing_capability",
-          prompt("redeem_pairing_capability", { capability }),
-          options.timeoutMs,
-          true,
-        ),
-        "redeem result",
-      );
-      if (redeemed.pairingId !== pairingId) {
-        throw new Error(
-          "Redeemed pairing ID does not match the issued capability.",
-        );
-      }
-      progress(options, "capability_redeemed", { pairingId });
-
-      const conversation = await participantB.invoke(
-        "create_conversation",
-        prompt("create_conversation", {}),
-        options.timeoutMs,
-      );
-      const conversationId = requireString(
-        conversation,
-        "conversation_id",
-        "conversation result",
-      );
-      progress(options, "conversation_created", { conversationId });
-      const joinerAuthorization = pairingFrom(
-        await participantB.invoke(
-          "authorize_pairing_joiner",
-          prompt("authorize_pairing_joiner", {
-            pairing_id: pairingId,
-            conversation_id: conversationId,
-            granted_role: "member",
-          }),
-          options.timeoutMs,
-          true,
-        ),
-        "authorize joiner result",
-      );
-      if (
-        joinerAuthorization.conversationId !== conversationId ||
-        joinerAuthorization.grantedRole !== "member"
-      ) {
-        throw new Error(
-          "Joiner authorization does not match the requested conversation and role.",
-        );
-      }
-      progress(options, "joiner_authorized", { pairingId, conversationId });
-
-      const phases = new Set<string>([createdStatus.phase, redeemed.phase]);
-      let inviterAuthorized = false;
-      let completedA = false;
-      let completedB = false;
       let pairingSyncRounds = 0;
-      for (
-        let attempt = 0;
-        attempt < 12 && !(completedA && completedB);
-        attempt += 1
-      ) {
-        pairingSyncRounds += 1;
-        let statusA = await syncPairing(
-          participantA,
-          pairingId,
-          options.timeoutMs,
-        );
-        phases.add(statusA.phase);
-        if (
-          !inviterAuthorized &&
-          statusA.phase === "joiner_awaiting_inviter_authorization"
-        ) {
-          if (
-            !statusA.inviterDeviceId ||
-            !statusA.conversationId ||
-            !statusA.grantedRole
-          ) {
+      const captureA = createCommandCapture();
+      const captureB = createCommandCapture();
+      const commandA = thinClient.createKonclaveCommands({
+        client: observePairingSync(localA, () => {
+          pairingSyncRounds += 1;
+        }),
+        output: captureA.output,
+      })[0];
+      const commandB = thinClient.createKonclaveCommands({
+        client: observePairingSync(localB, () => {
+          pairingSyncRounds += 1;
+        }),
+        output: captureB.output,
+      })[0];
+      if (!commandA || commandA.name !== "konclave" || !commandB) {
+        throw new Error("Thin client did not expose the Konclave command.");
+      }
+      const joinerConnect = connectCommand(
+        commandA,
+        "",
+        participantA.sessionId,
+      );
+      const capability = await withinDeadline(
+        Promise.race([
+          captureA.capability,
+          joinerConnect.then(() => {
+            assertCommandSucceeded(captureA.lines, "joiner connect");
             throw new Error(
-              "Joiner pairing status lacks inviter authorization fields.",
+              "Joiner connect completed without publishing a capability.",
             );
-          }
-          statusA = pairingFrom(
-            await participantA.invoke(
-              "authorize_pairing_inviter",
-              prompt("authorize_pairing_inviter", {
-                pairing_id: pairingId,
-                inviter_device_id: statusA.inviterDeviceId,
-                conversation_id: statusA.conversationId,
-                granted_role: statusA.grantedRole,
-              }),
-              options.timeoutMs,
-              true,
-            ),
-            "authorize inviter result",
-          );
-          inviterAuthorized = true;
-          phases.add(statusA.phase);
-        }
-        const statusB = await syncPairing(
-          participantB,
-          pairingId,
-          options.timeoutMs,
-        );
-        phases.add(statusB.phase);
-        completedA = statusA.phase === "completed";
-        completedB = statusB.phase === "completed";
-        if (!(completedA && completedB)) {
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
-      }
-      if (!completedA || !completedB) {
+          }),
+        ]),
+        options.timeoutMs,
+        "Joiner capability output",
+      );
+      activePairingId = commandValue(
+        captureA.lines,
+        "pairing: ",
+        "joiner connect",
+      );
+      progress(options, "capability_created", {
+        pairingId: activePairingId,
+      });
+      const inviterConnect = connectCommand(
+        commandB,
+        capability,
+        participantB.sessionId,
+      );
+      await withinDeadline(
+        Promise.all([joinerConnect, inviterConnect]),
+        options.timeoutMs,
+        "Two-command connect",
+      );
+      assertCommandSucceeded(captureA.lines, "joiner connect");
+      assertCommandSucceeded(captureB.lines, "inviter connect");
+      const pairingId = activePairingId;
+      const conversationId = commandValue(
+        captureA.lines,
+        "connected: ",
+        "joiner connect",
+      );
+      const inviterConversationId = commandValue(
+        captureB.lines,
+        "connected: ",
+        "inviter connect",
+      );
+      if (conversationId !== inviterConversationId) {
         throw new Error(
-          "Pairing did not reach completed state in both Copilot sessions.",
+          "Two-command connect returned different conversation identifiers.",
         );
       }
+      const phases = new Set<string>(
+        [...captureA.lines, ...captureB.lines]
+          .filter(
+            (line) =>
+              line.startsWith("connect phase: ") || line.startsWith("phase: "),
+          )
+          .map((line) => line.slice(line.indexOf(":") + 2)),
+      );
       pairingCompleted = true;
       progress(options, "pairing_completed", {
         pairingId,
@@ -522,27 +571,23 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         rounds: pairingSyncRounds,
       });
 
-      const firstMessageId = stableMessageId(runId, "a-to-b");
       const firstText = `konclave-smoke:${runId}:A-to-B`;
-      const firstSent = await participantA.invoke(
-        "send_message",
-        prompt("send_message", {
-          conversation_id: conversationId,
-          message_id: firstMessageId,
-          text: firstText,
+      await withinDeadline(
+        commandA.handler({
+          sessionId: participantA.sessionId,
+          command: `/konclave send -- ${firstText}`,
+          commandName: "konclave",
+          args: `send -- ${firstText}`,
         }),
         options.timeoutMs,
-        true,
+        "Implicit-conversation send command",
       );
-      if (
-        requireString(firstSent, "conversation_id", "send result") !==
-          conversationId ||
-        requireString(firstSent, "message_id", "send result") !== firstMessageId
-      ) {
-        throw new Error(
-          "Session A sent an unexpected Konclave message identity.",
-        );
-      }
+      assertCommandSucceeded(captureA.lines, "implicit-conversation send");
+      const firstMessageId = commandValue(
+        captureA.lines,
+        "message id: ",
+        "implicit-conversation send",
+      );
       progress(options, "message_a_sent", {
         conversationId,
         messageId: firstMessageId,

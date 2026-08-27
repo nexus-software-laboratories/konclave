@@ -4,6 +4,10 @@ Harness-specific integrations improve lifecycle mapping and automatic delivery, 
 they are not an eligibility gate. The packaged `generic.mjs` client lets any local
 harness invoke the shared service through the explicit `AccountTrusted` policy.
 
+The fallback is forbidden when a paved integration is available. In particular,
+Copilot CLI must use its native tools and `/konclave` commands. A paved-operation
+failure remains visible; it never authorizes profile discovery or Generic fallback.
+
 ## Security contract
 
 The generic client:
@@ -25,6 +29,8 @@ Pass one canonical lowercase profile alias. A user-approved alias can provide du
 continuity across invocations. If no stable subject exists, use a random
 `generic-<suffix>` alias and treat it as explicitly ephemeral. Never derive continuity
 from a process identifier, working directory, timestamp, model name, or agent text.
+Aliases beginning with `session-` are reserved for paved harnesses and rejected by the
+Generic client.
 
 ## Invocation
 

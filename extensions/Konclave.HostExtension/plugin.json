@@ -4,5 +4,5 @@
   "version": "0.1.0",
   "keywords": ["copilot", "plugin", "extension", "typescript"],
   "extensions": "extensions/Konclave.Extension/",
-  "skills": "skills/"
+  "skills": []
 }

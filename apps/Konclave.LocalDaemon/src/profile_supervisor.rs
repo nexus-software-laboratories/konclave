@@ -541,7 +541,25 @@ impl ProfileSupervisor {
         let profile_id =
             ProfileId::parse(profile).map_err(|_| ProfileSupervisorError::InvalidProfile)?;
         for _ in 0..MAX_ATTACH_STEPS {
-            match self.begin_attach(&profile_id)? {
+            let step = match self.begin_attach(&profile_id) {
+                Ok(step) => step,
+                Err(ProfileSupervisorError::ActiveProfileLimit) => {
+                    let before = self.slot_count();
+                    if let Err(error) = self.sweep_idle().await {
+                        tracing::warn!(
+                            outcome = "capacity_eviction_failed",
+                            error = %error,
+                            "idle profile eviction failed under capacity pressure"
+                        );
+                    }
+                    if self.slot_count() < before {
+                        continue;
+                    }
+                    return Err(ProfileSupervisorError::ActiveProfileLimit);
+                }
+                Err(error) => return Err(error),
+            };
+            match step {
                 AttachStep::Leased(lease) => return Ok(*lease),
                 AttachStep::AwaitOpen(pending) => {
                     wait_for_open(pending).await?;
@@ -571,6 +589,10 @@ impl ProfileSupervisor {
             .values()
             .filter(|slot| matches!(slot, ProfileSlot::Active(_)))
             .count()
+    }
+
+    fn slot_count(&self) -> usize {
+        guard(&self.state).slots.len()
     }
 
     /// Returns the supervised state of one hosted profile.
@@ -1431,6 +1453,40 @@ mod tests {
 
         assert_eq!(third.profile_id(), "bounded-c");
         drop((first, third));
+        supervisor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capacity_pressure_evicts_only_idle_profiles_before_retrying_attach() {
+        let root = TestProfileRoot::new();
+        let supervisor = ProfileSupervisor::new(
+            Arc::new(root.settings()),
+            ProfileSupervisorConfig {
+                max_active_profiles: 2,
+                idle_timeout: Duration::ZERO,
+                ..ProfileSupervisorConfig::default()
+            },
+        )
+        .unwrap();
+
+        let idle = supervisor.attach("pressure-idle").await.unwrap();
+        let retained = supervisor.attach("pressure-retained").await.unwrap();
+        drop(idle);
+
+        let replacement = supervisor.attach("pressure-replacement").await.unwrap();
+
+        assert!(supervisor.run_state("pressure-idle").is_none());
+        assert_eq!(replacement.profile_id(), "pressure-replacement");
+        assert!(
+            retained
+                .services()
+                .unwrap()
+                .conversations()
+                .device_id()
+                .is_ok()
+        );
+        assert_eq!(supervisor.active_profiles(), 2);
+        drop((retained, replacement));
         supervisor.shutdown().await.unwrap();
     }
 

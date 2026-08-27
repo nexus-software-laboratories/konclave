@@ -7,6 +7,16 @@ import { serviceOperations, toolOperations } from './service/operations.js';
 const requestDeadlineMs = 90_000;
 const allowedOperations = new Set<string>([...toolOperations, serviceOperations.status]);
 
+class GenericCommandUsageError extends Error {
+  readonly code: 'paved_profile_reserved';
+
+  constructor(code: 'paved_profile_reserved') {
+    super(code);
+    this.name = 'GenericCommandUsageError';
+    this.code = code;
+  }
+}
+
 export interface GenericCommandArguments {
   readonly profile: string;
   readonly operation: string;
@@ -51,6 +61,9 @@ export function parseGenericCommandArguments(values: readonly string[]): Generic
   }
   if (!profile || !operation || !allowedOperations.has(operation)) {
     throw new Error('invalid_arguments');
+  }
+  if (profile.startsWith('session-')) {
+    throw new GenericCommandUsageError('paved_profile_reserved');
   }
   return requestId ? { profile, operation, requestId } : { profile, operation };
 }
@@ -98,6 +111,9 @@ export function genericCommandFailure(error: unknown): {
     return { error: error.code };
   }
   if (error instanceof LocalServiceUpgradeRequiredError) {
+    return { error: error.code };
+  }
+  if (error instanceof GenericCommandUsageError) {
     return { error: error.code };
   }
   return { error: 'generic_client_failed' };

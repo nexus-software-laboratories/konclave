@@ -18,6 +18,9 @@ the packaging scripts.
   identifier that cannot be reused after a transport failure.
 - Preserve `extensions/Konclave.Extension/extension.mjs` as the build output
   declared in `plugin.json`.
+- Keep the unsupported-harness Generic skill in the package for manual installation,
+  but keep `plugin.json`'s skill list empty and never install that skill into
+  Copilot's paved discovery path.
 - Never write to stdout from the extension runtime. Render user-invoked command output
   with the SDK's awaited `session.log()` API; reserve the stderr diagnostics seam in
   `src/runtime.ts` for operational faults that do not belong in the transcript. Mark

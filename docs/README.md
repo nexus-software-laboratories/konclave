@@ -14,6 +14,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0007: Outbound relay principal enrollment](adr/adr-0007-outbound-relay-principal-enrollment.md)
 - [ADR 0008: Shared per-user local service](adr/adr-0008-shared-local-service.md)
 - [ADR 0009: Evidence-bound exact-profile session grants](adr/adr-0009-evidence-bound-session-grants.md)
+- [ADR 0010: AccountTrusted two-command pairing](adr/adr-0010-account-trusted-two-command-pairing.md)
 
 ## Protocol
 
