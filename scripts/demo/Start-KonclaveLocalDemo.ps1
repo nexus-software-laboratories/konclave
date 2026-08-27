@@ -145,6 +145,7 @@ $relayStateRoot = Join-Path $demoRoot 'relay'
 $statusPath = Join-Path $demoRoot 'demo-status.json'
 $profileRootBackupPath = Join-Path $demoRoot 'original-profile-root.json'
 $copilotExperimentalBackupPath = Join-Path $demoRoot 'original-copilot-experimental.json'
+$genericSkillStatePath = Join-Path $demoRoot 'generic-skill-install.json'
 $installParent = Join-Path $localAppData 'Programs' 'Konclave'
 $installRoot = Join-Path $installParent 'demo'
 $releaseManifest = Get-Content -LiteralPath (
@@ -171,6 +172,8 @@ $relayExecutable = Join-Path $relayRoot 'bin' 'KonclaveCommunityRelay.exe'
 $pluginRoot = Join-Path $clientRoot 'share' 'konclave' 'plugin'
 $extensionSource = Join-Path $pluginRoot 'extensions' 'Konclave.Extension' 'extension.mjs'
 $clientSource = Join-Path $pluginRoot 'extensions' 'Konclave.Extension' 'client.mjs'
+$genericSource = Join-Path $pluginRoot 'extensions' 'Konclave.Extension' 'generic.mjs'
+$genericSkillSource = Join-Path $pluginRoot 'skills' 'konclave-generic' 'SKILL.md'
 $serviceConfigPath = Join-Path $demoRoot 'service' 'konclave-local-service.json'
 $serviceIdentityPath = Join-Path $demoRoot 'service' 'identity.key'
 $copilotHomeValue = $env:COPILOT_HOME
@@ -192,6 +195,7 @@ else {
 $copilotSettingsPath = Join-Path $copilotHome 'settings.json'
 $copilotExtensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
 $copilotExtensionStateRoot = Join-Path $copilotHome '.konclave-extension-state'
+$copilotGenericSkillRoot = Join-Path $copilotHome 'skills' 'konclave-generic'
 $endpoint = "http://127.0.0.1:$Port"
 
 function Invoke-RequiredCommand {
@@ -608,6 +612,41 @@ function Remove-LegacyExtensionAssets {
     }
 }
 
+function Reset-PreReleaseAuthorizationState {
+    if (-not (Test-Path -LiteralPath $serviceConfigPath -PathType Leaf)) {
+        return
+    }
+    $config = Read-JsonObject -Path $serviceConfigPath
+    if (
+        -not $config.Contains('schemaVersion') -or
+        $config['schemaVersion'] -isnot [int64]
+    ) {
+        throw 'Existing local-service authorization schema is invalid.'
+    }
+    if ([int64]$config['schemaVersion'] -eq 2) {
+        return
+    }
+    if ([int64]$config['schemaVersion'] -ne 1) {
+        throw 'Existing local-service authorization schema is unsupported.'
+    }
+    foreach ($path in @(
+        $serviceConfigPath,
+        (Join-Path $demoRoot 'service' 'copilot-adapter.key'),
+        (Join-Path $copilotExtensionRoot 'konclave.service.json')
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path
+            if (
+                $item.PSIsContainer -or
+                $item.Attributes -band [IO.FileAttributes]::ReparsePoint
+            ) {
+                throw "Pre-release authorization path is unsafe to replace: $path"
+            }
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+}
+
 function Install-AtomicExtensionFile {
     param(
         [Parameter(Mandatory)]
@@ -617,6 +656,15 @@ function Install-AtomicExtensionFile {
         [string]$Destination
     )
 
+    if (Test-Path -LiteralPath $Destination) {
+        $existing = Get-Item -LiteralPath $Destination
+        if (
+            $existing.PSIsContainer -or
+            $existing.Attributes -band [IO.FileAttributes]::ReparsePoint
+        ) {
+            throw "Installed extension asset is unsafe: $Destination"
+        }
+    }
     if (
         (Test-Path -LiteralPath $Destination -PathType Leaf) -and
         (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -eq
@@ -624,8 +672,16 @@ function Install-AtomicExtensionFile {
     ) {
         return
     }
+    $destinationRoot = [IO.Path]::GetDirectoryName($Destination)
+    $root = Get-Item -LiteralPath $destinationRoot -ErrorAction Stop
+    if (
+        -not $root.PSIsContainer -or
+        $root.Attributes -band [IO.FileAttributes]::ReparsePoint
+    ) {
+        throw "Installed extension asset root is unsafe: $destinationRoot"
+    }
     $temporary = Join-Path (
-        $copilotExtensionRoot
+        $destinationRoot
     ) ".$([IO.Path]::GetFileName($Destination)).$([Guid]::NewGuid().ToString('N')).tmp"
     try {
         Copy-Item -LiteralPath $Source -Destination $temporary
@@ -638,8 +694,59 @@ function Install-AtomicExtensionFile {
     }
 }
 
+function Read-OwnedGenericSkill {
+    if (-not (Test-Path -LiteralPath $genericSkillStatePath -PathType Leaf)) {
+        return $null
+    }
+    $state = Read-JsonObject -Path $genericSkillStatePath
+    if (
+        [int64]$state['schemaVersion'] -ne 1 -or
+        [string]$state['path'] -cne $copilotGenericSkillRoot -or
+        [string]$state['sha256'] -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'Konclave generic skill ownership state is malformed.'
+    }
+    return $state
+}
+
+function Test-OwnedGenericSkill {
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$State
+    )
+
+    if (-not (Test-Path -LiteralPath $copilotGenericSkillRoot)) {
+        return $false
+    }
+    $root = Get-Item -LiteralPath $copilotGenericSkillRoot -ErrorAction Stop
+    if (
+        -not $root.PSIsContainer -or
+        $root.Attributes -band [IO.FileAttributes]::ReparsePoint
+    ) {
+        return $false
+    }
+    $entries = @(Get-ChildItem -LiteralPath $copilotGenericSkillRoot -Force)
+    $skillPath = Join-Path $copilotGenericSkillRoot 'SKILL.md'
+    if (
+        $entries.Count -ne 1 -or
+        $entries[0].Name -cne 'SKILL.md' -or
+        $entries[0].PSIsContainer -or
+        $entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint -or
+        (Get-FileHash -LiteralPath $skillPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$State['sha256']
+    ) {
+        return $false
+    }
+    return $true
+}
+
 function Install-CopilotExtension {
-    foreach ($source in @($extensionSource, $clientSource)) {
+    foreach ($source in @(
+        $extensionSource,
+        $clientSource,
+        $genericSource,
+        $genericSkillSource
+    )) {
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "Packaged extension asset is missing: $source"
         }
@@ -661,6 +768,35 @@ function Install-CopilotExtension {
     if (-not (Test-Path -LiteralPath $serviceConfig -PathType Leaf)) {
         throw 'Shared-service initialization did not install the extension sidecar.'
     }
+    $ownedSkill = Read-OwnedGenericSkill
+    if (
+        $null -ne $ownedSkill -and
+        -not (Test-OwnedGenericSkill -State $ownedSkill)
+    ) {
+        Remove-Item -LiteralPath $genericSkillStatePath -Force
+        $ownedSkill = $null
+        Write-Warning (
+            'The Konclave generic skill changed after demo installation; ' +
+            'it is now externally managed and will be preserved.'
+        )
+    }
+    if ($null -eq $ownedSkill -and (Test-Path -LiteralPath $copilotGenericSkillRoot)) {
+        $skillRoot = Get-Item -LiteralPath $copilotGenericSkillRoot
+        if (
+            -not $skillRoot.PSIsContainer -or
+            $skillRoot.Attributes -band [IO.FileAttributes]::ReparsePoint
+        ) {
+            throw 'Existing Konclave generic skill root is unsafe.'
+        }
+        Write-Warning (
+            'A pre-existing Konclave generic skill remains externally managed; ' +
+            'the demo will not replace or remove it.'
+        )
+    }
+    elseif ($null -eq $ownedSkill) {
+        New-Item -ItemType Directory -Path $copilotGenericSkillRoot -Force | Out-Null
+        $ownedSkill = @{}
+    }
 
     [void](Enable-CopilotExperimentalExtensions)
     Install-AtomicExtensionFile `
@@ -669,10 +805,40 @@ function Install-CopilotExtension {
     Install-AtomicExtensionFile `
         -Source $clientSource `
         -Destination (Join-Path $copilotExtensionRoot 'client.mjs')
+    Install-AtomicExtensionFile `
+        -Source $genericSource `
+        -Destination (Join-Path $copilotExtensionRoot 'generic.mjs')
+    if ($null -ne $ownedSkill) {
+        $installedSkill = Join-Path $copilotGenericSkillRoot 'SKILL.md'
+        Install-AtomicExtensionFile `
+            -Source $genericSkillSource `
+            -Destination $installedSkill
+        Write-AtomicJsonObject `
+            -Path $genericSkillStatePath `
+            -Value ([ordered]@{
+                schemaVersion = 1
+                path = $copilotGenericSkillRoot
+                sha256 = (
+                    Get-FileHash -LiteralPath $installedSkill -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+            })
+    }
     Remove-LegacyExtensionAssets
 }
 
 function Remove-CopilotExtension {
+    $ownedSkill = Read-OwnedGenericSkill
+    if (
+        $null -ne $ownedSkill -and
+        -not (Test-OwnedGenericSkill -State $ownedSkill)
+    ) {
+        Remove-Item -LiteralPath $genericSkillStatePath -Force
+        $ownedSkill = $null
+        Write-Warning (
+            'The Konclave generic skill changed after demo installation; ' +
+            'uninstall will preserve it.'
+        )
+    }
     if (Test-Path -LiteralPath $copilotExtensionRoot) {
         $extension = Get-Item -LiteralPath $copilotExtensionRoot
         if (
@@ -692,6 +858,13 @@ function Remove-CopilotExtension {
             throw 'Konclave extension state root is unsafe to remove.'
         }
         Remove-Item -LiteralPath $copilotExtensionStateRoot -Recurse -Force
+    }
+    if ($null -ne $ownedSkill) {
+        Remove-Item `
+            -LiteralPath (Join-Path $copilotGenericSkillRoot 'SKILL.md') `
+            -Force
+        Remove-Item -LiteralPath $copilotGenericSkillRoot -Force
+        Remove-Item -LiteralPath $genericSkillStatePath -Force
     }
     Restore-CopilotExperimentalSetting
 }
@@ -1264,6 +1437,52 @@ function Test-DemoStopPath {
     }
 }
 
+function Test-GenericSkillOwnership {
+    $testRoot = Join-Path (
+        [IO.Path]::GetTempPath()
+    ) "konclave-skill-test-$([Guid]::NewGuid().ToString('N'))"
+    $originalSkillRoot = $script:copilotGenericSkillRoot
+    $originalStatePath = $script:genericSkillStatePath
+    try {
+        $script:copilotGenericSkillRoot = Join-Path $testRoot 'skills' 'konclave-generic'
+        $script:genericSkillStatePath = Join-Path $testRoot 'state.json'
+        $source = Join-Path $testRoot 'source.md'
+        New-Item -ItemType Directory -Path $script:copilotGenericSkillRoot -Force |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $source,
+            'generic skill fixture',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $installed = Join-Path $script:copilotGenericSkillRoot 'SKILL.md'
+        Install-AtomicExtensionFile -Source $source -Destination $installed
+        Write-AtomicJsonObject `
+            -Path $script:genericSkillStatePath `
+            -Value ([ordered]@{
+                schemaVersion = 1
+                path = $script:copilotGenericSkillRoot
+                sha256 = (
+                    Get-FileHash -LiteralPath $installed -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+            })
+        $state = Read-OwnedGenericSkill
+        if ($null -eq $state -or -not (Test-OwnedGenericSkill -State $state)) {
+            throw 'Demo generic skill ownership was not recognized.'
+        }
+        Add-Content -LiteralPath $installed -Value 'modified'
+        if (Test-OwnedGenericSkill -State $state) {
+            throw 'A modified generic skill remained demo-owned.'
+        }
+    }
+    finally {
+        $script:copilotGenericSkillRoot = $originalSkillRoot
+        $script:genericSkillStatePath = $originalStatePath
+        if (Test-Path -LiteralPath $testRoot) {
+            Remove-Item -LiteralPath $testRoot -Recurse -Force
+        }
+    }
+}
+
 function Test-ProtectedZipExtraction {
     Add-Type -AssemblyName System.IO.Compression
     $testRoot = Join-Path (
@@ -1410,6 +1629,7 @@ if ($Validate) {
         throw 'Package validation workflow is missing.'
     }
     Test-DemoStopPath
+    Test-GenericSkillOwnership
     Test-ProtectedZipExtraction
     Test-ProvenanceValidation
     Write-Output 'Konclave local demo prerequisites and release contract are valid.'
@@ -1436,6 +1656,9 @@ if ($Refresh -or -not (
     (Test-Path -LiteralPath $relayExecutable -PathType Leaf)
 )) {
     Install-DemoPackages
+}
+if ($Refresh) {
+    Reset-PreReleaseAuthorizationState
 }
 
 New-Item -ItemType Directory -Path $relayStateRoot, $profileRoot -Force |
@@ -1472,6 +1695,8 @@ try {
         'init',
         '--relay-endpoint',
         $endpoint,
+        '--authorization-policy',
+        'account-trusted',
         '--profile-root',
         $profileRoot,
         '--copilot-extension-root',

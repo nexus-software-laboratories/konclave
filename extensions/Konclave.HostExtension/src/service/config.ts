@@ -7,7 +7,7 @@ import type { HarnessKind } from './transcript.js';
  * The bounded runtime configuration contract for the shared local service.
  *
  * Installation owns this file: it names the endpoint the service listens on, the
- * adapter registration this extension authenticates with, and the service key this
+ * issuer registration this extension authenticates with, and the service key this
  * client pins. Nothing here is discovered, guessed, or defaulted, and a missing or
  * malformed record fails visibly. There is no path that starts a daemon instead.
  */
@@ -21,22 +21,33 @@ const hex64 = /^[0-9a-f]{64}$/;
 export interface LocalServiceRuntimeConfig {
   /** Owner-protected endpoint the per-user service listens on. */
   readonly endpoint: string;
-  /** Registered adapter key identifier. */
-  readonly adapterKeyId: Buffer;
-  /** Registered adapter key version. */
-  readonly adapterKeyVersion: number;
-  /** Harness this adapter registration is authorized for. */
+  /** Installed AccountTrusted issuer key identifier. */
+  readonly issuerKeyId: Buffer;
+  /** Installed AccountTrusted issuer key version. */
+  readonly issuerKeyVersion: number;
+  /** Harness metadata this paved client requests. */
   readonly harness: HarnessKind;
   /** Service verification key this client pins. */
   readonly serviceKey: Buffer;
-  /** Owner-protected file holding the adapter signing seed. */
-  readonly signingKeyFile: string;
+  /** Owner-protected file holding the AccountTrusted issuer seed. */
+  readonly issuerKeyFile: string;
+  /** Effective installation policy accepted by this client build. */
+  readonly authorizationPolicy: {
+    readonly version: number;
+    readonly acceptedEvidence: readonly (readonly string[])[];
+  };
 }
 
 export class ServiceConfigurationError extends Error {
-  constructor(message: string) {
+  readonly code: 'invalid_configuration' | 'required_evidence_unavailable';
+
+  constructor(
+    message: string,
+    code: 'invalid_configuration' | 'required_evidence_unavailable' = 'invalid_configuration',
+  ) {
     super(message);
     this.name = 'ServiceConfigurationError';
+    this.code = code;
   }
 }
 
@@ -166,7 +177,7 @@ export function resolveLocalServiceConfig(
   } catch {
     throw new ServiceConfigurationError('Konclave service configuration is malformed.');
   }
-  if (!isRecord(parsed) || parsed.schemaVersion !== 1) {
+  if (!isRecord(parsed) || parsed.schemaVersion !== 2) {
     throw new ServiceConfigurationError('Konclave service configuration is malformed.');
   }
 
@@ -185,39 +196,40 @@ export function resolveLocalServiceConfig(
     throw new ServiceConfigurationError('Konclave service harness is invalid.');
   }
 
-  const adapterKeyVersion = parsed.adapterKeyVersion;
+  const issuerKeyVersion = parsed.issuerKeyVersion;
   if (
-    typeof adapterKeyVersion !== 'number' ||
-    !Number.isInteger(adapterKeyVersion) ||
-    adapterKeyVersion < 1
+    typeof issuerKeyVersion !== 'number' ||
+    !Number.isInteger(issuerKeyVersion) ||
+    issuerKeyVersion < 1
   ) {
-    throw new ServiceConfigurationError('Konclave adapter key version is invalid.');
+    throw new ServiceConfigurationError('Konclave issuer key version is invalid.');
   }
 
-  const signingKeyFile =
-    typeof parsed.signingKeyFile === 'string' ? parsed.signingKeyFile.trim() : '';
-  if (!signingKeyFile || !isAbsolute(signingKeyFile)) {
-    throw new ServiceConfigurationError('Konclave adapter key file must be absolute.');
+  const issuerKeyFile = typeof parsed.issuerKeyFile === 'string' ? parsed.issuerKeyFile.trim() : '';
+  if (!issuerKeyFile || !isAbsolute(issuerKeyFile)) {
+    throw new ServiceConfigurationError('Konclave issuer key file must be absolute.');
   }
+  const authorizationPolicy = parseAuthorizationPolicy(parsed.authorizationPolicy);
 
   return {
     endpoint,
-    adapterKeyId: requireHex(parsed.adapterKeyId, hex32, 'adapter key identifier'),
-    adapterKeyVersion,
+    issuerKeyId: requireHex(parsed.issuerKeyId, hex32, 'issuer key identifier'),
+    issuerKeyVersion,
     harness,
     serviceKey: requireHex(parsed.serviceKey, hex64, 'service key'),
-    signingKeyFile,
+    issuerKeyFile,
+    authorizationPolicy,
   };
 }
 
 /**
- * Reads the adapter signing seed from its owner-protected file.
+ * Reads the AccountTrusted issuer seed from its owner-protected file.
  *
  * The seed never appears in configuration, arguments, environment, or diagnostics: it
  * is read from the file at connect time and handed straight to the platform key
  * provider.
  */
-export function readAdapterSigningSeed(
+export function readIssuerSigningSeed(
   signingKeyFile: string,
   platform: NodeJS.Platform = process.platform,
   operations: SecureFileOperations = nodeFileOperations,
@@ -225,13 +237,57 @@ export function readAdapterSigningSeed(
   const contents = readBoundedFile(
     signingKeyFile,
     maxKeyFileBytes,
-    'adapter key',
+    'issuer key',
     platform,
     operations,
   );
   if (contents.length === 32) {
     return contents;
   }
+
   contents.fill(0);
-  throw new ServiceConfigurationError('Konclave adapter key is invalid.');
+  throw new ServiceConfigurationError('Konclave issuer key is invalid.');
+}
+
+function parseAuthorizationPolicy(
+  value: unknown,
+): LocalServiceRuntimeConfig['authorizationPolicy'] {
+  if (!isRecord(value)) {
+    throw new ServiceConfigurationError('Konclave authorization policy is invalid.');
+  }
+  const version = value.version;
+  const acceptedEvidence = value.acceptedEvidence;
+  if (
+    typeof version !== 'number' ||
+    !Number.isSafeInteger(version) ||
+    version <= 0 ||
+    !Array.isArray(acceptedEvidence) ||
+    acceptedEvidence.length === 0 ||
+    acceptedEvidence.length > 8
+  ) {
+    throw new ServiceConfigurationError('Konclave authorization policy is invalid.');
+  }
+  const clauses = acceptedEvidence.map((clause) => {
+    if (
+      !Array.isArray(clause) ||
+      clause.length === 0 ||
+      clause.some(
+        (kind) =>
+          kind !== 'account_trusted' &&
+          kind !== 'user_presence' &&
+          kind !== 'harness_attested' &&
+          kind !== 'workload_identity',
+      )
+    ) {
+      throw new ServiceConfigurationError('Konclave authorization policy is invalid.');
+    }
+    return [...clause] as readonly string[];
+  });
+  if (!clauses.some((clause) => clause.length === 1 && clause[0] === 'account_trusted')) {
+    throw new ServiceConfigurationError(
+      'Konclave authorization policy requires unavailable evidence.',
+      'required_evidence_unavailable',
+    );
+  }
+  return { version, acceptedEvidence: clauses };
 }

@@ -112,7 +112,11 @@ export function parseServiceStatus(value: unknown): ServiceStatusResult {
     typeof value.profile !== 'string' ||
     typeof value.deviceId !== 'string' ||
     typeof value.relayConfigured !== 'boolean' ||
-    typeof value.deliveryDegraded !== 'boolean'
+    typeof value.deliveryDegraded !== 'boolean' ||
+    typeof value.authorizationPolicy !== 'string' ||
+    typeof value.authorizationProvider !== 'string' ||
+    !Array.isArray(value.authorizationEvidence) ||
+    !value.authorizationEvidence.every((item) => typeof item === 'string')
   ) {
     throw new Error('the local service status response is malformed');
   }
@@ -124,6 +128,18 @@ export function parseServiceStatus(value: unknown): ServiceStatusResult {
     pendingEvents: integer(value.pendingEvents),
     claimedEvents: integer(value.claimedEvents),
     deliveryDegraded: value.deliveryDegraded,
+    authorizationPolicy: value.authorizationPolicy,
+    authorizationProvider: value.authorizationProvider,
+    authorizationEvidence: value.authorizationEvidence,
+    authorizationPolicyVersion: integer(value.authorizationPolicyVersion),
+    grantExpiresAtUnixMilliseconds: integer(value.grantExpiresAtUnixMilliseconds),
+    grantCapabilities: integer(value.grantCapabilities),
+    activeGrants: integer(value.activeGrants),
+    activeGrantsForIssuer: integer(value.activeGrantsForIssuer),
+    activeGrantsForProfile: integer(value.activeGrantsForProfile),
+    grantLimit: integer(value.grantLimit),
+    grantLimitPerIssuer: integer(value.grantLimitPerIssuer),
+    grantLimitPerProfile: integer(value.grantLimitPerProfile),
   };
 }
 

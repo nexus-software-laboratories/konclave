@@ -21,6 +21,27 @@ fn missing_subcommand_fails() {
 }
 
 #[test]
+fn noninteractive_init_requires_policy_before_side_effects() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profiles");
+    let mut command = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    command
+        .args([
+            "init",
+            "--relay-endpoint",
+            "https://relay.example.com",
+            "--profile-root",
+        ])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(contains(
+            "--authorization-policy is required for noninteractive initialization",
+        ));
+    assert!(!root.exists());
+}
+
+#[test]
 #[cfg(unix)]
 fn external_init_is_idempotent_and_conflicts_fail() {
     let directory = tempfile::tempdir().unwrap();
@@ -38,6 +59,8 @@ fn external_init_is_idempotent_and_conflicts_fail() {
                 "init",
                 "--relay-endpoint",
                 endpoint.as_str(),
+                "--authorization-policy",
+                "account-trusted",
                 "--profile-root",
             ])
             .arg(&root)
@@ -68,6 +91,8 @@ fn external_init_is_idempotent_and_conflicts_fail() {
             "init",
             "--relay-endpoint",
             "https://other.example.com",
+            "--authorization-policy",
+            "account-trusted",
             "--profile-root",
         ])
         .arg(&root)
@@ -111,6 +136,8 @@ fn doctor_checks_installation_source_layout_and_relay() {
         "init",
         "--relay-endpoint",
         endpoint.as_str(),
+        "--authorization-policy",
+        "account-trusted",
         "--profile-root",
     ])
     .arg(&root)
@@ -214,6 +241,8 @@ fn relay_bootstrap_creates_idempotent_access_and_protected_source() {
     init.arg("init")
         .arg("--relay-endpoint")
         .arg(endpoint.as_str())
+        .arg("--authorization-policy")
+        .arg("account-trusted")
         .arg("--profile-root")
         .arg(&root)
         .arg("--external-source")

@@ -7,11 +7,12 @@ use KonclaveClientLibrary::{
 };
 use KonclaveSecretStorage::NativeEnrollmentCredentialStore;
 
-use crate::cli::InitArgs;
+use crate::cli::{AuthorizationPolicyChoice, InitArgs};
 use crate::installation;
 use crate::local_service_installation;
 
 pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
+    let authorization_policy = select_authorization_policy(args.authorization_policy)?;
     let root = installation::resolve_profile_root(args.profile_root)?;
     let endpoint =
         RelayEndpoint::parse(&args.relay_endpoint).context("validating relay endpoint")?;
@@ -75,12 +76,41 @@ pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
         args.local_service_endpoint.as_deref(),
         args.local_service_identity_file,
         args.local_service_profile_key_directory,
+        authorization_policy,
     )?;
     println!(
         "Initialized shared local service for the Copilot extension at {}.",
         local.extension_root.display()
     );
     Ok(())
+}
+
+fn select_authorization_policy(
+    choice: Option<AuthorizationPolicyChoice>,
+) -> anyhow::Result<KonclaveLocalServiceTransport::AuthorizationPolicy> {
+    match choice {
+        Some(AuthorizationPolicyChoice::AccountTrusted) => {
+            Ok(KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted())
+        }
+        None if !std::io::stdin().is_terminal() => {
+            bail!("--authorization-policy is required for noninteractive initialization")
+        }
+        None => {
+            eprintln!("Choose local authorization policy:");
+            eprintln!("1. AccountTrusted");
+            eprintln!("   Automatic session access.");
+            eprintln!("   All processes under this OS account are trusted.");
+            eprintln!("   This does not provide same-user session isolation.");
+            let mut value = String::new();
+            std::io::stdin()
+                .read_line(&mut value)
+                .context("reading authorization policy")?;
+            if value.trim() != "1" {
+                bail!("authorization policy selection is invalid");
+            }
+            Ok(KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted())
+        }
+    }
 }
 
 fn read_enrollment_credential() -> anyhow::Result<RelayEnrollmentCredential> {

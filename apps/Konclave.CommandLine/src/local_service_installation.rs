@@ -6,19 +6,18 @@ use zeroize::Zeroizing;
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveDomainCore::Ed25519PublicKey;
 use KonclaveLocalServiceTransport::{
-    AdapterKeyId, AdapterKeyVersion, AdapterRegistration, CopilotServiceConfig, HarnessKind,
-    InstalledAdapterRegistration, LocalServiceEndpoint, LocalServiceIdentitySource,
-    LocalServiceInstallation, LocalServiceProfileCustody, ProfileAuthorization, ServiceProfileId,
-    COPILOT_SERVICE_CONFIG_FILE, LOCAL_SERVICE_INSTALLATION_FILE,
+    AuthorizationPolicy, CopilotServiceConfig, HarnessKind, InstalledIssuerRegistration,
+    IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LocalServiceEndpoint,
+    LocalServiceIdentitySource, LocalServiceInstallation, LocalServiceProfileCustody,
+    ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE, LOCAL_SERVICE_INSTALLATION_FILE,
 };
 use KonclaveSecretStorage::{
     create_or_verify_owner_protected_file, ensure_owner_protected_directory,
     open_owner_protected_file, NativeLocalServiceIdentityStore, SecretStorageError,
 };
 
-const ADAPTER_KEY_FILE: &str = "copilot-adapter.key";
+const ACCOUNT_ISSUER_KEY_FILE: &str = "account-issuer.key";
 const SERVICE_DIRECTORY: &str = "service";
-const COPILOT_PROFILE_NAMESPACE: &str = "session";
 
 pub(crate) struct InstalledLocalService {
     pub(crate) extension_root: PathBuf,
@@ -30,6 +29,7 @@ pub(crate) fn install(
     endpoint_override: Option<&str>,
     service_identity_file: Option<PathBuf>,
     profile_key_directory: Option<PathBuf>,
+    authorization_policy: AuthorizationPolicy,
 ) -> anyhow::Result<InstalledLocalService> {
     install_with(
         &NativeServiceIdentityStore,
@@ -38,6 +38,7 @@ pub(crate) fn install(
         endpoint_override,
         service_identity_file,
         profile_key_directory,
+        authorization_policy,
     )
 }
 
@@ -65,6 +66,7 @@ fn install_with(
     endpoint_override: Option<&str>,
     service_identity_file: Option<PathBuf>,
     profile_key_directory: Option<PathBuf>,
+    authorization_policy: AuthorizationPolicy,
 ) -> anyhow::Result<InstalledLocalService> {
     let service_root = profile_root
         .parent()
@@ -102,35 +104,33 @@ fn install_with(
         }
         None => LocalServiceProfileCustody::Native,
     };
-    let adapter_key_file = service_root.join(ADAPTER_KEY_FILE);
-    let adapter_seed = load_or_create_file_seed(&adapter_key_file)?;
-    let adapter_identity = LocalServiceIdentity::from_signing_seed(&adapter_seed)
-        .context("loading Copilot adapter identity")?;
-    let adapter_key_id = adapter_key_id(adapter_identity.public_key());
+    let issuer_key_file = service_root.join(ACCOUNT_ISSUER_KEY_FILE);
+    let issuer_seed = load_or_create_file_seed(&issuer_key_file)?;
+    let issuer_identity = LocalServiceIdentity::from_signing_seed(&issuer_seed)
+        .context("loading AccountTrusted issuer identity")?;
+    let issuer_key_id = account_issuer_key_id(issuer_identity.public_key());
     let endpoint = match endpoint_override {
         Some(endpoint) => {
             LocalServiceEndpoint::parse(endpoint).context("validating local-service endpoint")?
         }
         None => default_endpoint(&service_root, service_identity.public_key())?,
     };
-    let adapter_key_version =
-        AdapterKeyVersion::new(1).map_err(|_| anyhow::anyhow!("adapter key version is invalid"))?;
+    let issuer_key_version =
+        IssuerKeyVersion::new(1).map_err(|_| anyhow::anyhow!("issuer key version is invalid"))?;
     let installation = LocalServiceInstallation::new(
         endpoint.clone(),
         profile_root.to_path_buf(),
         service_identity.public_key(),
         service_identity_source,
         profile_custody,
-        vec![InstalledAdapterRegistration::new(
-            adapter_key_id,
-            adapter_key_version,
-            AdapterRegistration::new(
-                adapter_identity.public_key(),
-                HarnessKind::Copilot,
-                ProfileAuthorization::Namespace(
-                    ServiceProfileId::parse(COPILOT_PROFILE_NAMESPACE)
-                        .context("validating Copilot profile namespace")?,
-                ),
+        authorization_policy.clone(),
+        vec![InstalledIssuerRegistration::new(
+            issuer_key_id,
+            issuer_key_version,
+            IssuerRegistration::new(
+                issuer_identity.public_key(),
+                HarnessKind::Generic,
+                ProfileAuthorization::All,
             ),
         )],
     )
@@ -150,10 +150,11 @@ fn install_with(
         .context("creating owner-protected Copilot extension root")?;
     let client = CopilotServiceConfig::new(
         endpoint,
-        adapter_key_id,
-        adapter_key_version,
+        issuer_key_id,
+        issuer_key_version,
         service_identity.public_key(),
-        adapter_key_file,
+        issuer_key_file,
+        authorization_policy,
     )
     .context("building Copilot local-service configuration")?;
     let mut client_config = Vec::new();
@@ -193,37 +194,37 @@ fn load_or_create_service_seed(
 fn load_or_create_file_seed(path: &Path) -> anyhow::Result<LocalServiceSigningSeed> {
     match open_owner_protected_file(path) {
         Ok(file) => LocalServiceSigningSeed::from_reader(file)
-            .context("validating Copilot adapter signing key"),
+            .context("validating AccountTrusted issuer signing key"),
         Err(SecretStorageError::OwnerProtectedStorageUnavailable) if !path.exists() => {
             let candidate = LocalServiceSigningSeed::generate()
-                .context("generating Copilot adapter signing key")?;
+                .context("generating AccountTrusted issuer signing key")?;
             let mut encoded = Zeroizing::new(Vec::new());
             candidate
                 .write_to(&mut *encoded)
-                .context("encoding Copilot adapter signing key")?;
+                .context("encoding AccountTrusted issuer signing key")?;
             match create_or_verify_owner_protected_file(path, encoded.as_slice()) {
                 Ok(()) => Ok(candidate),
                 Err(SecretStorageError::OwnerProtectedStorageConflict) => {
                     let file = open_owner_protected_file(path)
-                        .context("opening concurrently created Copilot adapter key")?;
+                        .context("opening concurrently created AccountTrusted issuer key")?;
                     LocalServiceSigningSeed::from_reader(file)
-                        .context("validating concurrently created Copilot adapter key")
+                        .context("validating concurrently created AccountTrusted issuer key")
                 }
-                Err(error) => Err(error).context("creating Copilot adapter signing key"),
+                Err(error) => Err(error).context("creating AccountTrusted issuer signing key"),
             }
         }
-        Err(error) => Err(error).context("opening Copilot adapter signing key"),
+        Err(error) => Err(error).context("opening AccountTrusted issuer signing key"),
     }
 }
 
-fn adapter_key_id(public_key: Ed25519PublicKey) -> AdapterKeyId {
+fn account_issuer_key_id(public_key: Ed25519PublicKey) -> IssuerKeyId {
     let mut digest = Sha256::new();
-    digest.update(b"konclave:copilot-adapter-key-id:1\0");
+    digest.update(b"konclave:account-issuer-key-id:2\0");
     digest.update(public_key.as_bytes());
     let digest = digest.finalize();
-    let mut identifier = [0_u8; AdapterKeyId::LENGTH];
-    identifier.copy_from_slice(&digest[..AdapterKeyId::LENGTH]);
-    AdapterKeyId::from_bytes(identifier)
+    let mut identifier = [0_u8; IssuerKeyId::LENGTH];
+    identifier.copy_from_slice(&digest[..IssuerKeyId::LENGTH]);
+    IssuerKeyId::from_bytes(identifier)
 }
 
 #[cfg(windows)]
@@ -283,7 +284,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use KonclaveLocalServiceTransport::LocalServiceInstallation;
+    use KonclaveLocalServiceTransport::{LocalServiceInstallation, ServiceProfileId};
 
     use super::*;
 
@@ -332,6 +333,7 @@ mod tests {
             Some(endpoint),
             None,
             Some(profile_keys.clone()),
+            AuthorizationPolicy::account_trusted(),
         )
         .unwrap();
         let service_path = root
@@ -339,8 +341,12 @@ mod tests {
             .join(SERVICE_DIRECTORY)
             .join(LOCAL_SERVICE_INSTALLATION_FILE);
         let first_service = std::fs::read(&service_path).unwrap();
-        let first_adapter =
-            std::fs::read(root.path().join(SERVICE_DIRECTORY).join(ADAPTER_KEY_FILE)).unwrap();
+        let first_adapter = std::fs::read(
+            root.path()
+                .join(SERVICE_DIRECTORY)
+                .join(ACCOUNT_ISSUER_KEY_FILE),
+        )
+        .unwrap();
         install_with(
             &store,
             &profile_root,
@@ -348,22 +354,28 @@ mod tests {
             Some(endpoint),
             None,
             Some(profile_keys.clone()),
+            AuthorizationPolicy::account_trusted(),
         )
         .unwrap();
         assert_eq!(std::fs::read(&service_path).unwrap(), first_service);
         assert_eq!(
-            std::fs::read(root.path().join(SERVICE_DIRECTORY).join(ADAPTER_KEY_FILE)).unwrap(),
+            std::fs::read(
+                root.path()
+                    .join(SERVICE_DIRECTORY)
+                    .join(ACCOUNT_ISSUER_KEY_FILE),
+            )
+            .unwrap(),
             first_adapter
         );
 
         let installation = LocalServiceInstallation::from_reader(first_service.as_slice()).unwrap();
         assert_eq!(installation.profile_root(), profile_root);
-        assert_eq!(installation.adapters().len(), 1);
+        assert_eq!(installation.issuers().len(), 1);
         assert_eq!(
             installation.profile_custody(),
             &LocalServiceProfileCustody::ExternalDirectory(profile_keys)
         );
-        assert!(installation.adapters()[0]
+        assert!(installation.issuers()[0]
             .registration()
             .profiles()
             .permits(&ServiceProfileId::parse("session-example").unwrap()));
@@ -376,10 +388,10 @@ mod tests {
             encode_hex(installation.service_public_key().as_bytes())
         );
         assert_eq!(
-            client["signingKeyFile"],
+            client["issuerKeyFile"],
             root.path()
                 .join(SERVICE_DIRECTORY)
-                .join(ADAPTER_KEY_FILE)
+                .join(ACCOUNT_ISSUER_KEY_FILE)
                 .to_str()
                 .unwrap()
         );
@@ -392,6 +404,7 @@ mod tests {
             conflict.to_str(),
             None,
             Some(root.path().join("profile-keys")),
+            AuthorizationPolicy::account_trusted(),
         )
         .is_err());
         assert_eq!(std::fs::read(service_path).unwrap(), first_service);

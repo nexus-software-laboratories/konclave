@@ -1,6 +1,6 @@
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
 
 import { EventEmitter } from 'node:events';
 import { encodeFrame, FrameError, FrameReader, decodeFrameLength } from '../src/service/framing.js';
@@ -9,38 +9,58 @@ import {
   privateKeyFromSeedAndZeroize,
   publicKeyFromRaw,
   rawPublicKey,
+  signMessage,
   verifyMessage,
 } from '../src/service/keys.js';
 import {
   assertCanonicalProfile,
   clientSigningMessage,
-  encodeTranscript,
+  encodeIssuerTranscript,
   serviceSigningMessage,
 } from '../src/service/transcript.js';
 import { createKonclaveTools, konclaveTools } from '../src/service/tools.js';
 import { createKonclaveCommands, parseCommandArguments } from '../src/service/commands.js';
-import { toolOperations, isKnownOperation } from '../src/service/operations.js';
+import {
+  toolOperations,
+  isKnownOperation,
+  type ServiceStatusResult,
+} from '../src/service/operations.js';
 import { createLocalServiceDeliveryChannel } from '../src/service/delivery.js';
 import { createExtensionJoinConfig, deriveProfileId } from '../src/runtime.js';
 import { LocalServiceError, type LocalServiceClient } from '../src/service/client.js';
-
-const fixture = JSON.parse(
-  readFileSync(
-    join(process.cwd(), '..', '..', 'fixtures', 'local-service', 'v1', 'handshake-transcript.json'),
-    'utf8',
-  ),
-) as Record<string, string | number>;
-
-function hex(name: string): Buffer {
-  return Buffer.from(String(fixture[name]), 'hex');
-}
 
 function stubClient(request = vi.fn().mockResolvedValue({})): LocalServiceClient {
   return {
     profile: 'session-0123456789abcdef01234567',
     request: request as unknown as LocalServiceClient['request'],
+    retire: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
     connected: true,
+  };
+}
+
+function serviceStatus(overrides: Partial<ServiceStatusResult> = {}): ServiceStatusResult {
+  return {
+    profile: 'session-test',
+    deviceId: 'aa'.repeat(32),
+    relayConfigured: true,
+    watchedConversations: 2,
+    pendingEvents: 0,
+    claimedEvents: 0,
+    deliveryDegraded: false,
+    authorizationPolicy: 'AccountTrusted',
+    authorizationProvider: 'AccountTrusted',
+    authorizationEvidence: ['account_trusted'],
+    authorizationPolicyVersion: 1,
+    grantExpiresAtUnixMilliseconds: Date.now() + 60_000,
+    grantCapabilities: 15,
+    activeGrants: 3,
+    activeGrantsForIssuer: 3,
+    activeGrantsForProfile: 1,
+    grantLimit: 256,
+    grantLimitPerIssuer: 128,
+    grantLimitPerProfile: 32,
+    ...overrides,
   };
 }
 
@@ -54,69 +74,121 @@ function commandContext(args: string) {
 }
 
 describe('shared local service transcript', () => {
-  it('reproduces the canonical transcript and signing messages', () => {
-    const transcript = encodeTranscript({
-      adapterKeyId: hex('adapterKeyId'),
-      adapterKeyVersion: Number(fixture.adapterKeyVersion),
-      clientInstance: hex('clientInstance'),
+  const fixture = JSON.parse(
+    readFileSync(
+      join(
+        process.cwd(),
+        '..',
+        '..',
+        'fixtures',
+        'local-service',
+        'v2',
+        'authorization-transcript.json',
+      ),
+      'utf8',
+    ),
+  ) as Record<string, string | number>;
+  const issuerKey = privateKeyFromSeed(
+    Buffer.from(Array.from({ length: 32 }, (_, index) => index)),
+  );
+  const serviceKey = privateKeyFromSeed(
+    Buffer.from(Array.from({ length: 32 }, (_, index) => index + 32)),
+  );
+  const parts = {
+    issuerKeyId: Buffer.alloc(16, 1),
+    issuerKeyVersion: 3,
+    issuerPublicKey: rawPublicKey(issuerKey),
+    clientInstance: Buffer.alloc(16, 2),
+    harness: 'copilot' as const,
+    clientChallenge: Buffer.alloc(32, 3),
+    serviceChallenge: Buffer.alloc(32, 4),
+    serviceKey: rawPublicKey(serviceKey),
+  };
+
+  it('reproduces deterministic protocol-v2 issuer transcript bytes', () => {
+    const transcript = encodeIssuerTranscript(parts);
+    const again = encodeIssuerTranscript({ ...parts });
+
+    expect(transcript).toEqual(again);
+    expect(transcript.readUInt16BE(0)).toBe(2);
+    expect(transcript.readUInt8(2)).toBe(1);
+    expect(clientSigningMessage(transcript).subarray(32)).toEqual(transcript);
+    expect(serviceSigningMessage(transcript).subarray(32)).toEqual(transcript);
+  });
+
+  it('verifies both role-separated protocol-v2 signatures', () => {
+    const transcript = encodeIssuerTranscript(parts);
+    const clientSignature = signMessage(issuerKey, clientSigningMessage(transcript));
+    const serviceSignature = signMessage(serviceKey, serviceSigningMessage(transcript));
+
+    expect(
+      verifyMessage(
+        publicKeyFromRaw(parts.issuerPublicKey),
+        clientSigningMessage(transcript),
+        clientSignature,
+      ),
+    ).toBe(true);
+    expect(
+      verifyMessage(
+        publicKeyFromRaw(parts.serviceKey),
+        serviceSigningMessage(transcript),
+        serviceSignature,
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the shared protocol-v2 issuer vector', () => {
+    const hex = (name: string): Buffer => Buffer.from(String(fixture[name]), 'hex');
+    const transcript = encodeIssuerTranscript({
+      issuerKeyId: hex('issuerKeyId'),
+      issuerKeyVersion: Number(fixture.issuerKeyVersion),
+      issuerPublicKey: hex('issuerPublicKey'),
+      clientInstance: hex('issuerClientInstance'),
       harness: 'copilot',
-      profile: String(fixture.profile),
       clientChallenge: hex('clientChallenge'),
       serviceChallenge: hex('serviceChallenge'),
       serviceKey: hex('servicePublicKey'),
     });
-
-    expect(transcript.toString('hex')).toBe(fixture.encodedTranscript);
-    expect(clientSigningMessage(transcript).toString('hex')).toBe(fixture.clientSigningMessage);
-    expect(serviceSigningMessage(transcript).toString('hex')).toBe(fixture.serviceSigningMessage);
-  });
-
-  it('verifies the canonical signatures with the published keys', () => {
-    const transcript = hex('encodedTranscript');
+    expect(transcript.toString('hex')).toBe(fixture.issuerTranscript);
     expect(
       verifyMessage(
-        publicKeyFromRaw(hex('clientPublicKey')),
+        publicKeyFromRaw(hex('issuerPublicKey')),
         clientSigningMessage(transcript),
-        hex('clientSignature'),
+        hex('issuerSignature'),
       ),
     ).toBe(true);
     expect(
       verifyMessage(
         publicKeyFromRaw(hex('servicePublicKey')),
         serviceSigningMessage(transcript),
-        hex('serviceSignature'),
+        hex('issuerAcceptance'),
       ),
     ).toBe(true);
+  });
+
+  it('rejects every malformed fixed-width issuer transcript field', () => {
+    const valid = {
+      ...parts,
+      harness: 'copilot' as const,
+    };
+    for (const parts of [
+      { ...valid, issuerKeyId: Buffer.alloc(15) },
+      { ...valid, issuerKeyVersion: 0 },
+      { ...valid, issuerKeyVersion: 1.5 },
+      { ...valid, issuerPublicKey: Buffer.alloc(31) },
+      { ...valid, clientInstance: Buffer.alloc(15) },
+      { ...valid, clientChallenge: Buffer.alloc(31) },
+      { ...valid, serviceChallenge: Buffer.alloc(31) },
+      { ...valid, serviceKey: Buffer.alloc(31) },
+    ]) {
+      expect(() => encodeIssuerTranscript(parts)).toThrow();
+    }
   });
 
   it('refuses a profile that is not canonical lowercase', () => {
     expect(() => assertCanonicalProfile('alice')).not.toThrow();
     for (const profile of ['Alice', 'ALICE', 'alice.bob', '../escape', '', 'a'.repeat(33)]) {
       expect(() => assertCanonicalProfile(profile)).toThrow();
-    }
-  });
-
-  it('rejects every malformed fixed-width transcript field', () => {
-    const valid = {
-      adapterKeyId: Buffer.alloc(16),
-      adapterKeyVersion: 1,
-      clientInstance: Buffer.alloc(16),
-      harness: 'copilot' as const,
-      profile: 'alice',
-      clientChallenge: Buffer.alloc(32),
-      serviceChallenge: Buffer.alloc(32),
-      serviceKey: Buffer.alloc(32),
-    };
-    for (const parts of [
-      { ...valid, adapterKeyId: Buffer.alloc(15) },
-      { ...valid, adapterKeyVersion: 0 },
-      { ...valid, adapterKeyVersion: 1.5 },
-      { ...valid, clientInstance: Buffer.alloc(15) },
-      { ...valid, clientChallenge: Buffer.alloc(31) },
-      { ...valid, serviceChallenge: Buffer.alloc(31) },
-      { ...valid, serviceKey: Buffer.alloc(31) },
-    ]) {
-      expect(() => encodeTranscript(parts)).toThrow();
     }
   });
 
@@ -206,14 +278,40 @@ describe('agent tool surface', () => {
     const request = vi.fn().mockResolvedValue({ conversation_id: 'ab' });
     const tools = createKonclaveTools({ client: stubClient(request) });
     const send = tools.find((tool) => tool.name === 'send_message');
+    const invocation = {
+      sessionId: 'session-a',
+      toolCallId: 'tool-call-a',
+      toolName: 'send_message',
+      arguments: {},
+    };
 
-    await send?.handler({ conversation_id: 'ab', message_id: 'cd', text: 'hi' });
+    await send?.handler({ conversation_id: 'ab', message_id: 'cd', text: 'hi' }, invocation);
+    await send?.handler({ conversation_id: 'ab', message_id: 'cd', text: 'hi' }, invocation);
+    await send?.handler(
+      { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
+      { ...invocation, sessionId: 'a', toolCallId: 'b\0c' },
+    );
+    await send?.handler(
+      { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
+      { ...invocation, sessionId: 'a\0b', toolCallId: 'c' },
+    );
 
     expect(request).toHaveBeenCalledWith(
       'send_message',
       { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
-      expect.any(Number),
+      {
+        deadlineMs: expect.any(Number),
+        requestId: expect.any(Buffer),
+      },
     );
+    expect(request.mock.calls[0]?.[2]).toEqual(request.mock.calls[1]?.[2]);
+    expect(request.mock.calls[2]?.[2]).not.toEqual(request.mock.calls[3]?.[2]);
+    await expect(
+      send?.handler(
+        { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
+        { ...invocation, toolCallId: '' },
+      ),
+    ).rejects.toThrow('invocation identifiers are invalid');
 
     const identity = tools.find((tool) => tool.name === 'get_identity');
     await identity?.handler(undefined);
@@ -230,15 +328,12 @@ describe('deterministic commands', () => {
   });
 
   it('renders status from the client without any model turn', async () => {
-    const request = vi.fn().mockResolvedValue({
-      profile: 'session-0123456789abcdef01234567',
-      deviceId: 'ffee',
-      relayConfigured: true,
-      watchedConversations: 2,
-      pendingEvents: 0,
-      claimedEvents: 0,
-      deliveryDegraded: false,
-    });
+    const request = vi.fn().mockResolvedValue(
+      serviceStatus({
+        profile: 'session-0123456789abcdef01234567',
+        deviceId: 'ffee',
+      }),
+    );
     const lines: string[] = [];
     const commands = createKonclaveCommands({
       client: stubClient(request),
@@ -250,6 +345,10 @@ describe('deterministic commands', () => {
     expect(request).toHaveBeenCalledWith('service.status', {});
     expect(lines.some((line) => line.includes('session-0123456789abcdef01234567'))).toBe(true);
     expect(lines.some((line) => line.includes('relay configured: yes'))).toBe(true);
+    expect(lines.some((line) => line.includes('authorization provider: AccountTrusted'))).toBe(
+      true,
+    );
+    expect(lines.some((line) => line.includes('global 3/256'))).toBe(true);
   });
 
   it('reports an unknown subcommand without throwing into the session', async () => {
@@ -277,15 +376,14 @@ describe('deterministic commands', () => {
         case 'set_auto_delivery':
           return {};
         case 'service.status':
-          return {
-            profile: 'session-test',
+          return serviceStatus({
             deviceId: 'bb'.repeat(32),
             relayConfigured: false,
             watchedConversations: 1,
             pendingEvents: 2,
             claimedEvents: 3,
             deliveryDegraded: true,
-          };
+          });
         default:
           throw new Error('unexpected operation');
       }
@@ -382,7 +480,7 @@ describe('session join configuration', () => {
   });
 });
 
-describe('adapter key material', () => {
+describe('issuer key material', () => {
   it('never exposes a signing seed through an error or a key object', () => {
     const seed = Buffer.alloc(32, 7);
     const key = privateKeyFromSeed(seed);
@@ -520,15 +618,13 @@ describe('shared-service delivery adaptation', () => {
       .mockResolvedValueOnce({ events })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({
-        profile: 'session-test',
-        deviceId: '0a'.repeat(32),
-        relayConfigured: true,
-        watchedConversations: 2,
-        pendingEvents: 3,
-        claimedEvents: 4,
-        deliveryDegraded: false,
-      });
+      .mockResolvedValueOnce(
+        serviceStatus({
+          deviceId: '0a'.repeat(32),
+          pendingEvents: 3,
+          claimedEvents: 4,
+        }),
+      );
     const client = stubClient(request);
     const channel = createLocalServiceDeliveryChannel(client);
     const claimed = await channel.request({

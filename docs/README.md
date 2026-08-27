@@ -13,6 +13,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0006: Joiner-issued pairing capabilities](adr/adr-0006-joiner-issued-pairing-capabilities.md)
 - [ADR 0007: Outbound relay principal enrollment](adr/adr-0007-outbound-relay-principal-enrollment.md)
 - [ADR 0008: Shared per-user local service](adr/adr-0008-shared-local-service.md)
+- [ADR 0009: Evidence-bound exact-profile session grants](adr/adr-0009-evidence-bound-session-grants.md)
 
 ## Protocol
 
@@ -48,5 +49,6 @@ This map lists the documentation contributed by the selected project shape.
 - [Verify release integrity and contents](distribution/integrity.md)
 - [Packaged clean-install acceptance](distribution/acceptance.md)
 - [Local Copilot demo](distribution/local-demo.md)
+- [Generic harness client](integrations/generic-client.md)
 - [UX and design resilience](ux-design.md)
 - [Impeccable design workflow](impeccable-design.md)

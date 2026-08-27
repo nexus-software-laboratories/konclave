@@ -8,6 +8,14 @@ pub enum LocalServiceTransportError {
     #[error("local service protocol version is unsupported")]
     UnsupportedVersion,
 
+    /// A protocol-v1 client reached a protocol-v2 service.
+    #[error("local service client upgrade is required")]
+    ClientUpgradeRequired,
+
+    /// A protocol-v2 client reached an older service.
+    #[error("local service upgrade is required")]
+    ServiceUpgradeRequired,
+
     /// A frame declared more bytes than its stage permits.
     #[error("local service frame exceeds its bound")]
     FrameTooLarge,
@@ -47,6 +55,26 @@ pub enum LocalServiceTransportError {
     /// A stable error code on the wire is not one this build implements.
     #[error("local service error code is unknown")]
     UnknownErrorCode,
+
+    /// An evidence set or policy clause is empty, duplicated, or contains unknown bits.
+    #[error("local service authorization evidence is invalid")]
+    InvalidEvidence,
+
+    /// A grant's capability set is empty or contains unknown bits.
+    #[error("local service session capabilities are invalid")]
+    InvalidCapabilities,
+
+    /// A grant has contradictory issuance or expiry values.
+    #[error("local service session grant is invalid")]
+    InvalidGrant,
+
+    /// A grant identifier already exists.
+    #[error("local service session grant already exists")]
+    DuplicateGrant,
+
+    /// The service cannot admit another grant without evicting an active one.
+    #[error("local service session grant limit is reached")]
+    GrantLimitReached,
 
     /// No active registration exists for the presented adapter key and version.
     #[error("local service adapter registration is not active")]
@@ -123,6 +151,8 @@ impl LocalServiceTransportError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedVersion => "local_service_unsupported_version",
+            Self::ClientUpgradeRequired => "local_service_client_upgrade_required",
+            Self::ServiceUpgradeRequired => "local_service_upgrade_required",
             Self::FrameTooLarge => "local_service_frame_too_large",
             Self::MalformedFrame => "local_service_malformed_frame",
             Self::UnknownMessageKind => "local_service_unknown_message_kind",
@@ -133,6 +163,11 @@ impl LocalServiceTransportError {
             Self::InvalidIdentifier { .. } => "local_service_invalid_identifier",
             Self::UnknownHarnessKind => "local_service_unknown_harness_kind",
             Self::UnknownErrorCode => "local_service_unknown_error_code",
+            Self::InvalidEvidence => "local_service_invalid_evidence",
+            Self::InvalidCapabilities => "local_service_invalid_capabilities",
+            Self::InvalidGrant => "local_service_invalid_grant",
+            Self::DuplicateGrant => "local_service_duplicate_grant",
+            Self::GrantLimitReached => "local_service_grant_limit_reached",
             Self::UnknownAdapterRegistration => "local_service_unknown_adapter_registration",
             Self::HarnessNotAuthorized => "local_service_harness_not_authorized",
             Self::ProfileNotAuthorized => "local_service_profile_not_authorized",
@@ -171,6 +206,8 @@ mod tests {
     fn every_code_is_distinct_and_namespaced() {
         let errors = [
             LocalServiceTransportError::UnsupportedVersion,
+            LocalServiceTransportError::ClientUpgradeRequired,
+            LocalServiceTransportError::ServiceUpgradeRequired,
             LocalServiceTransportError::FrameTooLarge,
             LocalServiceTransportError::MalformedFrame,
             LocalServiceTransportError::UnknownMessageKind,
@@ -181,6 +218,11 @@ mod tests {
             LocalServiceTransportError::InvalidIdentifier { field: "profile" },
             LocalServiceTransportError::UnknownHarnessKind,
             LocalServiceTransportError::UnknownErrorCode,
+            LocalServiceTransportError::InvalidEvidence,
+            LocalServiceTransportError::InvalidCapabilities,
+            LocalServiceTransportError::InvalidGrant,
+            LocalServiceTransportError::DuplicateGrant,
+            LocalServiceTransportError::GrantLimitReached,
             LocalServiceTransportError::UnknownAdapterRegistration,
             LocalServiceTransportError::HarnessNotAuthorized,
             LocalServiceTransportError::ProfileNotAuthorized,

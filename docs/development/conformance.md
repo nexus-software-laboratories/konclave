@@ -102,12 +102,22 @@ crash or excessive-allocation case becomes a permanent regression input.
 ### Daemon and adapter authorization
 
 - reject unauthorized local peers and malformed model-generated tool arguments;
-- authenticate shared-service clients with exact registered key versions, immutable
-  harness/profile bindings, fresh transcript challenges, and active-registration
-  rechecks that close revoked connections;
-- bound shared-service request payload plus cached-response reservations, publish a
-  finite failure for abandoned execution, reject conflicting idempotency-key reuse,
-  and return one recorded outcome across reconnect;
+- authenticate protocol-v2 issuer and session roles with exact key versions, exact
+  profile/session-key grants, policy and evidence claims, fresh challenges, pinned
+  service identity, and uniform signed rejection;
+- prove the issuer cannot invoke operational methods, grants expire without active
+  eviction, quota exhaustion denies, and active-registration checks close revoked
+  connections;
+- bound shared-service request payload plus cached-response reservations, never
+  publish a false terminal outcome for abandoned execution, reject conflicting
+  idempotency-key reuse, and return one sealed recorded outcome across reconnect,
+  replacement grant, and service restart;
+- prove authenticated cancellation is scoped to one session key and request ID,
+  wins only before commit, and yields to the actual durable result after commit;
+- inject terminal-journal read/write failures and prove they neither leak process-wide
+  ledger capacity nor replace a committed result with a false terminal response;
+- reproduce `fixtures/local-service/v2/authorization-transcript.json` from Rust and
+  TypeScript, including every grant claim and both role-separated signatures;
 - keep `fixtures/local-service/v1/copilot-tools.json` byte-semantically aligned with
   the Rust router and consume that generated input schema from the Copilot SDK
   adapter;

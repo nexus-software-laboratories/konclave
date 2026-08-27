@@ -20,6 +20,7 @@ import type { LocalServiceClient } from '../src/service/client.js';
 /** A connected client that answers nothing, so no test needs a real service. */
 function stubClient(): LocalServiceClient {
   let rejectClaim: ((error: Error) => void) | undefined;
+  const close = vi.fn(() => rejectClaim?.(new Error('closed')));
   return {
     profile: 'session-0123456789abcdef01234567',
     request: vi.fn((operation: string) => {
@@ -30,7 +31,8 @@ function stubClient(): LocalServiceClient {
       }
       return Promise.resolve({});
     }),
-    close: vi.fn(() => rejectClaim?.(new Error('closed'))),
+    retire: vi.fn(async () => close()),
+    close,
     connected: true,
   };
 }
@@ -280,10 +282,12 @@ describe('bootExtension', () => {
     const sessionMock = createSessionMock();
     let rejectClaim: ((error: Error) => void) | undefined;
     let claims = 0;
+    const close = vi.fn(() => rejectClaim?.(new Error('closed')));
     const client: LocalServiceClient = {
       profile: 'session-0123456789abcdef01234567',
       connected: true,
-      close: vi.fn(() => rejectClaim?.(new Error('closed'))),
+      retire: vi.fn(async () => close()),
+      close,
       request: vi.fn(async (operation) => {
         if (operation !== 'delivery.claim') {
           return {};
@@ -332,6 +336,30 @@ describe('bootExtension', () => {
     await Promise.resolve();
     expect(connect).toHaveBeenCalledTimes(1);
     expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the client and reports a failed clean grant retirement', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    const client = stubClient();
+    vi.mocked(client.retire).mockRejectedValueOnce(new Error('retirement failed'));
+
+    const controller = await bootExtension({
+      connect: async () => client,
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+      processController,
+    });
+
+    controller?.dispose();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(client.close).toHaveBeenCalledTimes(1);
+    expect(diagnostics.stderr).toHaveBeenCalledWith(
+      'Konclave grant retirement failed: retirement failed',
+    );
   });
 
   it('schedules deferred sends and supports explicit cancellation', async () => {

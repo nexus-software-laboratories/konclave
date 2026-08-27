@@ -23,7 +23,10 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 use support::TestRelay;
-use support::shared_service::{SharedServiceProcess, complete_pairing, connect, identity, rpc};
+use support::shared_service::{
+    SessionConnectionRequest, SharedServiceProcess, complete_pairing, connect,
+    connect_with_session_identity, identity, rpc, rpc_with_request_id,
+};
 
 const CLIENT_COUNT: u8 = 20;
 
@@ -107,8 +110,9 @@ async fn twenty_clients_share_one_process_and_recover_after_restart() {
         service_identity.public_key(),
         LocalServiceIdentitySource::ExternalFile(service_seed_path),
         LocalServiceProfileCustody::ExternalDirectory(key_root),
+        KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted(),
         vec![
-            KonclaveLocalServiceTransport::InstalledAdapterRegistration::new(
+            KonclaveLocalServiceTransport::InstalledIssuerRegistration::new(
                 adapter_key_id(),
                 adapter_key_version(),
                 AdapterRegistration::new(
@@ -300,6 +304,27 @@ async fn twenty_clients_share_one_process_and_recover_after_restart() {
     .await;
     assert_eq!(identity(&mut reconnected).await, identities[0]);
     clients.push(reconnected);
+    let recovery_session_identity = LocalServiceIdentity::generate().unwrap();
+    let recovery_request_id = [0x5a; 16];
+    let mut durable_request = connect_with_session_identity(SessionConnectionRequest {
+        endpoint: &endpoint,
+        service_key: service_identity.public_key(),
+        issuer_identity: &adapter_identity,
+        issuer_key_id: adapter_key_id(),
+        issuer_key_version: adapter_key_version(),
+        profile: "session-load-00",
+        instance: 102,
+        session_identity: &recovery_session_identity,
+    })
+    .await;
+    let created_before_restart = rpc_with_request_id(
+        &mut durable_request,
+        recovery_request_id,
+        "create_conversation",
+        serde_json::json!({}),
+    )
+    .await;
+    drop(durable_request);
     drop(clients);
     drop(delivery_clients);
     service.shutdown().await;
@@ -308,17 +333,26 @@ async fn twenty_clients_share_one_process_and_recover_after_restart() {
         Path::new(env!("CARGO_BIN_EXE_KonclaveLocalService")),
         &config,
     );
-    let mut recovered = connect(
-        &endpoint,
-        service_identity.public_key(),
-        &adapter_identity,
-        adapter_key_id(),
-        adapter_key_version(),
-        "session-load-00",
-        101,
-    )
+    let mut recovered = connect_with_session_identity(SessionConnectionRequest {
+        endpoint: &endpoint,
+        service_key: service_identity.public_key(),
+        issuer_identity: &adapter_identity,
+        issuer_key_id: adapter_key_id(),
+        issuer_key_version: adapter_key_version(),
+        profile: "session-load-00",
+        instance: 103,
+        session_identity: &recovery_session_identity,
+    })
     .await;
     assert_eq!(identity(&mut recovered).await, identities[0]);
+    let recovered_outcome = rpc_with_request_id(
+        &mut recovered,
+        recovery_request_id,
+        "create_conversation",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(recovered_outcome, created_before_restart);
     drop(recovered);
     restarted.shutdown().await;
     relay.stop().await;

@@ -72,12 +72,18 @@ operating system credential store. Unix headless setup can create an owner-owned
 mode-`0600` external record from bounded stdin:
 
 ```shell
-printf '%s\n' '<enrollment-credential>' | konclave init --relay-endpoint https://relay.example.com --external-source /run/secrets/konclave-enrollment
+printf '%s\n' '<enrollment-credential>' | konclave init --relay-endpoint https://relay.example.com --authorization-policy account-trusted --external-source /run/secrets/konclave-enrollment
 ```
 
 Later Copilot sessions create independent profiles and enroll automatically without
 receiving the credential through their environment or extension configuration. Repeating
 `init` is idempotent for the same endpoint and source; conflicting setup fails.
+
+The initial `AccountTrusted` authorization policy trusts every process under the
+configured operating-system account; it does not isolate hostile same-user sessions.
+Each client still uses a memory-only session key and a finite exact-profile grant.
+Unsupported harnesses can use the same minimum-trust contract through the generic
+installed client API without claiming stronger evidence.
 
 ### Run the local Copilot demo
 

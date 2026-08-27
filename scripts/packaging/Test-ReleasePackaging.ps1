@@ -117,7 +117,9 @@ function Assert-ReleaseLayout {
             "bin/KonclaveLocalService$suffix",
             'share/konclave/plugin/plugin.json',
             'share/konclave/plugin/extensions/Konclave.Extension/client.mjs',
-            'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs'
+            'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs',
+            'share/konclave/plugin/extensions/Konclave.Extension/generic.mjs',
+            'share/konclave/plugin/skills/konclave-generic/SKILL.md'
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf)) {
                 throw "Client package is missing $relative."

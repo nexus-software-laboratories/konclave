@@ -7,15 +7,19 @@ use KonclaveAdapterTransport::{DeliveredEvent, DeliveredPayload, DeliveredRole};
 use KonclaveCryptographicCore::LocalServiceIdentity;
 use KonclaveDomainCore::AdapterConsumerId;
 use KonclaveLocalServiceTransport::{
-    AdapterAuthorizationRegistry, AdapterRegistration, LocalServiceBinding, LocalServiceEndpoint,
-    LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest, LocalServiceResponse,
-    MAX_RPC_FRAME_BYTES, RequestId, complete_service_handshake, read_request, write_response,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    HarnessKind, InMemorySessionAuthorizationRegistry, LocalServiceEndpoint, LocalServiceErrorCode,
+    LocalServiceListener, LocalServiceRequest, LocalServiceResponse, MAX_GRANTS_PER_ISSUER,
+    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId, ServiceProfileId,
+    SessionAuthorizationRegistry, SessionCapabilities, SessionGrant, SessionGrantClaims,
+    SessionGrantId, complete_authorization_service_handshake, read_request, write_response,
 };
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+use zeroize::Zeroizing;
 
 use crate::adapter::{DeliveryAttachment, SystemUnixClock, UnixClock};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
@@ -27,9 +31,13 @@ const MAX_LEDGER_ENTRIES: usize = 256;
 const MAX_LEDGER_BYTES: usize = 64 * 1024 * 1024;
 const CLIENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTHORIZATION_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(85);
+const OPERATION_RECONCILIATION_THRESHOLD: Duration = Duration::from_secs(85);
 const MAX_DELIVERY_EVENTS: u16 = 16;
 const MAX_DELIVERY_WAIT_MILLISECONDS: u32 = 30_000;
+const ACCOUNT_TRUSTED_GRANT_TTL: Duration = Duration::from_secs(60 * 60);
+const LOCAL_REQUEST_OUTCOME_VERSION: u8 = 1;
+const OUTCOME_PERSIST_ATTEMPTS: u8 = 3;
+const OUTCOME_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Validated inputs loaded before the shared service can start.
 ///
@@ -39,7 +47,8 @@ const MAX_DELIVERY_WAIT_MILLISECONDS: u32 = 30_000;
 pub(crate) struct SharedLocalServiceConfig {
     pub(crate) endpoint: LocalServiceEndpoint,
     pub(crate) service_identity: Arc<LocalServiceIdentity>,
-    pub(crate) adapter_registry: Arc<dyn AdapterAuthorizationRegistry>,
+    pub(crate) authorization_registry: Arc<InMemorySessionAuthorizationRegistry>,
+    pub(crate) authorization_policy: AuthorizationPolicy,
     pub(crate) profile_source: Arc<dyn ProfileSource>,
     pub(crate) supervisor: ProfileSupervisorConfig,
 }
@@ -75,13 +84,23 @@ where
             accepted = listener.accept() => {
                 match accepted {
                     Ok(stream) => {
-                        let registry = Arc::clone(&config.adapter_registry);
+                        let registry = Arc::clone(&config.authorization_registry);
+                        let policy = config.authorization_policy.clone();
                         let identity = Arc::clone(&config.service_identity);
                         let supervisor = Arc::clone(&supervisor);
                         let ledger = Arc::clone(&ledger);
                         let stop = stop_rx.clone();
                         clients.spawn(async move {
-                            serve_client(stream, registry, identity, supervisor, ledger, stop).await
+                            serve_client(
+                                stream,
+                                registry,
+                                policy,
+                                identity,
+                                supervisor,
+                                ledger,
+                                stop,
+                            )
+                            .await
                         });
                     }
                     Err(
@@ -98,27 +117,31 @@ where
                         outcome = "client_closed_with_error",
                         "shared local client connection ended"
                     ),
-                    Some(Err(error)) => tracing::error!(
-                        outcome = "client_task_failed",
-                        panic = error.is_panic(),
-                        "shared local client task ended unexpectedly"
-                    ),
+                    Some(Err(error)) => {
+                        tracing::error!(
+                            outcome = "client_task_failed",
+                            panic = error.is_panic(),
+                            "shared local client task ended unexpectedly"
+                        );
+                        anyhow::bail!("shared local client task failed");
+                    }
                 }
             }
         }
     }
 
-    let _ = stop_tx.send(true);
+    stop_admission_and_cancel_precommit(&ledger, RequestCancellationReason::Shutdown);
+    stop_tx.send_replace(true);
     let drained = timeout(CLIENT_SHUTDOWN_TIMEOUT, async {
         while clients.join_next().await.is_some() {}
     })
     .await;
     if drained.is_err() {
-        clients.shutdown().await;
         tracing::warn!(
-            outcome = "client_shutdown_timeout",
-            "shared local clients exceeded the shutdown deadline"
+            outcome = "client_shutdown_reconciling",
+            "shared local clients crossed the shutdown threshold while reconciling"
         );
+        while clients.join_next().await.is_some() {}
     }
     supervisor.shutdown().await?;
     Ok(())
@@ -126,22 +149,75 @@ where
 
 async fn serve_client(
     mut stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
-    registry: Arc<dyn AdapterAuthorizationRegistry>,
+    registry: Arc<InMemorySessionAuthorizationRegistry>,
+    policy: AuthorizationPolicy,
     identity: Arc<LocalServiceIdentity>,
     supervisor: Arc<ProfileSupervisor>,
     ledger: Arc<Mutex<RequestLedger>>,
+    stop: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let now = SystemUnixClock.now_unix_milliseconds();
+    let channel = complete_authorization_service_handshake(
+        &mut stream,
+        registry.as_ref(),
+        identity.as_ref(),
+        now,
+    )
+    .await
+    .context("authenticating a shared local client")?;
+    match channel.binding().clone() {
+        AuthorizationBinding::Issuer {
+            issuer_key_id,
+            issuer_key_version,
+            issuer_public_key,
+            client_instance,
+            harness,
+        } => {
+            serve_issuer_client(
+                &mut stream,
+                registry,
+                policy,
+                ledger,
+                IssuerConnection {
+                    issuer_key_id,
+                    issuer_key_version,
+                    issuer_public_key,
+                    client_instance,
+                    harness,
+                },
+                stop,
+            )
+            .await
+        }
+        AuthorizationBinding::Session {
+            grant,
+            client_instance,
+        } => {
+            serve_session_client(
+                &mut stream,
+                registry,
+                supervisor,
+                ledger,
+                grant,
+                client_instance,
+                stop,
+            )
+            .await
+        }
+    }
+}
+
+async fn serve_session_client(
+    stream: &mut KonclaveLocalServiceTransport::LocalServiceServerStream,
+    registry: Arc<InMemorySessionAuthorizationRegistry>,
+    supervisor: Arc<ProfileSupervisor>,
+    ledger: Arc<Mutex<RequestLedger>>,
+    grant: SessionGrant,
+    client_instance: KonclaveLocalServiceTransport::ClientInstanceId,
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let channel = complete_service_handshake(&mut stream, registry.as_ref(), identity.as_ref())
-        .await
-        .context("authenticating a shared local client")?;
-    let registration = channel
-        .service_registration()
-        .cloned()
-        .context("retaining the authenticated adapter registration")?;
-    let binding = channel.binding().clone();
     let lease = supervisor
-        .attach(binding.profile().as_str())
+        .attach(grant.profile().as_str())
         .await
         .context("attaching a shared local client profile")?;
     let services = lease.services().context("loading bound profile services")?;
@@ -150,9 +226,8 @@ async fn serve_client(
     let mut state = ClientRequestState {
         ledger,
         registry,
-        registration,
-        consumer: AdapterConsumerId::from_bytes(*binding.client_instance().as_bytes()),
-        binding,
+        consumer: AdapterConsumerId::from_bytes(*client_instance.as_bytes()),
+        grant,
         handler,
         services,
         store,
@@ -178,14 +253,14 @@ async fn serve_client(
                     }
                     continue;
                 }
-                request = read_request(&mut stream) => match request {
+                request = read_request(stream) => match request {
                     Ok(request) => request,
                     Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => break,
                     Err(error) => return Err(error).context("reading a shared local request"),
                 }
             };
-            let response = execute_idempotent(&mut state, request).await;
-            write_response(&mut stream, &response)
+            let response = execute_session_request(&mut state, request).await;
+            write_response(stream, &response)
                 .await
                 .context("writing a shared local response")?;
         }
@@ -201,6 +276,226 @@ async fn serve_client(
             .context("releasing a shared local delivery lease")?;
     }
     result
+}
+
+#[derive(Clone)]
+struct IssuerConnection {
+    issuer_key_id: KonclaveLocalServiceTransport::IssuerKeyId,
+    issuer_key_version: KonclaveLocalServiceTransport::IssuerKeyVersion,
+    issuer_public_key: KonclaveDomainCore::Ed25519PublicKey,
+    client_instance: KonclaveLocalServiceTransport::ClientInstanceId,
+    harness: HarnessKind,
+}
+
+impl IssuerConnection {
+    fn authorization_is_active(&self, registry: &InMemorySessionAuthorizationRegistry) -> bool {
+        registry
+            .active_issuer(self.issuer_key_id, self.issuer_key_version)
+            .is_some_and(|registration| {
+                registration.public_key() == self.issuer_public_key
+                    && (registration.harness() == self.harness
+                        || registration.harness() == HarnessKind::Generic)
+            })
+    }
+}
+
+async fn serve_issuer_client(
+    stream: &mut KonclaveLocalServiceTransport::LocalServiceServerStream,
+    registry: Arc<InMemorySessionAuthorizationRegistry>,
+    policy: AuthorizationPolicy,
+    ledger: Arc<Mutex<RequestLedger>>,
+    issuer: IssuerConnection,
+    mut stop: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut authorization_check = tokio::time::interval(AUTHORIZATION_RECHECK_INTERVAL);
+    authorization_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let request = tokio::select! {
+            biased;
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = authorization_check.tick() => {
+                if !issuer.authorization_is_active(&registry) {
+                    break;
+                }
+                continue;
+            }
+            request = read_request(stream) => match request {
+                Ok(request) => request,
+                Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => break,
+                Err(error) => return Err(error).context("reading a shared local issuer request"),
+            }
+        };
+        let key = LedgerKey::for_issuer(&issuer, request.request_id());
+        let response = execute_idempotent(Arc::clone(&ledger), key, &request, || async {
+            dispatch_issuer_request(&registry, &policy, &issuer, &request)
+        })
+        .await;
+        write_response(stream, &response)
+            .await
+            .context("writing a shared local issuer response")?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct GrantIssueRequest {
+    profile: String,
+    session_public_key: String,
+    harness: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantIssueResult {
+    grant_id: String,
+    issuer_key_id: String,
+    issuer_key_version: u32,
+    profile: String,
+    session_public_key: String,
+    harness: &'static str,
+    evidence: u8,
+    policy_version: u64,
+    issued_at_unix_milliseconds: u64,
+    expires_at_unix_milliseconds: u64,
+    capabilities: u64,
+}
+
+fn dispatch_issuer_request(
+    registry: &InMemorySessionAuthorizationRegistry,
+    policy: &AuthorizationPolicy,
+    issuer: &IssuerConnection,
+    request: &LocalServiceRequest,
+) -> LocalServiceResponse {
+    let result = match request.operation().as_str() {
+        "authorization.grant.issue" => {
+            issue_account_trusted_grant(registry, policy, issuer, request.payload())
+        }
+        _ => Err("unknown_operation".to_string()),
+    };
+    response_from_result(request.request_id(), result)
+}
+
+fn issue_account_trusted_grant(
+    registry: &InMemorySessionAuthorizationRegistry,
+    policy: &AuthorizationPolicy,
+    issuer: &IssuerConnection,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    let request: GrantIssueRequest =
+        serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
+    let profile =
+        ServiceProfileId::parse(&request.profile).map_err(|_| "invalid_request".to_string())?;
+    let harness = parse_harness(&request.harness).ok_or_else(|| "invalid_request".to_string())?;
+    let session_public_key = crate::mcp::decode_hex::<32>(&request.session_public_key)
+        .map(KonclaveDomainCore::Ed25519PublicKey::from_bytes)
+        .map_err(|_| "invalid_request".to_string())?;
+    let registration = registry
+        .active_issuer(issuer.issuer_key_id, issuer.issuer_key_version)
+        .ok_or_else(|| "local_service_not_authorized".to_string())?;
+    if !registration.profiles().permits(&profile)
+        || (registration.harness() != harness && registration.harness() != HarnessKind::Generic)
+    {
+        return Err("local_service_not_authorized".to_string());
+    }
+    let evidence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+        .map_err(|_| "internal".to_string())?;
+    if !policy.accepts(evidence) {
+        return Err("local_service_not_authorized".to_string());
+    }
+    let now = SystemUnixClock.now_unix_milliseconds();
+    let ttl =
+        u64::try_from(ACCOUNT_TRUSTED_GRANT_TTL.as_millis()).map_err(|_| "internal".to_string())?;
+    let expires = now.checked_add(ttl).ok_or_else(|| "internal".to_string())?;
+    let grant = issue_unique_grant(
+        registry,
+        GrantIssuance {
+            issuer_key_id: issuer.issuer_key_id,
+            issuer_key_version: issuer.issuer_key_version,
+            profile,
+            session_public_key,
+            harness,
+            evidence,
+            policy_version: policy.version(),
+            issued_at_unix_milliseconds: now,
+            expires_at_unix_milliseconds: expires,
+        },
+    )?;
+    serde_json::to_vec(&GrantIssueResult {
+        grant_id: crate::mcp::encode_hex(grant.grant_id().as_bytes()),
+        issuer_key_id: crate::mcp::encode_hex(grant.issuer_key_id().as_bytes()),
+        issuer_key_version: grant.issuer_key_version().get(),
+        profile: grant.profile().as_str().to_string(),
+        session_public_key: crate::mcp::encode_hex(grant.session_public_key().as_bytes()),
+        harness: grant.harness().as_str(),
+        evidence: grant.evidence().bits(),
+        policy_version: grant.policy_version().get(),
+        issued_at_unix_milliseconds: grant.issued_at_unix_milliseconds(),
+        expires_at_unix_milliseconds: grant.expires_at_unix_milliseconds(),
+        capabilities: grant.capabilities().bits(),
+    })
+    .map_err(|_| "response_encoding_failed".to_string())
+}
+
+struct GrantIssuance {
+    issuer_key_id: KonclaveLocalServiceTransport::IssuerKeyId,
+    issuer_key_version: KonclaveLocalServiceTransport::IssuerKeyVersion,
+    profile: ServiceProfileId,
+    session_public_key: KonclaveDomainCore::Ed25519PublicKey,
+    harness: HarnessKind,
+    evidence: AuthorizationEvidenceSet,
+    policy_version: KonclaveLocalServiceTransport::AuthorizationPolicyVersion,
+    issued_at_unix_milliseconds: u64,
+    expires_at_unix_milliseconds: u64,
+}
+
+fn issue_unique_grant(
+    registry: &InMemorySessionAuthorizationRegistry,
+    issuance: GrantIssuance,
+) -> Result<SessionGrant, String> {
+    for _ in 0..4 {
+        let mut identifier = [0_u8; 16];
+        KonclaveCryptographicCore::fill_random(&mut identifier)
+            .map_err(|_| "internal".to_string())?;
+        let grant = SessionGrant::new(SessionGrantClaims {
+            grant_id: SessionGrantId::from_bytes(identifier),
+            issuer_key_id: issuance.issuer_key_id,
+            issuer_key_version: issuance.issuer_key_version,
+            profile: issuance.profile.clone(),
+            session_public_key: issuance.session_public_key,
+            harness: issuance.harness,
+            evidence: issuance.evidence,
+            policy_version: issuance.policy_version,
+            issued_at_unix_milliseconds: issuance.issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds: issuance.expires_at_unix_milliseconds,
+            capabilities: SessionCapabilities::ALL,
+        })
+        .map_err(|_| "internal".to_string())?;
+        match registry.issue_grant(grant.clone(), issuance.issued_at_unix_milliseconds) {
+            Ok(()) => return Ok(grant),
+            Err(KonclaveLocalServiceTransport::LocalServiceTransportError::DuplicateGrant) => {}
+            Err(KonclaveLocalServiceTransport::LocalServiceTransportError::GrantLimitReached) => {
+                return Err("busy".to_string());
+            }
+            Err(_) => return Err("internal".to_string()),
+        }
+    }
+    Err("busy".to_string())
+}
+
+fn parse_harness(value: &str) -> Option<HarnessKind> {
+    match value {
+        "copilot" => Some(HarnessKind::Copilot),
+        "claude-code" => Some(HarnessKind::ClaudeCode),
+        "codex" => Some(HarnessKind::Codex),
+        "generic" => Some(HarnessKind::Generic),
+        _ => None,
+    }
 }
 
 fn operation_handler(services: &ProfileServices) -> StdioServer {
@@ -222,10 +517,9 @@ fn operation_handler(services: &ProfileServices) -> StdioServer {
 
 struct ClientRequestState {
     ledger: Arc<Mutex<RequestLedger>>,
-    registry: Arc<dyn AdapterAuthorizationRegistry>,
-    registration: AdapterRegistration,
+    registry: Arc<InMemorySessionAuthorizationRegistry>,
     consumer: AdapterConsumerId,
-    binding: LocalServiceBinding,
+    grant: SessionGrant,
     handler: StdioServer,
     services: ProfileServices,
     store: Arc<crate::persistence::ProfileStore>,
@@ -235,26 +529,164 @@ struct ClientRequestState {
 
 impl ClientRequestState {
     fn authorization_is_active(&self) -> bool {
-        self.registry.active_registration(
-            self.binding.adapter_key_id(),
-            self.binding.adapter_key_version(),
-        ) == Some(self.registration.clone())
+        self.registry
+            .active_grant(
+                self.grant.grant_id(),
+                SystemUnixClock.now_unix_milliseconds(),
+            )
+            .is_some_and(|grant| grant == self.grant)
     }
 }
 
-async fn execute_idempotent(
+async fn execute_session_request(
     state: &mut ClientRequestState,
     request: LocalServiceRequest,
 ) -> LocalServiceResponse {
-    let key = LedgerKey::new(&state.binding, request.request_id());
-    match begin_request(&state.ledger, key.clone(), &request) {
-        LedgerDecision::Cached(response) => response,
+    let key = LedgerKey::for_grant(&state.grant, request.request_id());
+    let ledger = Arc::clone(&state.ledger);
+    match begin_request(&ledger, key.clone(), &request) {
+        LedgerDecision::Cached(response, durable) => {
+            if durable {
+                response
+            } else {
+                let reconciliation = reconcile_session_response(state, &request, response).await;
+                if reconciliation.durable {
+                    mark_request_durable(&ledger, &key);
+                }
+                reconciliation.client_response
+            }
+        }
         LedgerDecision::Conflict => {
             LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Conflict)
         }
         LedgerDecision::Busy => {
             LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Busy)
         }
+        LedgerDecision::ShuttingDown => LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::ProfileUnavailable,
+        ),
+        LedgerDecision::Wait(mut outcome) => {
+            match outcome
+                .wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|response| response.clone())
+            {
+                Some(response) => {
+                    if request_is_durable(&ledger, &key) {
+                        response
+                    } else {
+                        let reconciliation =
+                            reconcile_session_response(state, &request, response).await;
+                        if reconciliation.durable {
+                            mark_request_durable(&ledger, &key);
+                        }
+                        reconciliation.client_response
+                    }
+                }
+                None => LocalServiceResponse::failure(
+                    request.request_id(),
+                    LocalServiceErrorCode::Internal,
+                ),
+            }
+        }
+        LedgerDecision::Execute => {
+            let completion = RequestCompletion::new(Arc::clone(&ledger), key.clone());
+            let persisted = match load_persisted_request_outcome(
+                Arc::clone(&state.store),
+                state.grant.session_public_key(),
+                request.request_id(),
+            )
+            .await
+            {
+                Ok(persisted) => persisted,
+                Err(_) => {
+                    tracing::error!(
+                        outcome = "request_outcome_read_failed",
+                        "shared local request outcome could not be read"
+                    );
+                    discard_request(&ledger, &key);
+                    return LocalServiceResponse::failure(
+                        request.request_id(),
+                        LocalServiceErrorCode::ProfileUnavailable,
+                    );
+                }
+            };
+            if let Some(plaintext) = persisted {
+                let (recorded_request, response) = match decode_local_request_outcome(&plaintext) {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        tracing::error!(
+                            outcome = "request_outcome_decode_failed",
+                            "shared local request outcome could not be decoded"
+                        );
+                        discard_request(&ledger, &key);
+                        return LocalServiceResponse::failure(
+                            request.request_id(),
+                            LocalServiceErrorCode::ProfileUnavailable,
+                        );
+                    }
+                };
+                let expected_request = Zeroizing::new(request.encode());
+                if recorded_request != expected_request.as_slice() {
+                    discard_request(&ledger, &key);
+                    return LocalServiceResponse::failure(
+                        request.request_id(),
+                        LocalServiceErrorCode::Conflict,
+                    );
+                }
+                if response.request_id() != request.request_id() {
+                    tracing::error!(
+                        outcome = "request_outcome_mismatch",
+                        "shared local request outcome named another request"
+                    );
+                    discard_request(&ledger, &key);
+                    return LocalServiceResponse::failure(
+                        request.request_id(),
+                        LocalServiceErrorCode::ProfileUnavailable,
+                    );
+                }
+                completion.complete(response.clone(), true);
+                return response;
+            }
+
+            tokio::task::yield_now().await;
+            let response = if let Some(reason) = commit_request(&ledger, &key) {
+                LocalServiceResponse::failure(request.request_id(), reason.error_code())
+            } else {
+                await_operation_outcome(dispatch_request(state, &request)).await
+            };
+            let reconciliation =
+                reconcile_session_response(state, &request, response.clone()).await;
+            completion.complete(response, reconciliation.durable);
+            reconciliation.client_response
+        }
+    }
+}
+
+async fn execute_idempotent<F, Fut>(
+    ledger: Arc<Mutex<RequestLedger>>,
+    key: LedgerKey,
+    request: &LocalServiceRequest,
+    dispatch: F,
+) -> LocalServiceResponse
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = LocalServiceResponse>,
+{
+    match begin_request(&ledger, key.clone(), request) {
+        LedgerDecision::Cached(response, _) => response,
+        LedgerDecision::Conflict => {
+            LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Conflict)
+        }
+        LedgerDecision::Busy => {
+            LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Busy)
+        }
+        LedgerDecision::ShuttingDown => LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::ProfileUnavailable,
+        ),
         LedgerDecision::Wait(mut outcome) => match outcome
             .wait_for(Option::is_some)
             .await
@@ -267,26 +699,181 @@ async fn execute_idempotent(
             }
         },
         LedgerDecision::Execute => {
-            let mut completion =
-                RequestCompletion::new(Arc::clone(&state.ledger), key, request.request_id());
-            let response =
-                with_operation_deadline(request.request_id(), dispatch_request(state, &request))
-                    .await;
-            completion.complete(response.clone());
+            let cancellation = commit_request(&ledger, &key);
+            let completion = RequestCompletion::new(ledger, key);
+            let response = cancellation.map_or_else(
+                || None,
+                |reason| {
+                    Some(LocalServiceResponse::failure(
+                        request.request_id(),
+                        reason.error_code(),
+                    ))
+                },
+            );
+            let response = match response {
+                Some(response) => response,
+                None => await_operation_outcome(dispatch()).await,
+            };
+            completion.complete(response.clone(), true);
             response
         }
     }
 }
 
-async fn with_operation_deadline<F>(request_id: RequestId, operation: F) -> LocalServiceResponse
+async fn await_operation_outcome<F>(operation: F) -> LocalServiceResponse
 where
     F: Future<Output = LocalServiceResponse>,
 {
-    timeout(OPERATION_TIMEOUT, operation)
+    tokio::pin!(operation);
+    match timeout(OPERATION_RECONCILIATION_THRESHOLD, operation.as_mut()).await {
+        Ok(response) => response,
+        Err(_) => {
+            tracing::warn!(
+                outcome = "operation_reconciling_after_deadline",
+                "shared local operation crossed its response deadline"
+            );
+            operation.await
+        }
+    }
+}
+
+async fn load_persisted_request_outcome(
+    store: Arc<crate::persistence::ProfileStore>,
+    session_public_key: KonclaveDomainCore::Ed25519PublicKey,
+    request_id: RequestId,
+) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
+    tokio::task::spawn_blocking(move || {
+        store.local_request_outcome(session_public_key, request_id.as_bytes())
+    })
+    .await
+    .context("joining local request outcome read")?
+    .context("reading local request outcome")
+}
+
+async fn persist_request_outcome(
+    store: Arc<crate::persistence::ProfileStore>,
+    session_public_key: KonclaveDomainCore::Ed25519PublicKey,
+    request: &LocalServiceRequest,
+    response: &LocalServiceResponse,
+) -> anyhow::Result<()> {
+    let request_id = request.request_id();
+    let plaintext = encode_local_request_outcome(request, response)?;
+    let completed_at = SystemUnixClock.now_unix_milliseconds();
+    tokio::task::spawn_blocking(move || {
+        store.record_local_request_outcome(
+            session_public_key,
+            request_id.as_bytes(),
+            completed_at,
+            &plaintext,
+        )
+    })
+    .await
+    .context("joining local request outcome write")?
+    .context("writing local request outcome")
+}
+
+struct SessionReconciliation {
+    client_response: LocalServiceResponse,
+    durable: bool,
+}
+
+async fn reconcile_session_response(
+    state: &ClientRequestState,
+    request: &LocalServiceRequest,
+    response: LocalServiceResponse,
+) -> SessionReconciliation {
+    for attempt in 1..=OUTCOME_PERSIST_ATTEMPTS {
+        if persist_request_outcome(
+            Arc::clone(&state.store),
+            state.grant.session_public_key(),
+            request,
+            &response,
+        )
         .await
-        .unwrap_or_else(|_| {
-            LocalServiceResponse::failure(request_id, LocalServiceErrorCode::DeadlineExceeded)
-        })
+        .is_ok()
+        {
+            return SessionReconciliation {
+                client_response: response,
+                durable: true,
+            };
+        }
+        if attempt < OUTCOME_PERSIST_ATTEMPTS {
+            tokio::time::sleep(OUTCOME_PERSIST_RETRY_DELAY).await;
+        }
+    }
+    tracing::error!(
+        outcome = "request_outcome_reconciliation_pending",
+        "shared local request outcome is known but not durably recorded"
+    );
+    SessionReconciliation {
+        client_response: LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::ReconciliationPending,
+        ),
+        durable: false,
+    }
+}
+
+fn encode_local_request_outcome(
+    request: &LocalServiceRequest,
+    response: &LocalServiceResponse,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let request = Zeroizing::new(request.encode());
+    let response = Zeroizing::new(
+        response
+            .encode()
+            .context("encoding local request terminal response")?,
+    );
+    let request_length = u32::try_from(request.len()).context("measuring local request")?;
+    let response_length = u32::try_from(response.len()).context("measuring local response")?;
+    let capacity = 1_usize
+        .checked_add(4)
+        .and_then(|value| value.checked_add(request.len()))
+        .and_then(|value| value.checked_add(4))
+        .and_then(|value| value.checked_add(response.len()))
+        .context("measuring local request outcome")?;
+    let mut encoded = Zeroizing::new(Vec::with_capacity(capacity));
+    encoded.push(LOCAL_REQUEST_OUTCOME_VERSION);
+    encoded.extend_from_slice(&request_length.to_be_bytes());
+    encoded.extend_from_slice(&request);
+    encoded.extend_from_slice(&response_length.to_be_bytes());
+    encoded.extend_from_slice(&response);
+    Ok(encoded)
+}
+
+fn decode_local_request_outcome(plaintext: &[u8]) -> anyhow::Result<(&[u8], LocalServiceResponse)> {
+    let (version, mut rest) = plaintext
+        .split_first()
+        .context("local request outcome is empty")?;
+    if *version != LOCAL_REQUEST_OUTCOME_VERSION {
+        anyhow::bail!("local request outcome version is unsupported");
+    }
+    let request_length = usize::try_from(u32::from_be_bytes(take_outcome::<4>(&mut rest)?))
+        .context("measuring stored local request")?;
+    if request_length > MAX_RPC_FRAME_BYTES || rest.len() < request_length {
+        anyhow::bail!("stored local request is outside its bound");
+    }
+    let (request, remaining) = rest.split_at(request_length);
+    rest = remaining;
+    let response_length = usize::try_from(u32::from_be_bytes(take_outcome::<4>(&mut rest)?))
+        .context("measuring stored local response")?;
+    if response_length > MAX_RPC_FRAME_BYTES || rest.len() != response_length {
+        anyhow::bail!("stored local response is outside its bound");
+    }
+    let response =
+        LocalServiceResponse::decode(rest).context("decoding stored local terminal response")?;
+    Ok((request, response))
+}
+
+fn take_outcome<const N: usize>(rest: &mut &[u8]) -> anyhow::Result<[u8; N]> {
+    if rest.len() < N {
+        anyhow::bail!("local request outcome is truncated");
+    }
+    let (value, remaining) = rest.split_at(N);
+    *rest = remaining;
+    value
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("local request outcome is malformed"))
 }
 
 async fn dispatch_request(
@@ -294,8 +881,29 @@ async fn dispatch_request(
     request: &LocalServiceRequest,
 ) -> LocalServiceResponse {
     let operation = request.operation().as_str();
+    let required = required_capability(operation);
+    if required.is_none_or(|capability| !state.grant.capabilities().permits(capability)) {
+        return LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::NotAuthorized,
+        );
+    }
     let result = match operation {
-        "service.status" => service_status(state.services.clone(), Arc::clone(&state.store)).await,
+        "request.cancel" => cancel_target_request(state, request.payload()),
+        "authorization.grant.retire" => {
+            let retired = state.registry.revoke_grant(state.grant.grant_id());
+            serde_json::to_vec(&GrantRetirementResult { retired })
+                .map_err(|_| "response_encoding_failed".to_string())
+        }
+        "service.status" => {
+            service_status(
+                state.services.clone(),
+                Arc::clone(&state.store),
+                state.grant.clone(),
+                Arc::clone(&state.registry),
+            )
+            .await
+        }
         "delivery.claim" => {
             delivery_claim(
                 &mut state.delivery,
@@ -321,6 +929,58 @@ async fn dispatch_request(
         _ => Err("unknown_operation".to_string()),
     };
     response_from_result(request.request_id(), result)
+}
+
+fn required_capability(operation: &str) -> Option<SessionCapabilities> {
+    if is_tool_operation(operation) {
+        Some(SessionCapabilities::PROFILE_OPERATIONS)
+    } else if operation.starts_with("delivery.") {
+        Some(SessionCapabilities::DELIVERY)
+    } else if operation == "service.status" {
+        Some(SessionCapabilities::STATUS)
+    } else if matches!(operation, "request.cancel" | "authorization.grant.retire") {
+        Some(SessionCapabilities::CONTROL)
+    } else {
+        None
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RequestCancellationRequest {
+    request_id: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestCancellationResult {
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantRetirementResult {
+    retired: bool,
+}
+
+fn cancel_target_request(state: &ClientRequestState, payload: &[u8]) -> Result<Vec<u8>, String> {
+    let request: RequestCancellationRequest =
+        serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
+    let request_id = crate::mcp::decode_hex::<16>(&request.request_id)
+        .map(RequestId::from_bytes)
+        .map_err(|_| "invalid_request".to_string())?;
+    let reason = match request.reason.as_str() {
+        "caller" => RequestCancellationReason::Caller,
+        "deadline" => RequestCancellationReason::Deadline,
+        _ => return Err("invalid_request".to_string()),
+    };
+    let key = LedgerKey::for_grant(&state.grant, request_id);
+    let cancellation = cancel_request(&state.ledger, &key, reason);
+    serde_json::to_vec(&RequestCancellationResult {
+        state: cancellation.as_str(),
+    })
+    .map_err(|_| "response_encoding_failed".to_string())
 }
 
 fn response_from_result(
@@ -355,6 +1015,7 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
         "relay_not_configured" => LocalServiceErrorCode::ProfileUnavailable,
         "local_service_not_authorized" => LocalServiceErrorCode::NotAuthorized,
+        "busy" => LocalServiceErrorCode::Busy,
         "deadline_exceeded" => LocalServiceErrorCode::DeadlineExceeded,
         _ => LocalServiceErrorCode::Internal,
     }
@@ -398,12 +1059,31 @@ struct ServiceStatusResult {
     pending_events: u32,
     claimed_events: u32,
     delivery_degraded: bool,
+    authorization_policy: &'static str,
+    authorization_provider: &'static str,
+    authorization_evidence: Vec<&'static str>,
+    authorization_policy_version: u64,
+    grant_expires_at_unix_milliseconds: u64,
+    grant_capabilities: u64,
+    active_grants: usize,
+    active_grants_for_issuer: usize,
+    active_grants_for_profile: usize,
+    grant_limit: usize,
+    grant_limit_per_issuer: usize,
+    grant_limit_per_profile: usize,
 }
 
 async fn service_status(
     services: ProfileServices,
     store: Arc<crate::persistence::ProfileStore>,
+    grant: SessionGrant,
+    registry: Arc<InMemorySessionAuthorizationRegistry>,
 ) -> Result<Vec<u8>, String> {
+    let capacity = registry.grant_capacity(
+        grant.issuer_key_id(),
+        grant.profile(),
+        SystemUnixClock.now_unix_milliseconds(),
+    );
     tokio::task::spawn_blocking(move || {
         let (pending_events, claimed_events) = store
             .remote_event_counts()
@@ -422,11 +1102,38 @@ async fn service_status(
             pending_events,
             claimed_events,
             delivery_degraded: services.health().is_degraded(),
+            authorization_policy: "AccountTrusted",
+            authorization_provider: "AccountTrusted",
+            authorization_evidence: evidence_names(grant.evidence()),
+            authorization_policy_version: grant.policy_version().get(),
+            grant_expires_at_unix_milliseconds: grant.expires_at_unix_milliseconds(),
+            grant_capabilities: grant.capabilities().bits(),
+            active_grants: capacity.active_global(),
+            active_grants_for_issuer: capacity.active_for_issuer(),
+            active_grants_for_profile: capacity.active_for_profile(),
+            grant_limit: MAX_SESSION_GRANTS,
+            grant_limit_per_issuer: MAX_GRANTS_PER_ISSUER,
+            grant_limit_per_profile: MAX_GRANTS_PER_PROFILE,
         })
         .map_err(|_| "response_encoding_failed".to_string())
     })
     .await
     .map_err(|_| "profile_unavailable".to_string())?
+}
+
+fn evidence_names(evidence: AuthorizationEvidenceSet) -> Vec<&'static str> {
+    [
+        AuthorizationEvidenceKind::AccountTrusted,
+        AuthorizationEvidenceKind::UserPresence,
+        AuthorizationEvidenceKind::HarnessAttested,
+        AuthorizationEvidenceKind::WorkloadIdentity,
+    ]
+    .into_iter()
+    .filter(|kind| {
+        AuthorizationEvidenceSet::new([*kind]).is_ok_and(|single| evidence.satisfies(single))
+    })
+    .map(AuthorizationEvidenceKind::as_str)
+    .collect()
 }
 
 #[derive(Deserialize)]
@@ -583,20 +1290,95 @@ const fn delivery_role(role: DeliveredRole) -> &'static str {
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
+enum LedgerPrincipal {
+    Issuer {
+        key_id: [u8; 16],
+        key_version: u32,
+    },
+    Session {
+        public_key: [u8; 32],
+        profile: String,
+    },
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct LedgerKey {
-    adapter_key_id: [u8; 16],
-    adapter_key_version: u32,
-    profile: String,
+    principal: LedgerPrincipal,
     request_id: [u8; 16],
 }
 
 impl LedgerKey {
-    fn new(binding: &LocalServiceBinding, request_id: RequestId) -> Self {
+    fn for_grant(grant: &SessionGrant, request_id: RequestId) -> Self {
         Self {
-            adapter_key_id: *binding.adapter_key_id().as_bytes(),
-            adapter_key_version: binding.adapter_key_version().get(),
-            profile: binding.profile().as_str().to_string(),
+            principal: LedgerPrincipal::Session {
+                public_key: *grant.session_public_key().as_bytes(),
+                profile: grant.profile().as_str().to_string(),
+            },
             request_id: *request_id.as_bytes(),
+        }
+    }
+
+    fn for_issuer(issuer: &IssuerConnection, request_id: RequestId) -> Self {
+        Self {
+            principal: LedgerPrincipal::Issuer {
+                key_id: *issuer.issuer_key_id.as_bytes(),
+                key_version: issuer.issuer_key_version.get(),
+            },
+            request_id: *request_id.as_bytes(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(
+        binding: &KonclaveLocalServiceTransport::LocalServiceBinding,
+        request_id: RequestId,
+    ) -> Self {
+        Self {
+            principal: LedgerPrincipal::Issuer {
+                key_id: *binding.adapter_key_id().as_bytes(),
+                key_version: binding.adapter_key_version().get(),
+            },
+            request_id: *request_id.as_bytes(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCancellationReason {
+    Caller,
+    Deadline,
+    Shutdown,
+}
+
+impl RequestCancellationReason {
+    const fn error_code(self) -> LocalServiceErrorCode {
+        match self {
+            Self::Caller => LocalServiceErrorCode::Cancelled,
+            Self::Deadline => LocalServiceErrorCode::DeadlineExceeded,
+            Self::Shutdown => LocalServiceErrorCode::ProfileUnavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestPhase {
+    PreCommit,
+    Committed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCancellationState {
+    Requested,
+    Reconciling,
+    Terminal,
+}
+
+impl RequestCancellationState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "cancellation_requested",
+            Self::Reconciling => "reconciling",
+            Self::Terminal => "terminal",
         }
     }
 }
@@ -605,6 +1387,9 @@ struct LedgerEntry {
     operation: String,
     payload: Vec<u8>,
     outcome: watch::Sender<Option<LocalServiceResponse>>,
+    phase: RequestPhase,
+    cancellation: Option<RequestCancellationReason>,
+    durable: bool,
     stored_bytes: usize,
 }
 
@@ -612,15 +1397,19 @@ struct LedgerEntry {
 struct RequestLedger {
     entries: HashMap<LedgerKey, LedgerEntry>,
     order: VecDeque<LedgerKey>,
+    cancellations: HashMap<LedgerKey, RequestCancellationReason>,
+    cancellation_order: VecDeque<LedgerKey>,
     stored_bytes: usize,
+    stopping: bool,
 }
 
 enum LedgerDecision {
     Execute,
     Wait(watch::Receiver<Option<LocalServiceResponse>>),
-    Cached(LocalServiceResponse),
+    Cached(LocalServiceResponse, bool),
     Conflict,
     Busy,
+    ShuttingDown,
 }
 
 fn begin_request(
@@ -629,13 +1418,17 @@ fn begin_request(
     request: &LocalServiceRequest,
 ) -> LedgerDecision {
     let mut ledger = lock(ledger);
+    if ledger.stopping {
+        return LedgerDecision::ShuttingDown;
+    }
     if let Some(entry) = ledger.entries.get(&key) {
         if entry.operation != request.operation().as_str() || entry.payload != request.payload() {
             return LedgerDecision::Conflict;
         }
-        return entry.outcome.borrow().clone().map_or_else(
+        let response = entry.outcome.borrow().clone();
+        return response.map_or_else(
             || LedgerDecision::Wait(entry.outcome.subscribe()),
-            LedgerDecision::Cached,
+            |response| LedgerDecision::Cached(response, entry.durable),
         );
     }
     let request_bytes = request
@@ -650,6 +1443,12 @@ fn begin_request(
     {
         return LedgerDecision::Busy;
     }
+    let cancellation = ledger.cancellations.remove(&key);
+    if cancellation.is_some() {
+        ledger
+            .cancellation_order
+            .retain(|candidate| candidate != &key);
+    }
     let (outcome, _) = watch::channel(None);
     ledger.order.push_back(key.clone());
     ledger.entries.insert(
@@ -658,6 +1457,9 @@ fn begin_request(
             operation: request.operation().as_str().to_string(),
             payload: request.payload().to_vec(),
             outcome,
+            phase: RequestPhase::PreCommit,
+            cancellation,
+            durable: false,
             stored_bytes: reservation,
         },
     );
@@ -665,10 +1467,90 @@ fn begin_request(
     LedgerDecision::Execute
 }
 
+fn commit_request(
+    ledger: &Arc<Mutex<RequestLedger>>,
+    key: &LedgerKey,
+) -> Option<RequestCancellationReason> {
+    let mut ledger = lock(ledger);
+    let entry = ledger.entries.get_mut(key)?;
+    if entry.outcome.borrow().is_some() {
+        return None;
+    }
+    if entry.cancellation.is_none() {
+        entry.phase = RequestPhase::Committed;
+    }
+    entry.cancellation
+}
+
+fn cancel_request(
+    ledger: &Arc<Mutex<RequestLedger>>,
+    key: &LedgerKey,
+    reason: RequestCancellationReason,
+) -> RequestCancellationState {
+    let mut ledger = lock(ledger);
+    let Some(entry) = ledger.entries.get_mut(key) else {
+        if !ledger.cancellations.contains_key(key) {
+            while ledger.cancellations.len() >= MAX_LEDGER_ENTRIES {
+                let Some(oldest) = ledger.cancellation_order.pop_front() else {
+                    break;
+                };
+                ledger.cancellations.remove(&oldest);
+            }
+            ledger.cancellations.insert(key.clone(), reason);
+            ledger.cancellation_order.push_back(key.clone());
+        }
+        return RequestCancellationState::Requested;
+    };
+    if entry.outcome.borrow().is_some() {
+        return RequestCancellationState::Terminal;
+    }
+    match entry.phase {
+        RequestPhase::PreCommit => {
+            entry.cancellation.get_or_insert(reason);
+            RequestCancellationState::Requested
+        }
+        RequestPhase::Committed => RequestCancellationState::Reconciling,
+    }
+}
+
+fn stop_admission_and_cancel_precommit(
+    ledger: &Arc<Mutex<RequestLedger>>,
+    reason: RequestCancellationReason,
+) {
+    let mut ledger = lock(ledger);
+    ledger.stopping = true;
+    for entry in ledger.entries.values_mut() {
+        if entry.phase == RequestPhase::PreCommit && entry.outcome.borrow().is_none() {
+            entry.cancellation.get_or_insert(reason);
+        }
+    }
+}
+
+fn discard_request(ledger: &Arc<Mutex<RequestLedger>>, key: &LedgerKey) {
+    let mut ledger = lock(ledger);
+    if let Some(entry) = ledger.entries.remove(key) {
+        ledger.stored_bytes = ledger.stored_bytes.saturating_sub(entry.stored_bytes);
+    }
+    ledger.order.retain(|candidate| candidate != key);
+    ledger.cancellations.remove(key);
+    ledger
+        .cancellation_order
+        .retain(|candidate| candidate != key);
+}
+
 fn complete_request(
     ledger: &Arc<Mutex<RequestLedger>>,
     key: &LedgerKey,
     response: LocalServiceResponse,
+) {
+    complete_request_with_durability(ledger, key, response, true);
+}
+
+fn complete_request_with_durability(
+    ledger: &Arc<Mutex<RequestLedger>>,
+    key: &LedgerKey,
+    response: LocalServiceResponse,
+    durable: bool,
 ) {
     let mut ledger = lock(ledger);
     let encoded = response.encode().map_or(0, |payload| payload.len());
@@ -680,6 +1562,7 @@ fn complete_request(
             .saturating_add(encoded);
         let reserved_bytes = entry.stored_bytes;
         entry.stored_bytes = actual_bytes;
+        entry.durable = durable;
         entry.outcome.send_replace(Some(response));
         Some((reserved_bytes, actual_bytes))
     } else {
@@ -694,6 +1577,22 @@ fn complete_request(
     evict_completed(&mut ledger, 0, 0);
 }
 
+fn mark_request_durable(ledger: &Arc<Mutex<RequestLedger>>, key: &LedgerKey) {
+    let mut ledger = lock(ledger);
+    if let Some(entry) = ledger.entries.get_mut(key)
+        && entry.outcome.borrow().is_some()
+    {
+        entry.durable = true;
+    }
+}
+
+fn request_is_durable(ledger: &Arc<Mutex<RequestLedger>>, key: &LedgerKey) -> bool {
+    lock(ledger)
+        .entries
+        .get(key)
+        .is_none_or(|entry| entry.durable)
+}
+
 fn evict_completed(ledger: &mut RequestLedger, required_entries: usize, required_bytes: usize) {
     let mut pending_seen = 0;
     while ledger.entries.len().saturating_add(required_entries) > MAX_LEDGER_ENTRIES
@@ -705,7 +1604,7 @@ fn evict_completed(ledger: &mut RequestLedger, required_entries: usize, required
         let completed = ledger
             .entries
             .get(&key)
-            .is_some_and(|entry| entry.outcome.borrow().is_some());
+            .is_some_and(|entry| entry.durable && entry.outcome.borrow().is_some());
         if !completed {
             ledger.order.push_back(key);
             pending_seen += 1;
@@ -724,35 +1623,15 @@ fn evict_completed(ledger: &mut RequestLedger, required_entries: usize, required
 struct RequestCompletion {
     ledger: Arc<Mutex<RequestLedger>>,
     key: LedgerKey,
-    request_id: RequestId,
-    completed: bool,
 }
 
 impl RequestCompletion {
-    fn new(ledger: Arc<Mutex<RequestLedger>>, key: LedgerKey, request_id: RequestId) -> Self {
-        Self {
-            ledger,
-            key,
-            request_id,
-            completed: false,
-        }
+    fn new(ledger: Arc<Mutex<RequestLedger>>, key: LedgerKey) -> Self {
+        Self { ledger, key }
     }
 
-    fn complete(&mut self, response: LocalServiceResponse) {
-        complete_request(&self.ledger, &self.key, response);
-        self.completed = true;
-    }
-}
-
-impl Drop for RequestCompletion {
-    fn drop(&mut self) {
-        if !self.completed {
-            complete_request(
-                &self.ledger,
-                &self.key,
-                LocalServiceResponse::failure(self.request_id, LocalServiceErrorCode::Internal),
-            );
-        }
+    fn complete(self, response: LocalServiceResponse, durable: bool) {
+        complete_request_with_durability(&self.ledger, &self.key, response, durable);
     }
 }
 
@@ -762,17 +1641,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use KonclaveCryptographicCore::LocalServiceIdentity;
     use KonclaveLocalServiceTransport::{
-        AdapterAuthorizationRegistry, AdapterKeyId, AdapterKeyVersion, AdapterRegistration,
-        ClientHandshakeRequest, ClientInstanceId, HarnessKind, InMemoryAdapterRegistry,
+        AdapterKeyId, AdapterKeyVersion, AdapterRegistration, AuthorizationEvidenceKind,
+        AuthorizationEvidenceSet, AuthorizationPolicy, AuthorizationPolicyVersion,
+        ClientInstanceId, HarnessKind, InMemorySessionAuthorizationRegistry,
         LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceBinding, LocalServiceEndpoint,
         LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse, MAX_RPC_PAYLOAD_BYTES,
         OperationName, ProfileAuthorization, RequestId, ServiceProfileId,
-        complete_client_handshake, connect_local_service, read_response, write_request,
+        SessionAuthorizationRegistry, SessionCapabilities, SessionGrant, SessionGrantClaims,
+        SessionGrantId, complete_session_client_handshake, connect_local_service, read_response,
+        write_request,
     };
     use tokio::sync::oneshot;
 
@@ -793,10 +1675,11 @@ mod tests {
         client_identity: LocalServiceIdentity,
         adapter_key_id: AdapterKeyId,
         adapter_key_version: AdapterKeyVersion,
+        registry: Arc<InMemorySessionAuthorizationRegistry>,
     }
 
     impl Fixture {
-        fn new() -> (Self, Arc<InMemoryAdapterRegistry>) {
+        fn new() -> (Self, Arc<InMemorySessionAuthorizationRegistry>) {
             let root = TestProfileRoot::new();
             let endpoint = LocalServiceEndpoint::parse(
                 root.path()
@@ -810,9 +1693,9 @@ mod tests {
             let client_identity = LocalServiceIdentity::generate().unwrap();
             let adapter_key_id = AdapterKeyId::from_bytes([7_u8; AdapterKeyId::LENGTH]);
             let adapter_key_version = AdapterKeyVersion::new(1).unwrap();
-            let mut registry = InMemoryAdapterRegistry::new();
+            let registry = Arc::new(InMemorySessionAuthorizationRegistry::new());
             registry
-                .register(
+                .register_issuer(
                     adapter_key_id,
                     adapter_key_version,
                     AdapterRegistration::new(
@@ -832,19 +1715,21 @@ mod tests {
                     client_identity,
                     adapter_key_id,
                     adapter_key_version,
+                    registry: Arc::clone(&registry),
                 },
-                Arc::new(registry),
+                registry,
             )
         }
 
         fn config(
             &self,
-            registry: Arc<dyn AdapterAuthorizationRegistry>,
+            registry: Arc<InMemorySessionAuthorizationRegistry>,
         ) -> SharedLocalServiceConfig {
             SharedLocalServiceConfig {
                 endpoint: self.endpoint.clone(),
                 service_identity: Arc::clone(&self.service_identity),
-                adapter_registry: registry,
+                authorization_registry: registry,
+                authorization_policy: AuthorizationPolicy::account_trusted(),
                 profile_source: Arc::new(self.root.settings()),
                 supervisor: ProfileSupervisorConfig::default(),
             }
@@ -862,16 +1747,33 @@ mod tests {
                         Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
                     }
                 };
-                complete_client_handshake(
+                let grant = SessionGrant::new(SessionGrantClaims {
+                    grant_id: SessionGrantId::from_bytes([instance_seed; 16]),
+                    issuer_key_id: self.adapter_key_id,
+                    issuer_key_version: self.adapter_key_version,
+                    profile: ServiceProfileId::parse(profile).unwrap(),
+                    session_public_key: self.client_identity.public_key(),
+                    harness: HarnessKind::Copilot,
+                    evidence: AuthorizationEvidenceSet::new([
+                        AuthorizationEvidenceKind::AccountTrusted,
+                    ])
+                    .unwrap(),
+                    policy_version: AuthorizationPolicyVersion::new(1).unwrap(),
+                    issued_at_unix_milliseconds: 1,
+                    expires_at_unix_milliseconds: u64::MAX,
+                    capabilities: SessionCapabilities::ALL,
+                })
+                .unwrap();
+                if self.registry.active_grant(grant.grant_id(), 1).is_none() {
+                    self.registry.issue_grant(grant.clone(), 1).unwrap();
+                }
+                complete_session_client_handshake(
                     &mut stream,
-                    &ClientHandshakeRequest {
-                        adapter_key_id: self.adapter_key_id,
-                        adapter_key_version: self.adapter_key_version,
+                    &KonclaveLocalServiceTransport::SessionHandshakeRequest {
+                        grant,
                         client_instance: ClientInstanceId::from_bytes(
                             [instance_seed; ClientInstanceId::LENGTH],
                         ),
-                        harness: HarnessKind::Copilot,
-                        profile: ServiceProfileId::parse(profile).unwrap(),
                     },
                     &self.client_identity,
                     self.service_identity.public_key(),
@@ -882,45 +1784,6 @@ mod tests {
             })
             .await
             .expect("shared service startup and handshake exceeded the test deadline")
-        }
-    }
-
-    struct RevocableRegistry {
-        adapter_key_id: AdapterKeyId,
-        adapter_key_version: AdapterKeyVersion,
-        registration: Mutex<Option<AdapterRegistration>>,
-    }
-
-    impl RevocableRegistry {
-        fn new(fixture: &Fixture) -> Self {
-            Self {
-                adapter_key_id: fixture.adapter_key_id,
-                adapter_key_version: fixture.adapter_key_version,
-                registration: Mutex::new(Some(AdapterRegistration::new(
-                    fixture.client_identity.public_key(),
-                    HarnessKind::Copilot,
-                    ProfileAuthorization::Namespace(ServiceProfileId::parse("session").unwrap()),
-                ))),
-            }
-        }
-
-        fn revoke(&self) {
-            *super::lock(&self.registration) = None;
-        }
-    }
-
-    impl AdapterAuthorizationRegistry for RevocableRegistry {
-        fn active_registration(
-            &self,
-            adapter_key_id: AdapterKeyId,
-            adapter_key_version: AdapterKeyVersion,
-        ) -> Option<AdapterRegistration> {
-            if adapter_key_id != self.adapter_key_id
-                || adapter_key_version != self.adapter_key_version
-            {
-                return None;
-            }
-            super::lock(&self.registration).clone()
         }
     }
 
@@ -948,6 +1811,47 @@ mod tests {
         .unwrap_or_else(|_| {
             panic!("shared service operation '{operation}' exceeded the test deadline")
         })
+    }
+
+    async fn wait_for_outcome_database(
+        root: &TestProfileRoot,
+        profile: &str,
+    ) -> std::path::PathBuf {
+        let database = root.root().join(profile).join("profile.sqlite");
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                let candidate = database.clone();
+                let ready = tokio::task::spawn_blocking(move || {
+                    if !candidate.is_file() {
+                        return false;
+                    }
+                    rusqlite::Connection::open_with_flags(
+                        candidate,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .unwrap()
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_schema
+                         WHERE type = 'table'
+                           AND name = 'daemon_local_request_outcome'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                        == 1
+                })
+                .await
+                .unwrap();
+                if ready {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("local request outcome table was not created");
+        database
     }
 
     fn binding(profile: &str) -> LocalServiceBinding {
@@ -1033,7 +1937,7 @@ mod tests {
 
         assert!(matches!(
             super::begin_request(&ledger, key.clone(), &request),
-            super::LedgerDecision::Cached(cached) if cached == response
+            super::LedgerDecision::Cached(cached, true) if cached == response
         ));
         let conflict = ledger_request(4, "create_conversation", b"{}".to_vec());
         assert!(matches!(
@@ -1043,7 +1947,153 @@ mod tests {
     }
 
     #[test]
-    fn an_abandoned_request_publishes_a_finite_internal_outcome() {
+    fn cancellation_is_terminal_only_before_commit() {
+        let ledger = Arc::new(std::sync::Mutex::new(super::RequestLedger::default()));
+        let binding = binding("session-cancellation");
+        let request = ledger_request(12, "send_message", b"{}".to_vec());
+        let key = super::LedgerKey::new(&binding, request.request_id());
+        assert!(matches!(
+            super::begin_request(&ledger, key.clone(), &request),
+            super::LedgerDecision::Execute
+        ));
+        assert_eq!(
+            super::cancel_request(&ledger, &key, super::RequestCancellationReason::Caller),
+            super::RequestCancellationState::Requested
+        );
+        assert_eq!(
+            super::commit_request(&ledger, &key),
+            Some(super::RequestCancellationReason::Caller)
+        );
+        let cancelled =
+            LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Cancelled);
+        super::complete_request(&ledger, &key, cancelled);
+        assert_eq!(
+            super::cancel_request(&ledger, &key, super::RequestCancellationReason::Deadline),
+            super::RequestCancellationState::Terminal
+        );
+
+        let committed = ledger_request(13, "send_message", b"{}".to_vec());
+        let committed_key = super::LedgerKey::new(&binding, committed.request_id());
+        assert!(matches!(
+            super::begin_request(&ledger, committed_key.clone(), &committed),
+            super::LedgerDecision::Execute
+        ));
+        assert_eq!(super::commit_request(&ledger, &committed_key), None);
+        assert_eq!(
+            super::cancel_request(
+                &ledger,
+                &committed_key,
+                super::RequestCancellationReason::Deadline
+            ),
+            super::RequestCancellationState::Reconciling
+        );
+
+        let raced = ledger_request(14, "send_message", b"{}".to_vec());
+        let raced_key = super::LedgerKey::new(&binding, raced.request_id());
+        assert_eq!(
+            super::cancel_request(
+                &ledger,
+                &raced_key,
+                super::RequestCancellationReason::Deadline
+            ),
+            super::RequestCancellationState::Requested
+        );
+        assert!(matches!(
+            super::begin_request(&ledger, raced_key.clone(), &raced),
+            super::LedgerDecision::Execute
+        ));
+        assert_eq!(
+            super::commit_request(&ledger, &raced_key),
+            Some(super::RequestCancellationReason::Deadline)
+        );
+    }
+
+    #[test]
+    fn admission_pressure_never_discards_a_racing_cancellation() {
+        let ledger = Arc::new(std::sync::Mutex::new(super::RequestLedger::default()));
+        let binding = binding("session-cancellation-pressure");
+        let payload = vec![1_u8; MAX_RPC_PAYLOAD_BYTES];
+        let mut first = None;
+        for seed in 1..=64 {
+            let request = ledger_request(seed, "send_message", payload.clone());
+            let key = super::LedgerKey::new(&binding, request.request_id());
+            match super::begin_request(&ledger, key.clone(), &request) {
+                super::LedgerDecision::Execute => {
+                    if first.is_none() {
+                        first = Some((key, request));
+                    }
+                }
+                super::LedgerDecision::Busy => break,
+                _ => panic!("a unique request returned an invalid ledger decision"),
+            };
+        }
+        let target = ledger_request(200, "send_message", payload);
+        let target_key = super::LedgerKey::new(&binding, target.request_id());
+        assert_eq!(
+            super::cancel_request(
+                &ledger,
+                &target_key,
+                super::RequestCancellationReason::Deadline
+            ),
+            super::RequestCancellationState::Requested
+        );
+        assert!(matches!(
+            super::begin_request(&ledger, target_key.clone(), &target),
+            super::LedgerDecision::Busy
+        ));
+
+        let (first_key, first_request) = first.unwrap();
+        super::complete_request(
+            &ledger,
+            &first_key,
+            LocalServiceResponse::failure(
+                first_request.request_id(),
+                LocalServiceErrorCode::Internal,
+            ),
+        );
+        assert!(matches!(
+            super::begin_request(&ledger, target_key.clone(), &target),
+            super::LedgerDecision::Execute
+        ));
+        assert_eq!(
+            super::commit_request(&ledger, &target_key),
+            Some(super::RequestCancellationReason::Deadline)
+        );
+    }
+
+    #[test]
+    fn shutdown_atomically_cancels_precommit_work_and_stops_admission() {
+        let ledger = Arc::new(std::sync::Mutex::new(super::RequestLedger::default()));
+        let binding = binding("session-shutdown-admission");
+        let admitted = ledger_request(23, "get_identity", b"{}".to_vec());
+        let admitted_key = super::LedgerKey::new(&binding, admitted.request_id());
+        assert!(matches!(
+            super::begin_request(&ledger, admitted_key.clone(), &admitted),
+            super::LedgerDecision::Execute
+        ));
+
+        super::stop_admission_and_cancel_precommit(
+            &ledger,
+            super::RequestCancellationReason::Shutdown,
+        );
+
+        assert_eq!(
+            super::commit_request(&ledger, &admitted_key),
+            Some(super::RequestCancellationReason::Shutdown)
+        );
+        let later = ledger_request(24, "get_identity", b"{}".to_vec());
+        assert!(matches!(
+            super::begin_request(
+                &ledger,
+                super::LedgerKey::new(&binding, later.request_id()),
+                &later
+            ),
+            super::LedgerDecision::ShuttingDown
+        ));
+    }
+
+    #[test]
+    fn an_abandoned_request_never_publishes_a_false_terminal_outcome() {
         let ledger = Arc::new(std::sync::Mutex::new(super::RequestLedger::default()));
         let binding = binding("session-abandoned");
         let request = ledger_request(5, "get_identity", b"{}".to_vec());
@@ -1056,30 +2106,68 @@ mod tests {
         drop(super::RequestCompletion::new(
             Arc::clone(&ledger),
             key.clone(),
-            request.request_id(),
         ));
 
         assert!(matches!(
             super::begin_request(&ledger, key, &request),
-            super::LedgerDecision::Cached(LocalServiceResponse::Failure {
-                code: LocalServiceErrorCode::Internal,
+            super::LedgerDecision::Wait(_)
+        ));
+    }
+
+    #[test]
+    fn an_unpersisted_actual_outcome_remains_reconcilable_without_leaking_the_slot() {
+        let ledger = Arc::new(std::sync::Mutex::new(super::RequestLedger::default()));
+        let binding = binding("session-reconciliation-pending");
+        let request = ledger_request(22, "get_identity", b"{}".to_vec());
+        let key = super::LedgerKey::new(&binding, request.request_id());
+        assert!(matches!(
+            super::begin_request(&ledger, key.clone(), &request),
+            super::LedgerDecision::Execute
+        ));
+        assert_eq!(super::commit_request(&ledger, &key), None);
+        let actual =
+            LocalServiceResponse::success(request.request_id(), br#"{"device_id":"aa"}"#.to_vec())
+                .unwrap();
+        super::RequestCompletion::new(Arc::clone(&ledger), key.clone())
+            .complete(actual.clone(), false);
+        let caller_outcome = LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::ReconciliationPending,
+        );
+        assert!(matches!(
+            caller_outcome,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::ReconciliationPending,
                 ..
-            })
+            }
+        ));
+        for seed in 30..=64 {
+            let pressure = ledger_request(seed, "send_message", vec![1_u8; MAX_RPC_PAYLOAD_BYTES]);
+            let pressure_key = super::LedgerKey::new(&binding, pressure.request_id());
+            if matches!(
+                super::begin_request(&ledger, pressure_key, &pressure),
+                super::LedgerDecision::Busy
+            ) {
+                break;
+            }
+        }
+        assert!(matches!(
+            super::begin_request(&ledger, key, &request),
+            super::LedgerDecision::Cached(cached, false) if cached == actual
         ));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_operation_that_never_finishes_has_a_finite_deadline_outcome() {
+    async fn an_operation_crossing_the_deadline_records_its_actual_outcome() {
         let request_id = RequestId::from_bytes([6_u8; 16]);
-        let response = super::with_operation_deadline(
-            request_id,
-            std::future::pending::<LocalServiceResponse>(),
-        )
+        let expected = LocalServiceResponse::success(request_id, b"settled".to_vec()).unwrap();
+        let response = super::await_operation_outcome(async {
+            tokio::time::sleep(super::OPERATION_RECONCILIATION_THRESHOLD + Duration::from_secs(1))
+                .await;
+            expected.clone()
+        })
         .await;
-        assert_eq!(
-            response,
-            LocalServiceResponse::failure(request_id, LocalServiceErrorCode::DeadlineExceeded)
-        );
+        assert_eq!(response, expected);
     }
 
     #[tokio::test]
@@ -1138,6 +2226,20 @@ mod tests {
             panic!("second identity request failed");
         };
         assert_ne!(first_payload, second_payload);
+        let status = request(&mut first, 21, "service.status", b"{}").await;
+        let LocalServiceResponse::Success { payload, .. } = status else {
+            panic!("service status request failed");
+        };
+        let status: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(status["authorizationProvider"], "AccountTrusted");
+        assert_eq!(status["authorizationEvidence"][0], "account_trusted");
+        assert_eq!(status["activeGrants"], 2);
+        assert_eq!(status["grantLimit"], super::MAX_SESSION_GRANTS);
+        assert_eq!(status["grantLimitPerIssuer"], super::MAX_GRANTS_PER_ISSUER);
+        assert_eq!(
+            status["grantLimitPerProfile"],
+            super::MAX_GRANTS_PER_PROFILE
+        );
         assert!(fixture.root.is_locked("session-a"));
         assert!(fixture.root.is_locked("session-b"));
 
@@ -1168,12 +2270,50 @@ mod tests {
             }
             stream = fixture.connect("session-retry", 3) => stream,
         };
-        let initial = request(&mut first, 9, "create_conversation", b"{}").await;
+        let initial = ledger_request(9, "create_conversation", b"{}".to_vec());
+        write_request(&mut first, &initial).await.unwrap();
+        let outcome_database = wait_for_outcome_database(&fixture.root, "session-retry").await;
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                let database = outcome_database.clone();
+                let recorded = tokio::task::spawn_blocking(move || {
+                    rusqlite::Connection::open_with_flags(
+                        database,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .unwrap()
+                    .query_row(
+                        "SELECT count(*) FROM daemon_local_request_outcome",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                })
+                .await
+                .unwrap();
+                if recorded == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the terminal request outcome was not persisted");
         drop(first);
 
-        let mut reconnected = fixture.connect("session-retry", 4).await;
+        let mut reconnected = fixture.connect("session-retry", 3).await;
         let retried = request(&mut reconnected, 9, "create_conversation", b"{}").await;
-        assert_eq!(initial, retried);
+        assert!(matches!(retried, LocalServiceResponse::Success { .. }));
+        let conversations = request(&mut reconnected, 10, "list_conversations", b"{}").await;
+        let LocalServiceResponse::Success { payload, .. } = conversations else {
+            panic!("conversation listing failed");
+        };
+        let conversations: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            conversations["conversation_ids"].as_array().unwrap().len(),
+            1
+        );
 
         drop(reconnected);
         stop_tx.send(()).unwrap();
@@ -1185,9 +2325,163 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn outcome_read_failure_discards_admission_without_wedging_retry() {
+        let (fixture, registry) = Fixture::new();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(registry),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut client = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the client connected: {result:?}")
+            }
+            stream = fixture.connect("session-storage-failure", 25) => stream,
+        };
+        let database = wait_for_outcome_database(&fixture.root, "session-storage-failure").await;
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(database)
+                .unwrap()
+                .execute("DROP TABLE daemon_local_request_outcome", [])
+                .unwrap();
+        })
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                request(&mut client, 25, "get_identity", b"{}").await,
+                LocalServiceResponse::Failure {
+                    code: LocalServiceErrorCode::ProfileUnavailable,
+                    ..
+                }
+            ));
+        }
+
+        drop(client);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn outcome_write_failure_returns_nonterminal_and_exact_retry_recovers() {
+        let (fixture, registry) = Fixture::new();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(registry),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut client = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the client connected: {result:?}")
+            }
+            stream = fixture.connect("session-write-failure", 26) => stream,
+        };
+        let database = wait_for_outcome_database(&fixture.root, "session-write-failure").await;
+        let fault_database = database.clone();
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(fault_database)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER fail_local_request_outcome_insert
+                     BEFORE INSERT ON daemon_local_request_outcome
+                     BEGIN
+                         SELECT RAISE(FAIL, 'injected outcome write failure');
+                     END;",
+                )
+                .unwrap();
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            request(&mut client, 26, "get_identity", b"{}").await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::ReconciliationPending,
+                ..
+            }
+        ));
+
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(database)
+                .unwrap()
+                .execute("DROP TRIGGER fail_local_request_outcome_insert", [])
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            request(&mut client, 26, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop(client);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn authenticated_cancellation_survives_a_replacement_grant_race() {
+        let (fixture, registry) = Fixture::new();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(registry),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut control = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the control client connected: {result:?}")
+            }
+            stream = fixture.connect("session-cancel-race", 15) => stream,
+        };
+        let cancellation = request(
+            &mut control,
+            15,
+            "request.cancel",
+            br#"{"requestId":"10101010101010101010101010101010","reason":"deadline"}"#,
+        )
+        .await;
+        let LocalServiceResponse::Success { payload, .. } = cancellation else {
+            panic!("cancellation request failed");
+        };
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["state"], "cancellation_requested");
+
+        let mut replacement = fixture.connect("session-cancel-race", 16).await;
+        assert!(matches!(
+            request(&mut replacement, 16, "get_identity", b"{}").await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::DeadlineExceeded,
+                ..
+            }
+        ));
+
+        drop((control, replacement));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn revocation_closes_an_already_authenticated_connection() {
-        let (fixture, _) = Fixture::new();
-        let registry = Arc::new(RevocableRegistry::new(&fixture));
+        let (fixture, registry) = Fixture::new();
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
             fixture.config(registry.clone()),
@@ -1206,7 +2500,7 @@ mod tests {
             LocalServiceResponse::Success { .. }
         ));
 
-        registry.revoke();
+        assert!(registry.revoke_grant(SessionGrantId::from_bytes([8; 16])));
         let closed = tokio::time::timeout(
             super::AUTHORIZATION_RECHECK_INTERVAL + Duration::from_secs(2),
             read_response(&mut client),

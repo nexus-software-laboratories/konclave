@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   nodeFileOperations,
-  readAdapterSigningSeed,
+  readIssuerSigningSeed,
   resolveLocalServiceConfig,
   ServiceConfigurationError,
   type SecureFileOperations,
@@ -24,20 +24,24 @@ function writeOwnerOnly(path: string, contents: string | Buffer): void {
   chmodSync(path, 0o600);
 }
 
-function serviceConfigRecord(signingKeyFile: string): Record<string, unknown> {
+function serviceConfigRecord(issuerKeyFile: string): Record<string, unknown> {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     endpoint: join(tmpdir(), 'konclave.sock'),
-    adapterKeyId: '00'.repeat(16),
-    adapterKeyVersion: 1,
+    issuerKeyId: '00'.repeat(16),
+    issuerKeyVersion: 1,
     harness: 'copilot',
     serviceKey: '11'.repeat(32),
-    signingKeyFile,
+    issuerKeyFile,
+    authorizationPolicy: {
+      version: 1,
+      acceptedEvidence: [['account_trusted']],
+    },
   };
 }
 
-function serviceConfig(signingKeyFile: string): string {
-  return JSON.stringify(serviceConfigRecord(signingKeyFile));
+function serviceConfig(issuerKeyFile: string): string {
+  return JSON.stringify(serviceConfigRecord(issuerKeyFile));
 }
 
 function fakeFiles(
@@ -108,8 +112,8 @@ afterEach(() => {
 describe('installed service custody', () => {
   it('reads the installer-protected Windows record through one bounded descriptor', () => {
     const directory = tmpdir();
-    const signingKeyFile = join(directory, 'adapter.key');
-    const files = fakeFiles(serviceConfig(signingKeyFile), {
+    const issuerKeyFile = join(directory, 'account-issuer.key');
+    const files = fakeFiles(serviceConfig(issuerKeyFile), {
       currentUid: Number.NaN,
       noFollowFlag: 0,
     });
@@ -120,14 +124,14 @@ describe('installed service custody', () => {
         'win32',
         files,
       ),
-    ).toMatchObject({ signingKeyFile });
+    ).toMatchObject({ issuerKeyFile });
     expect(files.closed).toEqual([7]);
   });
 
   it('parses a valid bounded config through the verified descriptor', () => {
     const directory = tmpdir();
-    const signingKeyFile = join(directory, 'adapter.key');
-    const files = fakeFiles(serviceConfig(signingKeyFile));
+    const issuerKeyFile = join(directory, 'account-issuer.key');
+    const files = fakeFiles(serviceConfig(issuerKeyFile));
     const config = resolveLocalServiceConfig(
       { KONCLAVE_SERVICE_CONFIG_FILE: `  ${join(directory, 'service.json')}  ` },
       directory,
@@ -136,18 +140,18 @@ describe('installed service custody', () => {
     );
 
     expect(config).toMatchObject({
-      adapterKeyVersion: 1,
+      issuerKeyVersion: 1,
       endpoint: join(tmpdir(), 'konclave.sock'),
       harness: 'copilot',
-      signingKeyFile,
+      issuerKeyFile,
     });
-    expect(config.adapterKeyId).toEqual(Buffer.alloc(16));
+    expect(config.issuerKeyId).toEqual(Buffer.alloc(16));
     expect(config.serviceKey).toEqual(Buffer.alloc(32, 0x11));
     expect(files.closed).toEqual([7]);
   });
 
   it('uses the installed sidecar when no override is present', () => {
-    const files = fakeFiles(serviceConfig(join(tmpdir(), 'adapter.key')));
+    const files = fakeFiles(serviceConfig(join(tmpdir(), 'account-issuer.key')));
     resolveLocalServiceConfig({}, tmpdir(), 'linux', files);
     expect(files.opened).toEqual([join(tmpdir(), 'konclave.service.json')]);
   });
@@ -177,22 +181,28 @@ describe('installed service custody', () => {
   });
 
   it('rejects malformed or unsafe configuration fields', () => {
-    const signingKeyFile = join(tmpdir(), 'adapter.key');
-    const valid = serviceConfigRecord(signingKeyFile);
+    const issuerKeyFile = join(tmpdir(), 'account-issuer.key');
+    const valid = serviceConfigRecord(issuerKeyFile);
     const invalid: unknown[] = [
       '{',
       [],
-      { ...valid, schemaVersion: 2 },
+      { ...valid, schemaVersion: 3 },
       { ...valid, endpoint: '' },
       { ...valid, endpoint: 'a'.repeat(201) },
       { ...valid, endpoint: 'https://localhost/socket' },
       { ...valid, endpoint: 'localhost:1234' },
       { ...valid, harness: 'other' },
-      { ...valid, adapterKeyVersion: 0 },
-      { ...valid, adapterKeyVersion: 1.5 },
-      { ...valid, signingKeyFile: 'relative.key' },
-      { ...valid, adapterKeyId: 'zz' },
+      { ...valid, issuerKeyVersion: 0 },
+      { ...valid, issuerKeyVersion: 1.5 },
+      { ...valid, issuerKeyFile: 'relative.key' },
+      { ...valid, issuerKeyId: 'zz' },
       { ...valid, serviceKey: '00' },
+      { ...valid, authorizationPolicy: null },
+      { ...valid, authorizationPolicy: { version: 1, acceptedEvidence: [] } },
+      {
+        ...valid,
+        authorizationPolicy: { version: 1, acceptedEvidence: [['harness_attested']] },
+      },
     ];
 
     for (const value of invalid) {
@@ -206,16 +216,39 @@ describe('installed service custody', () => {
         ),
       ).toThrow(ServiceConfigurationError);
     }
+
+    const strongerOnly = {
+      ...valid,
+      authorizationPolicy: { version: 1, acceptedEvidence: [['harness_attested']] },
+    };
+    const error = (() => {
+      try {
+        resolveLocalServiceConfig(
+          { KONCLAVE_SERVICE_CONFIG_FILE: join(tmpdir(), 'service.json') },
+          tmpdir(),
+          'linux',
+          fakeFiles(JSON.stringify(strongerOnly)),
+        );
+      } catch (failure) {
+        return failure;
+      }
+      return undefined;
+    })();
+    expect(error).toBeInstanceOf(ServiceConfigurationError);
+    if (!(error instanceof ServiceConfigurationError)) {
+      throw new Error('expected a service configuration error');
+    }
+    expect(error.code).toBe('required_evidence_unavailable');
   });
 
   it('reads only the exact raw seed format installed by Konclave', () => {
     const raw = Buffer.alloc(32, 3);
-    expect(readAdapterSigningSeed('/adapter.key', 'linux', fakeFiles(raw))).toEqual(raw);
+    expect(readIssuerSigningSeed('/account-issuer.key', 'linux', fakeFiles(raw))).toEqual(raw);
 
     for (const invalid of [Buffer.alloc(31), Buffer.alloc(33), Buffer.from('04'.repeat(32))]) {
-      expect(() => readAdapterSigningSeed('/adapter.key', 'linux', fakeFiles(invalid))).toThrow(
-        'adapter key is invalid',
-      );
+      expect(() =>
+        readIssuerSigningSeed('/account-issuer.key', 'linux', fakeFiles(invalid)),
+      ).toThrow('issuer key is invalid');
     }
   });
 
@@ -241,17 +274,17 @@ describe('installed service custody', () => {
     'reads owner-only regular files through the opened descriptor',
     () => {
       const directory = temporaryDirectory();
-      const signingKeyFile = join(directory, 'adapter.key');
+      const issuerKeyFile = join(directory, 'account-issuer.key');
       const configFile = join(directory, 'service.json');
-      writeOwnerOnly(signingKeyFile, Buffer.alloc(32, 7));
-      writeOwnerOnly(configFile, serviceConfig(signingKeyFile));
+      writeOwnerOnly(issuerKeyFile, Buffer.alloc(32, 7));
+      writeOwnerOnly(configFile, serviceConfig(issuerKeyFile));
 
       const config = resolveLocalServiceConfig(
         { KONCLAVE_SERVICE_CONFIG_FILE: configFile },
         directory,
       );
-      expect(config.adapterKeyId).toEqual(Buffer.alloc(16));
-      expect(readAdapterSigningSeed(signingKeyFile)).toEqual(Buffer.alloc(32, 7));
+      expect(config.issuerKeyId).toEqual(Buffer.alloc(16));
+      expect(readIssuerSigningSeed(issuerKeyFile)).toEqual(Buffer.alloc(32, 7));
     },
   );
 
@@ -259,11 +292,11 @@ describe('installed service custody', () => {
     'rejects group-readable files and symbolic-link substitution',
     () => {
       const directory = temporaryDirectory();
-      const signingKeyFile = join(directory, 'adapter.key');
+      const issuerKeyFile = join(directory, 'adapter.key');
       const configFile = join(directory, 'service.json');
       const linkedConfig = join(directory, 'linked-service.json');
-      writeOwnerOnly(signingKeyFile, Buffer.alloc(32, 7));
-      writeOwnerOnly(configFile, serviceConfig(signingKeyFile));
+      writeOwnerOnly(issuerKeyFile, Buffer.alloc(32, 7));
+      writeOwnerOnly(configFile, serviceConfig(issuerKeyFile));
 
       chmodSync(configFile, 0o640);
       expect(() =>

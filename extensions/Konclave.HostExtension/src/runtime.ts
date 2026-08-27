@@ -251,14 +251,17 @@ export async function bootExtension(
     // binds to the same durable profile rather than creating a second one.
     const profile = deriveProfileId(environment);
     client = await connect(environment, runtimeModuleDir, profile, platform);
-    const session = await options.joinSession(createExtensionJoinConfig(client, commandOutput));
+    const connectedClient = client;
+    const session = await options.joinSession(
+      createExtensionJoinConfig(connectedClient, commandOutput),
+    );
     const controller = attachExtension(
       session,
       options.diagnostics,
       options.processController,
       options.timers,
     );
-    const deliveryChannel = createLocalServiceDeliveryChannel(client);
+    const deliveryChannel = createLocalServiceDeliveryChannel(connectedClient);
     const coordinator = createDeliveryCoordinator({
       channel: deliveryChannel,
       session,
@@ -271,7 +274,10 @@ export async function bootExtension(
     });
     controller.attachDelivery(coordinator, () => {
       deliveryRuntime.stop();
-      deliveryChannel.close();
+      void connectedClient.retire().catch((error: unknown) => {
+        options.diagnostics.error(`Konclave grant retirement failed: ${formatError(error)}`);
+        connectedClient.close();
+      });
     });
     void deliveryRuntime.completed.catch((error: unknown) => {
       options.diagnostics.error(`Konclave delivery stopped: ${formatError(error)}`);

@@ -25,6 +25,8 @@ struct AcceptancePaths {
     service: PathBuf,
     second_service: PathBuf,
     client_module: PathBuf,
+    generic_module: PathBuf,
+    generic_skill: PathBuf,
     install_root: PathBuf,
     relay_endpoint: String,
     enrollment_source: PathBuf,
@@ -43,6 +45,8 @@ impl AcceptancePaths {
             service: required_path("KONCLAVE_ACCEPTANCE_SERVICE"),
             second_service: required_path("KONCLAVE_ACCEPTANCE_SECOND_SERVICE"),
             client_module: required_path("KONCLAVE_ACCEPTANCE_CLIENT_MODULE"),
+            generic_module: required_path("KONCLAVE_ACCEPTANCE_GENERIC_MODULE"),
+            generic_skill: required_path("KONCLAVE_ACCEPTANCE_GENERIC_SKILL"),
             install_root: required_path("KONCLAVE_ACCEPTANCE_INSTALL_ROOT"),
             relay_endpoint: required("KONCLAVE_ACCEPTANCE_RELAY_ENDPOINT"),
             enrollment_source: required_path("KONCLAVE_ACCEPTANCE_ENROLLMENT_SOURCE"),
@@ -137,6 +141,8 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
         assert!(binary.is_file(), "packaged binary is missing");
     }
     assert!(paths.client_module.is_file());
+    assert!(paths.generic_module.is_file());
+    assert!(paths.generic_skill.is_file());
     assert!(
         !paths
             .client_module
@@ -157,6 +163,8 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
             OsString::from("init"),
             OsString::from("--relay-endpoint"),
             OsString::from(&paths.relay_endpoint),
+            OsString::from("--authorization-policy"),
+            OsString::from("account-trusted"),
             OsString::from("--profile-root"),
             paths.profile_root.clone().into_os_string(),
             OsString::from("--external-source"),
@@ -171,7 +179,13 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
         true,
     );
     assert!(init_output.contains("shared local service"));
-    for (profile, value) in [("session-packaged-a", 31_u8), ("session-packaged-b", 32_u8)] {
+    let installed_generic = paths.extension_root.join("generic.mjs");
+    std::fs::copy(&paths.generic_module, &installed_generic).unwrap();
+    for (profile, value) in [
+        ("session-packaged-a", 31_u8),
+        ("session-packaged-b", 32_u8),
+        ("generic-packaged", 33_u8),
+    ] {
         create_or_verify_owner_protected_file(
             &paths.profile_keys.join(format!("{profile}.key")),
             &[value; 32],
@@ -192,26 +206,43 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
         installation.profile_custody(),
         &LocalServiceProfileCustody::ExternalDirectory(paths.profile_keys.clone())
     );
-    let adapter = &installation.adapters()[0];
-    let adapter_seed_path = paths
+    let issuer = &installation.issuers()[0];
+    let issuer_seed_path = paths
         .profile_root
         .parent()
         .unwrap()
         .join("service")
-        .join("copilot-adapter.key");
-    let adapter_seed = LocalServiceSigningSeed::from_reader(
-        open_owner_protected_file(&adapter_seed_path).unwrap(),
-    )
-    .unwrap();
-    let adapter_identity = LocalServiceIdentity::from_signing_seed(&adapter_seed).unwrap();
+        .join("account-issuer.key");
+    let issuer_seed =
+        LocalServiceSigningSeed::from_reader(open_owner_protected_file(&issuer_seed_path).unwrap())
+            .unwrap();
+    let issuer_identity = LocalServiceIdentity::from_signing_seed(&issuer_seed).unwrap();
 
     let service = SharedServiceProcess::start(&paths.service, &config_path);
+    let generic_output = Command::new("node")
+        .arg(&installed_generic)
+        .args([
+            "--profile",
+            "generic-packaged",
+            "--operation",
+            "get_identity",
+        ])
+        .output()
+        .expect("packaged generic client must start");
+    assert!(
+        generic_output.status.success(),
+        "packaged generic client failed: {}",
+        String::from_utf8_lossy(&generic_output.stderr)
+    );
+    let generic_identity: serde_json::Value =
+        serde_json::from_slice(&generic_output.stdout).unwrap();
+    assert!(generic_identity["device_id"].as_str().is_some());
     let mut first = connect(
         installation.endpoint(),
         installation.service_public_key(),
-        &adapter_identity,
-        adapter.adapter_key_id(),
-        adapter.adapter_key_version(),
+        &issuer_identity,
+        issuer.issuer_key_id(),
+        issuer.issuer_key_version(),
         "session-packaged-a",
         1,
     )
@@ -219,9 +250,9 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
     let mut second = connect(
         installation.endpoint(),
         installation.service_public_key(),
-        &adapter_identity,
-        adapter.adapter_key_id(),
-        adapter.adapter_key_version(),
+        &issuer_identity,
+        issuer.issuer_key_id(),
+        issuer.issuer_key_version(),
         "session-packaged-b",
         2,
     )
@@ -246,9 +277,9 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
     let mut second = connect(
         installation.endpoint(),
         installation.service_public_key(),
-        &adapter_identity,
-        adapter.adapter_key_id(),
-        adapter.adapter_key_version(),
+        &issuer_identity,
+        issuer.issuer_key_id(),
+        issuer.issuer_key_version(),
         "session-packaged-b",
         3,
     )
@@ -354,9 +385,9 @@ async fn packaged_shared_service_pairs_replays_restarts_and_remains_opaque() {
     let mut recovered = connect(
         installation.endpoint(),
         installation.service_public_key(),
-        &adapter_identity,
-        adapter.adapter_key_id(),
-        adapter.adapter_key_version(),
+        &issuer_identity,
+        issuer.issuer_key_id(),
+        issuer.issuer_key_version(),
         "session-packaged-a",
         4,
     )

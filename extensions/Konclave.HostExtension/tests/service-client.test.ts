@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,20 +10,26 @@ import {
   connectLocalService,
   LocalServiceError,
   LocalServiceProtocolError,
+  LocalServiceUpgradeRequiredError,
   type LocalServiceClientOptions,
 } from '../src/service/client.js';
 import { FrameError, FrameReader, writeFrame } from '../src/service/framing.js';
 import {
   privateKeyFromSeed,
+  publicKeyFromRaw,
   rawPublicKey,
   signMessage,
   verifyMessage,
 } from '../src/service/keys.js';
 import {
   clientSigningMessage,
-  encodeTranscript,
+  encodeIssuerTranscript,
+  encodeSessionTranscript,
   serviceSigningMessage,
+  type HarnessKind,
+  type SessionGrantRecord,
 } from '../src/service/transcript.js';
+import { connectInstalledGenericService } from '../src/service/installed.js';
 
 const handshakeFrameLimit = 256;
 const rpcFrameLimit = 1_048_662;
@@ -37,8 +43,11 @@ const temporaryDirectories: string[] = [];
 type RequestAction =
   | { readonly kind: 'respond'; readonly value: unknown }
   | { readonly kind: 'failure'; readonly wireCode: number }
+  | { readonly kind: 'failure-drop'; readonly wireCode: number }
   | { readonly kind: 'malformed-json' }
   | { readonly kind: 'drop' }
+  | { readonly kind: 'delay'; readonly milliseconds: number; readonly value: unknown }
+  | { readonly kind: 'defer'; readonly release: Promise<void>; readonly value: unknown }
   | { readonly kind: 'silent' };
 
 interface ReceivedRequest {
@@ -49,6 +58,7 @@ interface ReceivedRequest {
 
 interface TestService {
   readonly endpoint: string;
+  resetAuthorization(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -61,23 +71,81 @@ function endpoint(): string {
   return join(directory, 'service.sock');
 }
 
-function decodeHello(frame: Buffer) {
-  if (frame.readUInt8(0) !== 1) {
-    throw new Error('expected client hello');
+function decodeIssuerHello(frame: Buffer) {
+  if (frame.readUInt8(0) !== 5 || frame.readUInt16BE(1) !== 2) {
+    throw new Error('expected issuer hello');
   }
-  const adapterKeyId = Buffer.from(frame.subarray(3, 19));
-  const adapterKeyVersion = frame.readUInt32BE(19);
-  const clientInstance = Buffer.from(frame.subarray(23, 39));
-  const profileLength = frame.readUInt16BE(41);
-  const profileStart = 43;
-  const challengeStart = profileStart + profileLength;
   return {
-    adapterKeyId,
-    adapterKeyVersion,
-    clientInstance,
-    profile: frame.subarray(profileStart, challengeStart).toString('ascii'),
-    clientChallenge: Buffer.from(frame.subarray(challengeStart)),
+    issuerKeyId: Buffer.from(frame.subarray(3, 19)),
+    issuerKeyVersion: frame.readUInt32BE(19),
+    issuerPublicKey: Buffer.from(frame.subarray(23, 55)),
+    clientInstance: Buffer.from(frame.subarray(55, 71)),
+    harness: harness(frame.readUInt16BE(71)),
+    clientChallenge: Buffer.from(frame.subarray(73)),
   };
+}
+
+function decodeSessionHello(frame: Buffer): {
+  grant: SessionGrantRecord;
+  clientInstance: Buffer;
+  clientChallenge: Buffer;
+} {
+  if (frame.readUInt8(0) !== 6 || frame.readUInt16BE(1) !== 2) {
+    throw new Error('expected session hello');
+  }
+  let offset = 3;
+  const grantId = Buffer.from(frame.subarray(offset, (offset += 16)));
+  const issuerKeyId = Buffer.from(frame.subarray(offset, (offset += 16)));
+  const issuerKeyVersion = frame.readUInt32BE(offset);
+  offset += 4;
+  const sessionPublicKey = Buffer.from(frame.subarray(offset, (offset += 32)));
+  const grantHarness = harness(frame.readUInt16BE(offset));
+  offset += 2;
+  const profileLength = frame.readUInt16BE(offset);
+  offset += 2;
+  const profile = frame.subarray(offset, (offset += profileLength)).toString('ascii');
+  const evidence = frame.readUInt8(offset);
+  offset += 1;
+  const policyVersion = frame.readBigUInt64BE(offset);
+  offset += 8;
+  const issuedAtUnixMilliseconds = frame.readBigUInt64BE(offset);
+  offset += 8;
+  const expiresAtUnixMilliseconds = frame.readBigUInt64BE(offset);
+  offset += 8;
+  const capabilities = frame.readBigUInt64BE(offset);
+  offset += 8;
+  return {
+    grant: {
+      grantId,
+      issuerKeyId,
+      issuerKeyVersion,
+      profile,
+      sessionPublicKey,
+      harness: grantHarness,
+      evidence,
+      policyVersion,
+      issuedAtUnixMilliseconds,
+      expiresAtUnixMilliseconds,
+      capabilities,
+    },
+    clientInstance: Buffer.from(frame.subarray(offset, (offset += 16))),
+    clientChallenge: Buffer.from(frame.subarray(offset)),
+  };
+}
+
+function harness(value: number): HarnessKind {
+  switch (value) {
+    case 1:
+      return 'copilot';
+    case 2:
+      return 'claude-code';
+    case 3:
+      return 'codex';
+    case 4:
+      return 'generic';
+    default:
+      throw new Error('unknown harness');
+  }
 }
 
 function decodeRequest(frame: Buffer): ReceivedRequest {
@@ -120,9 +188,11 @@ function failure(requestId: Buffer, wireCode: number): Buffer {
 async function serveConnection(
   socket: Socket,
   action: (request: ReceivedRequest) => RequestAction,
+  grants: Map<string, SessionGrantRecord>,
+  observeControl: ((request: ReceivedRequest) => void) | undefined,
 ): Promise<void> {
   const reader = new FrameReader(socket, handshakeFrameLimit + 4);
-  const hello = decodeHello(await reader.read(handshakeFrameLimit));
+  const helloFrame = await reader.read(handshakeFrameLimit);
   const serviceChallenge = randomBytes(32);
   await writeFrame(
     socket,
@@ -130,27 +200,105 @@ async function serveConnection(
     handshakeFrameLimit,
   );
 
-  const transcript = encodeTranscript({
-    ...hello,
-    harness: 'copilot',
-    serviceChallenge,
-    serviceKey: servicePublicKey,
-  });
+  let transcript: Buffer;
+  let verificationKey = clientKey;
+  let issuer = false;
+  let accepted = true;
+  if (helloFrame.readUInt8(0) === 5) {
+    const hello = decodeIssuerHello(helloFrame);
+    transcript = encodeIssuerTranscript({
+      ...hello,
+      serviceChallenge,
+      serviceKey: servicePublicKey,
+    });
+    issuer = true;
+  } else {
+    const hello = decodeSessionHello(helloFrame);
+    const known = grants.get(hello.grant.grantId.toString('hex'));
+    if (!known || JSON.stringify(grantJson(known)) !== JSON.stringify(grantJson(hello.grant))) {
+      accepted = false;
+    }
+    transcript = encodeSessionTranscript({
+      ...hello,
+      serviceChallenge,
+      serviceKey: servicePublicKey,
+    });
+    verificationKey = publicKeyFromRaw(hello.grant.sessionPublicKey);
+  }
   const auth = await reader.read(handshakeFrameLimit);
   if (
     auth.readUInt8(0) !== 3 ||
-    !verifyMessage(clientKey, clientSigningMessage(transcript), auth.subarray(1))
+    !verifyMessage(verificationKey, clientSigningMessage(transcript), auth.subarray(1))
   ) {
     throw new Error('client authentication failed');
   }
   await writeFrame(
     socket,
-    Buffer.concat([Buffer.from([4]), signMessage(serviceKey, serviceSigningMessage(transcript))]),
+    Buffer.concat([
+      Buffer.from([accepted ? 4 : 7]),
+      signMessage(serviceKey, serviceSigningMessage(transcript)),
+    ]),
     handshakeFrameLimit,
   );
+  if (!accepted) {
+    return;
+  }
   reader.setBufferLimit(rpcFrameLimit + 4);
 
   const request = decodeRequest(await reader.read(rpcFrameLimit));
+  if (issuer) {
+    if (request.operation !== 'authorization.grant.issue') {
+      throw new Error('issuer requested an operational method');
+    }
+    if (
+      typeof request.payload !== 'object' ||
+      request.payload === null ||
+      Array.isArray(request.payload)
+    ) {
+      throw new Error('grant request was malformed');
+    }
+    const values = request.payload as Record<string, unknown>;
+    const profile = String(values.profile);
+    const sessionPublicKey = Buffer.from(String(values.sessionPublicKey), 'hex');
+    const grant: SessionGrantRecord = {
+      grantId: randomBytes(16),
+      issuerKeyId: Buffer.alloc(16, 7),
+      issuerKeyVersion: 1,
+      profile,
+      sessionPublicKey,
+      harness: String(values.harness) as HarnessKind,
+      evidence: 1,
+      policyVersion: 1n,
+      issuedAtUnixMilliseconds: BigInt(Date.now()),
+      expiresAtUnixMilliseconds: BigInt(Date.now() + 3_600_000),
+      capabilities: 15n,
+    };
+    grants.set(grant.grantId.toString('hex'), grant);
+    await writeFrame(
+      socket,
+      success(request.requestId, Buffer.from(JSON.stringify(grantJson(grant)), 'utf8')),
+      rpcFrameLimit,
+    );
+    return;
+  }
+  if (request.operation === 'request.cancel') {
+    observeControl?.(request);
+    await writeFrame(
+      socket,
+      success(request.requestId, Buffer.from('{"state":"reconciling"}', 'utf8')),
+      rpcFrameLimit,
+    );
+    return;
+  }
+  if (request.operation === 'authorization.grant.retire') {
+    observeControl?.(request);
+    await writeFrame(
+      socket,
+      success(request.requestId, Buffer.from('{"retired":true}', 'utf8')),
+      rpcFrameLimit,
+    );
+    return;
+  }
   const next = action(request);
   switch (next.kind) {
     case 'respond':
@@ -166,28 +314,73 @@ async function serveConnection(
     case 'failure':
       await writeFrame(socket, failure(request.requestId, next.wireCode), rpcFrameLimit);
       return;
+    case 'failure-drop':
+      await writeFrame(socket, failure(request.requestId, next.wireCode), rpcFrameLimit);
+      socket.destroy();
+      return;
     case 'drop':
       socket.destroy();
       return;
+    case 'delay':
+      await new Promise((resolve) => setTimeout(resolve, next.milliseconds));
+      await writeFrame(
+        socket,
+        success(request.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+        rpcFrameLimit,
+      );
+      return;
+    case 'defer':
+      await next.release;
+      await writeFrame(
+        socket,
+        success(request.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+        rpcFrameLimit,
+      );
+      return;
     case 'silent':
       await once(socket, 'close');
+  }
+
+  function grantJson(grant: SessionGrantRecord): Record<string, string | number> {
+    return {
+      grantId: grant.grantId.toString('hex'),
+      issuerKeyId: grant.issuerKeyId.toString('hex'),
+      issuerKeyVersion: grant.issuerKeyVersion,
+      profile: grant.profile,
+      sessionPublicKey: grant.sessionPublicKey.toString('hex'),
+      harness: grant.harness,
+      evidence: grant.evidence,
+      policyVersion: Number(grant.policyVersion),
+      issuedAtUnixMilliseconds: Number(grant.issuedAtUnixMilliseconds),
+      expiresAtUnixMilliseconds: Number(grant.expiresAtUnixMilliseconds),
+      capabilities: Number(grant.capabilities),
+    };
   }
 }
 
 async function startService(
   action: (request: ReceivedRequest, connection: number) => RequestAction,
+  observeControl?: (request: ReceivedRequest) => void,
 ): Promise<TestService> {
   const path = endpoint();
   const sockets = new Set<Socket>();
   const tasks: Promise<void>[] = [];
-  let connections = 0;
+  const grants = new Map<string, SessionGrantRecord>();
+  let sessionConnections = 0;
   const server: Server = createServer((socket) => {
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
-    const connection = connections;
-    connections += 1;
     tasks.push(
-      serveConnection(socket, (request) => action(request, connection)).catch((error: unknown) => {
+      serveConnection(
+        socket,
+        (request) => {
+          const connection = sessionConnections;
+          sessionConnections += 1;
+          return action(request, connection);
+        },
+        grants,
+        observeControl,
+      ).catch((error: unknown) => {
         if (error instanceof FrameError && error.failure === 'closed') {
           return;
         }
@@ -200,6 +393,45 @@ async function startService(
 
   return {
     endpoint: path,
+    async resetAuthorization() {
+      grants.clear();
+      const closing = [...sockets].map(async (socket) => {
+        const closed = once(socket, 'close');
+        socket.destroy();
+        await closed;
+      });
+      await Promise.all(closing);
+    },
+    async close() {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.all(tasks);
+    },
+  };
+}
+
+async function startLegacyService(): Promise<TestService> {
+  const path = endpoint();
+  const sockets = new Set<Socket>();
+  const tasks: Promise<void>[] = [];
+  const server: Server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    tasks.push(
+      (async () => {
+        const reader = new FrameReader(socket, handshakeFrameLimit + 4);
+        await reader.read(handshakeFrameLimit);
+        socket.destroy();
+      })(),
+    );
+  });
+  server.listen(path);
+  await once(server, 'listening');
+  return {
+    endpoint: path,
+    async resetAuthorization() {},
     async close() {
       for (const socket of sockets) {
         socket.destroy();
@@ -213,8 +445,8 @@ async function startService(
 function clientOptions(service: TestService): LocalServiceClientOptions {
   return {
     endpoint: service.endpoint,
-    adapterKeyId: Buffer.alloc(16, 7),
-    adapterKeyVersion: 1,
+    issuerKeyId: Buffer.alloc(16, 7),
+    issuerKeyVersion: 1,
     signingKey: clientKey,
     serviceKey: servicePublicKey,
     harness: 'copilot',
@@ -234,9 +466,49 @@ afterEach(() => {
 });
 
 describe('shared local service client', () => {
+  it('connects an unsupported harness through the installed generic issuer', async () => {
+    const service = await startService(() => ({
+      kind: 'respond',
+      value: { device_id: 'ac' },
+    }));
+    const directory = mkdtempSync(join(tmpdir(), 'konclave-generic-client-test-'));
+    temporaryDirectories.push(directory);
+    const issuerKeyFile = join(directory, 'account-issuer.key');
+    const serviceConfigFile = join(directory, 'konclave.service.json');
+    writeFileSync(issuerKeyFile, clientSeed, { mode: 0o600 });
+    writeFileSync(
+      serviceConfigFile,
+      JSON.stringify({
+        schemaVersion: 2,
+        endpoint: service.endpoint,
+        issuerKeyId: '07'.repeat(16),
+        issuerKeyVersion: 1,
+        harness: 'copilot',
+        serviceKey: servicePublicKey.toString('hex'),
+        issuerKeyFile,
+        authorizationPolicy: {
+          version: 1,
+          acceptedEvidence: [['account_trusted']],
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const client = await connectInstalledGenericService(
+      { KONCLAVE_SERVICE_CONFIG_FILE: serviceConfigFile },
+      directory,
+      'generic-test',
+    );
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ac' });
+    await client.retire();
+    await service.close();
+  });
+
   it('redacts an unavailable endpoint from connection errors', async () => {
     const unavailable: TestService = {
       endpoint: endpoint(),
+      resetAuthorization: async () => {},
       close: async () => {},
     };
     const error = await connectLocalService({
@@ -247,6 +519,16 @@ describe('shared local service client', () => {
     expect(error).toBeInstanceOf(Error);
     expect(String(error)).toContain('connection is unavailable');
     expect(String(error)).not.toContain(unavailable.endpoint);
+  });
+
+  it('reports that a reachable protocol-v1 service must be upgraded', async () => {
+    const service = await startLegacyService();
+
+    await expect(connectLocalService(clientOptions(service))).rejects.toBeInstanceOf(
+      LocalServiceUpgradeRequiredError,
+    );
+
+    await service.close();
   });
 
   it('reuses one request identifier after a transport disconnect', async () => {
@@ -269,18 +551,136 @@ describe('shared local service client', () => {
     await service.close();
   });
 
-  it('destroys a timed-out stream before a later request reconnects', async () => {
-    const service = await startService((_request, connection) =>
-      connection === 0 ? { kind: 'silent' } : { kind: 'respond', value: { device_id: 'cd' } },
+  it('accepts an explicit request identifier for caller-driven reconciliation', async () => {
+    const requests: ReceivedRequest[] = [];
+    const service = await startService((request) => {
+      requests.push(request);
+      return { kind: 'respond', value: { device_id: 'ae' } };
+    });
+    const client = await connectLocalService(clientOptions(service));
+    const requestId = Buffer.alloc(16, 0x42);
+
+    await client.request('get_identity', {}, { requestId });
+    await service.resetAuthorization();
+    await client.request('get_identity', {}, { requestId });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.requestId).toEqual(requestId);
+    expect(requests[1]?.requestId).toEqual(requestId);
+    await client.retire();
+    await service.close();
+  });
+
+  it('reissues a grant after service authorization state restarts', async () => {
+    const service = await startService(() => ({
+      kind: 'respond',
+      value: { device_id: 'ad' },
+    }));
+    const client = await connectLocalService(clientOptions(service));
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ad' });
+
+    await service.resetAuthorization();
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ad' });
+    await client.retire();
+    await service.close();
+  });
+
+  it('waits for the actual terminal outcome after the response deadline', async () => {
+    const service = await startService(() => ({
+      kind: 'delay',
+      milliseconds: 40,
+      value: { device_id: 'cd' },
+    }));
+    const client = await connectLocalService(clientOptions(service));
+
+    await expect(client.request('get_identity', {}, 25)).resolves.toEqual({ device_id: 'cd' });
+
+    client.close();
+    await service.close();
+  });
+
+  it('retries the same request when durable reconciliation is pending', async () => {
+    const requests: ReceivedRequest[] = [];
+    const service = await startService((request) => {
+      requests.push(request);
+      return requests.length === 1
+        ? { kind: 'failure-drop', wireCode: 11 }
+        : { kind: 'respond', value: { device_id: 'cf' } };
+    });
+    const client = await connectLocalService(clientOptions(service));
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'cf' });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.requestId).toEqual(requests[1]?.requestId);
+    await client.retire();
+    await service.close();
+  });
+
+  it('propagates caller cancellation without replacing a committed outcome', async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let releaseOperation!: () => void;
+    const operationRelease = new Promise<void>((resolve) => {
+      releaseOperation = resolve;
+    });
+    let observeCancellation!: (request: ReceivedRequest) => void;
+    const cancellation = new Promise<ReceivedRequest>((resolve) => {
+      observeCancellation = resolve;
+    });
+    const service = await startService(
+      () => {
+        markStarted();
+        return { kind: 'defer', release: operationRelease, value: { device_id: 'ce' } };
+      },
+      (request) => {
+        if (request.operation === 'request.cancel') {
+          observeCancellation(request);
+        }
+      },
+    );
+    const client = await connectLocalService(clientOptions(service));
+    const controller = new AbortController();
+    const operation = client.request('get_identity', {}, { signal: controller.signal });
+
+    await started;
+    controller.abort();
+    await expect(cancellation).resolves.toMatchObject({
+      operation: 'request.cancel',
+      payload: expect.objectContaining({ reason: 'caller' }),
+    });
+    releaseOperation();
+    await expect(operation).resolves.toEqual({ device_id: 'ce' });
+
+    client.close();
+    await service.close();
+  });
+
+  it('retires its exact grant before closing cleanly', async () => {
+    let observeRetirement!: (request: ReceivedRequest) => void;
+    const retirement = new Promise<ReceivedRequest>((resolve) => {
+      observeRetirement = resolve;
+    });
+    const service = await startService(
+      () => ({ kind: 'respond', value: {} }),
+      (request) => {
+        if (request.operation === 'authorization.grant.retire') {
+          observeRetirement(request);
+        }
+      },
     );
     const client = await connectLocalService(clientOptions(service));
 
-    await expect(client.request('get_identity', {}, 25)).rejects.toMatchObject({
-      code: 'deadline_exceeded',
-    } satisfies Partial<LocalServiceError>);
-    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'cd' });
+    await client.retire();
 
-    client.close();
+    await expect(retirement).resolves.toMatchObject({
+      operation: 'authorization.grant.retire',
+      payload: {},
+    });
+    expect(client.connected).toBe(false);
     await service.close();
   });
 
@@ -323,18 +723,28 @@ describe('shared local service client', () => {
   });
 
   it('does not let a delivery wait block an interactive operation', async () => {
-    const service = await startService((request) =>
-      request.operation === 'delivery.claim'
-        ? { kind: 'silent' }
-        : { kind: 'respond', value: { device_id: 'aa' } },
-    );
+    let markDeliveryStarted!: () => void;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      markDeliveryStarted = resolve;
+    });
+    let releaseDelivery!: () => void;
+    const deliveryRelease = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const service = await startService((request) => {
+      if (request.operation === 'delivery.claim') {
+        markDeliveryStarted();
+        return { kind: 'defer', release: deliveryRelease, value: { events: [] } };
+      }
+      return { kind: 'respond', value: { device_id: 'aa' } };
+    });
     const client = await connectLocalService(clientOptions(service));
-    const delivery = expect(
-      client.request('delivery.claim', { maxEvents: 16, waitMilliseconds: 20 }, 50),
-    ).rejects.toMatchObject({ code: 'deadline_exceeded' });
+    const delivery = client.request('delivery.claim', { maxEvents: 16, waitMilliseconds: 20 });
 
+    await deliveryStarted;
     await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'aa' });
-    await delivery;
+    releaseDelivery();
+    await expect(delivery).resolves.toEqual({ events: [] });
 
     client.close();
     await service.close();
@@ -399,6 +809,9 @@ describe('shared local service client', () => {
     await expect(client.request('get_identity', {}, 0)).rejects.toThrow(
       'request deadline is invalid',
     );
+    await expect(
+      client.request('get_identity', {}, { requestId: Buffer.alloc(15) }),
+    ).rejects.toThrow('request identifier is invalid');
     const circular: { self?: unknown } = {};
     circular.self = circular;
     expect(() => client.request('get_identity', circular)).toThrow();

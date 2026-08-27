@@ -5,7 +5,9 @@ use anyhow::bail;
 use rusqlite::{Connection, OpenFlags};
 use KonclaveClientLibrary::{check_relay_health, RelayInstallationConfig};
 use KonclaveLocalServiceTransport::{
-    connect_local_service, LocalServiceInstallation, LOCAL_SERVICE_INSTALLATION_FILE,
+    connect_local_service, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
+    LocalServiceInstallation, ProfileAuthorization, LOCAL_SERVICE_INSTALLATION_FILE,
+    MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_SESSION_GRANTS,
 };
 use KonclaveSecretStorage::{open_owner_protected_file, NativeWrappingKeyProvider};
 
@@ -126,6 +128,45 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
         return;
     }
     report.pass("local_service_config", "configuration is valid");
+    let account_trusted =
+        AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+            .is_ok_and(|evidence| installation.authorization_policy().accepts(evidence));
+    if account_trusted {
+        report.pass(
+            "authorization_policy",
+            "AccountTrusted; same-account processes are trusted; no same-user isolation",
+        );
+        let providers = installation
+            .issuers()
+            .iter()
+            .filter(|issuer| {
+                issuer.registration().harness() == HarnessKind::Generic
+                    && issuer.registration().profiles() == &ProfileAuthorization::All
+            })
+            .count();
+        if providers == 0 {
+            report.fail(
+                "authorization_provider",
+                "AccountTrusted issuer is unavailable",
+            );
+        } else {
+            report.pass(
+                "authorization_provider",
+                "AccountTrusted issuer is available to paved and generic clients",
+            );
+        }
+        report.pass(
+            "grant_limits",
+            format!(
+                "active grants are bounded: global {MAX_SESSION_GRANTS}, issuer {MAX_GRANTS_PER_ISSUER}, profile {MAX_GRANTS_PER_PROFILE}"
+            ),
+        );
+    } else {
+        report.fail(
+            "authorization_policy",
+            "this client has no available accepted evidence",
+        );
+    }
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
         connect_local_service(installation.endpoint()),

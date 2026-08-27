@@ -13,8 +13,8 @@ evidence that implementations honor both.
 - invitation capabilities and local authorization credentials;
 - pairing capabilities, directional pairing keys, and pairing authorization state;
 - install-scoped enrollment credentials and per-profile relay data-plane tokens;
-- registered local adapter private keys, authenticated service connections, and
-  delivery leases;
+- installed authorization-issuer private keys, ephemeral session keys, exact-profile
+  grants, authenticated service connections, and delivery leases;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;
@@ -46,24 +46,41 @@ named pipe or a socket inside an owner-only Unix runtime directory. It never ope
 TCP listener and is never reachable from the network. Platform peer credentials and
 endpoint policy reject other operating-system users.
 
-Operating-system identity alone does not authorize profile access. Each installed
-harness adapter has a registered Ed25519 client identity. Its private key remains in
-an owner-protected ordinary file; the service stores only the public key, adapter
-identifier, finite harness kind, allowed profile namespace, key version, and status.
+The configured authorization policy determines what evidence may obtain profile
+access. The initial `AccountTrusted` provider explicitly trusts every process running
+under the configured operating-system account. Its owner-protected Ed25519 key is an
+issuer credential only: it may request policy-permitted grants but cannot invoke
+profile operations. This excludes other accounts but intentionally does not isolate
+mutually hostile same-account processes.
+
+Each client generates a memory-only session key. An issued finite grant binds its
+public key to one exact profile, harness metadata, verified evidence set, policy
+version, expiry, and closed capability set. The service stores no session private key.
+Issuer and session roles use separate protocol-v2 transcripts, and every transcript
+binds both fresh challenges and the pinned service identity. Unknown, expired,
+revoked, substituted, or policy-invalid grants receive one signed uniform rejection
+after proof exchange. Protocol downgrade never falls back to version 1, operating
+system identity alone, another issuer, another profile, anonymous access, or a
+per-session daemon.
+
 The service signing seed uses native operating-system custody by default; an explicit
 headless installation may bind it to one owner-protected external file. The
 installation record pins the derived service public key, so missing or substituted
-custody fails before the endpoint opens.
+custody fails before the endpoint opens. AccountTrusted session keys are re-created
+after client restart. Service restart invalidates in-memory grants, and a live client
+uses the same session key to obtain a replacement grant.
 
-Every connection performs a versioned challenge-response signed by the registered
-adapter key. The transcript binds both fresh challenges, adapter and client instance,
-harness kind, requested profile, and protocol version. The service verifies the
-transport peer account, signature, active key version, harness kind, and profile
-namespace before opening or attaching the profile. The resulting profile binding
-cannot change on that connection. Revocation closes active connections and rejects
-reconnect. A failed or absent credential never falls back to operating-system identity
-alone, another adapter, another profile, anonymous access, or per-session daemon
-spawning.
+Active grants are bounded globally, per issuer, and per profile. Revocation removes
+one exact grant and closes its connections; AccountTrusted can issue a replacement
+because the same account remains trusted. Profile suspension and durable issuer
+disablement are stronger operator controls tracked separately and are not claimed by
+the initial in-memory registry.
+
+Terminal local request outcomes are sealed in the profile database and keyed by
+session public key, profile, and request identifier. Authenticated cancellation can
+stop only pre-commit work under that same session identity. Post-commit cancellation,
+disconnect, deadline, and shutdown reconcile and publish the actual durable result
+rather than a false terminal timeout.
 
 The adapter-delivery journal is independent of relay cursors. Relay acknowledgment
 means the daemon durably processed an envelope; adapter acknowledgment means a
@@ -230,10 +247,11 @@ the mutually supported maximum.
 | Offline database theft | Sealed secret blobs; no plaintext-key fallback |
 | Secret disclosure through diagnostics | No `Debug`, serialization, logs, telemetry, panic text, or snapshots containing keys/plaintext |
 | Malicious model/tool input | Schema validation, local authorization, bounded values, and explicit user-controlled policy |
-| Local service client impersonation | Owner-restricted service endpoint, verified platform peer account, registered Ed25519 adapter identity, signed fresh transcript, immutable profile binding, finite harness/profile grants, rotation, and revocation |
-| Adapter-key substitution or theft | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, public-key registration through an installer-owned administrative path, key versioning, exact-path cleanup, and no OS-identity-only fallback |
+| Local service client impersonation | Owner-restricted endpoint, verified platform peer account, issuer/session role separation, proof of the exact private key, signed fresh protocol-v2 transcript, exact-profile finite grant, capability checks, and uniform rejection |
+| Account issuer substitution or theft | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, installer-owned public registration, key versioning, exact-path cleanup, and explicit AccountTrusted semantics |
 | Shared-service endpoint squatting | Owner-protected well-known endpoint, single-instance service ownership, authenticated service/client transcript, and fail-closed startup when endpoint identity conflicts |
-| Cross-profile local attachment | Registered profile namespace, signed requested profile, immutable per-connection binding, per-request authorization, duplicate-consumer policy, and no profile-switch request |
+| Cross-profile local attachment | Exact profile, session public key, harness, evidence, policy, expiry, and capabilities signed into one immutable grant binding; no profile-switch request |
+| False timeout or cancellation outcome | Session-scoped authenticated cancellation, explicit pre/post-commit state, sealed terminal-outcome journal, exact retry reconciliation, and no dropped-join cancellation claim |
 | Delivery cursor or lease tampering | Sealed profile-global event state, consumer-bound lease identifiers and generations, checked expiry, idempotent acknowledgment, and stale-ack rejection |
 | Adapter crash before harness delivery | Pending or expired claim is reclaimed without advancing adapter acknowledgment |
 | Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
@@ -250,6 +268,12 @@ the mutually supported maximum.
 - An authorized member can copy or disclose plaintext it legitimately receives.
 - An authorized or compromised harness adapter can copy or disclose plaintext
   delivered to that harness.
+- `AccountTrusted` does not protect one session from another malicious process running
+  under the same operating-system account. Exact grants contain authority but do not
+  change that declared trust boundary.
+- The initial service-lifetime grant registry does not provide durable administrative
+  suspension or issuer disablement across service restart. Those controls require the
+  live durable registry tracked separately.
 - Konclave cannot guarantee availability against a malicious relay or network.
 - The initial protocol cannot guarantee consistent membership against a relay that
   equivocates between isolated clients.
@@ -264,8 +288,8 @@ the mutually supported maximum.
 - No automatic harness delivery occurs while its adapter is absent. Enabled backlog
   may eventually pause relay replay rather than be dropped.
 - Root, administrator, process-injection, or same-account active-memory compromise can
-  obtain the registered adapter private key and is outside the local
-  confidentiality guarantee.
+  obtain the AccountTrusted issuer key, an active session key, or plaintext and is
+  outside the local confidentiality guarantee.
 - Peer content is delivered as untrusted data; Konclave cannot prevent a model from
   making a poor decision after correctly receiving that data.
 - MLS conformance and library tests do not constitute an independent security audit

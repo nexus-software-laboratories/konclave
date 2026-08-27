@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// KonclaveCommandLine is a command-line application.
 #[derive(Parser)]
@@ -45,6 +45,16 @@ pub struct InitArgs {
     /// Directory containing one owner-protected wrapping key per profile
     #[arg(long)]
     pub local_service_profile_key_directory: Option<PathBuf>,
+    /// Local authorization policy; required for noninteractive initialization
+    #[arg(long, value_enum)]
+    pub authorization_policy: Option<AuthorizationPolicyChoice>,
+}
+
+/// Authorization policies available during initial installation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AuthorizationPolicyChoice {
+    /// Trust every process running under the configured operating-system account.
+    AccountTrusted,
 }
 
 #[derive(Args)]

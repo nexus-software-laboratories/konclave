@@ -252,7 +252,15 @@ function Assert-PackagedPlugin {
     $manifestPath = Join-Path $PluginRoot 'plugin.json'
     $clientPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'client.mjs'
     $extensionPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'extension.mjs'
-    foreach ($path in @($manifestPath, $clientPath, $extensionPath)) {
+    $genericPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'generic.mjs'
+    $genericSkillPath = Join-Path $PluginRoot 'skills' 'konclave-generic' 'SKILL.md'
+    foreach ($path in @(
+        $manifestPath,
+        $clientPath,
+        $extensionPath,
+        $genericPath,
+        $genericSkillPath
+    )) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Packaged plugin file is missing: $path"
         }

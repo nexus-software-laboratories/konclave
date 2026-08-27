@@ -2,17 +2,27 @@ import { randomBytes, type KeyObject } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
 
 import { FrameError, FrameReader, frameHeaderLength, writeFrame } from './framing.js';
-import { publicKeyFromRaw, signMessage, verifyMessage } from './keys.js';
 import {
-  adapterKeyIdLength,
+  generateSessionPrivateKey,
+  publicKeyFromRaw,
+  rawPublicKey,
+  signMessage,
+  verifyMessage,
+} from './keys.js';
+import {
   challengeLength,
   clientInstanceLength,
   clientSigningMessage,
-  encodeTranscript,
+  encodeGrantClaims,
+  encodeIssuerTranscript,
+  encodeSessionTranscript,
+  grantIdLength,
+  keyIdLength,
   protocolVersion,
   serviceSigningMessage,
   harnessWireValues,
   assertCanonicalProfile,
+  type SessionGrantRecord,
   type HarnessKind,
 } from './transcript.js';
 
@@ -33,10 +43,12 @@ const maxOperationLength = 64;
 const maxRpcFrameBytes = 1 + 16 + 1 + maxOperationLength + 4 + maxRpcPayloadBytes;
 const requestIdLength = 16;
 
-const kindClientHello = 1;
+const kindIssuerHello = 5;
+const kindSessionHello = 6;
 const kindServiceChallenge = 2;
 const kindClientAuth = 3;
 const kindServiceAccept = 4;
+const kindServiceReject = 7;
 const kindRequest = 16;
 const kindSuccess = 32;
 const kindFailure = 33;
@@ -52,6 +64,8 @@ export const localServiceErrorCodes = {
   7: 'payload_too_large',
   8: 'conflict',
   9: 'internal',
+  10: 'cancelled',
+  11: 'reconciliation_pending',
 } as const;
 
 export type LocalServiceErrorCode =
@@ -82,6 +96,15 @@ export class LocalServiceProtocolError extends Error {
   }
 }
 
+export class LocalServiceUpgradeRequiredError extends Error {
+  readonly code = 'service_upgrade_required';
+
+  constructor() {
+    super('the installed local service must be upgraded');
+    this.name = 'LocalServiceUpgradeRequiredError';
+  }
+}
+
 class LocalServiceConnectionError extends Error {
   constructor() {
     super('the local service connection is unavailable');
@@ -89,22 +112,29 @@ class LocalServiceConnectionError extends Error {
   }
 }
 
+class LocalServiceAuthorizationError extends Error {
+  constructor() {
+    super('the local service did not authorize this client');
+    this.name = 'LocalServiceAuthorizationError';
+  }
+}
+
 export interface LocalServiceClientOptions {
   /** Owner-protected endpoint path installed by the service package. */
   readonly endpoint: string;
-  /** Registered adapter key identifier, exactly 16 bytes. */
-  readonly adapterKeyId: Buffer;
-  /** Registered adapter key version, one or greater. */
-  readonly adapterKeyVersion: number;
-  /** Registered adapter signing key imported by the platform provider. */
+  /** Installed AccountTrusted issuer key identifier, exactly 16 bytes. */
+  readonly issuerKeyId: Buffer;
+  /** Installed AccountTrusted issuer key version, one or greater. */
+  readonly issuerKeyVersion: number;
+  /** Installed AccountTrusted issuer signing key. */
   readonly signingKey: KeyObject;
   /** The service verification key this client pins. */
   readonly serviceKey: Buffer;
-  /** The harness this adapter is registered for. */
+  /** Harness metadata included in the grant request. */
   readonly harness: HarnessKind;
   /** The durable profile this connection binds to. */
   readonly profile: string;
-  /** Deadline applied to the handshake and to each request. */
+  /** Default handshake and request-cancellation deadline. */
   readonly deadlineMs?: number;
   /** Number of reconnects attempted after an early transport failure. */
   readonly reconnectAttempts?: number;
@@ -119,12 +149,27 @@ export interface LocalServiceClientOptions {
 export interface LocalServiceClient {
   /** The immutable profile this connection is bound to. */
   readonly profile: string;
-  /** Invokes one bounded operation and returns its decoded result. */
-  request(operation: string, payload: unknown, deadlineMs?: number): Promise<unknown>;
+  /** Invokes one bounded operation and reconciles its actual terminal result. */
+  request(
+    operation: string,
+    payload: unknown,
+    options?: number | LocalServiceRequestOptions,
+  ): Promise<unknown>;
+  /** Retires this exact grant and closes both lanes. */
+  retire(): Promise<void>;
   /** Closes the connection. */
   close(): void;
   /** Whether the connection is still usable. */
   readonly connected: boolean;
+}
+
+export interface LocalServiceRequestOptions {
+  /** Requests authenticated cancellation when this interval elapses. */
+  readonly deadlineMs?: number;
+  /** Requests authenticated cancellation when the caller aborts. */
+  readonly signal?: AbortSignal;
+  /** Stable 16-byte idempotency key reused for exact reconciliation. */
+  readonly requestId?: Buffer;
 }
 
 const defaultDeadlineMs = 30_000;
@@ -159,24 +204,34 @@ function withDeadline<T>(
   });
 }
 
-function encodeClientHello(
-  adapterKeyId: Buffer,
-  adapterKeyVersion: number,
+function encodeIssuerHello(
+  issuerKeyId: Buffer,
+  issuerKeyVersion: number,
+  issuerPublicKey: Buffer,
   clientInstance: Buffer,
   harness: HarnessKind,
-  profile: string,
   clientChallenge: Buffer,
 ): Buffer {
-  const profileBytes = Buffer.from(profile, 'ascii');
-  const header = Buffer.alloc(1 + 2 + adapterKeyIdLength + 4 + clientInstanceLength + 2 + 2);
-  let offset = header.writeUInt8(kindClientHello, 0);
+  const header = Buffer.alloc(1 + 2 + keyIdLength + 4 + 32 + clientInstanceLength + 2);
+  let offset = header.writeUInt8(kindIssuerHello, 0);
   offset = header.writeUInt16BE(protocolVersion, offset);
-  offset += adapterKeyId.copy(header, offset);
-  offset = header.writeUInt32BE(adapterKeyVersion, offset);
+  offset += issuerKeyId.copy(header, offset);
+  offset = header.writeUInt32BE(issuerKeyVersion, offset);
+  offset += issuerPublicKey.copy(header, offset);
   offset += clientInstance.copy(header, offset);
-  offset = header.writeUInt16BE(harnessWireValues[harness], offset);
-  header.writeUInt16BE(profileBytes.length, offset);
-  return Buffer.concat([header, profileBytes, clientChallenge]);
+  header.writeUInt16BE(harnessWireValues[harness], offset);
+  return Buffer.concat([header, clientChallenge]);
+}
+
+function encodeSessionHello(
+  grant: SessionGrantRecord,
+  clientInstance: Buffer,
+  clientChallenge: Buffer,
+): Buffer {
+  const header = Buffer.alloc(1 + 2);
+  header.writeUInt8(kindSessionHello, 0);
+  header.writeUInt16BE(protocolVersion, 1);
+  return Buffer.concat([header, encodeGrantClaims(grant), clientInstance, clientChallenge]);
 }
 
 function decodeServiceChallenge(frame: Buffer): { serviceKey: Buffer; challenge: Buffer } {
@@ -189,11 +244,12 @@ function decodeServiceChallenge(frame: Buffer): { serviceKey: Buffer; challenge:
   };
 }
 
-function decodeServiceAccept(frame: Buffer): Buffer {
-  if (frame.length !== 1 + 64 || frame.readUInt8(0) !== kindServiceAccept) {
+function decodeServiceDecision(frame: Buffer): { accepted: boolean; signature: Buffer } {
+  const kind = frame.readUInt8(0);
+  if (frame.length !== 1 + 64 || (kind !== kindServiceAccept && kind !== kindServiceReject)) {
     throw new LocalServiceProtocolError('the service acceptance is malformed');
   }
-  return Buffer.from(frame.subarray(1));
+  return { accepted: kind === kindServiceAccept, signature: Buffer.from(frame.subarray(1)) };
 }
 
 interface JsonBudget {
@@ -397,7 +453,12 @@ function decodeResponse(frame: Buffer, requestId: Buffer, operation: string): { 
  */
 interface AuthenticatedConnection {
   readonly connected: boolean;
-  invoke(requestId: Buffer, operation: string, payload: Buffer): Promise<unknown>;
+  invoke(
+    requestId: Buffer,
+    operation: string,
+    payload: Buffer,
+    onWritten?: () => void,
+  ): Promise<unknown>;
   close(): void;
 }
 
@@ -431,19 +492,46 @@ function sanitizeTransportError(error: unknown): Error {
   if (
     error instanceof FrameError ||
     error instanceof LocalServiceError ||
-    error instanceof LocalServiceProtocolError
+    error instanceof LocalServiceProtocolError ||
+    error instanceof LocalServiceUpgradeRequiredError ||
+    error instanceof LocalServiceAuthorizationError
   ) {
     return error;
   }
   return new LocalServiceConnectionError();
 }
 
+type ConnectionCredential =
+  | {
+      readonly kind: 'issuer';
+      readonly key: KeyObject;
+    }
+  | {
+      readonly kind: 'session';
+      readonly key: KeyObject;
+      readonly grant: SessionGrantRecord;
+    };
+
+async function readServiceHandshakeFrame(reader: FrameReader): Promise<Buffer> {
+  try {
+    return await reader.read(maxHandshakeFrameBytes);
+  } catch (error) {
+    if (error instanceof FrameError && error.failure === 'closed') {
+      throw new LocalServiceUpgradeRequiredError();
+    }
+    throw error;
+  }
+}
+
 async function openConnection(
   options: LocalServiceClientOptions,
   deadlineMs: number,
+  credential: ConnectionCredential,
 ): Promise<AuthenticatedConnection> {
   const createSocket = options.createSocket ?? defaultCreateSocket;
-  assertCanonicalProfile(options.profile);
+  if (credential.kind === 'session') {
+    assertCanonicalProfile(credential.grant.profile);
+  }
   const socket = createSocket(options.endpoint);
   const reader = new FrameReader(socket, maxHandshakeFrameBytes + frameHeaderLength);
   let connected = true;
@@ -464,48 +552,63 @@ async function openConnection(
     const clientChallenge = randomBytes(challengeLength);
     await withDeadline(
       (async () => {
+        const publicKey = rawPublicKey(credential.key);
         await writeFrame(
           socket,
-          encodeClientHello(
-            options.adapterKeyId,
-            options.adapterKeyVersion,
-            clientInstance,
-            options.harness,
-            options.profile,
-            clientChallenge,
-          ),
+          credential.kind === 'issuer'
+            ? encodeIssuerHello(
+                options.issuerKeyId,
+                options.issuerKeyVersion,
+                publicKey,
+                clientInstance,
+                options.harness,
+                clientChallenge,
+              )
+            : encodeSessionHello(credential.grant, clientInstance, clientChallenge),
           maxHandshakeFrameBytes,
         );
 
-        const challengeFrame = await reader.read(maxHandshakeFrameBytes);
+        const challengeFrame = await readServiceHandshakeFrame(reader);
         const challenge = decodeServiceChallenge(challengeFrame);
         if (!challenge.serviceKey.equals(options.serviceKey)) {
           throw new LocalServiceProtocolError('the local service presented an unexpected key');
         }
 
-        const transcript = encodeTranscript({
-          adapterKeyId: options.adapterKeyId,
-          adapterKeyVersion: options.adapterKeyVersion,
-          clientInstance,
-          harness: options.harness,
-          profile: options.profile,
-          clientChallenge,
-          serviceChallenge: challenge.challenge,
-          serviceKey: challenge.serviceKey,
-        });
+        const transcript =
+          credential.kind === 'issuer'
+            ? encodeIssuerTranscript({
+                issuerKeyId: options.issuerKeyId,
+                issuerKeyVersion: options.issuerKeyVersion,
+                issuerPublicKey: publicKey,
+                clientInstance,
+                harness: options.harness,
+                clientChallenge,
+                serviceChallenge: challenge.challenge,
+                serviceKey: challenge.serviceKey,
+              })
+            : encodeSessionTranscript({
+                grant: credential.grant,
+                clientInstance,
+                clientChallenge,
+                serviceChallenge: challenge.challenge,
+                serviceKey: challenge.serviceKey,
+              });
 
-        const signature = signMessage(options.signingKey, clientSigningMessage(transcript));
+        const signature = signMessage(credential.key, clientSigningMessage(transcript));
         await writeFrame(
           socket,
           Buffer.concat([Buffer.from([kindClientAuth]), signature]),
           maxHandshakeFrameBytes,
         );
 
-        const acceptFrame = await reader.read(maxHandshakeFrameBytes);
-        const accepted = decodeServiceAccept(acceptFrame);
+        const acceptFrame = await readServiceHandshakeFrame(reader);
+        const decision = decodeServiceDecision(acceptFrame);
         const serviceKey = publicKeyFromRaw(challenge.serviceKey);
-        if (!verifyMessage(serviceKey, serviceSigningMessage(transcript), accepted)) {
+        if (!verifyMessage(serviceKey, serviceSigningMessage(transcript), decision.signature)) {
           throw new LocalServiceProtocolError('the local service acceptance did not verify');
+        }
+        if (!decision.accepted) {
+          throw new LocalServiceAuthorizationError();
         }
       })(),
       deadlineMs,
@@ -523,12 +626,13 @@ async function openConnection(
       return connected;
     },
     close,
-    async invoke(requestId, operation, payload) {
+    async invoke(requestId, operation, payload, onWritten) {
       if (!connected) {
         throw new FrameError('closed');
       }
       try {
         await writeFrame(socket, encodeRequest(requestId, operation, payload), maxRpcFrameBytes);
+        onWritten?.();
         const frame = await reader.read(maxRpcFrameBytes);
         const response = decodeResponse(frame, requestId, operation);
         return parseResponse(response.payload);
@@ -539,6 +643,167 @@ async function openConnection(
         throw sanitizeTransportError(error);
       }
     },
+  };
+}
+
+interface GrantIssueResult {
+  readonly grantId: unknown;
+  readonly issuerKeyId: unknown;
+  readonly issuerKeyVersion: unknown;
+  readonly profile: unknown;
+  readonly sessionPublicKey: unknown;
+  readonly harness: unknown;
+  readonly evidence: unknown;
+  readonly policyVersion: unknown;
+  readonly issuedAtUnixMilliseconds: unknown;
+  readonly expiresAtUnixMilliseconds: unknown;
+  readonly capabilities: unknown;
+}
+
+async function issueSessionGrant(
+  options: LocalServiceClientOptions,
+  sessionKey: KeyObject,
+  deadlineMs: number,
+  reconnectAttempts: number,
+  reconnectDelayMs: number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<SessionGrantRecord> {
+  const requestId = randomBytes(requestIdLength);
+  const payload = encodeRequestPayload('authorization.grant.issue', {
+    profile: options.profile,
+    sessionPublicKey: rawPublicKey(sessionKey).toString('hex'),
+    harness: options.harness,
+  });
+  const expiresAt = Date.now() + deadlineMs;
+  for (let attempt = 0; ; attempt += 1) {
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      throw new LocalServiceError('authorization.grant.issue', 'deadline_exceeded');
+    }
+    let issuer: AuthenticatedConnection | null = null;
+    try {
+      issuer = await openConnection(options, remaining, {
+        kind: 'issuer',
+        key: options.signingKey,
+      });
+      const result = await withDeadline(
+        issuer.invoke(requestId, 'authorization.grant.issue', payload),
+        remaining,
+        'authorization.grant.issue',
+        issuer.close,
+      );
+      return parseIssuedGrant(result, options, rawPublicKey(sessionKey));
+    } catch (error) {
+      if (attempt >= reconnectAttempts || !isRetryableTransportFailure(error)) {
+        throw error;
+      }
+      const delay = Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
+      if (delay > 0) {
+        await sleep(delay);
+      }
+    } finally {
+      issuer?.close();
+    }
+  }
+}
+
+function parseIssuedGrant(
+  value: unknown,
+  options: LocalServiceClientOptions,
+  expectedSessionKey: Buffer,
+): SessionGrantRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new LocalServiceProtocolError('the issued session grant is malformed');
+  }
+  const result = value as GrantIssueResult;
+  const grant: SessionGrantRecord = {
+    grantId: parseHex(result.grantId, grantIdLength),
+    issuerKeyId: parseHex(result.issuerKeyId, keyIdLength),
+    issuerKeyVersion: parsePositiveInteger(result.issuerKeyVersion),
+    profile: typeof result.profile === 'string' ? result.profile : '',
+    sessionPublicKey: parseHex(result.sessionPublicKey, 32),
+    harness: parseHarness(result.harness),
+    evidence: parsePositiveInteger(result.evidence),
+    policyVersion: parseUnsignedBigInt(result.policyVersion),
+    issuedAtUnixMilliseconds: parseUnsignedBigInt(result.issuedAtUnixMilliseconds),
+    expiresAtUnixMilliseconds: parseUnsignedBigInt(result.expiresAtUnixMilliseconds),
+    capabilities: parseUnsignedBigInt(result.capabilities),
+  };
+  if (
+    !grant.issuerKeyId.equals(options.issuerKeyId) ||
+    grant.issuerKeyVersion !== options.issuerKeyVersion ||
+    grant.profile !== options.profile ||
+    grant.harness !== options.harness ||
+    !grant.sessionPublicKey.equals(expectedSessionKey)
+  ) {
+    throw new LocalServiceProtocolError('the issued session grant does not match the request');
+  }
+  encodeGrantClaims(grant);
+  return grant;
+}
+
+function parseHex(value: unknown, length: number): Buffer {
+  if (typeof value !== 'string' || value.length !== length * 2 || !/^[0-9a-f]+$/u.test(value)) {
+    throw new LocalServiceProtocolError('the issued session grant is malformed');
+  }
+  return Buffer.from(value, 'hex');
+}
+
+function parsePositiveInteger(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new LocalServiceProtocolError('the issued session grant is malformed');
+  }
+  return value;
+}
+
+function parseUnsignedBigInt(value: unknown): bigint {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new LocalServiceProtocolError('the issued session grant is malformed');
+  }
+  return BigInt(value);
+}
+
+function parseHarness(value: unknown): HarnessKind {
+  if (value === 'copilot' || value === 'claude-code' || value === 'codex' || value === 'generic') {
+    return value;
+  }
+  throw new LocalServiceProtocolError('the issued session grant is malformed');
+}
+
+interface NormalizedRequestOptions {
+  readonly deadlineMs: number;
+  readonly signal: AbortSignal | undefined;
+  readonly requestId: Buffer | undefined;
+}
+
+function normalizeRequestOptions(
+  value: number | LocalServiceRequestOptions | undefined,
+  defaultValue: number,
+): NormalizedRequestOptions {
+  const deadlineMs = typeof value === 'number' ? value : (value?.deadlineMs ?? defaultValue);
+  const signal = typeof value === 'number' ? undefined : value?.signal;
+  const requestId = typeof value === 'number' ? undefined : value?.requestId;
+  if (!Number.isInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > 300_000) {
+    throw new Error('local service request deadline is invalid');
+  }
+  if (
+    signal !== undefined &&
+    (typeof signal.aborted !== 'boolean' ||
+      typeof signal.addEventListener !== 'function' ||
+      typeof signal.removeEventListener !== 'function')
+  ) {
+    throw new Error('local service request cancellation signal is invalid');
+  }
+  if (
+    requestId !== undefined &&
+    (!Buffer.isBuffer(requestId) || requestId.length !== requestIdLength)
+  ) {
+    throw new Error('local service request identifier is invalid');
+  }
+  return {
+    deadlineMs,
+    signal,
+    requestId: requestId === undefined ? undefined : Buffer.from(requestId),
   };
 }
 
@@ -571,8 +836,35 @@ export async function connectLocalService(
       new Promise<void>((resolve) => {
         setTimeout(resolve, milliseconds);
       }));
+  const sessionKey = generateSessionPrivateKey();
+  let grant = await issueSessionGrant(
+    options,
+    sessionKey,
+    deadlineMs,
+    reconnectAttempts,
+    reconnectDelayMs,
+    sleep,
+  );
+  let grantRefresh: Promise<SessionGrantRecord> | null = null;
+  const refreshGrant = (): Promise<SessionGrantRecord> => {
+    grantRefresh ??= issueSessionGrant(
+      options,
+      sessionKey,
+      deadlineMs,
+      reconnectAttempts,
+      reconnectDelayMs,
+      sleep,
+    ).finally(() => {
+      grantRefresh = null;
+    });
+    return grantRefresh;
+  };
   const interactiveLane: ConnectionLane = {
-    connection: await openConnection(options, deadlineMs),
+    connection: await openConnection(options, deadlineMs, {
+      kind: 'session',
+      key: sessionKey,
+      grant,
+    }),
     inFlight: Promise.resolve(),
   };
   const deliveryLane: ConnectionLane = {
@@ -602,7 +894,29 @@ export async function connectLocalService(
     if (lane.connection?.connected) {
       return lane.connection;
     }
-    lane.connection = await openConnection(options, remainingMs);
+    if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now() + 60_000)) {
+      grant = await refreshGrant();
+    }
+    try {
+      lane.connection = await openConnection(options, remainingMs, {
+        kind: 'session',
+        key: sessionKey,
+        grant,
+      });
+    } catch (error) {
+      if (
+        !(error instanceof LocalServiceAuthorizationError) &&
+        !isRetryableTransportFailure(error)
+      ) {
+        throw error;
+      }
+      grant = await refreshGrant();
+      lane.connection = await openConnection(options, remainingMs, {
+        kind: 'session',
+        key: sessionKey,
+        grant,
+      });
+    }
     if (closed) {
       lane.connection.close();
       lane.connection = null;
@@ -611,21 +925,73 @@ export async function connectLocalService(
     return lane.connection;
   };
 
+  const invokeControl = async (operation: string, payload: unknown): Promise<unknown> => {
+    const requestId = randomBytes(requestIdLength);
+    const encoded = encodeRequestPayload(operation, payload);
+    let refreshed = false;
+    while (true) {
+      let connection: AuthenticatedConnection | null = null;
+      try {
+        connection = await openConnection(options, deadlineMs, {
+          kind: 'session',
+          key: sessionKey,
+          grant,
+        });
+        return await withDeadline(
+          connection.invoke(requestId, operation, encoded),
+          deadlineMs,
+          operation,
+          connection.close,
+        );
+      } catch (error) {
+        if (
+          refreshed ||
+          (!(error instanceof LocalServiceAuthorizationError) &&
+            !isRetryableTransportFailure(error))
+        ) {
+          throw error;
+        }
+        grant = await refreshGrant();
+        refreshed = true;
+      } finally {
+        connection?.close();
+      }
+    }
+  };
+
+  const requestCancellation = (
+    requestId: Buffer,
+    reason: 'caller' | 'deadline',
+  ): Promise<unknown> =>
+    invokeControl('request.cancel', {
+      requestId: requestId.toString('hex'),
+      reason,
+    });
+
   return {
     profile: options.profile,
     get connected() {
       return !closed;
     },
     close,
-    request(operation, payload, requestDeadlineMs = deadlineMs) {
-      if (
-        !Number.isInteger(requestDeadlineMs) ||
-        requestDeadlineMs <= 0 ||
-        requestDeadlineMs > 300_000
-      ) {
-        return Promise.reject(new Error('local service request deadline is invalid'));
+    async retire() {
+      if (closed) {
+        return;
       }
-      const requestId = randomBytes(requestIdLength);
+      try {
+        await invokeControl('authorization.grant.retire', {});
+      } finally {
+        close();
+      }
+    },
+    request(operation, payload, requestOptions) {
+      let normalized: NormalizedRequestOptions;
+      try {
+        normalized = normalizeRequestOptions(requestOptions, deadlineMs);
+      } catch (error) {
+        return Promise.reject(error as Error);
+      }
+      const requestId = normalized.requestId ?? randomBytes(requestIdLength);
       const encoded = encodeRequestPayload(operation, payload ?? {});
       encodeRequest(requestId, operation, encoded);
       const deliveryOperation = operation.startsWith('delivery.');
@@ -633,36 +999,75 @@ export async function connectLocalService(
       const allowedReconnects = deliveryOperation ? 0 : reconnectAttempts;
 
       const run = lane.inFlight.then(async () => {
-        const expiresAt = Date.now() + requestDeadlineMs;
+        const expiresAt = Date.now() + normalized.deadlineMs;
+        let cancellationReason: 'caller' | 'deadline' | null = normalized.signal?.aborted
+          ? 'caller'
+          : null;
+        let admitted = false;
+        let cancellationSent = false;
+        const sendCancellation = (reason: 'caller' | 'deadline') => {
+          cancellationReason ??= reason;
+          if (!admitted || cancellationSent || closed) {
+            return;
+          }
+          cancellationSent = true;
+          void requestCancellation(requestId, cancellationReason).catch(() => {});
+        };
+        const abort = () => sendCancellation('caller');
+        normalized.signal?.addEventListener('abort', abort, { once: true });
+        const deadlineTimer = setTimeout(() => sendCancellation('deadline'), normalized.deadlineMs);
         let attempt = 0;
-        while (true) {
-          const remainingMs = expiresAt - Date.now();
-          if (remainingMs <= 0) {
-            throw new LocalServiceError(operation, 'deadline_exceeded');
-          }
+        let reconciliationAttempt = 0;
+        try {
+          while (true) {
+            const remainingMs = admitted ? normalized.deadlineMs : expiresAt - Date.now();
+            if (!admitted && remainingMs <= 0) {
+              throw new LocalServiceError(operation, 'deadline_exceeded');
+            }
 
-          let active: AuthenticatedConnection;
-          try {
-            active = await getConnection(lane, remainingMs);
-            return await withDeadline(
-              active.invoke(requestId, operation, encoded),
-              remainingMs,
-              operation,
-              active.close,
-            );
-          } catch (error) {
-            if (lane.connection && !lane.connection.connected) {
-              lane.connection = null;
-            }
-            if (closed || attempt >= allowedReconnects || !isRetryableTransportFailure(error)) {
-              throw error;
-            }
-            attempt += 1;
-            const delay = Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
-            if (delay > 0) {
-              await sleep(delay);
+            let active: AuthenticatedConnection;
+            try {
+              active = await getConnection(lane, remainingMs);
+              if (!admitted && cancellationReason) {
+                throw new LocalServiceError(
+                  operation,
+                  cancellationReason === 'caller' ? 'cancelled' : 'deadline_exceeded',
+                );
+              }
+              return await active.invoke(requestId, operation, encoded, () => {
+                admitted = true;
+                if (cancellationReason) {
+                  sendCancellation(cancellationReason);
+                }
+              });
+            } catch (error) {
+              if (lane.connection && !lane.connection.connected) {
+                lane.connection = null;
+              }
+              if (
+                error instanceof LocalServiceError &&
+                error.code === 'reconciliation_pending' &&
+                reconciliationAttempt < 3
+              ) {
+                reconciliationAttempt += 1;
+                await sleep(reconnectDelayMs);
+                continue;
+              }
+              if (closed || attempt >= allowedReconnects || !isRetryableTransportFailure(error)) {
+                throw error;
+              }
+              attempt += 1;
+              const delay = admitted
+                ? reconnectDelayMs
+                : Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
+              if (delay > 0) {
+                await sleep(delay);
+              }
             }
           }
+        } finally {
+          clearTimeout(deadlineTimer);
+          normalized.signal?.removeEventListener('abort', abort);
         }
       });
       lane.inFlight = run.then(

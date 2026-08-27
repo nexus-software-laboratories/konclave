@@ -133,6 +133,21 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         output.write(`device: ${bounded(status.deviceId)}`);
         output.write(`relay configured: ${status.relayConfigured ? 'yes' : 'no'}`);
         output.write(
+          `authorization: ${bounded(status.authorizationPolicy)} (${status.authorizationEvidence.map((item) => bounded(item)).join('+')})`,
+        );
+        output.write(`authorization provider: ${bounded(status.authorizationProvider)}`);
+        if (status.authorizationPolicy === 'AccountTrusted') {
+          output.write(
+            'authorization boundary: same-account processes are trusted; no same-user isolation',
+          );
+        }
+        output.write(
+          `grant: expires ${status.grantExpiresAtUnixMilliseconds}, capabilities ${status.grantCapabilities}`,
+        );
+        output.write(
+          `grant capacity: global ${status.activeGrants}/${status.grantLimit}, issuer ${status.activeGrantsForIssuer}/${status.grantLimitPerIssuer}, profile ${status.activeGrantsForProfile}/${status.grantLimitPerProfile}`,
+        );
+        output.write(
           `delivery: ${status.deliveryDegraded ? 'degraded' : 'healthy'}, watching ${status.watchedConversations}, pending ${status.pendingEvents}, claimed ${status.claimedEvents}`,
         );
         return;

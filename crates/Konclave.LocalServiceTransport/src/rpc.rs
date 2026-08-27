@@ -31,6 +31,8 @@ const ERROR_DEADLINE_EXCEEDED: u16 = 6;
 const ERROR_PAYLOAD_TOO_LARGE: u16 = 7;
 const ERROR_CONFLICT: u16 = 8;
 const ERROR_INTERNAL: u16 = 9;
+const ERROR_CANCELLED: u16 = 10;
+const ERROR_RECONCILIATION_PENDING: u16 = 11;
 
 /// Stable identifier for one request on one connection.
 ///
@@ -136,6 +138,10 @@ pub enum LocalServiceErrorCode {
     Conflict,
     /// The service failed for a reason it does not disclose.
     Internal,
+    /// The request was cancelled before its irreversible commit point.
+    Cancelled,
+    /// The actual result is known in memory but is not yet durably journaled.
+    ReconciliationPending,
 }
 
 impl LocalServiceErrorCode {
@@ -152,6 +158,8 @@ impl LocalServiceErrorCode {
             Self::PayloadTooLarge => ERROR_PAYLOAD_TOO_LARGE,
             Self::Conflict => ERROR_CONFLICT,
             Self::Internal => ERROR_INTERNAL,
+            Self::Cancelled => ERROR_CANCELLED,
+            Self::ReconciliationPending => ERROR_RECONCILIATION_PENDING,
         }
     }
 
@@ -172,6 +180,8 @@ impl LocalServiceErrorCode {
             ERROR_PAYLOAD_TOO_LARGE => Ok(Self::PayloadTooLarge),
             ERROR_CONFLICT => Ok(Self::Conflict),
             ERROR_INTERNAL => Ok(Self::Internal),
+            ERROR_CANCELLED => Ok(Self::Cancelled),
+            ERROR_RECONCILIATION_PENDING => Ok(Self::ReconciliationPending),
             _ => Err(LocalServiceTransportError::UnknownErrorCode),
         }
     }
@@ -189,6 +199,8 @@ impl LocalServiceErrorCode {
             Self::PayloadTooLarge => "payload_too_large",
             Self::Conflict => "conflict",
             Self::Internal => "internal",
+            Self::Cancelled => "cancelled",
+            Self::ReconciliationPending => "reconciliation_pending",
         }
     }
 }
@@ -740,6 +752,8 @@ mod tests {
             LocalServiceErrorCode::PayloadTooLarge,
             LocalServiceErrorCode::Conflict,
             LocalServiceErrorCode::Internal,
+            LocalServiceErrorCode::Cancelled,
+            LocalServiceErrorCode::ReconciliationPending,
         ] {
             let response = LocalServiceResponse::failure(request_id(), code);
             let encoded = response.encode().unwrap();
@@ -749,7 +763,7 @@ mod tests {
                 code
             );
         }
-        for value in [0_u16, 10, u16::MAX] {
+        for value in [0_u16, 12, u16::MAX] {
             assert_eq!(
                 LocalServiceErrorCode::from_wire_value(value).unwrap_err(),
                 LocalServiceTransportError::UnknownErrorCode

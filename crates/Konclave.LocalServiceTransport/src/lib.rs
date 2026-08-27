@@ -32,9 +32,14 @@
 //! harness and profile, and returns its own acceptance signature over a separate
 //! domain. The resulting binding is immutable for the life of the connection.
 
+mod authorization_binding;
+mod authorization_handshake;
+mod authorization_message;
+mod authorization_transcript;
 mod binding;
 mod endpoint;
 mod error;
+mod grant;
 mod handshake;
 mod identifiers;
 mod installation;
@@ -43,24 +48,41 @@ mod registry;
 mod rpc;
 mod transcript;
 
+pub use authorization_binding::AuthorizationBinding;
+pub use authorization_handshake::{
+    AUTHORIZATION_HANDSHAKE_TIMEOUT, AuthenticatedAuthorizationChannel, IssuerHandshakeRequest,
+    SessionHandshakeRequest, complete_authorization_service_handshake,
+    complete_issuer_client_handshake, complete_session_client_handshake,
+};
+pub use authorization_message::{
+    AuthorizationHandshakeMessage, MAX_AUTHORIZATION_HANDSHAKE_FRAME_BYTES,
+};
+pub use authorization_transcript::AuthorizationTranscript;
 pub use binding::LocalServiceBinding;
 pub use endpoint::{
     LocalServiceClientStream, LocalServiceEndpoint, LocalServiceListener, LocalServiceServerStream,
     MAX_ENDPOINT_LENGTH, connect_local_service,
 };
 pub use error::LocalServiceTransportError;
+pub use grant::{
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationPolicyVersion, InMemorySessionAuthorizationRegistry, MAX_GRANTS_PER_ISSUER,
+    MAX_GRANTS_PER_PROFILE, MAX_POLICY_CLAUSES, MAX_SESSION_GRANTS, SESSION_GRANT_ID_LENGTH,
+    SESSION_GRANT_PROTOCOL_VERSION, SessionAuthorizationRegistry, SessionCapabilities,
+    SessionGrant, SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
+};
 pub use handshake::{
     AdapterAuthorizationRegistry, AdapterRegistration, AuthenticatedLocalChannel,
-    ClientHandshakeRequest, HANDSHAKE_TIMEOUT, complete_client_handshake,
-    complete_service_handshake,
+    AuthorizationRegistration, ClientHandshakeRequest, HANDSHAKE_TIMEOUT, IssuerRegistration,
+    complete_client_handshake, complete_service_handshake,
 };
 pub use identifiers::{
-    AdapterKeyId, AdapterKeyVersion, CHALLENGE_LENGTH, ClientInstanceId, HarnessKind,
-    LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceChallenge, MAX_PROFILE_ID_LENGTH,
+    AdapterKeyId, AdapterKeyVersion, CHALLENGE_LENGTH, ClientInstanceId, HarnessKind, IssuerKeyId,
+    IssuerKeyVersion, LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceChallenge, MAX_PROFILE_ID_LENGTH,
     ProfileAuthorization, ServiceProfileId,
 };
 pub use installation::{
-    COPILOT_SERVICE_CONFIG_FILE, CopilotServiceConfig, InstalledAdapterRegistration,
+    COPILOT_SERVICE_CONFIG_FILE, CopilotServiceConfig, InstalledIssuerRegistration,
     LOCAL_SERVICE_INSTALLATION_FILE, LocalServiceIdentitySource, LocalServiceInstallation,
     LocalServiceInstallationError, LocalServiceProfileCustody,
 };
@@ -76,4 +98,8 @@ pub use transcript::LocalServiceTranscript;
 const _: () = assert!(
     MAX_HANDSHAKE_FRAME_BYTES < MAX_RPC_FRAME_BYTES,
     "an unauthenticated peer must never reserve a request-sized buffer"
+);
+const _: () = assert!(
+    MAX_AUTHORIZATION_HANDSHAKE_FRAME_BYTES < MAX_RPC_FRAME_BYTES,
+    "a v2 unauthenticated peer must never reserve a request-sized buffer"
 );

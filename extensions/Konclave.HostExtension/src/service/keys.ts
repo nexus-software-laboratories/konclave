@@ -1,4 +1,11 @@
-import { createPrivateKey, createPublicKey, sign, verify, type KeyObject } from 'node:crypto';
+import {
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  sign,
+  verify,
+  type KeyObject,
+} from 'node:crypto';
 
 /**
  * Ed25519 key handling for the shared local service handshake.
@@ -42,6 +49,11 @@ export function privateKeyFromSeedAndZeroize(seed: Buffer): KeyObject {
   } finally {
     seed.fill(0);
   }
+}
+
+/** Generates one process-lifetime non-exported Ed25519 session key. */
+export function generateSessionPrivateKey(): KeyObject {
+  return generateKeyPairSync('ed25519').privateKey;
 }
 
 export function publicKeyFromRaw(raw: Buffer): KeyObject {

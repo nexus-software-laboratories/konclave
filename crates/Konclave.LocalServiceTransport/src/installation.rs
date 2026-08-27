@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AdapterKeyId, AdapterKeyVersion, AdapterRegistration, HarnessKind, LocalServiceEndpoint,
-    ProfileAuthorization, ServiceProfileId,
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationPolicyVersion, HarnessKind, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
+    LocalServiceEndpoint, ProfileAuthorization, ServiceProfileId,
 };
 
 /// File name of the service-owned installation record.
@@ -17,9 +18,9 @@ pub const LOCAL_SERVICE_INSTALLATION_FILE: &str = "konclave-local-service.json";
 /// File name installed beside the Copilot extension.
 pub const COPILOT_SERVICE_CONFIG_FILE: &str = "konclave.service.json";
 
-const INSTALLATION_SCHEMA_VERSION: u32 = 1;
+const INSTALLATION_SCHEMA_VERSION: u32 = 2;
 const MAX_INSTALLATION_BYTES: usize = 64 * 1024;
-const MAX_ADAPTER_REGISTRATIONS: usize = 64;
+const MAX_ISSUER_REGISTRATIONS: usize = 64;
 const MAX_PATH_BYTES: usize = 4 * 1024;
 
 /// Stable failures while reading or creating local-service installation records.
@@ -36,44 +37,44 @@ pub enum LocalServiceInstallationError {
     Invalid,
 }
 
-/// One validated adapter authorization loaded by the service.
+/// One validated authorization issuer loaded by the service.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InstalledAdapterRegistration {
-    adapter_key_id: AdapterKeyId,
-    adapter_key_version: AdapterKeyVersion,
-    registration: AdapterRegistration,
+pub struct InstalledIssuerRegistration {
+    issuer_key_id: IssuerKeyId,
+    issuer_key_version: IssuerKeyVersion,
+    registration: IssuerRegistration,
 }
 
-impl InstalledAdapterRegistration {
-    /// Creates one exact adapter authorization.
+impl InstalledIssuerRegistration {
+    /// Creates one exact issuer authorization.
     #[must_use]
     pub const fn new(
-        adapter_key_id: AdapterKeyId,
-        adapter_key_version: AdapterKeyVersion,
-        registration: AdapterRegistration,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+        registration: IssuerRegistration,
     ) -> Self {
         Self {
-            adapter_key_id,
-            adapter_key_version,
+            issuer_key_id,
+            issuer_key_version,
             registration,
         }
     }
 
     /// Returns the registered key identifier.
     #[must_use]
-    pub const fn adapter_key_id(&self) -> AdapterKeyId {
-        self.adapter_key_id
+    pub const fn issuer_key_id(&self) -> IssuerKeyId {
+        self.issuer_key_id
     }
 
     /// Returns the registered key version.
     #[must_use]
-    pub const fn adapter_key_version(&self) -> AdapterKeyVersion {
-        self.adapter_key_version
+    pub const fn issuer_key_version(&self) -> IssuerKeyVersion {
+        self.issuer_key_version
     }
 
     /// Returns the public authorization record.
     #[must_use]
-    pub const fn registration(&self) -> &AdapterRegistration {
+    pub const fn registration(&self) -> &IssuerRegistration {
         &self.registration
     }
 }
@@ -86,7 +87,8 @@ pub struct LocalServiceInstallation {
     service_public_key: Ed25519PublicKey,
     service_identity_source: LocalServiceIdentitySource,
     profile_custody: LocalServiceProfileCustody,
-    adapters: Vec<InstalledAdapterRegistration>,
+    authorization_policy: AuthorizationPolicy,
+    issuers: Vec<InstalledIssuerRegistration>,
 }
 
 /// Explicit private-key custody selected for the shared service identity.
@@ -113,14 +115,15 @@ impl LocalServiceInstallation {
     /// # Errors
     ///
     /// Returns [`LocalServiceInstallationError::Invalid`] for a non-absolute or
-    /// oversized profile root, an empty adapter set, or too many registrations.
+    /// oversized profile root, an empty issuer set, or too many registrations.
     pub fn new(
         endpoint: LocalServiceEndpoint,
         profile_root: PathBuf,
         service_public_key: Ed25519PublicKey,
         service_identity_source: LocalServiceIdentitySource,
         profile_custody: LocalServiceProfileCustody,
-        adapters: Vec<InstalledAdapterRegistration>,
+        authorization_policy: AuthorizationPolicy,
+        issuers: Vec<InstalledIssuerRegistration>,
     ) -> Result<Self, LocalServiceInstallationError> {
         validate_absolute_path(&profile_root)?;
         if let LocalServiceIdentitySource::ExternalFile(path) = &service_identity_source {
@@ -129,19 +132,19 @@ impl LocalServiceInstallation {
         if let LocalServiceProfileCustody::ExternalDirectory(path) = &profile_custody {
             validate_absolute_path(path)?;
         }
-        if adapters.is_empty() || adapters.len() > MAX_ADAPTER_REGISTRATIONS {
+        if issuers.is_empty() || issuers.len() > MAX_ISSUER_REGISTRATIONS {
             return Err(LocalServiceInstallationError::Invalid);
         }
-        let unique = adapters
+        let unique = issuers
             .iter()
-            .map(|adapter| (adapter.adapter_key_id, adapter.adapter_key_version))
+            .map(|issuer| (issuer.issuer_key_id, issuer.issuer_key_version))
             .collect::<HashSet<_>>();
-        if unique.len() != adapters.len() {
+        if unique.len() != issuers.len() {
             return Err(LocalServiceInstallationError::Invalid);
         }
-        if adapters
+        if issuers
             .iter()
-            .any(|adapter| adapter.registration.public_key() == service_public_key)
+            .any(|issuer| issuer.registration.public_key() == service_public_key)
         {
             return Err(LocalServiceInstallationError::Invalid);
         }
@@ -151,7 +154,8 @@ impl LocalServiceInstallation {
             service_public_key,
             service_identity_source,
             profile_custody,
-            adapters,
+            authorization_policy,
+            issuers,
         })
     }
 
@@ -216,24 +220,31 @@ impl LocalServiceInstallation {
         &self.profile_custody
     }
 
-    /// Returns the finite active adapter registrations.
+    /// Returns the effective installation authorization policy.
     #[must_use]
-    pub fn adapters(&self) -> &[InstalledAdapterRegistration] {
-        &self.adapters
+    pub const fn authorization_policy(&self) -> &AuthorizationPolicy {
+        &self.authorization_policy
+    }
+
+    /// Returns the finite active AccountTrusted issuer registrations.
+    #[must_use]
+    pub fn issuers(&self) -> &[InstalledIssuerRegistration] {
+        &self.issuers
     }
 }
 
 /// Validated Copilot extension sidecar emitted from an installation.
 pub struct CopilotServiceConfig {
     endpoint: LocalServiceEndpoint,
-    adapter_key_id: AdapterKeyId,
-    adapter_key_version: AdapterKeyVersion,
+    issuer_key_id: IssuerKeyId,
+    issuer_key_version: IssuerKeyVersion,
     service_public_key: Ed25519PublicKey,
     signing_key_file: PathBuf,
+    authorization_policy: AuthorizationPolicy,
 }
 
 impl CopilotServiceConfig {
-    /// Binds one Copilot adapter to an installed service.
+    /// Binds one Copilot AccountTrusted issuer to an installed service.
     ///
     /// # Errors
     ///
@@ -241,18 +252,20 @@ impl CopilotServiceConfig {
     /// is not absolute or exceeds the path bound.
     pub fn new(
         endpoint: LocalServiceEndpoint,
-        adapter_key_id: AdapterKeyId,
-        adapter_key_version: AdapterKeyVersion,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
         service_public_key: Ed25519PublicKey,
         signing_key_file: PathBuf,
+        authorization_policy: AuthorizationPolicy,
     ) -> Result<Self, LocalServiceInstallationError> {
         validate_absolute_path(&signing_key_file)?;
         Ok(Self {
             endpoint,
-            adapter_key_id,
-            adapter_key_version,
+            issuer_key_id,
+            issuer_key_version,
             service_public_key,
             signing_key_file,
+            authorization_policy,
         })
     }
 
@@ -267,14 +280,15 @@ impl CopilotServiceConfig {
             &CopilotDocument {
                 schema_version: INSTALLATION_SCHEMA_VERSION,
                 endpoint: self.endpoint.as_str(),
-                adapter_key_id: encode_hex(self.adapter_key_id.as_bytes()),
-                adapter_key_version: self.adapter_key_version.get(),
+                issuer_key_id: encode_hex(self.issuer_key_id.as_bytes()),
+                issuer_key_version: self.issuer_key_version.get(),
                 harness: "copilot",
                 service_key: encode_hex(self.service_public_key.as_bytes()),
-                signing_key_file: self
+                issuer_key_file: self
                     .signing_key_file
                     .to_str()
                     .ok_or(LocalServiceInstallationError::Invalid)?,
+                authorization_policy: AuthorizationPolicyDocument::from(&self.authorization_policy),
             },
         )
         .map_err(|_| LocalServiceInstallationError::Io)
@@ -290,7 +304,8 @@ struct InstallationDocument {
     service_public_key: String,
     service_identity: IdentitySourceDocument,
     profile_custody: ProfileCustodyDocument,
-    adapters: Vec<AdapterDocument>,
+    authorization_policy: AuthorizationPolicyDocument,
+    issuers: Vec<IssuerDocument>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -309,13 +324,20 @@ enum ProfileCustodyDocument {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct AdapterDocument {
-    adapter_key_id: String,
-    adapter_key_version: u32,
+struct IssuerDocument {
+    issuer_key_id: String,
+    issuer_key_version: u32,
     public_key: String,
     harness: String,
     profile_kind: String,
     profile_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AuthorizationPolicyDocument {
+    version: u64,
+    accepted_evidence: Vec<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -323,11 +345,12 @@ struct AdapterDocument {
 struct CopilotDocument<'a> {
     schema_version: u32,
     endpoint: &'a str,
-    adapter_key_id: String,
-    adapter_key_version: u32,
+    issuer_key_id: String,
+    issuer_key_version: u32,
     harness: &'static str,
     service_key: String,
-    signing_key_file: &'a str,
+    issuer_key_file: &'a str,
+    authorization_policy: AuthorizationPolicyDocument,
 }
 
 impl TryFrom<InstallationDocument> for LocalServiceInstallation {
@@ -354,10 +377,11 @@ impl TryFrom<InstallationDocument> for LocalServiceInstallation {
                 LocalServiceProfileCustody::ExternalDirectory(PathBuf::from(path))
             }
         };
-        let adapters = document
-            .adapters
+        let authorization_policy = AuthorizationPolicy::try_from(document.authorization_policy)?;
+        let issuers = document
+            .issuers
             .into_iter()
-            .map(InstalledAdapterRegistration::try_from)
+            .map(InstalledIssuerRegistration::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         Self::new(
             endpoint,
@@ -365,36 +389,43 @@ impl TryFrom<InstallationDocument> for LocalServiceInstallation {
             service_public_key,
             service_identity_source,
             profile_custody,
-            adapters,
+            authorization_policy,
+            issuers,
         )
     }
 }
 
-impl TryFrom<AdapterDocument> for InstalledAdapterRegistration {
+impl TryFrom<IssuerDocument> for InstalledIssuerRegistration {
     type Error = LocalServiceInstallationError;
 
-    fn try_from(document: AdapterDocument) -> Result<Self, Self::Error> {
+    fn try_from(document: IssuerDocument) -> Result<Self, Self::Error> {
         let harness = match document.harness.as_str() {
             "copilot" => HarnessKind::Copilot,
             "claude-code" => HarnessKind::ClaudeCode,
             "codex" => HarnessKind::Codex,
+            "generic" => HarnessKind::Generic,
             _ => return Err(LocalServiceInstallationError::Invalid),
         };
-        let adapter_key_id = AdapterKeyId::from_bytes(decode_hex(&document.adapter_key_id)?);
-        let adapter_key_version = AdapterKeyVersion::new(document.adapter_key_version)
+        let issuer_key_id = IssuerKeyId::from_bytes(decode_hex(&document.issuer_key_id)?);
+        let issuer_key_version = IssuerKeyVersion::new(document.issuer_key_version)
             .map_err(|_| LocalServiceInstallationError::Invalid)?;
         let public_key = Ed25519PublicKey::from_bytes(decode_hex(&document.public_key)?);
-        let profile = ServiceProfileId::parse(&document.profile_id)
-            .map_err(|_| LocalServiceInstallationError::Invalid)?;
         let profiles = match document.profile_kind.as_str() {
-            "profile" => ProfileAuthorization::Profile(profile),
-            "namespace" => ProfileAuthorization::Namespace(profile),
+            "profile" => ProfileAuthorization::Profile(
+                ServiceProfileId::parse(&document.profile_id)
+                    .map_err(|_| LocalServiceInstallationError::Invalid)?,
+            ),
+            "namespace" => ProfileAuthorization::Namespace(
+                ServiceProfileId::parse(&document.profile_id)
+                    .map_err(|_| LocalServiceInstallationError::Invalid)?,
+            ),
+            "all" if document.profile_id.is_empty() => ProfileAuthorization::All,
             _ => return Err(LocalServiceInstallationError::Invalid),
         };
         Ok(Self::new(
-            adapter_key_id,
-            adapter_key_version,
-            AdapterRegistration::new(public_key, harness, profiles),
+            issuer_key_id,
+            issuer_key_version,
+            IssuerRegistration::new(public_key, harness, profiles),
         ))
     }
 }
@@ -422,31 +453,100 @@ impl From<&LocalServiceInstallation> for InstallationDocument {
                     }
                 }
             },
-            adapters: installation
-                .adapters
+            authorization_policy: AuthorizationPolicyDocument::from(
+                &installation.authorization_policy,
+            ),
+            issuers: installation
+                .issuers
                 .iter()
-                .map(|adapter| AdapterDocument {
-                    adapter_key_id: encode_hex(adapter.adapter_key_id.as_bytes()),
-                    adapter_key_version: adapter.adapter_key_version.get(),
-                    public_key: encode_hex(adapter.registration.public_key().as_bytes()),
-                    harness: match adapter.registration.harness() {
+                .map(|issuer| IssuerDocument {
+                    issuer_key_id: encode_hex(issuer.issuer_key_id.as_bytes()),
+                    issuer_key_version: issuer.issuer_key_version.get(),
+                    public_key: encode_hex(issuer.registration.public_key().as_bytes()),
+                    harness: match issuer.registration.harness() {
                         HarnessKind::Copilot => "copilot",
                         HarnessKind::ClaudeCode => "claude-code",
                         HarnessKind::Codex => "codex",
+                        HarnessKind::Generic => "generic",
                     }
                     .to_string(),
-                    profile_kind: match adapter.registration.profiles() {
+                    profile_kind: match issuer.registration.profiles() {
                         ProfileAuthorization::Profile(_) => "profile",
                         ProfileAuthorization::Namespace(_) => "namespace",
+                        ProfileAuthorization::All => "all",
                     }
                     .to_string(),
-                    profile_id: match adapter.registration.profiles() {
+                    profile_id: match issuer.registration.profiles() {
                         ProfileAuthorization::Profile(profile)
                         | ProfileAuthorization::Namespace(profile) => profile.as_str().to_string(),
+                        ProfileAuthorization::All => String::new(),
                     },
                 })
                 .collect(),
         }
+    }
+}
+
+impl TryFrom<AuthorizationPolicyDocument> for AuthorizationPolicy {
+    type Error = LocalServiceInstallationError;
+
+    fn try_from(document: AuthorizationPolicyDocument) -> Result<Self, Self::Error> {
+        let version = AuthorizationPolicyVersion::new(document.version)
+            .map_err(|_| LocalServiceInstallationError::Invalid)?;
+        let clauses = document
+            .accepted_evidence
+            .into_iter()
+            .map(|clause| {
+                AuthorizationEvidenceSet::new(
+                    clause
+                        .into_iter()
+                        .map(|kind| parse_evidence_kind(&kind))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+                .map_err(|_| LocalServiceInstallationError::Invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        AuthorizationPolicy::new(version, clauses)
+            .map_err(|_| LocalServiceInstallationError::Invalid)
+    }
+}
+
+impl From<&AuthorizationPolicy> for AuthorizationPolicyDocument {
+    fn from(policy: &AuthorizationPolicy) -> Self {
+        Self {
+            version: policy.version().get(),
+            accepted_evidence: policy
+                .clauses()
+                .iter()
+                .map(|clause| {
+                    [
+                        AuthorizationEvidenceKind::AccountTrusted,
+                        AuthorizationEvidenceKind::UserPresence,
+                        AuthorizationEvidenceKind::HarnessAttested,
+                        AuthorizationEvidenceKind::WorkloadIdentity,
+                    ]
+                    .into_iter()
+                    .filter(|kind| {
+                        AuthorizationEvidenceSet::new([*kind])
+                            .is_ok_and(|single| clause.satisfies(single))
+                    })
+                    .map(|kind| kind.as_str().to_string())
+                    .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
+fn parse_evidence_kind(
+    value: &str,
+) -> Result<AuthorizationEvidenceKind, LocalServiceInstallationError> {
+    match value {
+        "account_trusted" => Ok(AuthorizationEvidenceKind::AccountTrusted),
+        "user_presence" => Ok(AuthorizationEvidenceKind::UserPresence),
+        "harness_attested" => Ok(AuthorizationEvidenceKind::HarnessAttested),
+        "workload_identity" => Ok(AuthorizationEvidenceKind::WorkloadIdentity),
+        _ => Err(LocalServiceInstallationError::Invalid),
     }
 }
 
@@ -509,10 +609,11 @@ mod tests {
             Ed25519PublicKey::from_bytes([3_u8; Ed25519PublicKey::LENGTH]),
             LocalServiceIdentitySource::Native,
             LocalServiceProfileCustody::Native,
-            vec![InstalledAdapterRegistration::new(
-                AdapterKeyId::from_bytes([1_u8; AdapterKeyId::LENGTH]),
-                AdapterKeyVersion::new(1).unwrap(),
-                AdapterRegistration::new(
+            AuthorizationPolicy::account_trusted(),
+            vec![InstalledIssuerRegistration::new(
+                IssuerKeyId::from_bytes([1_u8; IssuerKeyId::LENGTH]),
+                IssuerKeyVersion::new(1).unwrap(),
+                IssuerRegistration::new(
                     Ed25519PublicKey::from_bytes([2_u8; Ed25519PublicKey::LENGTH]),
                     HarnessKind::Copilot,
                     ProfileAuthorization::Namespace(ServiceProfileId::parse("session").unwrap()),
@@ -533,30 +634,35 @@ mod tests {
         );
 
         let signing_key = if cfg!(windows) {
-            PathBuf::from(r"C:\Users\example\AppData\Local\Konclave\adapter.key")
+            PathBuf::from(r"C:\Users\example\AppData\Local\Konclave\account-issuer.key")
         } else {
-            PathBuf::from("/home/example/.local/share/konclave/adapter.key")
+            PathBuf::from("/home/example/.local/share/konclave/account-issuer.key")
         };
-        let adapter = &expected.adapters()[0];
+        let issuer = &expected.issuers()[0];
         let client = CopilotServiceConfig::new(
             expected.endpoint().clone(),
-            adapter.adapter_key_id(),
-            adapter.adapter_key_version(),
+            issuer.issuer_key_id(),
+            issuer.issuer_key_version(),
             expected.service_public_key(),
             signing_key,
+            AuthorizationPolicy::account_trusted(),
         )
         .unwrap();
         let mut client_json = Vec::new();
         client.write_to(&mut client_json).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&client_json).unwrap();
-        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["schemaVersion"], 2);
         assert_eq!(value["harness"], "copilot");
-        assert_eq!(value["adapterKeyId"], "01".repeat(16));
+        assert_eq!(value["issuerKeyId"], "01".repeat(16));
         assert_eq!(value["serviceKey"], "03".repeat(32));
+        assert_eq!(
+            value["authorizationPolicy"]["acceptedEvidence"][0][0],
+            "account_trusted"
+        );
     }
 
     #[test]
-    fn service_identity_cannot_be_reused_as_an_adapter_identity() {
+    fn service_identity_cannot_be_reused_as_an_issuer_identity() {
         let service_key = Ed25519PublicKey::from_bytes([3_u8; Ed25519PublicKey::LENGTH]);
         assert_eq!(
             LocalServiceInstallation::new(
@@ -574,10 +680,11 @@ mod tests {
                 service_key,
                 LocalServiceIdentitySource::Native,
                 LocalServiceProfileCustody::Native,
-                vec![InstalledAdapterRegistration::new(
-                    AdapterKeyId::from_bytes([1_u8; AdapterKeyId::LENGTH]),
-                    AdapterKeyVersion::new(1).unwrap(),
-                    AdapterRegistration::new(
+                AuthorizationPolicy::account_trusted(),
+                vec![InstalledIssuerRegistration::new(
+                    IssuerKeyId::from_bytes([1_u8; IssuerKeyId::LENGTH]),
+                    IssuerKeyVersion::new(1).unwrap(),
+                    IssuerRegistration::new(
                         service_key,
                         HarnessKind::Copilot,
                         ProfileAuthorization::Namespace(
@@ -603,13 +710,17 @@ mod tests {
         for value in [
             serde_json::json!({}),
             serde_json::json!({
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "endpoint": "/tmp/service.sock",
                 "profileRoot": "/tmp/profiles",
                 "servicePublicKey": "03".repeat(32),
                 "serviceIdentity": {"kind": "native"},
                 "profileCustody": {"kind": "native"},
-                "adapters": []
+                "authorizationPolicy": {
+                    "version": 1,
+                    "acceptedEvidence": [["account_trusted"]]
+                },
+                "issuers": []
             }),
         ] {
             assert_eq!(

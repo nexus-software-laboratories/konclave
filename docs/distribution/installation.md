@@ -37,8 +37,8 @@ Before extraction, verify the complete downloaded release set as described in
 
 Copilot discovers user-scoped extensions under
 `~/.copilot/extensions/konclave/`. A complete installation contains `extension.mjs`, the reusable `client.mjs`, and the
-installer-created `konclave.service.json` sidecar. No executable lives under the
-extension directory.
+one-shot `generic.mjs` fallback plus the installer-created `konclave.service.json`
+sidecar. No native executable lives under the extension directory.
 
 The [Local Copilot demo](local-demo.md) performs this installation atomically on
 Windows and enables experimental extension support when necessary. Direct
@@ -46,9 +46,12 @@ Windows and enables experimental extension support when necessary. Direct
 versions can cache the plugin payload without mounting its extension.
 
 On Linux or macOS, run `init` first so the owner-protected extension directory and
-sidecar exist, then copy `extension.mjs` and `client.mjs` from
+sidecar exist, then copy `extension.mjs`, `client.mjs`, and `generic.mjs` from
 `<install-root>/share/konclave/plugin/extensions/Konclave.Extension/` into that
-directory. Do not copy an executable or create a `bin/` child under the extension.
+directory. Copy
+`<install-root>/share/konclave/plugin/skills/konclave-generic/SKILL.md` to
+`~/.copilot/skills/konclave-generic/SKILL.md` when the best-effort skill is wanted.
+Do not copy a native executable or create a `bin/` child under the extension.
 
 ## Initialize the installation
 
@@ -60,22 +63,30 @@ Run the packaged CLI once:
 ```
 
 `init` prompts without echo and stores the endpoint-bound enrollment credential in
-native operating-system custody. Unix headless installations may instead use the
-explicit external-source flow documented in the repository README. Headless service
-identity and per-profile wrapping-key custody are also explicit:
+native operating-system custody. Interactive setup also requires one explicit
+authorization-policy selection. `AccountTrusted` preserves automatic startup but
+trusts every process under the operating-system account and does not provide hostile
+same-user session isolation. Noninteractive setup must pass the policy explicitly;
+there is no default or fallback. Unix headless installations may use the external
+source flow documented in the repository README. Headless service identity and
+per-profile wrapping-key custody are also explicit:
 
 ```shell
 <install-root>/bin/konclave init \
   --relay-endpoint https://relay.example.com \
+  --authorization-policy account-trusted \
   --external-source /run/secrets/konclave-enrollment \
   --local-service-identity-file /run/secrets/konclave-service-identity \
   --local-service-profile-key-directory /run/secrets/konclave-profile-keys
 ```
 
-`init` creates or verifies one service identity, one Copilot adapter identity, the
-finite adapter registration, the service configuration, and the extension sidecar.
-Repeating the exact command is idempotent; a conflicting endpoint, custody source, or
-existing file fails without replacement.
+`init` creates or verifies one service identity, one AccountTrusted issuer identity,
+the finite issuer registration, the explicit evidence policy, the service
+configuration, and the extension sidecar. A Copilot process uses the issuer only to
+obtain a finite exact-profile grant for a memory-only session key. The issuer cannot
+invoke profile operations directly. Repeating the exact command is idempotent; a
+conflicting endpoint, policy, custody source, or existing file fails without
+replacement.
 
 ## Run as a service
 
@@ -97,10 +108,13 @@ existing conflicting definition.
 
 ## Upgrade and rollback
 
-Before replacing a compatibility build, close old harness sessions and stop every
-recorded per-session daemon. Install the new archive, rerun the exact `init` command,
-then start the shared service. Native-custody profiles reopen without data conversion
-or re-enrollment.
+The current unsigned prerelease has no supported external installation base.
+Protocol-v2/schema-v2 setup is therefore a clean development transition, not a
+customer migration contract. Close old harness sessions, stop the exact recorded
+service, install the complete new archive, rerun the exact `init` command with the
+same explicit policy, and then start the shared service. The demo's `-Refresh` path
+replaces only the obsolete development authorization record, issuer key, sidecar, and
+package after stopping that service; durable profiles remain separate.
 
 An external-custody profile must have its original key copied to
 `<profile-key-directory>/<profile-id>.key` before the shared service opens it. Every
@@ -108,10 +122,12 @@ file is owner protected and each profile resolves only its own canonical name; a
 missing or wrong key fails closed without replacing identity or state. Never point
 multiple profiles at one launch-scoped key as a migration shortcut.
 
-Rollback stops the shared service and reinstalls the complete prior archive. It is
-not a selectable runtime mode inside the new thin extension. Profile databases,
-native custody, relay principals, and external key files remain outside the
-installation root and are retained through either direction.
+Rollback for this pre-release transition is source/package rollback after stopping
+the service; protocol v2 never negotiates down to v1. Before a supported release
+creates compatibility obligations, packaging must provide a journaled
+preview/apply/recovery/rollback migration engine. Profile databases, native custody,
+relay principals, and external key files remain outside the installation root and
+are retained.
 
 ## Run the Community Relay
 

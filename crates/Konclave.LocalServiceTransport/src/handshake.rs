@@ -23,19 +23,19 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 static ISSUED_CHALLENGES: AtomicU64 = AtomicU64::new(0);
 
-/// The public authorization record the service holds for one registered adapter key.
+/// Public authorization metadata held for one registered transport credential.
 ///
 /// The record is installation-owned. Nothing a client sends can create or broaden it,
 /// so a client that presents an unregistered key, a retired version, another harness,
 /// or a profile outside its namespace has no path to a binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdapterRegistration {
+pub struct AuthorizationRegistration {
     public_key: Ed25519PublicKey,
     harness: HarnessKind,
     profiles: ProfileAuthorization,
 }
 
-impl AdapterRegistration {
+impl AuthorizationRegistration {
     /// Creates an authorization record.
     #[must_use]
     pub const fn new(
@@ -68,6 +68,12 @@ impl AdapterRegistration {
         &self.profiles
     }
 }
+
+/// Protocol-v1 name for an adapter's authorization registration.
+pub type AdapterRegistration = AuthorizationRegistration;
+
+/// Protocol-v2 name for an authorization issuer registration.
+pub type IssuerRegistration = AuthorizationRegistration;
 
 /// Resolves an adapter key and version to its active authorization record.
 ///

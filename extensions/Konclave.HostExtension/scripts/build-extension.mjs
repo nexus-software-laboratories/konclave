@@ -9,6 +9,7 @@ await build({
   entryPoints: {
     client: 'src/client-api.ts',
     extension: 'src/extension.ts',
+    generic: 'src/generic-cli.ts',
   },
   outdir: dirname(extensionEntryPath),
   outExtension: { '.js': '.mjs' },

@@ -85,4 +85,16 @@ export interface ServiceStatusResult {
   readonly pendingEvents: number;
   readonly claimedEvents: number;
   readonly deliveryDegraded: boolean;
+  readonly authorizationPolicy: string;
+  readonly authorizationProvider: string;
+  readonly authorizationEvidence: readonly string[];
+  readonly authorizationPolicyVersion: number;
+  readonly grantExpiresAtUnixMilliseconds: number;
+  readonly grantCapabilities: number;
+  readonly activeGrants: number;
+  readonly activeGrantsForIssuer: number;
+  readonly activeGrantsForProfile: number;
+  readonly grantLimit: number;
+  readonly grantLimitPerIssuer: number;
+  readonly grantLimitPerProfile: number;
 }

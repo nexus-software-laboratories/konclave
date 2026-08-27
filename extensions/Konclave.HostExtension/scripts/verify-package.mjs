@@ -5,6 +5,8 @@ import { unzipSync } from 'fflate';
 import {
   extensionEntryPath,
   clientEntryPath,
+  genericEntryPath,
+  genericSkillPath,
   getArchivePath,
   maintainerSkillPath,
   manifestExtensionPath,
@@ -87,6 +89,7 @@ const compiledExtension = existsSync(extensionEntryPath)
   ? readFileSync(extensionEntryPath, 'utf8')
   : '';
 const compiledClient = existsSync(clientEntryPath) ? readFileSync(clientEntryPath, 'utf8') : '';
+const compiledGeneric = existsSync(genericEntryPath) ? readFileSync(genericEntryPath, 'utf8') : '';
 
 check(
   compiledExtension.includes('joinSession'),
@@ -94,8 +97,10 @@ check(
 );
 check(
   compiledClient.includes('connectInstalledService') &&
+    compiledClient.includes('connectInstalledGenericService') &&
+    compiledClient.includes('request.cancel') &&
     compiledClient.includes('createKonclaveTools'),
-  'Compiled client bundle is missing the shared connector or SDK tools.',
+  'Compiled client bundle is missing the paved/generic connector, cancellation, or SDK tools.',
 );
 check(
   !compiledClient.includes('KonclaveLocalDaemon') && !compiledClient.includes('type: "stdio"'),
@@ -104,6 +109,16 @@ check(
 check(
   !compiledClient.includes('console.log(') && !compiledClient.includes('process.stdout'),
   'Compiled client bundle must not write to stdout.',
+);
+check(
+  compiledGeneric.includes('connectInstalledGenericService') &&
+    compiledGeneric.includes('request.cancel') &&
+    compiledGeneric.includes('account_trusted'),
+  'Compiled generic client is missing the generic grant or cancellation path.',
+);
+check(
+  !compiledGeneric.includes('KonclaveLocalDaemon') && !compiledGeneric.includes('type: "stdio"'),
+  'Compiled generic client must not contain a per-session daemon path.',
 );
 check(
   compiledExtension.includes('delivery.claim'),
@@ -135,6 +150,7 @@ check(
 );
 
 const skillText = existsSync(maintainerSkillPath) ? readFileSync(maintainerSkillPath, 'utf8') : '';
+const genericSkillText = existsSync(genericSkillPath) ? readFileSync(genericSkillPath, 'utf8') : '';
 check(
   skillText.includes('name: copilot-cli-extension-maintainer'),
   'The maintainer skill frontmatter name is missing or incorrect.',
@@ -146,6 +162,12 @@ check(
 check(
   skillText.includes('schedulePromptSend'),
   'The maintainer skill should point contributors at schedulePromptSend().',
+);
+check(
+  genericSkillText.includes('name: konclave-generic') &&
+    genericSkillText.includes('AccountTrusted') &&
+    genericSkillText.includes('generic.mjs'),
+  'The generic skill must describe the packaged AccountTrusted fallback.',
 );
 
 const releaseTag = optionValue('--tag');

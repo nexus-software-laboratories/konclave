@@ -68,6 +68,9 @@ paths:
   advances the epoch, and enrolls a new identity.
 - Every message and side-effecting request is idempotent and replay checked at the
   application layer.
+- Async transport and concurrency tests synchronize on observable protocol events
+  and explicit release signals. Never use sleeps, assumed task ordering, or a client
+  deadline as a proxy for proving that one lane remains live while another is blocked.
 - Apply hard pre-allocation bounds to every untrusted collection, frame, string,
   decompression, page, queue, and watch.
 - Windows named-pipe endpoints use an explicit current-account DACL on every

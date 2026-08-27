@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveLocalServiceTransport::{
-    InMemoryAdapterRegistry, LocalServiceIdentitySource, LocalServiceInstallation,
+    InMemorySessionAuthorizationRegistry, LocalServiceIdentitySource, LocalServiceInstallation,
     LocalServiceProfileCustody,
 };
 use KonclaveSecretStorage::{NativeLocalServiceIdentityStore, open_owner_protected_file};
@@ -45,15 +45,15 @@ where
         "native local-service identity does not match the installation"
     );
 
-    let mut registry = InMemoryAdapterRegistry::new();
-    for adapter in installation.adapters() {
+    let registry = InMemorySessionAuthorizationRegistry::new();
+    for issuer in installation.issuers() {
         registry
-            .register(
-                adapter.adapter_key_id(),
-                adapter.adapter_key_version(),
-                adapter.registration().clone(),
+            .register_issuer(
+                issuer.issuer_key_id(),
+                issuer.issuer_key_version(),
+                issuer.registration().clone(),
             )
-            .context("loading an installed adapter registration")?;
+            .context("loading an installed issuer registration")?;
     }
     let profile_source = Arc::new(match installation.profile_custody() {
         LocalServiceProfileCustody::Native => {
@@ -71,7 +71,8 @@ where
         SharedLocalServiceConfig {
             endpoint: installation.endpoint().clone(),
             service_identity: Arc::new(identity),
-            adapter_registry: Arc::new(registry),
+            authorization_registry: Arc::new(registry),
+            authorization_policy: installation.authorization_policy().clone(),
             profile_source,
             supervisor: ProfileSupervisorConfig::default(),
         },
