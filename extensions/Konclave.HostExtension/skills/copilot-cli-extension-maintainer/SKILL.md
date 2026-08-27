@@ -13,8 +13,9 @@ the packaging scripts.
   with the shared operation contract. Command handlers must not invoke a model.
 - Preserve `extensions/Konclave.Extension/extension.mjs` as the build output
   declared in `plugin.json`.
-- Never write to stdout from the extension runtime. Use the stderr diagnostics seam in
-  `src/runtime.ts`.
+- Never write to stdout from the extension runtime. Render user-invoked command output
+  with the SDK's awaited `session.log()` API; reserve the stderr diagnostics seam in
+  `src/runtime.ts` for operational faults that do not belong in the transcript.
 - Route any future `session.send()` behavior through `schedulePromptSend()` so sends
   stay deferred and cancelable during shutdown.
 - Preserve the automatic-delivery coordinator's idle gate, untrusted-content framing,

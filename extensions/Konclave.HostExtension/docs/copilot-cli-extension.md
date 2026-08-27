@@ -52,7 +52,9 @@ claim response is bound to the disconnected consumer lease.
 ## Deterministic commands
 
 `/konclave` handlers call the shared client directly. They never prompt a model,
-inject a user turn, or interpret command text as an instruction.
+inject a user turn, or interpret command text as an instruction. Bounded command
+results are awaited through the SDK's `session.log()` API so they appear in the
+interactive transcript; stderr remains reserved for extension diagnostics.
 
 ```text
 /konclave help

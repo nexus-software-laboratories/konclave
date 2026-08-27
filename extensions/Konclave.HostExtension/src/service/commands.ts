@@ -14,7 +14,7 @@ import { serviceOperations } from './operations.js';
  */
 
 export interface CommandOutput {
-  write(line: string): void;
+  write(line: string): Promise<void> | void;
 }
 
 export interface CommandDependencies {
@@ -123,48 +123,48 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
     switch (subcommand) {
       case 'help': {
         for (const line of helpLines) {
-          output.write(line);
+          await output.write(line);
         }
         return;
       }
       case 'status': {
         const status = parseServiceStatus(await client.request(serviceOperations.status, {}));
-        output.write(`profile: ${bounded(status.profile)}`);
-        output.write(`device: ${bounded(status.deviceId)}`);
-        output.write(`relay configured: ${status.relayConfigured ? 'yes' : 'no'}`);
-        output.write(
+        await output.write(`profile: ${bounded(status.profile)}`);
+        await output.write(`device: ${bounded(status.deviceId)}`);
+        await output.write(`relay configured: ${status.relayConfigured ? 'yes' : 'no'}`);
+        await output.write(
           `authorization: ${bounded(status.authorizationPolicy)} (${status.authorizationEvidence.map((item) => bounded(item)).join('+')})`,
         );
-        output.write(`authorization provider: ${bounded(status.authorizationProvider)}`);
+        await output.write(`authorization provider: ${bounded(status.authorizationProvider)}`);
         if (status.authorizationPolicy === 'AccountTrusted') {
-          output.write(
+          await output.write(
             'authorization boundary: same-account processes are trusted; no same-user isolation',
           );
         }
-        output.write(
+        await output.write(
           `grant: expires ${status.grantExpiresAtUnixMilliseconds}, capabilities ${status.grantCapabilities}`,
         );
-        output.write(
+        await output.write(
           `grant capacity: global ${status.activeGrants}/${status.grantLimit}, issuer ${status.activeGrantsForIssuer}/${status.grantLimitPerIssuer}, profile ${status.activeGrantsForProfile}/${status.grantLimitPerProfile}`,
         );
-        output.write(
+        await output.write(
           `delivery: ${status.deliveryDegraded ? 'degraded' : 'healthy'}, watching ${status.watchedConversations}, pending ${status.pendingEvents}, claimed ${status.claimedEvents}`,
         );
         return;
       }
       case 'identity': {
         const deviceId = identity(await client.request('get_identity', {}));
-        output.write(`device: ${bounded(deviceId)}`);
+        await output.write(`device: ${bounded(deviceId)}`);
         return;
       }
       case 'conversations': {
         const list = conversations(await client.request('list_conversations', {}));
         if (list.length === 0) {
-          output.write('no conversations yet');
+          await output.write('no conversations yet');
           return;
         }
         for (const conversation of list.slice(0, 20)) {
-          output.write(bounded(conversation));
+          await output.write(bounded(conversation));
         }
         return;
       }
@@ -175,7 +175,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           conversation_id: conversation,
           enabled: subcommand === 'unmute',
         });
-        output.write(
+        await output.write(
           `automatic delivery ${subcommand === 'unmute' ? 'resumed' : 'muted'} for ${bounded(conversation)}`,
         );
         return;
@@ -195,7 +195,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         } catch (error) {
           // A failure is rendered as a bounded line rather than thrown into the
           // session, so a command never becomes an error turn for the model.
-          output.write(
+          await output.write(
             error instanceof LocalServiceError
               ? `konclave: ${error.operation} failed (${error.code})`
               : `konclave: ${boundedMessage(error instanceof Error ? error.message : 'failed')}`,

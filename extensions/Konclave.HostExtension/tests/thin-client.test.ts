@@ -337,7 +337,11 @@ describe('deterministic commands', () => {
     const lines: string[] = [];
     const commands = createKonclaveCommands({
       client: stubClient(request),
-      output: { write: (line) => lines.push(line) },
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
     });
 
     await commands[0]?.handler(commandContext('status'));
@@ -355,7 +359,11 @@ describe('deterministic commands', () => {
     const lines: string[] = [];
     const commands = createKonclaveCommands({
       client: stubClient(),
-      output: { write: (line) => lines.push(line) },
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
     });
 
     await expect(
@@ -391,7 +399,11 @@ describe('deterministic commands', () => {
     const lines: string[] = [];
     const command = createKonclaveCommands({
       client: stubClient(request),
-      output: { write: (line) => lines.push(line) },
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
     })[0];
 
     for (const args of [
@@ -433,7 +445,11 @@ describe('deterministic commands', () => {
     const lines: string[] = [];
     const command = createKonclaveCommands({
       client: stubClient(request),
-      output: { write: (line) => lines.push(line) },
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
     })[0];
 
     await command?.handler(commandContext('conversations'));
@@ -453,7 +469,11 @@ describe('deterministic commands', () => {
     const lines: string[] = [];
     const command = createKonclaveCommands({
       client: stubClient(),
-      output: { write: (line) => lines.push(line) },
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
     })[0];
 
     await command?.handler(commandContext('mute not-an-id'));

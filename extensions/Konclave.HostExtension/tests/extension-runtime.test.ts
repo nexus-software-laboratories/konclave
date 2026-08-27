@@ -9,6 +9,7 @@ import {
   deriveProfileId,
   type AssistantMessageEvent,
   type ExtensionSession,
+  type JoinSessionConfig,
   type ProcessController,
   type SessionErrorEvent,
   type SessionIdleEvent,
@@ -83,10 +84,12 @@ function createSessionMock() {
   const handlers = new Map<keyof EventHandlerMap, unknown>();
   const unsubscribeMocks: Partial<Record<keyof EventHandlerMap, ReturnType<typeof vi.fn>>> = {};
   const send = vi.fn().mockResolvedValue('message-1');
+  const log = vi.fn().mockResolvedValue(undefined);
   const disconnect = vi.fn().mockResolvedValue(undefined);
 
   const session: ExtensionSession = {
     disconnect,
+    log,
     send,
     on(eventType, handler) {
       handlers.set(eventType as keyof EventHandlerMap, handler);
@@ -101,6 +104,7 @@ function createSessionMock() {
   return {
     handlers,
     disconnect,
+    log,
     send,
     session,
     unsubscribeMocks,
@@ -226,7 +230,7 @@ describe('bootExtension', () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
-    const joinSession = vi.fn().mockResolvedValue(sessionMock.session);
+    const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
 
     const controller = await bootExtension({
       diagnostics: diagnostics.diagnostics,
@@ -237,7 +241,10 @@ describe('bootExtension', () => {
 
     expect(controller).not.toBeNull();
     expect(joinSession).toHaveBeenCalledTimes(1);
-    const joined = joinSession.mock.calls[0]?.[0] as { mcpServers: unknown; tools: unknown[] };
+    const joined = joinSession.mock.calls[0]?.[0];
+    if (!joined) {
+      throw new Error('extension did not join the session');
+    }
     expect(joined.mcpServers).toEqual({});
     expect(joined.tools.length).toBeGreaterThan(0);
     expect([...sessionMock.handlers.keys()].sort()).toEqual([
@@ -274,6 +281,48 @@ describe('bootExtension', () => {
       expect(unsubscribe).toHaveBeenCalledTimes(1);
     }
     expect(processController.registeredSignals).toEqual([]);
+  });
+
+  it('renders deterministic command output in the session timeline', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession,
+      processController,
+      connect: async () => stubClient(),
+    });
+
+    const config = joinSession.mock.calls[0]?.[0];
+    if (!config) {
+      throw new Error('extension did not join the session');
+    }
+    const command = config.commands.find((candidate) => candidate.name === 'konclave');
+    if (!command) {
+      throw new Error('Konclave command was not registered');
+    }
+
+    await command.handler({
+      args: '',
+      command: '/konclave',
+      commandName: 'konclave',
+      sessionId: 'foreground-session-123',
+    });
+
+    expect(sessionMock.log).toHaveBeenCalledWith(
+      'Konclave commands (deterministic; no model inference):',
+      { level: 'info' },
+    );
+    expect(sessionMock.log).toHaveBeenCalledWith(
+      '  /konclave status               Show profile, delivery, and relay state.',
+      { level: 'info' },
+    );
+    expect(diagnostics.stderr).not.toHaveBeenCalled();
+
+    controller?.dispose();
   });
 
   it('delivers shared-service events only after the session becomes idle', async () => {
