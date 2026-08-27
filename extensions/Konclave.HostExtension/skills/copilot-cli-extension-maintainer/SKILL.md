@@ -10,11 +10,19 @@ the packaging scripts.
   child process, MCP server, daemon command, endpoint discovery fallback, or unverified
   key-custody path.
 - Keep the explicit agent-tool table and deterministic `/konclave` commands aligned
-  with the shared operation contract. Command handlers must not invoke a model.
+  with the shared operation contract. Command handlers must not invoke a model or
+  duplicate pairing/message domain logic; high-level workflows compose the existing
+  closed operations and retain explicit authorization commands. Never infer
+  joiner-side approval values from the same pairing state being approved, default a
+  remote administrator request to administrator, or generate an undisclosed message
+  identifier that cannot be reused after a transport failure.
 - Preserve `extensions/Konclave.Extension/extension.mjs` as the build output
   declared in `plugin.json`.
-- Never write to stdout from the extension runtime. Use the stderr diagnostics seam in
-  `src/runtime.ts`.
+- Never write to stdout from the extension runtime. Render user-invoked command output
+  with the SDK's awaited `session.log()` API; reserve the stderr diagnostics seam in
+  `src/runtime.ts` for operational faults that do not belong in the transcript. Mark
+  pairing capabilities and peer message text ephemeral so command output does not
+  persist those sensitive values.
 - Route any future `session.send()` behavior through `schedulePromptSend()` so sends
   stay deferred and cancelable during shutdown.
 - Preserve the automatic-delivery coordinator's idle gate, untrusted-content framing,

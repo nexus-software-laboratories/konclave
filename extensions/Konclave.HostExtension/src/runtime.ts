@@ -65,6 +65,13 @@ export interface SessionShutdownEvent {
 
 export interface ExtensionSession {
   send(message: string | PromptMessage): Promise<string>;
+  log(
+    message: string,
+    options?: {
+      level?: 'info' | 'warning' | 'error';
+      ephemeral?: boolean;
+    },
+  ): Promise<void>;
   on(eventType: string, handler: (event: unknown) => void): () => void;
   disconnect(): Promise<void>;
 }
@@ -242,9 +249,20 @@ export async function bootExtension(
 ): Promise<ExtensionController | null> {
   const environment = options.environment ?? process.env;
   const connect = options.connect ?? connectInstalledService;
-  const commandOutput = options.commandOutput ?? createDiagnosticsOutput(options.diagnostics);
   const platform = options.platform ?? process.platform;
   let client: LocalServiceClient | null = null;
+  let joinedSession: ExtensionSession | null = null;
+  const commandOutput: CommandOutput = options.commandOutput ?? {
+    async write(line, commandOptions) {
+      if (joinedSession === null) {
+        throw new Error('Konclave command output requested before the session was joined.');
+      }
+      await joinedSession.log(
+        line,
+        commandOptions?.ephemeral ? { level: 'info', ephemeral: true } : { level: 'info' },
+      );
+    },
+  };
 
   try {
     // The profile is derived before anything connects, so a reconnect or reload
@@ -255,6 +273,7 @@ export async function bootExtension(
     const session = await options.joinSession(
       createExtensionJoinConfig(connectedClient, commandOutput),
     );
+    joinedSession = session;
     const controller = attachExtension(
       session,
       options.diagnostics,
@@ -291,14 +310,6 @@ export async function bootExtension(
     options.processController.setExitCode(1);
     return null;
   }
-}
-
-function createDiagnosticsOutput(diagnostics: Diagnostics): CommandOutput {
-  return {
-    write(line) {
-      diagnostics.error(line);
-    },
-  };
 }
 
 /**

@@ -52,20 +52,55 @@ claim response is bound to the disconnected consumer lease.
 ## Deterministic commands
 
 `/konclave` handlers call the shared client directly. They never prompt a model,
-inject a user turn, or interpret command text as an instruction.
+inject a user turn, or interpret command text as an instruction. Bounded command
+results are awaited through the SDK's `session.log()` API so they appear in the
+interactive transcript; stderr remains reserved for extension diagnostics. Pairing
+capabilities and peer text are emitted as ephemeral timeline entries so the CLI does
+not persist those sensitive values as command output.
 
 ```text
 /konclave help
 /konclave status
 /konclave identity
 /konclave conversations
+/konclave pair [member|administrator]
+/konclave join <capability>
+/konclave new
+/konclave pairing <pairing>
+/konclave approve <pairing> <conversation> [role]
+/konclave approve <pairing> <inviter> <conversation> <role>
+/konclave sync <pairing>
+/konclave cancel <pairing>
+/konclave send <conversation> [message-id] -- <text>
+/konclave reply <conversation> <reply-to> [message-id] -- <text>
+/konclave messages <conversation> [after-cursor]
 /konclave mute <conversation>
 /konclave unmute <conversation>
 ```
 
-Arguments and rendered output are bounded. Agent tools use the same operation names
-and schemas as the existing daemon handlers, so the transport changes without
-creating a second domain implementation.
+Arguments and rendered output are bounded. High-level commands orchestrate only the
+existing closed operations; they do not implement a second pairing or messaging
+domain. `/konclave approve` reads authenticated pairing state before selecting the
+role-specific authorization operation. Inviter-side approval defaults to `member`;
+granting `administrator` is explicit. Joiner-side approval requires the operator to
+repeat the displayed inviter, conversation, and role, and rejects any mismatch. The
+inviter supplies an existing conversation explicitly, which avoids hiding a
+non-atomic create-and-authorize sequence.
+
+When `send` or `reply` generates a message identifier, it displays the identifier and
+an exact retry shape before submitting the operation. Supplying that identifier on a
+retry preserves both message and request idempotency. `messages` syncs one bounded
+relay page, reads at most ten records after the requested cursor, and displays an
+explicit resume cursor.
+
+Ephemeral SDK logs remain visible to the terminal and in-memory session consumers;
+they are not a confidentiality boundary. Pairing capabilities are protected by their
+short lifetime, one-time consumption, bounded handling, and daemon-side zeroization.
+The ephemeral flag prevents the extension's command output from adding those values
+to the persisted session event log. The `/konclave join` command text can still remain
+in local CLI input history until the capability is consumed or expires; operators
+must not copy it into diagnostics or public artifacts. Agent tools use the same
+operation names and schemas as the existing daemon handlers.
 
 ## Automatic delivery
 
