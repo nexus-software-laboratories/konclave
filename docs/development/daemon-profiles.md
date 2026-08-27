@@ -364,11 +364,18 @@ keyed by validated profile identifier owns that lifecycle:
 
 Conversation creation generates the conversation and routing identifiers through the
 configured cryptographic provider, creates a distinct conversation signing identity,
-and persists the authenticated initial administrator policy before creating the MLS
-group. The profile-first order makes an interrupted initial group creation
-recoverable: the next startup recreates only the missing epoch-zero group with the
-same sealed signing material and verifies the resulting state. It never fabricates
-missing MLS state for an advanced conversation.
+and persists the authenticated initial administrator policy plus the sealed
+automatic-delivery policy in one transaction before creating the MLS group. A failure
+to seal either policy leaves no visible conversation. The profile-first order makes an
+interrupted initial group creation recoverable: the next startup recreates only the
+missing epoch-zero group with the same sealed signing material and verifies the
+resulting state. It never fabricates missing MLS state for an advanced conversation.
+
+Operation-record contexts retain their historical concatenated encoding whenever it
+fits the sealed-record identifier bound. A versioned length-prefixed derived context
+is used only when that legacy encoding is oversized. Such a context could not have
+produced prior ciphertext, so this fallback adds full-length session-profile support
+without changing the associated data of any readable record.
 
 Outbound application operations serialize sender-counter reservation, MLS
 sender-ratchet persistence, sealed-envelope journaling, relay submission, and exact
