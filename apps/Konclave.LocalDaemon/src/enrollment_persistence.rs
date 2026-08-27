@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn version_eleven_migrates_to_twelve_transactionally() {
+    fn version_eleven_migrates_to_current_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration").unwrap();
         let database_path = {
@@ -834,7 +834,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_relay_enrollment;
+                    "DROP TABLE daemon_local_request_outcome;
+                     DROP TABLE daemon_relay_enrollment;
                      PRAGMA user_version = 11;",
                 )
                 .unwrap();
@@ -850,13 +851,14 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
         drop(store);
 
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_relay_enrollment;
+                "DROP TABLE daemon_local_request_outcome;
+                 DROP TABLE daemon_relay_enrollment;
                  CREATE TABLE daemon_relay_enrollment (sentinel INTEGER);
                  PRAGMA user_version = 11;",
             )

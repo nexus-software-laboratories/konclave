@@ -1,6 +1,8 @@
 use crate::error::LocalServiceTransportError;
 
-/// Local service protocol version implemented by this build.
+/// Historical adapter-registration protocol version.
+///
+/// Supported service entry points use [`crate::SESSION_GRANT_PROTOCOL_VERSION`].
 pub const LOCAL_SERVICE_PROTOCOL_VERSION: u16 = 1;
 
 /// Byte length of a handshake challenge.
@@ -21,6 +23,9 @@ const HARNESS_CLAUDE_CODE: u16 = 2;
 
 /// Wire value for a Codex harness.
 const HARNESS_CODEX: u16 = 3;
+
+/// Wire value for a harness using the universal generic client contract.
+const HARNESS_GENERIC: u16 = 4;
 
 macro_rules! define_fixed_identifier {
     ($(#[$meta:meta])* $name:ident, $length:expr, $field:literal) => {
@@ -61,15 +66,18 @@ macro_rules! define_fixed_identifier {
 }
 
 define_fixed_identifier!(
-    /// Random identifier for one registered harness adapter signing key.
+    /// Random identifier for one registered authorization issuer signing key.
     ///
     /// The identifier is public routing information for the service registry. It is
     /// not a credential: possession of it proves nothing without the matching private
     /// key.
-    AdapterKeyId,
+    IssuerKeyId,
     16,
-    "adapter_key"
+    "issuer_key"
 );
+
+/// Protocol-v1 name retained for decoding the historical adapter handshake.
+pub type AdapterKeyId = IssuerKeyId;
 
 define_fixed_identifier!(
     /// Identifier for one live client connection attempt.
@@ -81,15 +89,15 @@ define_fixed_identifier!(
     "client_instance"
 );
 
-/// Version of one registered adapter signing key.
+/// Version of one registered authorization issuer signing key.
 ///
 /// Rotation registers a new version before the previous one is retired, so the
 /// version is part of the authorization lookup rather than a display value. Zero is
 /// rejected because an uninitialized field must never resolve to a real registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AdapterKeyVersion(u32);
+pub struct IssuerKeyVersion(u32);
 
-impl AdapterKeyVersion {
+impl IssuerKeyVersion {
     /// Creates a key version.
     ///
     /// # Errors
@@ -99,7 +107,7 @@ impl AdapterKeyVersion {
     pub const fn new(value: u32) -> Result<Self, LocalServiceTransportError> {
         if value == 0 {
             return Err(LocalServiceTransportError::InvalidIdentifier {
-                field: "adapter_key_version",
+                field: "issuer_key_version",
             });
         }
         Ok(Self(value))
@@ -111,6 +119,9 @@ impl AdapterKeyVersion {
         self.0
     }
 }
+
+/// Protocol-v1 name retained for decoding the historical adapter handshake.
+pub type AdapterKeyVersion = IssuerKeyVersion;
 
 /// One fresh, single-use handshake challenge contributed by one peer.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -153,6 +164,8 @@ pub enum HarnessKind {
     ClaudeCode,
     /// A Codex session.
     Codex,
+    /// A harness without a paved Konclave lifecycle adapter.
+    Generic,
 }
 
 impl HarnessKind {
@@ -163,6 +176,7 @@ impl HarnessKind {
             Self::Copilot => HARNESS_COPILOT,
             Self::ClaudeCode => HARNESS_CLAUDE_CODE,
             Self::Codex => HARNESS_CODEX,
+            Self::Generic => HARNESS_GENERIC,
         }
     }
 
@@ -177,6 +191,7 @@ impl HarnessKind {
             HARNESS_COPILOT => Ok(Self::Copilot),
             HARNESS_CLAUDE_CODE => Ok(Self::ClaudeCode),
             HARNESS_CODEX => Ok(Self::Codex),
+            HARNESS_GENERIC => Ok(Self::Generic),
             _ => Err(LocalServiceTransportError::UnknownHarnessKind),
         }
     }
@@ -188,6 +203,7 @@ impl HarnessKind {
             Self::Copilot => "copilot",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Generic => "generic",
         }
     }
 }
@@ -243,6 +259,8 @@ pub enum ProfileAuthorization {
     Profile(ServiceProfileId),
     /// One label plus every `label-suffix` profile beneath it.
     Namespace(ServiceProfileId),
+    /// Every canonical profile under this explicit AccountTrusted issuer.
+    All,
 }
 
 impl ProfileAuthorization {
@@ -259,6 +277,7 @@ impl ProfileAuthorization {
                         && requested.starts_with(label)
                         && requested.as_bytes()[label.len()] == b'-')
             }
+            Self::All => true,
         }
     }
 }
@@ -287,7 +306,7 @@ mod tests {
             assert_eq!(
                 AdapterKeyId::from_slice(&vec![1_u8; length]).unwrap_err(),
                 LocalServiceTransportError::InvalidIdentifier {
-                    field: "adapter_key"
+                    field: "issuer_key"
                 }
             );
         }
@@ -298,7 +317,7 @@ mod tests {
         assert_eq!(
             AdapterKeyVersion::new(0).unwrap_err(),
             LocalServiceTransportError::InvalidIdentifier {
-                field: "adapter_key_version"
+                field: "issuer_key_version"
             }
         );
         assert_eq!(AdapterKeyVersion::new(1).unwrap().get(), 1);
@@ -310,13 +329,14 @@ mod tests {
             HarnessKind::Copilot,
             HarnessKind::ClaudeCode,
             HarnessKind::Codex,
+            HarnessKind::Generic,
         ] {
             assert_eq!(
                 HarnessKind::from_wire_value(harness.wire_value()).unwrap(),
                 harness
             );
         }
-        for value in [0_u16, 4, u16::MAX] {
+        for value in [0_u16, 5, u16::MAX] {
             assert_eq!(
                 HarnessKind::from_wire_value(value).unwrap_err(),
                 LocalServiceTransportError::UnknownHarnessKind
@@ -389,5 +409,12 @@ mod tests {
         assert!(!authorization.permits(&profile("teamalice")));
         assert!(!authorization.permits(&profile("team_alice")));
         assert!(!authorization.permits(&profile("other-team")));
+    }
+
+    #[test]
+    fn an_account_trusted_all_authorization_permits_every_canonical_profile() {
+        let authorization = ProfileAuthorization::All;
+        assert!(authorization.permits(&profile("alice")));
+        assert!(authorization.permits(&profile("session-a")));
     }
 }

@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 import {
   bootExtension,
+  connectInstalledService,
   createExtensionJoinConfig,
   createProcessController,
   createStderrDiagnostics,
+  deriveProfileId,
   type AssistantMessageEvent,
   type ExtensionSession,
   type ProcessController,
@@ -12,6 +15,27 @@ import {
   type SessionShutdownEvent,
   type ToolExecutionCompleteEvent,
 } from '../src/runtime';
+import type { LocalServiceClient } from '../src/service/client.js';
+
+/** A connected client that answers nothing, so no test needs a real service. */
+function stubClient(): LocalServiceClient {
+  let rejectClaim: ((error: Error) => void) | undefined;
+  const close = vi.fn(() => rejectClaim?.(new Error('closed')));
+  return {
+    profile: 'session-0123456789abcdef01234567',
+    request: vi.fn((operation: string) => {
+      if (operation === 'delivery.claim') {
+        return new Promise<never>((_resolve, reject) => {
+          rejectClaim = reject;
+        });
+      }
+      return Promise.resolve({});
+    }),
+    retire: vi.fn(async () => close()),
+    close,
+    connected: true,
+  };
+}
 
 type EventHandlerMap = {
   'assistant.message': (event: AssistantMessageEvent) => void;
@@ -115,49 +139,65 @@ afterEach(() => {
 });
 
 describe('bootExtension', () => {
-  it('registers the local daemon as a session-scoped MCP server', () => {
-    const windows = createExtensionJoinConfig(
-      {
-        SESSION_ID: 'session-a',
-        KONCLAVE_DAEMON_PATH: 'C:\\tools\\KonclaveLocalDaemon.exe',
-        KONCLAVE_PROFILE_ROOT: 'C:\\profiles',
-        KONCLAVE_WRAPPING_KEY_FILE: 'C:\\secrets\\wrapping.key',
-        KONCLAVE_RELAY_ENDPOINT: 'https://relay.example.test',
-        KONCLAVE_RELAY_CREDENTIAL_FILE: 'C:\\secrets\\relay.credential',
-      },
-      'win32',
-    );
-    const repeated = createExtensionJoinConfig({ SESSION_ID: 'session-a' }, 'linux');
-    const different = createExtensionJoinConfig({ SESSION_ID: 'session-b' }, 'linux');
-    const windowsServer = windows.mcpServers.konclave;
-    const repeatedServer = repeated.mcpServers.konclave;
-    const differentServer = different.mcpServers.konclave;
+  it('fails before connecting when the installed sidecar is absent', async () => {
+    await expect(
+      connectInstalledService(
+        { KONCLAVE_SERVICE_CONFIG_FILE: join(process.cwd(), 'missing-service-config.json') },
+        process.cwd(),
+        'session-test',
+        'win32',
+      ),
+    ).rejects.toThrow('service configuration is not installed');
+  });
 
-    if (!windowsServer || !repeatedServer || !differentServer) {
-      throw new Error('Konclave MCP server configuration is missing.');
-    }
+  it('joins as a thin client and declares no session-scoped process', () => {
+    const client = stubClient();
+    const config = createExtensionJoinConfig(client, { write: () => {} });
 
-    expect(windowsServer).toMatchObject({
-      type: 'stdio',
-      command: 'C:\\tools\\KonclaveLocalDaemon.exe',
-      args: [],
-      tools: ['*'],
-      timeout: 90_000,
-      env: {
-        KONCLAVE_MCP_ALLOW_WRITE: 'true',
-        KONCLAVE_PROFILE_ROOT: 'C:\\profiles',
-        KONCLAVE_WRAPPING_KEY_FILE: 'C:\\secrets\\wrapping.key',
-        KONCLAVE_RELAY_ENDPOINT: 'https://relay.example.test',
-        KONCLAVE_RELAY_CREDENTIAL_FILE: 'C:\\secrets\\relay.credential',
+    // The supported path owns no child: no MCP server, no command, no environment
+    // carrying a daemon path, profile root, or key file.
+    expect(config.mcpServers).toEqual({});
+    expect(config.hooks).toEqual({});
+    const serialized = JSON.stringify({
+      mcpServers: config.mcpServers,
+      hooks: config.hooks,
+      tools: config.tools.map((tool) => tool.name),
+      commands: config.commands.map((command) => command.name),
+    });
+    expect(serialized).not.toContain('KonclaveLocalDaemon');
+    expect(serialized).not.toContain('KONCLAVE_');
+    expect(config.tools.length).toBeGreaterThan(0);
+    expect(config.commands.map((command) => command.name)).toEqual(['konclave']);
+  });
+
+  it('reuses one durable profile across reloads and refuses an unknown session', () => {
+    const first = deriveProfileId({ SESSION_ID: 'session-a' });
+    expect(deriveProfileId({ SESSION_ID: 'session-a' })).toBe(first);
+    expect(deriveProfileId({ SESSION_ID: 'session-b' })).not.toBe(first);
+    expect(first).toMatch(/^session-[0-9a-f]{24}$/);
+    expect(() => deriveProfileId({})).toThrow();
+  });
+
+  it('fails visibly when the shared service is unavailable', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const joinSession = vi.fn();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession,
+      processController,
+      environment: { SESSION_ID: 'session-a' },
+      connect: async () => {
+        throw new Error('endpoint unavailable');
       },
     });
-    expect(windowsServer.env.KONCLAVE_PROFILE_ID).toMatch(/^session-[0-9a-f]{24}$/);
-    expect(repeatedServer.command).toBe('KonclaveLocalDaemon');
-    expect(repeatedServer.env.KONCLAVE_PROFILE_ID).toBe(windowsServer.env.KONCLAVE_PROFILE_ID);
-    expect(differentServer.env.KONCLAVE_PROFILE_ID).not.toBe(
-      repeatedServer.env.KONCLAVE_PROFILE_ID,
-    );
-    expect(JSON.stringify(windows)).not.toContain('session-a');
+
+    // No fallback exists: the extension reports and exits rather than spawning.
+    expect(controller).toBeNull();
+    expect(joinSession).not.toHaveBeenCalled();
+    expect(processController.exitCode).toBe(1);
+    expect(diagnostics.stderr.mock.calls.flat().join(' ')).toContain('shared service unavailable');
   });
 
   it('fails before joining when the host session identity is unavailable', async () => {
@@ -166,6 +206,7 @@ describe('bootExtension', () => {
     const joinSession = vi.fn();
 
     const controller = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession,
       processController,
@@ -177,7 +218,7 @@ describe('bootExtension', () => {
     expect(joinSession).not.toHaveBeenCalled();
     expect(processController.exitCode).toBe(1);
     expect(diagnostics.stderr).toHaveBeenCalledWith(
-      'Failed to join Copilot session: SESSION_ID is required to derive the Konclave profile.',
+      'Konclave shared service unavailable: SESSION_ID is required to derive the Konclave profile.',
     );
   });
 
@@ -191,12 +232,14 @@ describe('bootExtension', () => {
       diagnostics: diagnostics.diagnostics,
       joinSession,
       processController,
+      connect: async () => stubClient(),
     });
 
     expect(controller).not.toBeNull();
-    expect(joinSession).toHaveBeenCalledWith(
-      createExtensionJoinConfig(process.env, process.platform),
-    );
+    expect(joinSession).toHaveBeenCalledTimes(1);
+    const joined = joinSession.mock.calls[0]?.[0] as { mcpServers: unknown; tools: unknown[] };
+    expect(joined.mcpServers).toEqual({});
+    expect(joined.tools.length).toBeGreaterThan(0);
     expect([...sessionMock.handlers.keys()].sort()).toEqual([
       'assistant.message',
       'session.error',
@@ -233,12 +276,99 @@ describe('bootExtension', () => {
     expect(processController.registeredSignals).toEqual([]);
   });
 
+  it('delivers shared-service events only after the session becomes idle', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    let rejectClaim: ((error: Error) => void) | undefined;
+    let claims = 0;
+    const close = vi.fn(() => rejectClaim?.(new Error('closed')));
+    const client: LocalServiceClient = {
+      profile: 'session-0123456789abcdef01234567',
+      connected: true,
+      retire: vi.fn(async () => close()),
+      close,
+      request: vi.fn(async (operation) => {
+        if (operation !== 'delivery.claim') {
+          return {};
+        }
+        claims += 1;
+        if (claims === 1) {
+          return {
+            events: [
+              {
+                notificationId: '01'.repeat(16),
+                leaseGeneration: 1,
+                sequence: 1,
+                conversation: '02'.repeat(32),
+                sender: '03'.repeat(32),
+                relayCursor: 1,
+                payload: { kind: 'application_text', text: 'shared hello' },
+              },
+            ],
+          };
+        }
+        return new Promise<never>((_resolve, reject) => {
+          rejectClaim = reject;
+        });
+      }),
+    };
+    const connect = vi.fn().mockResolvedValue(client);
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+      processController,
+      connect,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sessionMock.send).not.toHaveBeenCalled();
+
+    sessionMock.emit('session.idle', { data: {}, timestamp: '2026-08-16T00:00:00.000Z' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+    expect(sessionMock.send.mock.calls[0]?.[0]).toContain('shared hello');
+
+    controller?.dispose();
+    await Promise.resolve();
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the client and reports a failed clean grant retirement', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    const client = stubClient();
+    vi.mocked(client.retire).mockRejectedValueOnce(new Error('retirement failed'));
+
+    const controller = await bootExtension({
+      connect: async () => client,
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+      processController,
+    });
+
+    controller?.dispose();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(client.close).toHaveBeenCalledTimes(1);
+    expect(diagnostics.stderr).toHaveBeenCalledWith(
+      'Konclave grant retirement failed: retirement failed',
+    );
+  });
+
   it('schedules deferred sends and supports explicit cancellation', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
 
     const controller = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession: vi.fn().mockResolvedValue(sessionMock.session),
       processController,
@@ -271,6 +401,7 @@ describe('bootExtension', () => {
     const sessionMock = createSessionMock();
 
     const controller = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession: vi.fn().mockResolvedValue(sessionMock.session),
       processController,
@@ -291,6 +422,7 @@ describe('bootExtension', () => {
     const secondSession = createSessionMock();
     const secondProcessController = new FakeProcessController();
     const secondController = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession: vi.fn().mockResolvedValue(secondSession.session),
       processController: secondProcessController,
@@ -312,6 +444,7 @@ describe('bootExtension', () => {
     sessionMock.send.mockRejectedValueOnce(new Error('send failed'));
 
     const controller = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession: vi.fn().mockResolvedValue(sessionMock.session),
       processController,
@@ -339,6 +472,7 @@ describe('bootExtension', () => {
     const processController = new FakeProcessController();
 
     const controller = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession: vi.fn().mockRejectedValue(new Error('join failed')),
       processController,
@@ -346,7 +480,9 @@ describe('bootExtension', () => {
 
     expect(controller).toBeNull();
     expect(processController.exitCode).toBe(1);
-    expect(diagnostics.stderr).toHaveBeenCalledWith('Failed to join Copilot session: join failed');
+    expect(diagnostics.stderr).toHaveBeenCalledWith(
+      'Konclave shared service unavailable: join failed',
+    );
     expect(diagnostics.stdout).not.toHaveBeenCalled();
   });
 
@@ -373,6 +509,7 @@ describe('bootExtension', () => {
     const failingDiagnostics = createDiagnosticsRecorder();
     const joinSession = vi.fn().mockRejectedValue({ unexpected: true });
     const failedController = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: failingDiagnostics.diagnostics,
       joinSession,
       processController: new FakeProcessController(),
@@ -380,11 +517,12 @@ describe('bootExtension', () => {
 
     expect(failedController).toBeNull();
     expect(failingDiagnostics.stderr).toHaveBeenCalledWith(
-      'Failed to join Copilot session: Unknown error',
+      'Konclave shared service unavailable: Unknown error',
     );
 
     const stringDiagnostics = createDiagnosticsRecorder();
     const stringFailedController = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: stringDiagnostics.diagnostics,
       joinSession: vi.fn().mockRejectedValue('string failure'),
       processController: new FakeProcessController(),
@@ -392,7 +530,7 @@ describe('bootExtension', () => {
 
     expect(stringFailedController).toBeNull();
     expect(stringDiagnostics.stderr).toHaveBeenCalledWith(
-      'Failed to join Copilot session: string failure',
+      'Konclave shared service unavailable: string failure',
     );
   });
 
@@ -402,6 +540,7 @@ describe('bootExtension', () => {
     const sessionMock = createSessionMock();
 
     const controller = await bootExtension({
+      connect: async () => stubClient(),
       diagnostics: diagnostics.diagnostics,
       joinSession: vi.fn().mockResolvedValue(sessionMock.session),
       processController,

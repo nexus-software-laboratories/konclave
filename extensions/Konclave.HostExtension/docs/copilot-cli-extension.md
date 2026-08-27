@@ -2,86 +2,104 @@
 
 ## Runtime boundary
 
-The generated extension is a Node.js process that joins the foreground Copilot CLI
-session with `@github/copilot-sdk/extension`. It starts from:
+The generated extension is a thin Node.js process that joins the foreground Copilot
+CLI session with `@github/copilot-sdk/extension`. It registers:
 
-- no extension-owned tools or hooks
-- one local stdio MCP server exposing the daemon's bounded Konclave tools
-- stderr-only diagnostics
-- explicit cleanup for event handlers and scheduled sends, plus SDK disconnect on OS
-  termination signals
+- the 22 bounded Konclave agent tools as native SDK handlers;
+- one deterministic `/konclave` command surface;
+- automatic delivery through the existing bounded coalescing and wake policy;
+- no MCP server, child command, or per-session daemon; and
+- stderr-only diagnostics with explicit session, signal, timer, delivery, and local
+  client cleanup.
 
 The extension derives a stable, non-reversible profile identifier from the foreground
-Copilot session ID. Independent CLI sessions therefore run independent device
-profiles without sharing a lock, while a resumed session reopens its durable profile.
-The raw session ID is never passed to the daemon.
+Copilot session ID. Independent CLI sessions therefore bind to independent device
+profiles, while a resumed session reuses its durable profile. The raw session ID is
+never sent to the service or included in diagnostics.
 
-The daemon command is resolved in priority order: an explicit non-empty
-`KONCLAVE_DAEMON_PATH` overrides everything and is never forwarded to the daemon's
-own environment; otherwise the extension first looks for a daemon under `bin/`
-beside a user-scoped extension, then for one under the installed plugin root. Each is
-selected only when that path exists and is a regular file; otherwise the bare
-binary name (`KonclaveLocalDaemon` or `KonclaveLocalDaemon.exe`) is resolved against
-the system `PATH`. Both fixed layouts are derived from the compiled extension module's
-own on-disk location (`import.meta.url`), never from `process.cwd()` or an unbounded
-ancestor search.
+## Shared-service client
 
-`KONCLAVE_PROFILE_ROOT` takes precedence when present. Otherwise a user-scoped
-installation reads the absolute profile root from the bounded, non-secret
-`konclave.runtime.json` sidecar beside `extension.mjs`. Optional
-`KONCLAVE_WRAPPING_KEY_FILE` paths are forwarded; secret file contents and relay
-credentials never cross the extension boundary. For first-run relay provisioning,
-the extension also forwards `KONCLAVE_RELAY_ENDPOINT` and
-`KONCLAVE_RELAY_CREDENTIAL_FILE`. The latter is a path to a local file containing the
-canonical unpadded base64url bearer; the value itself is never placed in extension or
-MCP configuration.
+Installation writes `konclave.service.json` beside the installed extension. A bounded
+development override may name that file with `KONCLAVE_SERVICE_CONFIG_FILE`. The
+record contains only:
 
-GitHub's extension contract reserves stdout for the JSON-RPC transport. The template
-therefore treats any stdout write as a bug.
+- the local named-pipe or Unix-socket endpoint;
+- the registered adapter key identifier and version;
+- the authorized harness;
+- the pinned service verification key; and
+- an absolute path to the adapter signing-key custody record.
 
-## Experimental and trust requirements
+The extension never discovers an endpoint, trusts a network URL, broadens a
+registration, or starts a service. Missing, malformed, unsafe, or unauthorized state
+fails visibly with no per-session fallback.
 
-GitHub currently documents Copilot CLI extensions as experimental. The local demo
-enables the persistent experimental setting when necessary and restores its prior
-value when the extension is explicitly removed.
+On Unix, configuration and key records are opened with `O_NOFOLLOW`, verified through
+the same descriptor as regular files owned by the current UID with no group or other
+permissions, and read within hard byte limits. On Windows, the Rust installer creates
+and verifies the extension directory and both files with an explicit
+current-account-only DACL before Node reads either through one bounded descriptor.
+The service named pipe independently verifies both process SIDs and integrity levels.
+The Ed25519 seed and its temporary DER encoding are zeroized immediately after the
+platform crypto provider imports the key.
 
-Extensions execute with the local user's privileges. Installing the extension is
-equivalent to running trusted local code. The paved-path extension explicitly enables
-the daemon's write-capable MCP methods; the daemon itself remains read-only when
-started without `KONCLAVE_MCP_ALLOW_WRITE=true`.
+One profile-bound client owns separate interactive and delivery lanes. Both lanes use
+the same pinned registration and profile, while the second authenticated connection
+prevents a bounded delivery wait from blocking an interactive tool or slash command.
+Interactive reconnect retries preserve the request ID so the service returns the
+recorded idempotent outcome. Delivery reconnects use a fresh claim request because a
+claim response is bound to the disconnected consumer lease.
 
-## Build outputs
+## Deterministic commands
 
-- `extensions/Konclave.Extension/extension.mjs` — bundled extension entry loaded
-  by Copilot CLI
-- `plugin.json` — distribution metadata for future marketplace delivery
-- `skills/copilot-cli-extension-maintainer/SKILL.md` — optional skill for safely
-  evolving the extension
-- `build/outputs/<plugin-name>-<version>.zip` — deterministic release bundle
-  containing installable plugin assets
+`/konclave` handlers call the shared client directly. They never prompt a model,
+inject a user turn, or interpret command text as an instruction.
+
+```text
+/konclave help
+/konclave status
+/konclave identity
+/konclave conversations
+/konclave mute <conversation>
+/konclave unmute <conversation>
+```
+
+Arguments and rendered output are bounded. Agent tools use the same operation names
+and schemas as the existing daemon handlers, so the transport changes without
+creating a second domain implementation.
+
+## Automatic delivery
+
+The shared service retains the durable wait/claim/acknowledge/release journal. The
+extension reuses the established delivery coordinator to:
+
+- inject only while the Copilot session is idle;
+- quote remote text as untrusted collaborator content;
+- coalesce bounded batches without mixing conversations;
+- enforce global and per-conversation wake budgets;
+- acknowledge only after the harness accepts a synthetic turn; and
+- release or reclaim work after rejection, disconnect, or restart.
+
+## Build and package contract
+
+- `extensions/Konclave.Extension/extension.mjs` is the bundled entry loaded by
+  Copilot CLI.
+- `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client
+  bundle used by local smoke and future harness adapters.
+- `plugin.json` is the distribution manifest.
+- `skills/copilot-cli-extension-maintainer/SKILL.md` is the contributor skill.
+- `build/outputs/<plugin-name>-<version>.zip` is the deterministic release bundle.
+
+`scripts/verify-package.mjs` rejects a compiled extension that omits the shared-client
+tool, command, or delivery surfaces; writes to stdout; names `KonclaveLocalDaemon`;
+or declares a stdio MCP server. The archive contains exactly the manifest, thin
+extension, and maintainer skill—never a daemon binary.
 
 ## Safe send seam
 
-GitHub's extension guidance warns against calling `session.send()` synchronously from a
-hook. `src/runtime.ts` therefore centralizes future message injection behind
-`schedulePromptSend()`, which always defers the send through a timer and tracks
-cancellation during shutdown.
-
-## Package contract
-
-`scripts/verify-package.mjs` validates that:
-
-- `package.json` and `plugin.json` stay in sync
-- the compiled extension exists at the declared plugin manifest path
-- the compiled output still uses the `joinSession()` lifecycle
-- the packaged ZIP contains only the installable plugin assets
-- the compiled extension does not introduce obvious stdout writes
-
-## Release contract
-
-The release workflow triggers on bare semver tags, rebuilds the extension, recreates
-the deterministic ZIP, validates the tag against `plugin.json`, and uploads the ZIP as
-a draft GitHub release asset.
+GitHub's extension guidance warns against calling `session.send()` synchronously from
+a hook. `src/runtime.ts` centralizes scheduled sends behind `schedulePromptSend()`,
+while automatic delivery uses the coordinator's idle gate and bounded wake policy.
+Both paths are canceled during shutdown.
 
 ## Official references
 

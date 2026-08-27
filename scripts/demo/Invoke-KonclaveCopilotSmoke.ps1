@@ -75,33 +75,39 @@ else {
     }
     [IO.Path]::GetFullPath($env:COPILOT_HOME)
 }
-$daemonPath = Join-Path (
-    $copilotHome
-) 'extensions' 'konclave' 'bin' 'KonclaveLocalDaemon.exe'
-$runtimeConfigPath = Join-Path $copilotHome 'extensions' 'konclave' 'konclave.runtime.json'
-if (-not (Test-Path -LiteralPath $runtimeConfigPath -PathType Leaf)) {
-    throw 'Installed Konclave extension runtime configuration is unavailable.'
+$extensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
+$clientModulePath = Join-Path $extensionRoot 'client.mjs'
+$serviceConfigPath = Join-Path $extensionRoot 'konclave.service.json'
+foreach ($path in @($clientModulePath, $serviceConfigPath)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Installed Konclave shared-client asset is unavailable: $path"
+    }
 }
-$runtimeConfigItem = Get-Item -LiteralPath $runtimeConfigPath
+$statusPath = Join-Path $localAppData 'Konclave' 'demo' 'demo-status.json'
+if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
+    throw 'Konclave demo status is unavailable; run setup without -SkipSetup.'
+}
+$status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json -Depth 20
 if (
-    $runtimeConfigItem.Attributes -band [IO.FileAttributes]::ReparsePoint -or
-    $runtimeConfigItem.Length -gt 4096
+    [int64]$status.schemaVersion -ne 3 -or
+    [int64]$status.serviceProcessId -le 0
 ) {
-    throw 'Installed Konclave extension runtime configuration is unsafe.'
+    throw 'Konclave demo shared-service status is malformed.'
 }
-$runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw -Encoding UTF8 |
-    ConvertFrom-Json -Depth 10
+$serviceProcess = Get-Process -Id ([int]$status.serviceProcessId) -ErrorAction SilentlyContinue
+if ($null -eq $serviceProcess -or $serviceProcess.HasExited) {
+    throw 'Konclave demo shared service is not running.'
+}
 if (
-    [int64]$runtimeConfig.schemaVersion -ne 1 -or
-    [string]::IsNullOrWhiteSpace([string]$runtimeConfig.profileRoot) -or
-    -not [IO.Path]::IsPathRooted([string]$runtimeConfig.profileRoot)
+    -not [IO.Path]::GetFullPath($serviceProcess.Path).Equals(
+        [IO.Path]::GetFullPath([string]$status.serviceExecutable),
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or
+    $serviceProcess.StartTime.ToUniversalTime().ToFileTimeUtc() -ne
+        [int64]$status.serviceStartTimeUtcFileTime
 ) {
-    throw 'Installed Konclave extension runtime configuration is malformed.'
-}
-$profileRoot = [IO.Path]::GetFullPath([string]$runtimeConfig.profileRoot)
-
-if (-not (Test-Path -LiteralPath $daemonPath -PathType Leaf)) {
-    throw 'Installed Konclave extension daemon is unavailable.'
+    throw 'Konclave demo shared-service process no longer matches recorded status.'
 }
 
 Push-Location $smokeRoot
@@ -139,8 +145,9 @@ try {
     $maxAiCredits = $MaxAiCreditsPerSession.ToString()
     $nodeArguments = @(
         'dist/src/cli.js',
-        '--daemon', $daemonPath,
-        '--profile-root', $profileRoot,
+        '--client-module', $clientModulePath,
+        '--service-config', $serviceConfigPath,
+        '--service-pid', ([string]$status.serviceProcessId),
         '--working-directory', $projectRoot,
         '--timeout-ms', $timeoutMs,
         '--max-ai-credits', $maxAiCredits

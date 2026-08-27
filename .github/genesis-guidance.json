@@ -68,6 +68,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0009-evidence-bound-session-grants.md",
+        "title": "ADR 0009: Evidence-bound exact-profile session grants",
+        "section": "Architecture",
+        "order": 90,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

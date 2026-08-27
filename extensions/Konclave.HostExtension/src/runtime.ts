@@ -1,16 +1,18 @@
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { JoinSessionConfig as CopilotJoinSessionConfig } from '@github/copilot-sdk/extension';
 
+import { createDeliveryCoordinator, startDeliveryRuntime } from './adapter/runtime.js';
+import type { LocalServiceClient } from './service/client.js';
+import { createLocalServiceDeliveryChannel } from './service/delivery.js';
+import { connectInstalledService } from './service/installed.js';
 import {
-  createAdapterRendezvous,
-  listenForDaemon,
-  type AdapterRendezvous,
-} from './adapter/channel.js';
-import { createDeliveryCoordinator } from './adapter/delivery.js';
-import { startDeliveryRuntime, type AdapterIntegration } from './adapter/runtime.js';
-import { resolveDaemonCommand } from './daemon-path.js';
-import { resolveInstalledProfileRoot } from './runtime-config.js';
+  createKonclaveCommands,
+  type CommandOutput,
+  type RegisteredCommand,
+} from './service/commands.js';
+import { createKonclaveTools, type RegisteredTool } from './service/tools.js';
 
 /**
  * Directory of the running module itself, used to locate a daemon bundled beside
@@ -90,20 +92,20 @@ export interface TimerController {
   clearTimeout(handle: TimerHandle): void;
 }
 
-export interface JoinSessionConfig {
-  tools: [];
+export type JoinSessionConfig = CopilotJoinSessionConfig & {
+  tools: RegisteredTool[];
+  commands: RegisteredCommand[];
   hooks: Record<string, never>;
-  mcpServers: Record<string, McpStdioServerConfig>;
-}
-
-export interface McpStdioServerConfig {
-  type: 'stdio';
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  tools: ['*'];
-  timeout: number;
-}
+  /**
+   * Kept empty on purpose.
+   *
+   * A Copilot session must never start a Konclave process. The shared per-user
+   * service owns every profile, and this extension is a thin client of it, so an
+   * MCP server entry here would reintroduce the per-session daemon the shared
+   * service exists to replace.
+   */
+  mcpServers: Record<string, never>;
+};
 
 export interface ExtensionState {
   lastAssistantMessageId: string | null;
@@ -145,26 +147,29 @@ export interface BootExtensionOptions {
   environment?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   /**
-   * Adapter hosting used to receive remote events.
+   * Connects the thin client to the shared per-user service.
    *
-   * Absent, the extension mounts the daemon and serves tools without a delivery
-   * channel, which is what keeps this entry point testable without a socket. The
-   * composition root supplies the real integration.
+   * Replaced in tests by an in-process service. There is no fallback: when this
+   * fails the extension reports it and exits rather than starting a daemon.
    */
-  adapter?: AdapterIntegration;
+  connect?: (
+    environment: Readonly<Record<string, string | undefined>>,
+    moduleDir: string,
+    profile: string,
+    platform: NodeJS.Platform,
+  ) => Promise<LocalServiceClient>;
+  /** Where deterministic command output is rendered. */
+  commandOutput?: CommandOutput;
 }
 
-/** The adapter hosting used in production. */
-export const nodeAdapterIntegration: AdapterIntegration = {
-  createRendezvous(platform) {
-    return createAdapterRendezvous(platform);
-  },
-  listen(rendezvous, platform) {
-    return listenForDaemon(rendezvous, platform);
-  },
-};
-
-const mcpToolTimeoutMs = 90_000;
+/**
+ * Connects to the installed shared service.
+ *
+ * Every input comes from owner-protected installed state: the endpoint, the adapter
+ * registration, and the pinned service key. The signing seed is read at connect time
+ * and never passed through arguments, environment, or diagnostics.
+ */
+export { connectInstalledService };
 
 const extensionSignals: readonly ExtensionSignal[] = ['SIGINT', 'SIGTERM'];
 
@@ -235,17 +240,20 @@ function normalizeDelay(delayMs: number | undefined): number {
 export async function bootExtension(
   options: BootExtensionOptions,
 ): Promise<ExtensionController | null> {
-  const platform = options.platform ?? process.platform;
   const environment = options.environment ?? process.env;
-  let rendezvous: AdapterRendezvous | null = null;
+  const connect = options.connect ?? connectInstalledService;
+  const commandOutput = options.commandOutput ?? createDiagnosticsOutput(options.diagnostics);
+  const platform = options.platform ?? process.platform;
+  let client: LocalServiceClient | null = null;
 
   try {
-    // The rendezvous exists before the daemon child starts, because the daemon
-    // connects outward to it during its own startup and cannot wait for one to
-    // appear later.
-    rendezvous = options.adapter ? await options.adapter.createRendezvous(platform) : null;
+    // The profile is derived before anything connects, so a reconnect or reload
+    // binds to the same durable profile rather than creating a second one.
+    const profile = deriveProfileId(environment);
+    client = await connect(environment, runtimeModuleDir, profile, platform);
+    const connectedClient = client;
     const session = await options.joinSession(
-      createExtensionJoinConfig(environment, platform, rendezvous),
+      createExtensionJoinConfig(connectedClient, commandOutput),
     );
     const controller = attachExtension(
       session,
@@ -253,66 +261,44 @@ export async function bootExtension(
       options.processController,
       options.timers,
     );
-
-    if (options.adapter && rendezvous) {
-      attachAdapterDelivery(
-        controller,
-        options.adapter,
-        rendezvous,
-        deriveProfileId(environment),
-        options.diagnostics,
-        platform,
-      );
-    }
-
+    const deliveryChannel = createLocalServiceDeliveryChannel(connectedClient);
+    const coordinator = createDeliveryCoordinator({
+      channel: deliveryChannel,
+      session,
+      diagnostics: options.diagnostics,
+    });
+    const deliveryRuntime = startDeliveryRuntime({
+      channel: deliveryChannel,
+      coordinator,
+      diagnostics: options.diagnostics,
+    });
+    controller.attachDelivery(coordinator, () => {
+      deliveryRuntime.stop();
+      void connectedClient.retire().catch((error: unknown) => {
+        options.diagnostics.error(`Konclave grant retirement failed: ${formatError(error)}`);
+        connectedClient.close();
+      });
+    });
+    void deliveryRuntime.completed.catch((error: unknown) => {
+      options.diagnostics.error(`Konclave delivery stopped: ${formatError(error)}`);
+    });
     return controller;
   } catch (error) {
-    await rendezvous?.dispose();
-    options.diagnostics.error(`Failed to join Copilot session: ${formatError(error)}`);
+    client?.close();
+    // There is no per-session daemon to fall back to. An unavailable or unauthorized
+    // service is reported and the extension exits.
+    options.diagnostics.error(`Konclave shared service unavailable: ${formatError(error)}`);
     options.processController.setExitCode(1);
     return null;
   }
 }
 
-/**
- * Runs the delivery channel beside the session without blocking startup.
- *
- * A daemon that never connects must not prevent the extension from serving tools, so
- * the channel is established in the background and its failures are diagnostics
- * rather than startup errors.
- */
-function attachAdapterDelivery(
-  controller: ExtensionController,
-  adapter: AdapterIntegration,
-  rendezvous: AdapterRendezvous,
-  profileId: string,
-  diagnostics: Diagnostics,
-  platform: NodeJS.Platform,
-): void {
-  void (async () => {
-    try {
-      const listener = await adapter.listen(rendezvous, platform);
-      const channel = await listener.accept(profileId);
-      const coordinator = createDeliveryCoordinator({
-        channel,
-        session: controller.session,
-        diagnostics,
-      });
-      const runtime = startDeliveryRuntime({ channel, coordinator, diagnostics });
-      // Disposal stops the claim loop first. Closing the channel underneath a running
-      // loop would surface as a claim failure rather than an orderly stop.
-      controller.attachDelivery(coordinator, () => {
-        runtime.stop();
-        channel.close();
-        void listener.close();
-        void rendezvous.dispose();
-      });
-      await runtime.completed;
-    } catch (error) {
-      diagnostics.error(`Konclave delivery channel unavailable: ${formatError(error)}`);
-      await rendezvous.dispose();
-    }
-  })();
+function createDiagnosticsOutput(diagnostics: Diagnostics): CommandOutput {
+  return {
+    write(line) {
+      diagnostics.error(line);
+    },
+  };
 }
 
 /**
@@ -331,57 +317,15 @@ export function deriveProfileId(environment: Readonly<Record<string, string | un
 }
 
 export function createExtensionJoinConfig(
-  environment: Readonly<Record<string, string | undefined>>,
-  platform: NodeJS.Platform,
-  rendezvous: AdapterRendezvous | null = null,
+  client: LocalServiceClient,
+  output: CommandOutput,
 ): JoinSessionConfig {
-  const command = resolveDaemonCommand(environment, platform, runtimeModuleDir);
-  const daemonEnvironment: Record<string, string> = {
-    KONCLAVE_PROFILE_ID: deriveProfileId(environment),
-    KONCLAVE_MCP_ALLOW_WRITE: 'true',
-  };
-
-  if (rendezvous) {
-    // All three are supplied together; the daemon rejects a partial set rather than
-    // running without a delivery channel.
-    daemonEnvironment.KONCLAVE_ADAPTER_ENDPOINT = rendezvous.endpoint;
-    daemonEnvironment.KONCLAVE_ADAPTER_CAPABILITY_FILE = rendezvous.capabilityFile;
-    daemonEnvironment.KONCLAVE_ADAPTER_CONSUMER_ID = rendezvous.consumerId;
-  }
-
-  const profileRoot = resolveInstalledProfileRoot(environment, runtimeModuleDir);
-  if (profileRoot) {
-    daemonEnvironment.KONCLAVE_PROFILE_ROOT = profileRoot;
-  }
-  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_WRAPPING_KEY_FILE');
-  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_RELAY_ENDPOINT');
-  copyNonEmptyEnvironment(environment, daemonEnvironment, 'KONCLAVE_RELAY_CREDENTIAL_FILE');
-
   return {
-    tools: [],
+    tools: createKonclaveTools({ client }),
+    commands: createKonclaveCommands({ client, output }),
     hooks: {},
-    mcpServers: {
-      konclave: {
-        type: 'stdio',
-        command,
-        args: [],
-        env: daemonEnvironment,
-        tools: ['*'],
-        timeout: mcpToolTimeoutMs,
-      },
-    },
+    mcpServers: {},
   };
-}
-
-function copyNonEmptyEnvironment(
-  source: Readonly<Record<string, string | undefined>>,
-  destination: Record<string, string>,
-  name: string,
-): void {
-  const value = source[name]?.trim();
-  if (value) {
-    destination[name] = value;
-  }
 }
 
 function attachExtension(

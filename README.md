@@ -29,7 +29,7 @@ pwsh ./scripts/Invoke-NodeWorkspaceChecks.ps1
 Run a Rust process from the workspace root:
 
 ```shell
-cargo run -p KonclaveLocalDaemon
+cargo run -p KonclaveLocalDaemon --bin KonclaveLocalService -- --config <absolute-service-config>
 cargo run -p KonclaveCommunityRelay
 cargo run -p KonclaveCommandLine -- --help
 ```
@@ -52,7 +52,8 @@ The Copilot CLI host extension is packaged from
 
 ### Initialize an installation
 
-After installing the CLI, daemon, and Copilot extension, configure relay enrollment once:
+After installing the CLI, shared service, and Copilot extension, configure the
+installation once:
 
 ```shell
 konclave init --relay-endpoint https://relay.example.com
@@ -71,12 +72,18 @@ operating system credential store. Unix headless setup can create an owner-owned
 mode-`0600` external record from bounded stdin:
 
 ```shell
-printf '%s\n' '<enrollment-credential>' | konclave init --relay-endpoint https://relay.example.com --external-source /run/secrets/konclave-enrollment
+printf '%s\n' '<enrollment-credential>' | konclave init --relay-endpoint https://relay.example.com --authorization-policy account-trusted --external-source /run/secrets/konclave-enrollment
 ```
 
 Later Copilot sessions create independent profiles and enroll automatically without
 receiving the credential through their environment or extension configuration. Repeating
 `init` is idempotent for the same endpoint and source; conflicting setup fails.
+
+The initial `AccountTrusted` authorization policy trusts every process under the
+configured operating-system account; it does not isolate hostile same-user sessions.
+Each client still uses a memory-only session key and a finite exact-profile grant.
+Unsupported harnesses can use the same minimum-trust contract through the generic
+installed client API without claiming stronger evidence.
 
 ### Run the local Copilot demo
 
@@ -103,14 +110,13 @@ from running in CI.
 
 Konclave separates the trusted local agent boundary from relay transport:
 
-- `Konclave.LocalDaemon` owns local IPC, authorization hooks, SQLite state, and
-  the MCP server boundary.
+- `Konclave.LocalDaemon` builds the shared authenticated local service, profile
+  supervision, authorization, SQLite state, and reusable operation handlers.
 - `Konclave.CommunityRelay` provides outbound WebSocket/HTTP relay transport
   without access to plaintext message content.
 - Shared crates own protocol contracts, cryptographic policy, domain behavior,
   and client integration.
-- TypeScript guests provide the Copilot CLI extension and administration
-  console.
+- TypeScript guests provide the thin Copilot CLI client and administration console.
 
 See the [project documentation](docs/README.md) for engineering and delivery
 details.
@@ -121,7 +127,7 @@ details.
 ```
 apps/Konclave.CommandLine/       # Command-line client
 apps/Konclave.CommunityRelay/    # Self-hosted relay service
-apps/Konclave.LocalDaemon/       # Trusted local daemon and MCP boundary
+apps/Konclave.LocalDaemon/       # Shared local service and operation host
 apps/Konclave.AdminConsole/      # React administration console
 extensions/Konclave.HostExtension/ # Copilot CLI extension
 crates/                          # Shared Rust protocol, crypto, domain, and client crates

@@ -14,29 +14,31 @@ The job proves:
   variables;
 - `doctor` recognizes the extracted daemon and plugin and reaches the relay through a
   locally generated certificate chain trusted by the client process;
-- two simulated Copilot host sessions launch the daemon bundled in the cached plugin,
-  enroll independent relay principals, and pair through one capability;
-- messages arrive automatically through the authenticated adapter channel in both
-  directions without a receiver sync prompt;
+- one packaged shared-service process hosts independently enrolled profiles and the
+  thin plugin contains no daemon;
+- two shared-service clients pair through one capability and exchange exact messages
+  in both directions;
 - an untrusted relay certificate is rejected before the same endpoint succeeds with
   its temporary CA explicitly trusted;
-- killing a daemon before adapter acknowledgment redelivers the same stable
-  notification after restart through a second, byte-identical extraction;
+- disconnecting one client, sending while it is offline, and reconnecting replays the
+  exact missed message;
+- restarting the one service through a second, byte-identical extraction preserves
+  profile identity;
 - an active pairing can be cancelled without exposing Invitation, JoinProof, Welcome,
   cursor, route, or peer-binding fields;
 - native and Docker-loaded relays expose the same enrollment, pairing, delivery, and
   recovery behavior;
 - relay databases and logs contain neither message plaintext, pairing capabilities,
   nor the protected enrollment record;
-- daemon process arguments and environments contain no legacy relay credential or
+- service process arguments and environments contain no relay credential or
   endpoint variables and no tested secret/plaintext sentinels;
 - removing extracted installations leaves profile databases intact; and
 - Docker cleanup removes the exact acceptance container and loaded image while
   preserving the pre-run engine baseline.
 
-The test compiles only its CI harness. Every process under test—the CLI, both daemon
-instances, plugin-bundled replacement daemon, standalone relay, and container
-image—comes from the packaged release candidates.
+The test compiles only its CI harness. Every process under test—the CLI, shared service
+and its replacement extraction, standalone relay, and container image—comes from the
+packaged release candidates.
 
 Because this is the first packaged prerelease, no earlier release exists for a
 cross-version schema migration. The job covers replacement-install mechanics by
@@ -46,10 +48,16 @@ confirming the separate profile state remains.
 
 ## Proprietary Copilot boundary
 
-CI simulates the Copilot host session contract around the packaged plugin: session
-identity, MCP child launch, outbound authenticated adapter attachment, idle delivery,
-prompt framing, and acknowledgment. Existing plugin tests exercise the packaged
-extension's session callbacks and safety framing.
+CI simulates the Copilot host contract around the packaged thin client: registered
+SDK tools, authenticated profile attachment, delivery settlement, idle injection
+safety, and no process launch. Existing plugin tests exercise session callbacks,
+slash commands, reconnect, and safety framing.
+
+The CI-safe `shared_service_process` test additionally attaches 20 logical clients
+with 40 authenticated interactive/delivery lanes and 20 delivery leases to one PID,
+proves distinct identities and profile stores, checks process/descriptor/memory
+bounds, pairs two profiles, exchanges an offline message and exact reply, restarts the
+service, and verifies relay opacity.
 
 The test does not perform browser OAuth against the proprietary Copilot CLI service
 and does not request cloud model inference. Those operations require a billed,

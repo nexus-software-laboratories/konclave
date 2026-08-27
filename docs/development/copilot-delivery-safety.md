@@ -42,6 +42,26 @@ releases the claim, so the event stays reclaimable rather than being lost. A cra
 between acceptance and acknowledgment may redeliver the same stable notification
 identifier, which the contract permits and the identifier makes recognizable.
 
+## Tool cancellation reflects durable outcomes
+
+The generic thin-client API accepts an `AbortSignal` and converts it into an
+authenticated, session-scoped cancellation request. Cancellation before the service's
+commit point becomes a terminal cancellation. Cancellation after commit leaves the
+tool call pending until the service records and returns the actual durable outcome;
+the client never substitutes a local timeout for work that may still commit.
+
+The current public Copilot SDK `ToolInvocation` contract does not expose a
+tool-invocation `AbortSignal`. The paved Copilot handler therefore cannot propagate a
+harness abort that it does not receive. Its configured deadline still requests
+authenticated cancellation, and the generic client is ready to forward a signal when
+the SDK adds one. This limitation is explicit rather than approximated from session
+events or connection closure.
+
+The paved handler does receive stable session and tool-call identifiers. It hashes
+those values under a Konclave-specific domain into the 16-byte local request
+identifier, so reconnect or callback replay of the same tool call reconciles the same
+sealed outcome without exposing the upstream identifiers on the wire.
+
 ## Delivery follows an explicit join
 
 Creating or joining a conversation is what turns delivery on for it. Nothing else

@@ -10,6 +10,7 @@ The terms MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY describe project requireme
 Konclave tracks these versions independently:
 
 - transport endpoint version;
+- local-service authorization protocol version;
 - relay envelope version;
 - Konclave application protocol version;
 - MLS protocol version;
@@ -45,6 +46,26 @@ Schema rules:
   use.
 
 ## Wire layers
+
+### Local service authorization
+
+The supported shared-service protocol is version 2. It has separate issuer and
+session-grant handshake roles and never negotiates down to protocol version 1. An old
+client cannot parse a protocol-v2 rejection, so the service classifies the attempt as
+`client_upgrade_required` while the old client observes a failed attach. A version-2
+client classifies a reachable old service as `service_upgrade_required`.
+
+Every operational connection presents one complete finite grant and proves the
+matching ephemeral session private key. The canonical transcript binds the exact
+profile, harness, evidence, policy version, issuance, expiry, capabilities, issuer,
+client instance, both fresh challenges, and pinned service key. Invalid grants use one
+signed uniform rejection after proof exchange.
+
+Installation schema version 2 emits only this protocol. Because no supported Konclave
+release or external installation predates it, the current transition is a clean
+pre-release cut rather than a v1 compatibility mode. A supported release requires the
+journaled migration and rollback machinery defined by ADR 0009 before changing this
+schema again.
 
 ### Transport frame
 

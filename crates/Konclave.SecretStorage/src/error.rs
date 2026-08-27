@@ -44,6 +44,18 @@ pub enum SecretStorageError {
     #[error("native wrapping-key credential is invalid")]
     InvalidNativeCredential,
 
+    /// An owner-protected local directory or file is absent or unavailable.
+    #[error("owner-protected local storage is unavailable")]
+    OwnerProtectedStorageUnavailable,
+
+    /// A local directory or file does not have the required owner-only shape.
+    #[error("owner-protected local storage is unsafe")]
+    OwnerProtectedStorageUnsafe,
+
+    /// An existing owner-protected file differs from the exact installation value.
+    #[error("owner-protected local storage conflicts with the installation")]
+    OwnerProtectedStorageConflict,
+
     /// The selected persistence backend rejected an MLS storage operation.
     #[error("MLS storage backend failed during {operation}")]
     MlsStorageBackendFailure { operation: &'static str },
@@ -64,6 +76,9 @@ impl SecretStorageError {
             Self::NativeCustodyUnavailable => "native_key_custody_unavailable",
             Self::NativeCredentialNotFound => "native_credential_not_found",
             Self::InvalidNativeCredential => "invalid_native_key_credential",
+            Self::OwnerProtectedStorageUnavailable => "owner_protected_storage_unavailable",
+            Self::OwnerProtectedStorageUnsafe => "owner_protected_storage_unsafe",
+            Self::OwnerProtectedStorageConflict => "owner_protected_storage_conflict",
             Self::MlsStorageBackendFailure { .. } => "mls_storage_backend_failure",
         }
     }

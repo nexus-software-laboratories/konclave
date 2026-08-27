@@ -17,6 +17,32 @@ interface CompletedTool {
   readonly structured: unknown;
 }
 
+interface ToolCompletionResult {
+  readonly content?: string;
+  readonly structuredContent?: unknown;
+}
+
+const maxToolResultBytes = 1024 * 1024;
+
+export function decodeToolCompletionResult(
+  result: ToolCompletionResult | undefined,
+): unknown {
+  if (result?.structuredContent !== undefined) {
+    return result.structuredContent;
+  }
+  if (
+    typeof result?.content !== "string" ||
+    Buffer.byteLength(result.content, "utf8") > maxToolResultBytes
+  ) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(result.content) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface ParticipantUsage {
   readonly modelCalls: number;
   readonly models: string[];
@@ -70,7 +96,7 @@ export class SmokeParticipant {
       this.completions.push({
         callId: event.data.toolCallId,
         success: event.data.success,
-        structured: event.data.result?.structuredContent,
+        structured: decodeToolCompletionResult(event.data.result),
       });
     });
     session.on("assistant.usage", (event) => {
@@ -139,7 +165,8 @@ export class SmokeParticipant {
     }
     const unexpected = starts.filter(
       (call) =>
-        call.serverName !== "konclave" || call.toolName !== expectedTool,
+        (call.serverName !== undefined && call.serverName !== "konclave") ||
+        call.toolName !== expectedTool,
     );
     if (unexpected.length > 0 || (!allowRepeated && starts.length !== 1)) {
       const names = starts.map(

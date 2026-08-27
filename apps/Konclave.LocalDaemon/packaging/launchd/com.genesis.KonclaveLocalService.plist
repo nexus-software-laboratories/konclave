@@ -3,10 +3,12 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.genesis.KonclaveLocalDaemon</string>
+  <string>com.genesis.KonclaveLocalService</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/libexec/konclave/bin/KonclaveLocalDaemon</string>
+    <string>@SERVICE_BINARY@</string>
+    <string>--config</string>
+    <string>@SERVICE_CONFIG@</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   approveAll,
   CopilotClient,
   type CopilotSession,
+  type Tool,
   ToolSet,
 } from "@github/copilot-sdk";
 
@@ -20,8 +22,9 @@ import { assertLocalAgentSmoke } from "./local-only.js";
 import { SmokeParticipant, type ParticipantUsage } from "./participant.js";
 
 export interface SmokeOptions {
-  readonly daemonPath: string;
-  readonly profileRoot: string;
+  readonly clientModulePath: string;
+  readonly serviceConfigPath: string;
+  readonly servicePid: number;
   readonly workingDirectory: string;
   readonly model?: string;
   readonly timeoutMs: number;
@@ -40,6 +43,7 @@ export interface SmokeReport {
   readonly maxAiCreditsPerSession: number;
   readonly sessionA: string;
   readonly sessionB: string;
+  readonly servicePid: number;
   readonly pairingId: string;
   readonly conversationId: string;
   readonly pairingPhases: string[];
@@ -64,7 +68,7 @@ interface PairingStatus {
 }
 
 const instruction =
-  "Call exactly the named Konclave MCP tool once with the supplied arguments, then stop. " +
+  "Call exactly the named Konclave tool once with the supplied arguments, then stop. " +
   "Never call shell, filesystem, web, skill, repository, or any other tool. " +
   "Never reproduce a pairing capability in your response.";
 
@@ -80,6 +84,7 @@ const scenarioTools = [
   "sync_messages",
   "read_messages",
 ] as const;
+const scenarioToolNames: ReadonlySet<string> = new Set(scenarioTools);
 
 function assertRegularFile(path: string, label: string): void {
   if (!isAbsolute(path) || !lstatSync(path).isFile()) {
@@ -118,14 +123,14 @@ function progress(
   options.onProgress?.(stage, details);
 }
 
-function createSessionConfig(
+export function createSessionConfig(
   options: SmokeOptions,
   sessionId: string,
-  profileId: string,
+  tools: Tool[],
 ): Parameters<CopilotClient["createSession"]>[0] {
   const availableTools = new ToolSet();
   for (const tool of scenarioTools) {
-    availableTools.addMcp(`konclave-${tool}`);
+    availableTools.addCustom(tool);
   }
   return {
     sessionId,
@@ -142,25 +147,49 @@ function createSessionConfig(
       mode: "replace",
       content:
         "You are one participant in a deterministic local Konclave smoke test. " +
-        "For every user request, call exactly the one named Konclave MCP tool once " +
+        "For every user request, call exactly the one named Konclave tool once " +
         "with exactly the supplied arguments, then end the turn immediately. " +
         instruction,
     },
-    mcpServers: {
-      konclave: {
-        type: "stdio",
-        command: options.daemonPath,
-        args: [],
-        env: {
-          KONCLAVE_PROFILE_ROOT: options.profileRoot,
-          KONCLAVE_PROFILE_ID: profileId,
-          KONCLAVE_MCP_ALLOW_WRITE: "true",
-        },
-        tools: ["*"],
-        timeout: 30_000,
-      },
-    },
+    tools,
+    mcpServers: {},
   };
+}
+
+interface SmokeLocalClient {
+  close(): void;
+}
+
+interface ThinClientModule {
+  connectInstalledService(
+    environment: Readonly<Record<string, string | undefined>>,
+    moduleDir: string,
+    profile: string,
+    platform: NodeJS.Platform,
+  ): Promise<SmokeLocalClient>;
+  createKonclaveTools(options: {
+    readonly client: SmokeLocalClient;
+    readonly toolDeadlineMs?: number;
+  }): Tool[];
+}
+
+function isThinClientModule(value: unknown): value is ThinClientModule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "connectInstalledService" in value &&
+    typeof value.connectInstalledService === "function" &&
+    "createKonclaveTools" in value &&
+    typeof value.createKonclaveTools === "function"
+  );
+}
+
+async function loadThinClient(path: string): Promise<ThinClientModule> {
+  const loaded: unknown = await import(pathToFileURL(path).href);
+  if (!isThinClientModule(loaded)) {
+    throw new Error("Thin client module does not expose the required API.");
+  }
+  return loaded;
 }
 
 async function syncPairing(
@@ -270,12 +299,13 @@ async function disconnectAndDelete(
 
 export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
   assertLocalAgentSmoke(process.env);
-  assertRegularFile(options.daemonPath, "daemonPath");
-  if (
-    !isAbsolute(options.profileRoot) ||
-    !isAbsolute(options.workingDirectory)
-  ) {
-    throw new Error("profileRoot and workingDirectory must be absolute paths.");
+  assertRegularFile(options.clientModulePath, "clientModulePath");
+  assertRegularFile(options.serviceConfigPath, "serviceConfigPath");
+  if (!isAbsolute(options.workingDirectory)) {
+    throw new Error("workingDirectory must be an absolute path.");
+  }
+  if (!Number.isSafeInteger(options.servicePid) || options.servicePid <= 0) {
+    throw new Error("servicePid must be a positive process identifier.");
   }
 
   const startedAt = Date.now();
@@ -289,6 +319,7 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
     useLoggedInUser: true,
   });
   const sessions: CopilotSession[] = [];
+  const localClients: SmokeLocalClient[] = [];
   let primaryError: Error | undefined;
   let report: SmokeReport | undefined;
   let participantA: SmokeParticipant | undefined;
@@ -298,12 +329,51 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
 
   try {
     report = await (async (): Promise<SmokeReport> => {
+      const thinClient = await loadThinClient(options.clientModulePath);
+      const environment = {
+        KONCLAVE_SERVICE_CONFIG_FILE: options.serviceConfigPath,
+      };
+      const moduleDir = dirname(options.clientModulePath);
+      const localA = await thinClient.connectInstalledService(
+        environment,
+        moduleDir,
+        "session-copilot-smoke-a",
+        process.platform,
+      );
+      localClients.push(localA);
+      const localB = await thinClient.connectInstalledService(
+        environment,
+        moduleDir,
+        "session-copilot-smoke-b",
+        process.platform,
+      );
+      localClients.push(localB);
+      const toolsA = thinClient
+        .createKonclaveTools({
+          client: localA,
+          toolDeadlineMs: options.timeoutMs,
+        })
+        .filter((tool) => scenarioToolNames.has(tool.name));
+      const toolsB = thinClient
+        .createKonclaveTools({
+          client: localB,
+          toolDeadlineMs: options.timeoutMs,
+        })
+        .filter((tool) => scenarioToolNames.has(tool.name));
+      if (
+        toolsA.length !== scenarioTools.length ||
+        toolsB.length !== scenarioTools.length
+      ) {
+        throw new Error(
+          "Thin client did not expose the complete smoke tool set.",
+        );
+      }
       const sessionA = await client.createSession(
-        createSessionConfig(options, randomUUID(), "copilot-smoke-a"),
+        createSessionConfig(options, randomUUID(), toolsA),
       );
       sessions.push(sessionA);
       const sessionB = await client.createSession(
-        createSessionConfig(options, randomUUID(), "copilot-smoke-b"),
+        createSessionConfig(options, randomUUID(), toolsB),
       );
       sessions.push(sessionB);
       participantA = new SmokeParticipant(sessionA, "copilot-smoke-a");
@@ -552,6 +622,7 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         maxAiCreditsPerSession: options.maxAiCreditsPerSession,
         sessionA: participantA.sessionId,
         sessionB: participantB.sessionId,
+        servicePid: options.servicePid,
         pairingId,
         conversationId,
         pairingPhases: [...phases],
@@ -591,6 +662,17 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
     }
   }
   cleanupErrors.push(...(await disconnectAndDelete(client, sessions)));
+  for (const localClient of localClients) {
+    try {
+      localClient.close();
+    } catch (error) {
+      cleanupErrors.push(
+        error instanceof Error
+          ? error
+          : new Error("Unknown local client cleanup failure."),
+      );
+    }
+  }
   try {
     rmSync(sdkHome, { recursive: true, force: true });
   } catch (error) {

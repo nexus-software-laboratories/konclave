@@ -4,7 +4,12 @@ use std::path::{Path, PathBuf};
 use anyhow::bail;
 use rusqlite::{Connection, OpenFlags};
 use KonclaveClientLibrary::{check_relay_health, RelayInstallationConfig};
-use KonclaveSecretStorage::NativeWrappingKeyProvider;
+use KonclaveLocalServiceTransport::{
+    connect_local_service, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
+    LocalServiceInstallation, ProfileAuthorization, LOCAL_SERVICE_INSTALLATION_FILE,
+    MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_SESSION_GRANTS,
+};
+use KonclaveSecretStorage::{open_owner_protected_file, NativeWrappingKeyProvider};
 
 use crate::cli::DoctorArgs;
 use crate::installation;
@@ -46,6 +51,7 @@ pub(crate) async fn run(args: DoctorArgs) -> anyhow::Result<()> {
             Err(error) => report.fail("relay_reachable", error.code()),
         }
     }
+    check_local_service(&profile_root, &mut report).await;
     check_profiles(&profile_root, &mut report);
     report.print();
     if report.failures == 0 {
@@ -70,15 +76,22 @@ fn check_source(config: &RelayInstallationConfig, report: &mut DoctorReport) {
 
 fn check_installation_layout(root: &Path, report: &mut DoctorReport) {
     let executable = if cfg!(windows) {
-        "KonclaveLocalDaemon.exe"
+        "KonclaveLocalService.exe"
     } else {
-        "KonclaveLocalDaemon"
+        "KonclaveLocalService"
     };
     if root.join("bin").join(executable).is_file() || root.join(executable).is_file() {
-        report.pass("daemon_binary", "daemon binary is present");
+        report.pass(
+            "local_service_binary",
+            "shared local-service binary is present",
+        );
     } else {
-        report.fail("daemon_binary", "daemon binary is missing");
+        report.fail(
+            "local_service_binary",
+            "shared local-service binary is missing",
+        );
     }
+
     let plugin = root
         .join("share")
         .join("konclave")
@@ -88,6 +101,89 @@ fn check_installation_layout(root: &Path, report: &mut DoctorReport) {
         report.pass("copilot_plugin", "plugin manifest is present");
     } else {
         report.fail("copilot_plugin", "plugin manifest is missing or invalid");
+    }
+}
+
+async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
+    let Some(parent) = profile_root.parent() else {
+        report.fail("local_service_config", "profile root has no parent");
+        return;
+    };
+    let path = parent.join("service").join(LOCAL_SERVICE_INSTALLATION_FILE);
+    let installation = open_owner_protected_file(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|file| LocalServiceInstallation::from_reader(file).map_err(anyhow::Error::from));
+    let Ok(installation) = installation else {
+        report.fail(
+            "local_service_config",
+            "configuration is unavailable or invalid",
+        );
+        return;
+    };
+    if installation.profile_root() != profile_root {
+        report.fail(
+            "local_service_config",
+            "configuration targets another profile root",
+        );
+        return;
+    }
+    report.pass("local_service_config", "configuration is valid");
+    let account_trusted =
+        AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+            .is_ok_and(|evidence| installation.authorization_policy().accepts(evidence));
+    if account_trusted {
+        report.pass(
+            "authorization_policy",
+            "AccountTrusted; same-account processes are trusted; no same-user isolation",
+        );
+        let providers = installation
+            .issuers()
+            .iter()
+            .filter(|issuer| {
+                issuer.registration().harness() == HarnessKind::Generic
+                    && issuer.registration().profiles() == &ProfileAuthorization::All
+            })
+            .count();
+        if providers == 0 {
+            report.fail(
+                "authorization_provider",
+                "AccountTrusted issuer is unavailable",
+            );
+        } else {
+            report.pass(
+                "authorization_provider",
+                "AccountTrusted issuer is available to paved and generic clients",
+            );
+        }
+        report.pass(
+            "grant_limits",
+            format!(
+                "active grants are bounded: global {MAX_SESSION_GRANTS}, issuer {MAX_GRANTS_PER_ISSUER}, profile {MAX_GRANTS_PER_PROFILE}"
+            ),
+        );
+    } else {
+        report.fail(
+            "authorization_policy",
+            "this client has no available accepted evidence",
+        );
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        connect_local_service(installation.endpoint()),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            report.pass(
+                "local_service_running",
+                "owner-authenticated endpoint accepted",
+            );
+        }
+        _ => report.fail(
+            "local_service_running",
+            "shared local service is unavailable",
+        ),
     }
 }
 

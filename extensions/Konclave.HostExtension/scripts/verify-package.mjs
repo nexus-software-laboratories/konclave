@@ -4,6 +4,9 @@ import { spawnSync } from 'node:child_process';
 import { unzipSync } from 'fflate';
 import {
   extensionEntryPath,
+  clientEntryPath,
+  genericEntryPath,
+  genericSkillPath,
   getArchivePath,
   maintainerSkillPath,
   manifestExtensionPath,
@@ -85,10 +88,49 @@ for (const filePath of packageFiles) {
 const compiledExtension = existsSync(extensionEntryPath)
   ? readFileSync(extensionEntryPath, 'utf8')
   : '';
+const compiledClient = existsSync(clientEntryPath) ? readFileSync(clientEntryPath, 'utf8') : '';
+const compiledGeneric = existsSync(genericEntryPath) ? readFileSync(genericEntryPath, 'utf8') : '';
 
 check(
   compiledExtension.includes('joinSession'),
   'Compiled extension is missing the joinSession lifecycle.',
+);
+check(
+  compiledClient.includes('connectInstalledService') &&
+    compiledClient.includes('connectInstalledGenericService') &&
+    compiledClient.includes('request.cancel') &&
+    compiledClient.includes('createKonclaveTools'),
+  'Compiled client bundle is missing the paved/generic connector, cancellation, or SDK tools.',
+);
+check(
+  !compiledClient.includes('KonclaveLocalDaemon') && !compiledClient.includes('type: "stdio"'),
+  'Compiled client bundle must not contain a per-session daemon path.',
+);
+check(
+  !compiledClient.includes('console.log(') && !compiledClient.includes('process.stdout'),
+  'Compiled client bundle must not write to stdout.',
+);
+check(
+  compiledGeneric.includes('connectInstalledGenericService') &&
+    compiledGeneric.includes('request.cancel') &&
+    compiledGeneric.includes('account_trusted'),
+  'Compiled generic client is missing the generic grant or cancellation path.',
+);
+check(
+  !compiledGeneric.includes('KonclaveLocalDaemon') && !compiledGeneric.includes('type: "stdio"'),
+  'Compiled generic client must not contain a per-session daemon path.',
+);
+check(
+  compiledExtension.includes('delivery.claim'),
+  'Compiled extension is missing shared-service automatic delivery.',
+);
+check(
+  compiledExtension.includes('name: "konclave"'),
+  'Compiled extension is missing deterministic Konclave commands.',
+);
+check(
+  compiledExtension.includes('createKonclaveTools'),
+  'Compiled extension is missing native SDK tool registration.',
 );
 check(
   !compiledExtension.includes('console.log('),
@@ -98,8 +140,17 @@ check(
   !compiledExtension.includes('process.stdout'),
   'Compiled extension must not write to process.stdout.',
 );
+check(
+  !compiledExtension.includes('KonclaveLocalDaemon'),
+  'Compiled extension must not name or launch a per-session daemon.',
+);
+check(
+  !compiledExtension.includes('type: "stdio"'),
+  'Compiled extension must not declare a stdio MCP server.',
+);
 
 const skillText = existsSync(maintainerSkillPath) ? readFileSync(maintainerSkillPath, 'utf8') : '';
+const genericSkillText = existsSync(genericSkillPath) ? readFileSync(genericSkillPath, 'utf8') : '';
 check(
   skillText.includes('name: copilot-cli-extension-maintainer'),
   'The maintainer skill frontmatter name is missing or incorrect.',
@@ -111,6 +162,12 @@ check(
 check(
   skillText.includes('schedulePromptSend'),
   'The maintainer skill should point contributors at schedulePromptSend().',
+);
+check(
+  genericSkillText.includes('name: konclave-generic') &&
+    genericSkillText.includes('AccountTrusted') &&
+    genericSkillText.includes('generic.mjs'),
+  'The generic skill must describe the packaged AccountTrusted fallback.',
 );
 
 const releaseTag = optionValue('--tag');

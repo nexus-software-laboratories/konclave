@@ -9,8 +9,9 @@ scope: "local-only Copilot inference smoke"
 - Keep deterministic unit, type, lint, and build checks independent of Copilot authentication
   and inference.
 - Preserve hard runtime refusal for recognized CI environment markers.
-- Use the Copilot SDK in empty mode with an explicit allowlist containing only the scenario's
-  Konclave MCP tools.
+- Use the Copilot SDK in empty mode with an explicit allowlist containing only the
+  scenario's packaged shared-client custom Konclave tools. Never declare an MCP server
+  or process command.
 - Keep capabilities, prompts, model responses, tool arguments, and tool results out of logs and
   reports. Report bounded identifiers, phases, tool names, token counts, durations, and terminal
   outcomes.

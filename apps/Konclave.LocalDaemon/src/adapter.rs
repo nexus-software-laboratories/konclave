@@ -105,6 +105,12 @@ impl AdapterLaunchConfig {
 #[derive(Debug)]
 pub(crate) struct AdapterAttachment {
     channel: AuthenticatedChannel,
+    delivery: DeliveryAttachment,
+}
+
+/// One authenticated local client holding the profile's delivery-consumer lease.
+#[derive(Debug, Clone)]
+pub(crate) struct DeliveryAttachment {
     consumer_id: AdapterConsumerId,
     lease_id: AdapterLeaseId,
 }
@@ -117,7 +123,7 @@ impl AdapterAttachment {
 
     /// Returns the lease this attachment owns.
     pub(crate) fn lease_id(&self) -> AdapterLeaseId {
-        self.lease_id
+        self.delivery.lease_id()
     }
 
     /// Releases the lease so another consumer may attach without waiting for expiry.
@@ -126,7 +132,112 @@ impl AdapterAttachment {
     ///
     /// Returns a stale-lease or storage error.
     pub(crate) fn release(&self, store: &ProfileStore) -> Result<(), ProfileStoreError> {
+        self.delivery.release(store)
+    }
+
+    fn delivery(&self) -> &DeliveryAttachment {
+        &self.delivery
+    }
+}
+
+impl DeliveryAttachment {
+    /// Claims the profile's single delivery consumer for one authenticated client.
+    ///
+    /// # Errors
+    ///
+    /// Returns a lease, clock, or random-generation error. Another active consumer
+    /// fails closed rather than being displaced.
+    pub(crate) fn acquire(
+        consumer_id: AdapterConsumerId,
+        store: &ProfileStore,
+        now_unix_milliseconds: u64,
+    ) -> anyhow::Result<Self> {
+        let lease_id = generate_lease_id().context("generating a delivery lease identifier")?;
+        let expires_at = now_unix_milliseconds
+            .checked_add(
+                u64::try_from(CONSUMER_LEASE_DURATION.as_millis())
+                    .context("delivery lease duration does not fit a millisecond clock")?,
+            )
+            .context("delivery lease expiry overflows the clock")?;
+        store
+            .acquire_adapter_consumer(consumer_id, lease_id, now_unix_milliseconds, expires_at)
+            .context("acquiring the delivery consumer lease")?;
+        Ok(Self {
+            consumer_id,
+            lease_id,
+        })
+    }
+
+    /// Returns the lease identifier this attachment owns.
+    pub(crate) const fn lease_id(&self) -> AdapterLeaseId {
+        self.lease_id
+    }
+
+    /// Releases this consumer and all of its unacknowledged claims.
+    pub(crate) fn release(&self, store: &ProfileStore) -> Result<(), ProfileStoreError> {
         store.release_adapter_consumer(self.consumer_id, self.lease_id)
+    }
+
+    /// Waits for and claims one bounded delivery batch.
+    pub(crate) async fn wait_and_claim(
+        &self,
+        store: &std::sync::Arc<ProfileStore>,
+        shutdown: &mut watch::Receiver<bool>,
+        max_events: u16,
+        wait_milliseconds: u32,
+    ) -> Result<Vec<DeliveredEvent>, ProfileStoreError> {
+        let attachment = self.clone();
+        let store = std::sync::Arc::clone(store);
+        let response = wait_for_claim(shutdown, wait_milliseconds, move || {
+            let attachment = attachment.clone();
+            let store = std::sync::Arc::clone(&store);
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    claim_delivery_events(&attachment, &store, &SystemUnixClock, max_events)
+                })
+                .await
+                .map_err(|_| ProfileStoreError::Storage)?
+            }
+        })
+        .await?;
+        match response {
+            AdapterResponse::Batch(events) => Ok(events),
+            _ => Err(ProfileStoreError::InvalidTransition),
+        }
+    }
+
+    /// Acknowledges one claimed delivery event.
+    pub(crate) fn acknowledge(
+        &self,
+        store: &ProfileStore,
+        notification_id: [u8; 16],
+        lease_generation: u64,
+    ) -> Result<(), ProfileStoreError> {
+        finish_claim_result(
+            self,
+            store,
+            &SystemUnixClock,
+            notification_id,
+            lease_generation,
+            true,
+        )
+    }
+
+    /// Releases one claimed delivery event for exact redelivery.
+    pub(crate) fn release_claim(
+        &self,
+        store: &ProfileStore,
+        notification_id: [u8; 16],
+        lease_generation: u64,
+    ) -> Result<(), ProfileStoreError> {
+        finish_claim_result(
+            self,
+            store,
+            &SystemUnixClock,
+            notification_id,
+            lease_generation,
+            false,
+        )
     }
 }
 
@@ -185,27 +296,10 @@ fn acquire_attachment(
     if announced != config.consumer_id() {
         bail!("the authenticated adapter announced a different consumer than it was launched with");
     }
-    let lease_id = generate_lease_id().context("generating an adapter lease identifier")?;
-    let expires_at = now_unix_milliseconds
-        .checked_add(
-            u64::try_from(CONSUMER_LEASE_DURATION.as_millis())
-                .context("adapter lease duration does not fit a millisecond clock")?,
-        )
-        .context("adapter lease expiry overflows the clock")?;
-    store
-        .acquire_adapter_consumer(
-            config.consumer_id(),
-            lease_id,
-            now_unix_milliseconds,
-            expires_at,
-        )
+    let delivery = DeliveryAttachment::acquire(config.consumer_id(), store, now_unix_milliseconds)
         .context("acquiring the adapter consumer lease")?;
 
-    Ok(AdapterAttachment {
-        channel,
-        consumer_id: config.consumer_id(),
-        lease_id,
-    })
+    Ok(AdapterAttachment { channel, delivery })
 }
 
 /// Runs the adapter channel for the life of the daemon.
@@ -350,7 +444,15 @@ where
 
         let response = match AdapterRequest::decode(&payload) {
             Ok(request) => {
-                handle_request(request, attachment, store, clock, health, &mut shutdown).await
+                handle_request(
+                    request,
+                    attachment.delivery(),
+                    store,
+                    clock,
+                    health,
+                    &mut shutdown,
+                )
+                .await
             }
             // A malformed request is answered rather than silently dropped so the
             // adapter learns its frame was rejected instead of waiting forever.
@@ -384,7 +486,7 @@ impl UnixClock for SystemUnixClock {
 
 async fn handle_request(
     request: AdapterRequest,
-    attachment: &AdapterAttachment,
+    attachment: &DeliveryAttachment,
     store: &ProfileStore,
     clock: &dyn UnixClock,
     health: &DeliveryHealth,
@@ -439,30 +541,34 @@ async fn handle_request(
 }
 
 async fn wait_and_claim(
-    attachment: &AdapterAttachment,
+    attachment: &DeliveryAttachment,
     store: &ProfileStore,
     clock: &dyn UnixClock,
     shutdown: &mut watch::Receiver<bool>,
     max_events: u16,
     wait_milliseconds: u32,
 ) -> Result<AdapterResponse, ProfileStoreError> {
+    wait_for_claim(shutdown, wait_milliseconds, || {
+        std::future::ready(claim_delivery_events(attachment, store, clock, max_events))
+    })
+    .await
+}
+
+async fn wait_for_claim<F, Fut>(
+    shutdown: &mut watch::Receiver<bool>,
+    wait_milliseconds: u32,
+    mut claim: F,
+) -> Result<AdapterResponse, ProfileStoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<AdapterResponse, ProfileStoreError>>,
+{
     let deadline =
         tokio::time::Instant::now() + Duration::from_millis(u64::from(wait_milliseconds));
     loop {
-        let now = clock.now_unix_milliseconds();
-        let expires_at = now
-            .saturating_add(u64::try_from(CONSUMER_LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
-        let claimed = store.claim_remote_events(
-            attachment.consumer_id,
-            attachment.lease_id,
-            now,
-            expires_at,
-            usize::from(max_events),
-        )?;
-        if !claimed.is_empty() {
-            return Ok(AdapterResponse::Batch(
-                claimed.into_iter().map(deliver).collect(),
-            ));
+        let response = claim().await?;
+        if !matches!(&response, AdapterResponse::Batch(events) if events.is_empty()) {
+            return Ok(response);
         }
         if tokio::time::Instant::now() >= deadline {
             // An expired wait is not an event, so the empty batch tells the adapter
@@ -485,17 +591,57 @@ async fn wait_and_claim(
     }
 }
 
+fn claim_delivery_events(
+    attachment: &DeliveryAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    max_events: u16,
+) -> Result<AdapterResponse, ProfileStoreError> {
+    let now = clock.now_unix_milliseconds();
+    let expires_at =
+        now.saturating_add(u64::try_from(CONSUMER_LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
+    let claimed = store.claim_remote_events(
+        attachment.consumer_id,
+        attachment.lease_id,
+        now,
+        expires_at,
+        usize::from(max_events),
+    )?;
+    Ok(AdapterResponse::Batch(
+        claimed.into_iter().map(deliver).collect(),
+    ))
+}
+
 fn finish_claim(
-    attachment: &AdapterAttachment,
+    attachment: &DeliveryAttachment,
     store: &ProfileStore,
     clock: &dyn UnixClock,
     notification_id: [u8; 16],
     lease_generation: u64,
     acknowledge: bool,
 ) -> AdapterResponse {
+    finish_claim_result(
+        attachment,
+        store,
+        clock,
+        notification_id,
+        lease_generation,
+        acknowledge,
+    )
+    .map_or_else(failure, |()| AdapterResponse::Accepted)
+}
+
+fn finish_claim_result(
+    attachment: &DeliveryAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    notification_id: [u8; 16],
+    lease_generation: u64,
+    acknowledge: bool,
+) -> Result<(), ProfileStoreError> {
     let notification_id = NotificationId::from_bytes(notification_id);
     let now = clock.now_unix_milliseconds();
-    let outcome = if acknowledge {
+    if acknowledge {
         store.acknowledge_remote_event(
             notification_id,
             attachment.consumer_id,
@@ -511,8 +657,7 @@ fn finish_claim(
             lease_generation,
             now,
         )
-    };
-    outcome.map_or_else(failure, |()| AdapterResponse::Accepted)
+    }
 }
 
 fn failure(error: ProfileStoreError) -> AdapterResponse {
@@ -632,7 +777,7 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
         use super::super::{
-            AdapterAttachment, AdapterLaunchConfig, UnixClock, attach_adapter, generate_lease_id,
+            AdapterAttachment, AdapterLaunchConfig, DeliveryAttachment, UnixClock, attach_adapter,
             serve_adapter,
         };
         use crate::health::DeliveryHealth;
@@ -886,19 +1031,10 @@ mod tests {
             .unwrap();
             let mut adapter_stream = adapter.await.unwrap();
 
-            let attachment = AdapterAttachment {
-                channel,
-                consumer_id: AdapterConsumerId::from_bytes([1; 16]),
-                lease_id: generate_lease_id().unwrap(),
-            };
-            store
-                .acquire_adapter_consumer(
-                    attachment.consumer_id,
-                    attachment.lease_id,
-                    NOW,
-                    NOW + 60_000,
-                )
-                .unwrap();
+            let delivery =
+                DeliveryAttachment::acquire(AdapterConsumerId::from_bytes([1; 16]), &store, NOW)
+                    .unwrap();
+            let attachment = AdapterAttachment { channel, delivery };
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let served = tokio::spawn(async move {

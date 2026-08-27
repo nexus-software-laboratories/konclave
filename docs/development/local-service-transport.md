@@ -10,42 +10,60 @@ This crate is the protocol and transport only. Profile registries, per-profile
 runtimes, and the operations a service actually implements are separate concerns that
 compose on top of it.
 
-## Registered adapter identity
+## Evidence-bound issuer and session grants
 
-Installation generates one Ed25519 signing identity per harness adapter and registers
-its public record with the service. The record contains a random 16-byte adapter key
-identifier, a non-zero key version, the one harness the adapter may claim, and the
-profiles it may attach to. Ordinary clients cannot create or broaden a record.
+Installation creates an AccountTrusted issuer identity and registers its public
+record with the service. The record contains a random 16-byte issuer key identifier,
+a non-zero key version, bounded harness metadata, and the profiles for which it may
+issue. The issuer can request grants; it cannot invoke profile tools, delivery, status,
+or membership operations.
+
+`AccountTrusted` explicitly trusts every process running as the configured operating
+system account. The owner-protected issuer key excludes other accounts but does not
+isolate mutually hostile same-account processes. Exact grants add profile binding,
+expiry, auditability, quotas, and connection containment without overstating that
+boundary.
 
 `KonclaveCryptographicCore::LocalServiceIdentity` generates the key pair through the
 project's configured provider and signs already-canonical bytes. It is deliberately
 not `Clone`, not `Debug`, and not serializable, so the private key cannot be copied by
-accident or reach a log, snapshot, or configuration record. This build keeps
-identities in memory only; persistent owner-protected custody is separate work.
+accident or reach a log, snapshot, or configuration record. Service composition
+reconstructs the identity from exactly 32 bytes loaded through native credential
+custody or an explicitly configured owner-protected external file. The transport
+crate never chooses or persists that custody. The AccountTrusted session key is
+different: the client generates it in memory for one process lifetime, and the
+service stores only its public key.
 
-The service resolves a registration through the injected
-`AdapterAuthorizationRegistry`. Rotation registers a new version before the old one is
-retired, and revocation removes every version for a key. A retired or revoked record
-simply stops resolving and the handshake fails closed, with no fallback to another
-version.
+The effective authorization policy is a versioned any-of/all-of list of evidence
+clauses. Every clause is a nonempty canonical set whose members must all be present;
+satisfying any complete clause permits issuance. Missing, empty, malformed, or
+unknown policy denies. Clients cannot supply or weaken policy, and evidence is never
+relabelled as a stronger kind.
 
-`ProfileAuthorization` is either one exact profile or one namespace label. A namespace
-authorizes the label itself and every `label-suffix` profile beneath it, so `team`
-covers `team-alice` but never `teamalice`.
+An issued `SessionGrant` binds one random grant identifier, issuer key and version,
+ephemeral session public key, exact canonical profile, harness metadata, verified
+evidence set, policy version, issuance and expiry, and a closed capability bitset.
+Active grants are bounded globally, per issuer, and per profile. Expired grants are
+reclaimed before issuance; quota exhaustion denies the new grant and never evicts an
+active one.
+
+The built-in Generic integration uses the same AccountTrusted issuer and grant
+contract. A self-declared harness label is metadata, not evidence. A generic client
+must supply an explicit durable profile alias or use a clearly ephemeral isolated
+profile; PID, working directory, time, model name, and free-form text do not establish
+continuity.
 
 ## Authenticated transcript
 
-Both peers authenticate one canonical byte string:
+Protocol version 2 has separate issuer and session roles. Both transcripts begin with
+the two-byte protocol version and one-byte role, and end with the 32-byte client
+challenge, 32-byte service challenge, and 32-byte pinned service public key.
 
-1. the protocol version as two big-endian bytes;
-2. the adapter key identifier, exactly 16 bytes;
-3. the adapter key version as four big-endian bytes;
-4. the client instance identifier, exactly 16 bytes;
-5. the harness wire value as two big-endian bytes;
-6. the profile length as two big-endian bytes, then the profile bytes;
-7. the client challenge, exactly 32 bytes;
-8. the service challenge, exactly 32 bytes; and
-9. the service public key, exactly 32 bytes.
+The issuer role binds the issuer key identifier and version, issuer public key,
+client instance, and harness metadata. The session role binds every grant claim:
+grant and issuer identifiers, issuer version, session public key, client instance,
+harness, length-prefixed exact profile, evidence bitset, policy version, issuance,
+expiry, and capability bitset.
 
 The single variable-length field carries an explicit length and every other field is
 fixed width, so no two distinct transcripts share an encoding.
@@ -65,8 +83,8 @@ retained.
 Each signature is Ed25519 over a fixed 32-byte role domain followed by the encoded
 transcript:
 
-- `konclave.local-service.v1.client` for the proof a client presents; and
-- `konclave.local-service.v1.accept` for the acceptance the service returns.
+- `konclave.local-service.v2.client` for the proof an issuer or session presents; and
+- `konclave.local-service.v2.accept` for the acceptance the service returns.
 
 Distinct domains of equal fixed width mean a captured client signature cannot be
 replayed as a service acceptance. Verification runs through
@@ -75,16 +93,16 @@ primitive.
 
 ## Handshake exchange
 
-The client opens with its version, registration, instance, harness, requested profile,
-and challenge. The service answers with the identity a client pins and its own
-challenge. The client signs the transcript, and the service returns its acceptance
-over the separate domain.
+An issuer opens with its complete public identity and fresh challenge. A session opens
+with its complete grant and fresh challenge. The service answers with the identity a
+client pins and its own challenge. The client proves the corresponding private key,
+and the service returns its acceptance over the separate role domain.
 
-The service authenticates before it authorizes. It resolves the registration only to
-obtain a verification key, checks the signature over the full transcript, and only
-then checks the claimed harness and requested profile against the record. An
-unauthentic peer therefore never learns which harness or profile a registration would
-have permitted.
+The service completes the proof exchange before revealing authorization. Unknown,
+expired, revoked, wrong-key, wrong-profile, wrong-harness, or policy-invalid grants
+receive the same signed rejection, so the handshake is not a grant-registration
+oracle. Protocol version 1 is not negotiated: an old client requires an upgrade and a
+version-2 client refuses an old service.
 
 The client pins the exact service public key it expects, so an endpoint that answers
 with any other identity fails before the client signs anything, and an acceptance
@@ -95,9 +113,11 @@ authenticates nothing on another. The whole exchange is bounded by a single time
 rather than each read, so a peer that connects and stalls cannot hold a task and a
 buffer indefinitely.
 
-The resulting `LocalServiceBinding` is immutable for the life of the connection. A
-client that needs another profile opens another connection and performs another
-handshake; no later request field can move it.
+The resulting `AuthorizationBinding` is immutable for the life of the connection. An
+issuer connection accepts only issuance operations. A session connection accepts
+only capabilities in that exact grant. A client that needs another profile obtains
+another grant and opens another connection; no request field can move an existing
+binding.
 
 ## Bounded framing
 
@@ -123,11 +143,25 @@ path, identifier, or plaintext.
 The transport does not interpret an operation or its payload, so a new operation needs
 no transport change and every bound applies to all of them uniformly.
 
-The request identifier is the idempotency key. A client that retries after a
-disconnect reuses the same identifier, and a service that has already applied it
-answers with the recorded outcome instead of repeating the side effect. Nothing else
-in the frame is safe to deduplicate on, because two distinct operations may otherwise
-be byte-identical.
+The request identifier is the idempotency key. Pending work is keyed by the ephemeral
+session public key, profile, and request identifier, so a replacement grant for the
+same live client can reconcile without broadening cancellation authority. Terminal
+request and response frames are sealed into the profile database before the response
+is published. The journal is bounded to the newest 256 outcomes per profile and
+survives shared-service restart. A conflicting operation or payload under one key is
+rejected rather than replacing the recorded result.
+
+Cancellation is an authenticated control operation carrying the target request
+identifier and either caller or deadline reason. A cancellation that wins before the
+explicit commit point becomes the terminal `cancelled` or `deadline_exceeded`
+outcome. Once committed, the service reports `reconciling`, finishes the operation,
+persists its actual durable outcome, and publishes that result. A disconnect or a
+dropped async join never fabricates a terminal timeout while blocking work can still
+commit. If terminal journaling remains unavailable after bounded retries, the service
+caches the known actual result and returns nonterminal `reconciliation_pending`; an
+exact retry attempts persistence again before returning that result. Coordinated
+shutdown atomically stops new ledger admission, requests pre-commit cancellation, and
+continues draining post-commit work after its diagnostic threshold.
 
 Decoding validates every field at an exact offset: an unknown message kind, an
 unimplemented error code, an empty or oversized operation length, an operation outside
@@ -174,9 +208,12 @@ additional ACE, non-allow ACE, or another SID fails creation.
 
 The service obtains the connecting process identifier from each accepted pipe,
 opens its query-only process token, and requires the same user SID and an integrity
-level at least as high as the service. The client performs the symmetric check against
-the server process before writing a handshake byte. A missing process, inaccessible
-token, malformed SID, another account, or lower-integrity peer fails closed.
+level at least as high as the service. Native Rust clients perform the symmetric check
+against the server process before writing a handshake byte. Thin clients without a
+native token API pin the installation-specific service public key and authenticate
+the service proof before sending any operation request or plaintext. A missing
+process, inaccessible token, malformed SID, another account, lower-integrity peer, or
+invalid service proof fails closed.
 
 The Win32 FFI, owned-handle cleanup, aligned token buffers, SID copying, security
 descriptor lifetime, and DACL inspection live behind the safe
@@ -185,17 +222,17 @@ handle or opt out of verification.
 
 ## Cross-language parity
 
-`fixtures/local-service/v1/handshake-transcript.json` holds the canonical vectors:
-every identifier input, the encoded transcript, both domain-separated signing
-messages and real deterministic Ed25519 signatures, every handshake message payload,
-the request and response encodings, and the bounds each side enforces. Any
-implementation of this contract, in any language, must reproduce those bytes exactly
-and verify both signatures under the fixture public keys.
+`fixtures/local-service/v2/authorization-transcript.json` holds the canonical
+protocol-v2 issuer and session vectors: every grant claim, both encoded transcripts,
+both role-separated signing messages and deterministic Ed25519 signatures, and every
+handshake message. Any implementation of this contract must reproduce those bytes
+and verify the signatures under the fixture public keys.
 
-`crates/Konclave.LocalServiceTransport/tests/shared_vectors.rs` is pinned to the
-fixture as data rather than restating the bytes, so a change to a layout, a signature
-domain, a message tag, or a bound fails there instead of silently desynchronizing a
-non-Rust client.
+Rust's `authorization_vectors` tests and the TypeScript thin-client tests are pinned
+to that fixture as data rather than restating the bytes. A layout, signature domain,
+message tag, evidence, expiry, or capability change therefore fails cross-language
+validation instead of silently desynchronizing clients. The version-1 fixture remains
+historical regression data and is not an accepted shared-service compatibility mode.
 
 The fixture keys come from fixed non-secret test seeds. Runtime identities remain
 provider-generated and non-exportable; deterministic key material is data in the

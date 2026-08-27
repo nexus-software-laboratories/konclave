@@ -1,6 +1,10 @@
 import { frameDelivery } from './framing.js';
-import type { AdapterChannel } from './channel.js';
-import { maxClaimBatch, type AdapterResponse, type DeliveredEvent } from './session.js';
+import {
+  maxClaimBatch,
+  type AdapterChannel,
+  type AdapterResponse,
+  type DeliveredEvent,
+} from './session.js';
 
 /**
  * Coalescing and wake limits.

@@ -190,11 +190,8 @@ impl LocalServiceListener {
     pub async fn bind(endpoint: &LocalServiceEndpoint) -> Result<Self, LocalServiceTransportError> {
         let account_verifier = KonclaveWindowsSecurity::WindowsAccountVerifier::current()
             .map_err(map_windows_verification_unavailable)?;
-        let server = KonclaveWindowsSecurity::create_owner_restricted_named_pipe(
-            tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true),
-            endpoint.as_str(),
-        )
-        .map_err(|_| LocalServiceTransportError::EndpointInUse)?;
+        let server = create_windows_server(endpoint, true)
+            .map_err(|_| LocalServiceTransportError::EndpointInUse)?;
         Ok(Self {
             endpoint: endpoint.clone(),
             server: Some(server),
@@ -237,26 +234,44 @@ impl LocalServiceListener {
     /// cannot establish its identity.
     #[cfg(windows)]
     pub async fn accept(&mut self) -> Result<LocalServiceServerStream, LocalServiceTransportError> {
-        let server = self
-            .server
-            .take()
-            .ok_or(LocalServiceTransportError::EndpointUnavailable)?;
-        server
-            .connect()
-            .await
-            .map_err(|_| LocalServiceTransportError::EndpointUnavailable)?;
-        self.server = Some(
-            KonclaveWindowsSecurity::create_owner_restricted_named_pipe(
-                &tokio::net::windows::named_pipe::ServerOptions::new(),
-                self.endpoint.as_str(),
-            )
-            .map_err(|_| LocalServiceTransportError::EndpointUnavailable)?,
-        );
-        self.account_verifier
-            .verify_client(&server)
-            .map_err(map_windows_client_verification)?;
-        Ok(server)
+        loop {
+            let connection = self
+                .server
+                .as_ref()
+                .ok_or(LocalServiceTransportError::EndpointUnavailable)?
+                .connect()
+                .await;
+            let server = self
+                .server
+                .take()
+                .ok_or(LocalServiceTransportError::EndpointUnavailable)?;
+            if connection.is_err() {
+                self.server = Some(
+                    create_windows_server(&self.endpoint, false)
+                        .map_err(|_| LocalServiceTransportError::EndpointUnavailable)?,
+                );
+                continue;
+            }
+            self.server = Some(
+                create_windows_server(&self.endpoint, false)
+                    .map_err(|_| LocalServiceTransportError::EndpointUnavailable)?,
+            );
+            self.account_verifier
+                .verify_client(&server)
+                .map_err(map_windows_client_verification)?;
+            return Ok(server);
+        }
     }
+}
+
+#[cfg(windows)]
+fn create_windows_server(
+    endpoint: &LocalServiceEndpoint,
+    first_instance: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer, std::io::Error> {
+    let mut options = tokio::net::windows::named_pipe::ServerOptions::new();
+    options.first_pipe_instance(first_instance);
+    KonclaveWindowsSecurity::create_owner_restricted_named_pipe(&options, endpoint.as_str())
 }
 
 impl core::fmt::Debug for LocalServiceListener {

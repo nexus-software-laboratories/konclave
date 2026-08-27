@@ -15,7 +15,10 @@ pub use identity::{
     verify_device_credential_binding, verify_invitation, verify_pairing_control,
     verify_pairing_offer,
 };
-pub use local_service::{LocalServiceIdentity, verify_local_service_signature};
+pub use local_service::{
+    LOCAL_SERVICE_SIGNING_SEED_LENGTH, LocalServiceIdentity, LocalServiceSigningSeed,
+    verify_local_service_signature,
+};
 pub use mls::{
     AppliedMembershipCommit, DecryptedApplicationMessage, MlsApplicationMessage, MlsCommit,
     MlsConversation, MlsConversationClient, MlsWelcome, OutboundMembershipCommit,

@@ -1,5 +1,10 @@
 # Adapter channel authentication
 
+> **Legacy compatibility contract.** ADR 0008 supersedes this per-session
+> daemon-to-adapter channel for new harness sessions. The Rust implementation remains
+> only for bounded old-version drain and rollback; the Copilot extension now uses the
+> authenticated shared local service described by ADR 0008.
+
 `Konclave.AdapterTransport` owns the harness-neutral half of the local adapter
 channel defined by
 [ADR 0005](../adr/adr-0005-harness-neutral-adapter-boundary.md). It contains no
@@ -177,7 +182,7 @@ creating its endpoint yet; repeated failure backs off to a ceiling so a permanen
 absent adapter cannot spin. The lease is released on every exit path, so a restarting
 adapter is not made to wait out an expiry window that no live consumer owns.
 
-## Cross-language parity
+## Legacy conformance fixtures
 
 `fixtures/adapter/v1/auth-transcript.json` holds the canonical authentication
 vectors: inputs, the encoded transcript, and both proofs.
@@ -186,14 +191,12 @@ every request and response encoding, every delivered event kind, and the bounds 
 side enforces. Any implementation of this contract, in any language, must reproduce
 those bytes exactly.
 
-Both implementations are pinned to the fixtures as data rather than restating the
-bytes, so a change to a layout, a proof domain, or a bound fails on both sides instead
-of silently desynchronizing one of them:
+The retained Rust compatibility implementation is pinned to those fixtures:
 
 - `crates/Konclave.AdapterTransport/tests/shared_vectors.rs` and
-  `shared_session_vectors.rs` for the daemon; and
-- `extensions/Konclave.HostExtension/tests/adapter-transcript.test.ts` and
-  `adapter-session.test.ts` for the Copilot extension.
+  `shared_session_vectors.rs` for the daemon.
 
-Proofs produced by the daemon verify in the extension, and the extension decodes every
-event kind the daemon emits.
+The superseded TypeScript channel and its duplicate binary decoders were removed when
+the Copilot adapter migrated to the shared-service JSON operation boundary. Current
+cross-language evidence lives under `fixtures/local-service/v1/`, including the
+handshake transcript and generated Copilot tool contract.

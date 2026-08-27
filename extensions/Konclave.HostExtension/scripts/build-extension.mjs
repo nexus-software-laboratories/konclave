@@ -6,8 +6,13 @@ import { extensionEntryPath } from './package-contract.mjs';
 mkdirSync(dirname(extensionEntryPath), { recursive: true });
 
 await build({
-  entryPoints: ['src/extension.ts'],
-  outfile: extensionEntryPath,
+  entryPoints: {
+    client: 'src/client-api.ts',
+    extension: 'src/extension.ts',
+    generic: 'src/generic-cli.ts',
+  },
+  outdir: dirname(extensionEntryPath),
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   external: ['@github/copilot-sdk', '@github/copilot-sdk/*'],
   format: 'esm',

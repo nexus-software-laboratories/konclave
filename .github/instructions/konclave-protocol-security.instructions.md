@@ -52,12 +52,17 @@ scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter bo
   advances the epoch, and enrolls a new identity.
 - Every message and side-effecting request is idempotent and replay checked at the
   application layer.
+- Async transport and concurrency tests synchronize on observable protocol events
+  and explicit release signals. Never use sleeps, assumed task ordering, or a client
+  deadline as a proxy for proving that one lane remains live while another is blocked.
 - Apply hard pre-allocation bounds to every untrusted collection, frame, string,
   decompression, page, queue, and watch.
 - Windows named-pipe endpoints use an explicit current-account DACL on every
-  instance, verify both connected process SIDs, reject lower-integrity peers, and
-  execute those checks on Windows. There is no unenforced verifier or default-DACL
-  fallback.
+  instance. The service verifies the connected client SID and rejects lower-integrity
+  peers. A client either verifies the server SID and integrity or authenticates a
+  pinned installation-specific service proof before sending any operation or
+  plaintext. These checks execute on Windows; there is no unenforced verifier,
+  unpinned client mode, or default-DACL fallback.
 - Add focused negative, compatibility, and adversarial tests with every security
   behavior change. Cryptography, identity, authorization, wire parsing, secret
   persistence, and relay metadata changes require specialized security review before

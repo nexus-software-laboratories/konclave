@@ -11,6 +11,8 @@ KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveLocalFraming = { path = "../Konclave.LocalFraming" }
 thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["io-util", "net", "time"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

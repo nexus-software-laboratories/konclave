@@ -1257,7 +1257,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_relay_enrollment;
+                    "DROP TABLE daemon_local_request_outcome;
+                     DROP TABLE daemon_relay_enrollment;
                      DROP TABLE daemon_pairing;
                      PRAGMA user_version = 10;",
                 )
@@ -1294,7 +1295,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_pairing;
+                    "DROP TABLE daemon_local_request_outcome;
+                     DROP TABLE daemon_pairing;
                      CREATE TABLE daemon_pairing (sentinel INTEGER);
                      PRAGMA user_version = 10;",
                 )

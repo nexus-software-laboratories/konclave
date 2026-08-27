@@ -16,6 +16,7 @@ use KonclaveDomainCore::{
     MembershipOperationId, MessageId, NotificationId, RelayEnvelope, RoutingId,
     StoredRelayEnvelope,
 };
+use KonclaveLocalServiceTransport::MAX_RPC_FRAME_BYTES;
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_conversation_state, decode_device_credential_binding,
     decode_invitation, decode_join_proof, decode_membership_control, decode_relay_envelope,
@@ -26,7 +27,7 @@ use KonclaveSecretStorage::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
 };
 use fs4::{FileExt, TryLockError};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -35,7 +36,7 @@ pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 12;
+const PROFILE_SCHEMA_VERSION: u32 = 13;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -73,6 +74,10 @@ const MAX_PENDING_REMOTE_EVENT_BYTES_PER_CONVERSATION: usize = 1024 * 1024;
 const MAX_REMOTE_EVENT_TERMINAL_RECORDS: usize = 256;
 const MAX_REMOTE_EVENT_RECORDS: usize =
     MAX_PENDING_REMOTE_EVENTS + MAX_REMOTE_EVENT_TERMINAL_RECORDS;
+const MAX_LOCAL_REQUEST_OUTCOMES: usize = 256;
+const MAX_LOCAL_REQUEST_OUTCOME_BYTES: usize =
+    1 + 4 + MAX_RPC_FRAME_BYTES + 4 + MAX_RPC_FRAME_BYTES;
+const MAX_SEALED_LOCAL_REQUEST_OUTCOME_BYTES: usize = MAX_LOCAL_REQUEST_OUTCOME_BYTES + 64;
 const MAX_ADAPTER_LEASE_MILLISECONDS: u64 = 5 * 60 * 1_000;
 const OUTBOX_TERMINAL_REASON_EXPIRED: i64 = 1;
 const OUTBOX_TERMINAL_REASON_REMOVED: i64 = 2;
@@ -260,6 +265,7 @@ impl LockedProfile {
             locked_profile: self,
         };
         store.verify_remote_event_journal()?;
+        store.verify_local_request_outcomes()?;
         store.invalidate_remote_event_leases()?;
         store.migrate_legacy_history()?;
         Ok(store)
@@ -278,6 +284,225 @@ impl ProfileStore {
     #[must_use]
     pub(crate) fn mls_database_path(&self) -> PathBuf {
         self.locked_profile.mls_database_path()
+    }
+
+    /// Opens one sealed terminal result for an exact ephemeral session request.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage or corruption when metadata, bounds, context, or ciphertext do
+    /// not validate. The ciphertext length is checked before its bytes are loaded.
+    pub(crate) fn local_request_outcome(
+        &self,
+        session_public_key: Ed25519PublicKey,
+        request_id: &[u8; 16],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ProfileStoreError> {
+        let connection = self.lock()?;
+        let length: Option<i64> = connection
+            .query_row(
+                "SELECT length(sealed_outcome)
+                 FROM daemon_local_request_outcome
+                 WHERE session_public_key = ?1 AND request_id = ?2",
+                params![session_public_key.as_bytes(), request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some(length) = length else {
+            return Ok(None);
+        };
+        let length = validate_local_request_outcome_blob_length(length)?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_outcome
+                 FROM daemon_local_request_outcome
+                 WHERE session_public_key = ?1 AND request_id = ?2",
+                params![session_public_key.as_bytes(), request_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        drop(connection);
+        if bytes.len() != length {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let blob = SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
+        self.sealer
+            .open(
+                &local_request_outcome_context(
+                    &self.locked_profile.profile_id,
+                    session_public_key,
+                    request_id,
+                )?,
+                &blob,
+            )
+            .map(Some)
+            .map_err(|_| ProfileStoreError::CorruptData)
+    }
+
+    /// Seals one terminal request/response pair before it may be published.
+    ///
+    /// Repeating the exact plaintext is idempotent. A conflicting result under the
+    /// same session key and request identifier fails without replacing the first.
+    ///
+    /// # Errors
+    ///
+    /// Returns bounds, sequence, transition, sealing, transaction, or storage failure.
+    pub(crate) fn record_local_request_outcome(
+        &self,
+        session_public_key: Ed25519PublicKey,
+        request_id: &[u8; 16],
+        completed_at_unix_milliseconds: u64,
+        plaintext: &[u8],
+    ) -> Result<(), ProfileStoreError> {
+        if plaintext.is_empty() || plaintext.len() > MAX_LOCAL_REQUEST_OUTCOME_BYTES {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let context = local_request_outcome_context(
+            &self.locked_profile.profile_id,
+            session_public_key,
+            request_id,
+        )?;
+        let sealed = self
+            .sealer
+            .seal(&context, plaintext)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let completed_at = i64::try_from(completed_at_unix_milliseconds)
+            .map_err(|_| ProfileStoreError::SequenceExhausted)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let existing_length: Option<i64> = transaction
+            .query_row(
+                "SELECT length(sealed_outcome)
+                 FROM daemon_local_request_outcome
+                 WHERE session_public_key = ?1 AND request_id = ?2",
+                params![session_public_key.as_bytes(), request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if let Some(length) = existing_length {
+            let length = validate_local_request_outcome_blob_length(length)?;
+            let bytes: Vec<u8> = transaction
+                .query_row(
+                    "SELECT sealed_outcome
+                     FROM daemon_local_request_outcome
+                     WHERE session_public_key = ?1 AND request_id = ?2",
+                    params![session_public_key.as_bytes(), request_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if bytes.len() != length {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            let blob = SealedBlob::from_bytes(bytes).map_err(|_| ProfileStoreError::CorruptData)?;
+            let existing = self
+                .sealer
+                .open(&context, &blob)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            return if existing.as_slice() == plaintext {
+                Ok(())
+            } else {
+                Err(ProfileStoreError::InvalidTransition)
+            };
+        }
+        let sequence: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1
+                 FROM daemon_local_request_outcome",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::SequenceExhausted)?;
+        if sequence <= 0 {
+            return Err(ProfileStoreError::SequenceExhausted);
+        }
+        transaction
+            .execute(
+                "INSERT INTO daemon_local_request_outcome (
+                    session_public_key,
+                    request_id,
+                    sequence,
+                    completed_at_unix_milliseconds,
+                    sealed_outcome
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    session_public_key.as_bytes(),
+                    request_id,
+                    sequence,
+                    completed_at,
+                    sealed.as_bytes()
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction
+            .execute(
+                "DELETE FROM daemon_local_request_outcome
+                 WHERE (session_public_key, request_id) NOT IN (
+                    SELECT session_public_key, request_id
+                    FROM daemon_local_request_outcome
+                    ORDER BY sequence DESC,
+                             session_public_key DESC,
+                             request_id DESC
+                    LIMIT ?1
+                 )",
+                params![
+                    i64::try_from(MAX_LOCAL_REQUEST_OUTCOMES)
+                        .map_err(|_| ProfileStoreError::SequenceExhausted)?
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    fn verify_local_request_outcomes(&self) -> Result<(), ProfileStoreError> {
+        let keys = {
+            let connection = self.lock()?;
+            let count: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM daemon_local_request_outcome",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if count < 0
+                || usize::try_from(count)
+                    .ok()
+                    .is_none_or(|count| count > MAX_LOCAL_REQUEST_OUTCOMES)
+            {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            let mut statement = connection
+                .prepare(
+                    "SELECT session_public_key, request_id
+                     FROM daemon_local_request_outcome
+                     ORDER BY sequence DESC,
+                              session_public_key DESC,
+                              request_id DESC",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        for (session_public_key, request_id) in keys {
+            let session_public_key = Ed25519PublicKey::from_bytes(
+                session_public_key
+                    .try_into()
+                    .map_err(|_| ProfileStoreError::CorruptData)?,
+            );
+            let request_id: [u8; 16] = request_id
+                .try_into()
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            self.local_request_outcome(session_public_key, &request_id)?
+                .ok_or(ProfileStoreError::CorruptData)?;
+        }
+        Ok(())
     }
 
     /// Enables or mutes automatic adapter delivery for one conversation.
@@ -7743,33 +7968,38 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
-        11 => return enrollment::initialize_enrollment_schema(connection),
+        12 => return initialize_local_request_outcome_schema(connection),
+        11 => {
+            enrollment::initialize_enrollment_schema(connection)?;
+            return initialize_local_request_outcome_schema(connection);
+        }
         10 => {
             pairing::initialize_pairing_schema(connection)?;
-            return enrollment::initialize_enrollment_schema(connection);
+            enrollment::initialize_enrollment_schema(connection)?;
+            return initialize_local_request_outcome_schema(connection);
         }
-        9 => return initialize_remote_event_pairing_and_enrollment_schema(connection),
+        9 => return initialize_remaining_schema(connection),
         8 => {
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         7 => {
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         6 => {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         5 => {
             initialize_pending_join_receipt_schema(connection)?;
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         4 => {
             initialize_pending_join_schema(connection)?;
@@ -7777,7 +8007,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         3 => {
             initialize_membership_outbox_schema(connection)?;
@@ -7786,7 +8016,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         2 => {
             initialize_message_history_schema(connection)?;
@@ -7796,7 +8026,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
             initialize_replay_head_schema(connection)?;
             initialize_outbox_terminal_schema(connection)?;
             initialize_outbox_removed_terminal_schema(connection)?;
-            return initialize_remote_event_pairing_and_enrollment_schema(connection);
+            return initialize_remaining_schema(connection);
         }
         0 => connection
             .execute_batch(
@@ -7943,15 +8173,41 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
     initialize_replay_head_schema(connection)?;
     initialize_outbox_terminal_schema(connection)?;
     initialize_outbox_removed_terminal_schema(connection)?;
-    initialize_remote_event_pairing_and_enrollment_schema(connection)
+    initialize_remaining_schema(connection)
 }
 
-fn initialize_remote_event_pairing_and_enrollment_schema(
-    connection: &Connection,
-) -> Result<(), ProfileStoreError> {
+fn initialize_remaining_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
     initialize_remote_event_schema(connection)?;
     pairing::initialize_pairing_schema(connection)?;
-    enrollment::initialize_enrollment_schema(connection)
+    enrollment::initialize_enrollment_schema(connection)?;
+    initialize_local_request_outcome_schema(connection)
+}
+
+fn initialize_local_request_outcome_schema(
+    connection: &Connection,
+) -> Result<(), ProfileStoreError> {
+    connection
+        .execute_batch(
+            "BEGIN;
+             CREATE TABLE daemon_local_request_outcome (
+                session_public_key BLOB NOT NULL CHECK (length(session_public_key) = 32),
+                request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+                sequence INTEGER NOT NULL UNIQUE CHECK (sequence >= 1),
+                completed_at_unix_milliseconds INTEGER NOT NULL
+                    CHECK (completed_at_unix_milliseconds >= 0),
+                sealed_outcome BLOB NOT NULL,
+                PRIMARY KEY (session_public_key, request_id)
+             ) WITHOUT ROWID;
+             CREATE INDEX daemon_local_request_outcome_sequence_idx
+                ON daemon_local_request_outcome(
+                    sequence,
+                    session_public_key,
+                    request_id
+                );
+             PRAGMA user_version = 13;
+             COMMIT;",
+        )
+        .map_err(|_| ProfileStoreError::Storage)
 }
 
 fn initialize_message_history_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -9514,6 +9770,22 @@ fn operation_record_context(
     SecretRecordContext::new(kind, identifier).map_err(|_| ProfileStoreError::Storage)
 }
 
+fn local_request_outcome_context(
+    profile_id: &ProfileId,
+    session_public_key: Ed25519PublicKey,
+    request_id: &[u8; 16],
+) -> Result<SecretRecordContext, ProfileStoreError> {
+    SecretRecordContext::derive(
+        SecretRecordKind::LocalServiceRequestOutcome,
+        &[
+            profile_id.as_bytes(),
+            session_public_key.as_bytes(),
+            request_id,
+        ],
+    )
+    .map_err(|_| ProfileStoreError::Storage)
+}
+
 fn remote_event_head_record_context(
     profile_id: &ProfileId,
 ) -> Result<SecretRecordContext, ProfileStoreError> {
@@ -9689,6 +9961,14 @@ fn validate_blob_length(length: i64) -> Result<(), ProfileStoreError> {
     Ok(())
 }
 
+fn validate_local_request_outcome_blob_length(length: i64) -> Result<usize, ProfileStoreError> {
+    let length = usize::try_from(length).map_err(|_| ProfileStoreError::CorruptData)?;
+    if length == 0 || length > MAX_SEALED_LOCAL_REQUEST_OUTCOME_BYTES {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(length)
+}
+
 fn from_sql_integer(value: i64) -> Result<u64, ProfileStoreError> {
     u64::try_from(value).map_err(|_| ProfileStoreError::CorruptData)
 }
@@ -9739,6 +10019,168 @@ mod tests {
     /// Builds a sealer whose wrapping key is distinct per test key byte.
     fn sealer_with_key(key: u8) -> SecretSealer {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([key; 32])).unwrap()
+    }
+
+    #[test]
+    fn local_request_outcomes_are_sealed_durable_conflict_checked_and_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("request-outcomes").unwrap();
+        let session_public_key = Ed25519PublicKey::from_bytes([3; 32]);
+        let request_id = [4; 16];
+        let plaintext = b"request-and-terminal-response";
+        let store = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+
+        store
+            .record_local_request_outcome(session_public_key, &request_id, 1, plaintext)
+            .unwrap();
+        store
+            .record_local_request_outcome(session_public_key, &request_id, 1, plaintext)
+            .unwrap();
+        assert_eq!(
+            store.record_local_request_outcome(session_public_key, &request_id, 1, b"conflict"),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        assert_eq!(
+            store
+                .local_request_outcome(session_public_key, &request_id)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            plaintext
+        );
+        for value in 0..=MAX_LOCAL_REQUEST_OUTCOMES {
+            let encoded = u64::try_from(value).unwrap().to_be_bytes();
+            let mut bounded_request_id = [0_u8; 16];
+            bounded_request_id[..8].copy_from_slice(&encoded);
+            bounded_request_id[8..].copy_from_slice(&encoded);
+            store
+                .record_local_request_outcome(
+                    session_public_key,
+                    &bounded_request_id,
+                    u64::try_from(value + 2).unwrap(),
+                    &encoded,
+                )
+                .unwrap();
+        }
+        assert!(
+            store
+                .local_request_outcome(session_public_key, &request_id)
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+
+        let reopened = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let latest = u64::try_from(MAX_LOCAL_REQUEST_OUTCOMES)
+            .unwrap()
+            .to_be_bytes();
+        let mut latest_request_id = [0_u8; 16];
+        latest_request_id[..8].copy_from_slice(&latest);
+        latest_request_id[8..].copy_from_slice(&latest);
+        assert_eq!(
+            reopened
+                .local_request_outcome(session_public_key, &latest_request_id)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            latest.as_slice()
+        );
+        let version: u32 = reopened
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn local_request_outcomes_reject_oversized_blobs_before_loading_them() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("request-outcome-bound").unwrap();
+        let session_public_key = Ed25519PublicKey::from_bytes([5; 32]);
+        let request_id = [6; 16];
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO daemon_local_request_outcome (
+                    session_public_key,
+                    request_id,
+                    sequence,
+                    completed_at_unix_milliseconds,
+                    sealed_outcome
+                 ) VALUES (?1, ?2, 1, 1, zeroblob(?3))",
+                params![
+                    session_public_key.as_bytes(),
+                    request_id,
+                    i64::try_from(MAX_SEALED_LOCAL_REQUEST_OUTCOME_BYTES + 1).unwrap()
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .local_request_outcome(session_public_key, &request_id)
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn local_request_outcome_tampering_fails_profile_open() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("request-outcome-tamper").unwrap();
+        let session_public_key = Ed25519PublicKey::from_bytes([7; 32]);
+        let request_id = [8; 16];
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store
+                .record_local_request_outcome(
+                    session_public_key,
+                    &request_id,
+                    1,
+                    b"sealed-terminal-outcome",
+                )
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(database_path).unwrap();
+        let mut sealed: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_outcome FROM daemon_local_request_outcome",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        sealed[0] ^= 0x80;
+        connection
+            .execute(
+                "UPDATE daemon_local_request_outcome SET sealed_outcome = ?1",
+                params![sealed],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
     }
 
     struct ConversationFixture {
@@ -10222,7 +10664,8 @@ mod tests {
     fn downgrade_v10_to_v9(connection: &Connection) {
         connection
             .execute_batch(
-                "DROP TABLE daemon_relay_enrollment;
+                "DROP TABLE daemon_local_request_outcome;
+                 DROP TABLE daemon_relay_enrollment;
                  DROP TABLE daemon_pairing;
                  DROP TABLE daemon_adapter_consumer;
                  DROP TABLE daemon_remote_event;
@@ -12486,7 +12929,71 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v1_to_v12_transactionally() {
+    fn profile_schema_migrates_v12_to_current_transactionally() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("request-outcome-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_local_request_outcome;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let version: u32 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        drop(store);
+
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_local_request_outcome;
+                 CREATE TABLE daemon_local_request_outcome (sentinel INTEGER);
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let sentinel_columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('daemon_local_request_outcome')
+                 WHERE name = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 12);
+        assert_eq!(sentinel_columns, 1);
+    }
+
+    #[test]
+    fn profile_schema_migrates_v1_to_current_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("migration-test").unwrap();
         let locked = LockedProfile::acquire(root.path(), profile_id).unwrap();
@@ -12509,6 +13016,7 @@ mod tests {
             "daemon_membership_inbox",
             "daemon_pending_join",
             "daemon_relay_enrollment",
+            "daemon_local_request_outcome",
         ] {
             let exists: i64 = store
                 .lock()
@@ -12525,7 +13033,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v9_to_v12_remote_event_journal() {
+    fn profile_schema_migrates_v9_to_current_remote_event_journal() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("remote-event-migration").unwrap();
         let database_path = {
@@ -12609,7 +13117,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v2_to_v12() {
+    fn profile_schema_migrates_v2_to_current() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("message-history-migration").unwrap();
         let database_path = {
@@ -12769,7 +13277,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v3_to_v12_membership_journal() {
+    fn profile_schema_migrates_v3_to_current_membership_journal() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("membership-migration").unwrap();
         let database_path = {
@@ -12817,7 +13325,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v6_to_v12_with_replay_heads() {
+    fn profile_schema_migrates_v6_to_current_with_replay_heads() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("replay-head-migration").unwrap();
         let database_path = {
@@ -12928,7 +13436,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v7_to_v12_outbox_terminal_reasons() {
+    fn profile_schema_migrates_v7_to_current_outbox_terminal_reasons() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-terminal-migration").unwrap();
         let database_path = {
@@ -12966,7 +13474,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v8_to_v12_removed_terminal_reason() {
+    fn profile_schema_migrates_v8_to_current_removed_terminal_reason() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("outbox-removed-migration").unwrap();
         let database_path = {
@@ -13077,7 +13585,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v5_to_v12_join_receipts() {
+    fn profile_schema_migrates_v5_to_current_join_receipts() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("join-receipt-migration").unwrap();
         let database_path = {
@@ -13169,7 +13677,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_schema_migrates_v4_to_v12_pending_joins() {
+    fn profile_schema_migrates_v4_to_current_pending_joins() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("pending-join-migration").unwrap();
         let database_path = {

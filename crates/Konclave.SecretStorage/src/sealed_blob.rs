@@ -41,6 +41,7 @@ pub enum SecretRecordKind {
     RemoteEventDeliveryPolicy = 14,
     PairingOperation = 15,
     RelayEnrollmentIntent = 16,
+    LocalServiceRequestOutcome = 17,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.

@@ -7,10 +7,12 @@ use KonclaveClientLibrary::{
 };
 use KonclaveSecretStorage::NativeEnrollmentCredentialStore;
 
-use crate::cli::InitArgs;
+use crate::cli::{AuthorizationPolicyChoice, InitArgs};
 use crate::installation;
+use crate::local_service_installation;
 
 pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
+    let authorization_policy = select_authorization_policy(args.authorization_policy)?;
     let root = installation::resolve_profile_root(args.profile_root)?;
     let endpoint =
         RelayEndpoint::parse(&args.relay_endpoint).context("validating relay endpoint")?;
@@ -26,49 +28,89 @@ pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
             "Relay enrollment is already initialized using {} custody.",
             installation::source_label(existing.source())
         );
-        return Ok(());
+    } else {
+        let config = match args.external_source {
+            Some(path) => {
+                let config = RelayInstallationConfig::new(
+                    endpoint.clone(),
+                    RelayEnrollmentSourceConfig::ExternalFile { path: path.clone() },
+                )
+                .context("validating external enrollment source")?;
+                if !path.exists() {
+                    let credential = read_enrollment_credential()?;
+                    config
+                        .create_external_credential(&credential)
+                        .context("creating protected external enrollment source")?;
+                }
+                installation::load_credential(&config)
+                    .context("validating endpoint-bound external enrollment source")?;
+                config
+            }
+            None => {
+                let credential = read_enrollment_credential()?;
+                let installation_id = installation::native_installation_id(&credential, &endpoint);
+                let record = credential
+                    .encode_bound(&endpoint)
+                    .context("binding enrollment credential to endpoint")?;
+                NativeEnrollmentCredentialStore::new(installation_id.clone())
+                    .context("creating native enrollment custody")?
+                    .store(&record)
+                    .context("storing native enrollment credential")?;
+                RelayInstallationConfig::new(
+                    endpoint,
+                    RelayEnrollmentSourceConfig::Native { installation_id },
+                )
+                .context("building relay installation configuration")?
+            }
+        };
+        installation::write_exact(&root, &config)?;
+        println!(
+            "Initialized relay enrollment using {} custody.",
+            installation::source_label(config.source())
+        );
     }
 
-    let config = match args.external_source {
-        Some(path) => {
-            let config = RelayInstallationConfig::new(
-                endpoint.clone(),
-                RelayEnrollmentSourceConfig::ExternalFile { path: path.clone() },
-            )
-            .context("validating external enrollment source")?;
-            if !path.exists() {
-                let credential = read_enrollment_credential()?;
-                config
-                    .create_external_credential(&credential)
-                    .context("creating protected external enrollment source")?;
-            }
-            installation::load_credential(&config)
-                .context("validating endpoint-bound external enrollment source")?;
-            config
-        }
-        None => {
-            let credential = read_enrollment_credential()?;
-            let installation_id = installation::native_installation_id(&credential, &endpoint);
-            let record = credential
-                .encode_bound(&endpoint)
-                .context("binding enrollment credential to endpoint")?;
-            NativeEnrollmentCredentialStore::new(installation_id.clone())
-                .context("creating native enrollment custody")?
-                .store(&record)
-                .context("storing native enrollment credential")?;
-            RelayInstallationConfig::new(
-                endpoint,
-                RelayEnrollmentSourceConfig::Native { installation_id },
-            )
-            .context("building relay installation configuration")?
-        }
-    };
-    installation::write_exact(&root, &config)?;
+    let local = local_service_installation::install(
+        &root,
+        args.copilot_extension_root,
+        args.local_service_endpoint.as_deref(),
+        args.local_service_identity_file,
+        args.local_service_profile_key_directory,
+        authorization_policy,
+    )?;
     println!(
-        "Initialized relay enrollment using {} custody.",
-        installation::source_label(config.source())
+        "Initialized shared local service for the Copilot extension at {}.",
+        local.extension_root.display()
     );
     Ok(())
+}
+
+fn select_authorization_policy(
+    choice: Option<AuthorizationPolicyChoice>,
+) -> anyhow::Result<KonclaveLocalServiceTransport::AuthorizationPolicy> {
+    match choice {
+        Some(AuthorizationPolicyChoice::AccountTrusted) => {
+            Ok(KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted())
+        }
+        None if !std::io::stdin().is_terminal() => {
+            bail!("--authorization-policy is required for noninteractive initialization")
+        }
+        None => {
+            eprintln!("Choose local authorization policy:");
+            eprintln!("1. AccountTrusted");
+            eprintln!("   Automatic session access.");
+            eprintln!("   All processes under this OS account are trusted.");
+            eprintln!("   This does not provide same-user session isolation.");
+            let mut value = String::new();
+            std::io::stdin()
+                .read_line(&mut value)
+                .context("reading authorization policy")?;
+            if value.trim() != "1" {
+                bail!("authorization policy selection is invalid");
+            }
+            Ok(KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted())
+        }
+    }
 }
 
 fn read_enrollment_credential() -> anyhow::Result<RelayEnrollmentCredential> {

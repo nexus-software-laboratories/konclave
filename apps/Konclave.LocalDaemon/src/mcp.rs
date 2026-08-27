@@ -16,6 +16,7 @@ use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::service::ServerInitializeError;
 use rmcp::{Json, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::time::timeout;
@@ -296,6 +297,109 @@ impl StdioServer {
         }
     }
 
+    /// Dispatches one local-service operation through the same implementation used
+    /// by the MCP adapter.
+    ///
+    /// The local RPC layer carries a bounded opaque payload. This method is the one
+    /// JSON boundary that turns it into the existing typed tool request, invokes the
+    /// corresponding handler, and encodes that handler's structured result. A new
+    /// operation therefore cannot drift between MCP and local RPC implementations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, authorization, domain, task, or encoding code.
+    pub(crate) async fn dispatch_json(
+        &self,
+        operation: &str,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        match operation {
+            "get_identity" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.get_identity().await?)
+            }
+            "create_conversation" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.create_conversation().await?)
+            }
+            "list_conversations" => Self::encode_json(
+                self.list_conversations(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "send_message" => {
+                Self::encode_json(self.send_message(Self::parse_parameters(payload)?).await?)
+            }
+            "read_messages" => {
+                Self::encode_json(self.read_messages(Self::parse_parameters(payload)?).await?)
+            }
+            "sync_messages" => {
+                Self::encode_json(self.sync_messages(Self::parse_parameters(payload)?).await?)
+            }
+            "watch_messages" => Self::encode_json(
+                self.watch_messages(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "create_invitation" => Self::encode_json(
+                self.create_invitation(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "create_join_proof" => Self::encode_json(
+                self.create_join_proof(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "add_member" => {
+                Self::encode_json(self.add_member(Self::parse_parameters(payload)?).await?)
+            }
+            "accept_welcome" => Self::encode_json(
+                self.accept_welcome(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "remove_member" => {
+                Self::encode_json(self.remove_member(Self::parse_parameters(payload)?).await?)
+            }
+            "change_member_role" => Self::encode_json(
+                self.change_member_role(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "create_pairing_capability" => Self::encode_json(
+                self.create_pairing_capability(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "redeem_pairing_capability" => Self::encode_json(
+                self.redeem_pairing_capability(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "get_pairing_status" => Self::encode_json(
+                self.get_pairing_status(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "authorize_pairing_joiner" => Self::encode_json(
+                self.authorize_pairing_joiner(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "authorize_pairing_inviter" => Self::encode_json(
+                self.authorize_pairing_inviter(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "sync_pairing" => {
+                Self::encode_json(self.sync_pairing(Self::parse_parameters(payload)?).await?)
+            }
+            "cancel_pairing" => Self::encode_json(
+                self.cancel_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "set_auto_delivery" => Self::encode_json(
+                self.set_auto_delivery(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "delivery_status" => Self::encode_json(
+                self.delivery_status(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            _ => Err("unknown_operation".to_string()),
+        }
+    }
+
     #[tool(
         name = "set_auto_delivery",
         description = "Enable or mute automatic delivery of remote events for one conversation."
@@ -315,6 +419,25 @@ impl StdioServer {
         .map_err(|_| "task_failed".to_string())?
         .map_err(tool_error)?;
         self.delivery_status_for(Some(conversation_id)).await
+    }
+
+    fn parse_parameters<T: DeserializeOwned>(payload: &[u8]) -> Result<Parameters<T>, String> {
+        serde_json::from_slice(payload)
+            .map(Parameters)
+            .map_err(|_| "invalid_request".to_string())
+    }
+
+    fn require_empty_request(payload: &[u8]) -> Result<(), String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
+        match value {
+            serde_json::Value::Object(fields) if fields.is_empty() => Ok(()),
+            _ => Err("invalid_request".to_string()),
+        }
+    }
+
+    fn encode_json<T: Serialize>(Json(value): Json<T>) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&value).map_err(|_| "response_encoding_failed".to_string())
     }
 
     #[tool(
@@ -361,7 +484,7 @@ impl StdioServer {
 
     #[tool(
         name = "get_identity",
-        description = "Return this daemon profile's public device identifier."
+        description = "Return this profile's public device identifier."
     )]
     async fn get_identity(&self) -> Result<Json<IdentityResult>, String> {
         self.authorize("get_identity")?;
@@ -1221,7 +1344,7 @@ fn message_result(
     })
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1231,7 +1354,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], ()> {
+pub(crate) fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], ()> {
     if value.len() != N * 2 || !value.is_ascii() {
         return Err(());
     }
@@ -1344,6 +1467,16 @@ mod tests {
     struct TestClient;
 
     impl ClientHandler for TestClient {}
+
+    #[test]
+    fn copilot_tool_contract_fixture_matches_the_router() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/local-service/v1/copilot-tools.json"
+        ))
+        .unwrap();
+        let actual = serde_json::to_value(StdioServer::tool_router().list_all()).unwrap();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn authorization_hook_is_explicit_and_deterministic() {

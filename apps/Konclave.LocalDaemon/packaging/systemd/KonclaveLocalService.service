@@ -1,0 +1,13 @@
+[Unit]
+Description=Konclave shared local service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="@SERVICE_BINARY@" --config "@SERVICE_CONFIG@"
+Restart=on-failure
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target

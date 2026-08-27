@@ -78,6 +78,61 @@ async fn two_clients_attach_in_turn_and_keep_separate_bindings() {
 }
 
 #[tokio::test]
+async fn an_early_probe_disconnect_does_not_stop_the_next_accept() {
+    let endpoint = endpoint("probe-disconnect");
+    let mut listener = LocalServiceListener::bind(&endpoint).await.unwrap();
+
+    let probe = connect_local_service(&endpoint).await.unwrap();
+    drop(probe);
+
+    let service = async { listener.accept().await.unwrap() };
+    let client = async { connect_local_service(&endpoint).await.unwrap() };
+    let (accepted, connected) = tokio::join!(service, client);
+
+    drop(accepted);
+    drop(connected);
+}
+
+#[tokio::test]
+async fn a_disconnected_accepted_instance_does_not_poison_the_next_accept() {
+    let endpoint = endpoint("accepted-disconnect");
+    let mut listener = LocalServiceListener::bind(&endpoint).await.unwrap();
+
+    let first_service = async { listener.accept().await.unwrap() };
+    let first_client = async { connect_local_service(&endpoint).await.unwrap() };
+    let (accepted_first, connected_first) = tokio::join!(first_service, first_client);
+    drop(connected_first);
+
+    let second_service = async { listener.accept().await.unwrap() };
+    let second_client = async { connect_local_service(&endpoint).await.unwrap() };
+    let (accepted_second, connected_second) = tokio::join!(second_service, second_client);
+
+    drop(accepted_first);
+    drop(accepted_second);
+    drop(connected_second);
+}
+
+#[tokio::test]
+async fn cancelling_a_pending_accept_keeps_the_listener_usable() {
+    let endpoint = endpoint("cancel-accept");
+    let mut listener = LocalServiceListener::bind(&endpoint).await.unwrap();
+
+    tokio::select! {
+        accepted = listener.accept() => {
+            panic!("accept completed without a client: {accepted:?}");
+        }
+        () = tokio::task::yield_now() => {}
+    }
+
+    let service = async { listener.accept().await.unwrap() };
+    let client = async { connect_local_service(&endpoint).await.unwrap() };
+    let (accepted, connected) = tokio::join!(service, client);
+
+    drop(accepted);
+    drop(connected);
+}
+
+#[tokio::test]
 async fn connecting_to_an_absent_endpoint_fails_closed() {
     let endpoint = endpoint("absent");
     let error = connect_local_service(&endpoint).await.unwrap_err();

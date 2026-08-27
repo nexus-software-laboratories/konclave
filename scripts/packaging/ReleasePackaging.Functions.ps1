@@ -250,8 +250,17 @@ function Assert-PackagedPlugin {
     )
 
     $manifestPath = Join-Path $PluginRoot 'plugin.json'
+    $clientPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'client.mjs'
     $extensionPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'extension.mjs'
-    foreach ($path in @($manifestPath, $extensionPath)) {
+    $genericPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'generic.mjs'
+    $genericSkillPath = Join-Path $PluginRoot 'skills' 'konclave-generic' 'SKILL.md'
+    foreach ($path in @(
+        $manifestPath,
+        $clientPath,
+        $extensionPath,
+        $genericPath,
+        $genericSkillPath
+    )) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Packaged plugin file is missing: $path"
         }
@@ -422,41 +431,49 @@ function Copy-ClientPayload {
 
     $suffix = if ([string]$Artifact.operatingSystem -ceq 'windows') { '.exe' } else { '' }
     $cliSource = Join-Path $BinaryDirectory "KonclaveCommandLine$suffix"
-    $daemonSource = Join-Path $BinaryDirectory "KonclaveLocalDaemon$suffix"
+    $serviceSource = Join-Path $BinaryDirectory "KonclaveLocalService$suffix"
     Copy-ReleaseFile $cliSource (Join-Path $DestinationRoot 'bin' "konclave$suffix")
-    Copy-ReleaseFile $daemonSource (
-        Join-Path $DestinationRoot 'bin' "KonclaveLocalDaemon$suffix"
+    Copy-ReleaseFile $serviceSource (
+        Join-Path $DestinationRoot 'bin' "KonclaveLocalService$suffix"
     )
 
     $pluginRoot = Join-Path $DestinationRoot 'share' 'konclave' 'plugin'
     Expand-ProtectedPluginArchive $PluginArchivePath $pluginRoot
     Assert-PackagedPlugin $pluginRoot $Version
-    Copy-ReleaseFile $daemonSource (
-        Join-Path $pluginRoot 'bin' "KonclaveLocalDaemon$suffix"
-    )
-
     $serviceRoot = Join-Path $DestinationRoot 'share' 'konclave' 'service'
     switch ([string]$Artifact.operatingSystem) {
         'linux' {
             Copy-ReleaseFile (
                 Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'systemd' `
-                    'KonclaveLocalDaemon-daemon.service'
+                    'KonclaveLocalService.service'
             ) (
-                Join-Path $serviceRoot 'systemd' 'KonclaveLocalDaemon-daemon.service'
+                Join-Path $serviceRoot 'systemd' 'KonclaveLocalService.service'
+            )
+            Copy-ReleaseFile (
+                Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'systemd' `
+                    'manage-user-service.sh'
+            ) (
+                Join-Path $serviceRoot 'systemd' 'manage-user-service.sh'
             )
         }
         'macos' {
             Copy-ReleaseFile (
                 Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'launchd' `
-                    'com.genesis.KonclaveLocalDaemon.plist'
+                    'com.genesis.KonclaveLocalService.plist'
             ) (
-                Join-Path $serviceRoot 'launchd' 'com.genesis.KonclaveLocalDaemon.plist'
+                Join-Path $serviceRoot 'launchd' 'com.genesis.KonclaveLocalService.plist'
+            )
+            Copy-ReleaseFile (
+                Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'launchd' `
+                    'manage-agent.sh'
+            ) (
+                Join-Path $serviceRoot 'launchd' 'manage-agent.sh'
             )
         }
         'windows' {
             $serviceSource = Join-Path $BinaryDirectory 'windows_service.exe'
             Copy-ReleaseFile $serviceSource (
-                Join-Path $DestinationRoot 'bin' 'KonclaveLocalDaemonService.exe'
+                Join-Path $DestinationRoot 'bin' 'KonclaveLocalServiceHost.exe'
             )
             Copy-ReleaseFile (
                 Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `

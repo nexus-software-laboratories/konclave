@@ -12,6 +12,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0006: Pair sessions through joiner-issued, self-authenticating capabilities](../adr/adr-0006-joiner-issued-pairing-capabilities.md)
 - [ADR 0007: Provision per-profile relay principals through an outbound enrollment control plane](../adr/adr-0007-outbound-relay-principal-enrollment.md)
 - [ADR 0008: Host logical agent profiles in one per-user local service](../adr/adr-0008-shared-local-service.md)
+- [ADR 0009: Authorize local sessions through evidence-bound exact-profile grants](../adr/adr-0009-evidence-bound-session-grants.md)
 
 ## Superseded records
 

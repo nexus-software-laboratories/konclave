@@ -9,8 +9,9 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       include: ['src/**/*.ts'],
       exclude: [
-        // The entry module only boots the runtime under the Copilot host.
+        // Entry modules only bind process I/O to independently tested runtime logic.
         'src/extension.ts',
+        'src/generic-cli.ts',
       ],
       thresholds: {
         lines: 85,

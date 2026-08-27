@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(
             HandshakeMessage::decode(&payload).unwrap_err(),
             LocalServiceTransportError::InvalidIdentifier {
-                field: "adapter_key_version"
+                field: "issuer_key_version"
             }
         );
     }

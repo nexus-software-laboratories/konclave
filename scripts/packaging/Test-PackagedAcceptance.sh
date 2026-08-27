@@ -141,9 +141,8 @@ prepare_state() {
     local mode="$1"
     local endpoint="$2"
     local state_root="$acceptance_root/state-$mode"
-    mkdir -p "$state_root/relay"
-    head -c 32 /dev/urandom >"$state_root/wrapping.key"
-    chmod 0600 "$state_root/wrapping.key"
+    mkdir -p "$state_root/relay" "$state_root/profile-keys"
+    chmod 0700 "$state_root/profile-keys"
     "$client_root_a/bin/konclave" relay-bootstrap \
         --relay-endpoint "$endpoint" \
         --access-document "$state_root/access.json" \
@@ -158,14 +157,19 @@ run_harness() {
     SSL_CERT_FILE="$acceptance_root/tls/ca.crt" \
     CARGO_TARGET_DIR="$harness_target" \
     KONCLAVE_ACCEPTANCE_CLI="$client_root_a/bin/konclave" \
-    KONCLAVE_ACCEPTANCE_DAEMON="$client_root_a/share/konclave/plugin/bin/KonclaveLocalDaemon" \
-    KONCLAVE_ACCEPTANCE_SECOND_DAEMON="$client_root_b/share/konclave/plugin/bin/KonclaveLocalDaemon" \
+    KONCLAVE_ACCEPTANCE_SERVICE="$client_root_a/bin/KonclaveLocalService" \
+    KONCLAVE_ACCEPTANCE_SECOND_SERVICE="$client_root_b/bin/KonclaveLocalService" \
+    KONCLAVE_ACCEPTANCE_CLIENT_MODULE="$client_root_a/share/konclave/plugin/extensions/Konclave.Extension/client.mjs" \
+    KONCLAVE_ACCEPTANCE_GENERIC_MODULE="$client_root_a/share/konclave/plugin/extensions/Konclave.Extension/generic.mjs" \
+    KONCLAVE_ACCEPTANCE_GENERIC_SKILL="$client_root_a/share/konclave/plugin/skills/konclave-generic/SKILL.md" \
     KONCLAVE_ACCEPTANCE_INSTALL_ROOT="$client_root_a" \
     KONCLAVE_ACCEPTANCE_RELAY_ENDPOINT="$endpoint" \
     KONCLAVE_ACCEPTANCE_ACCESS_DOCUMENT="$state_root/access.json" \
     KONCLAVE_ACCEPTANCE_ENROLLMENT_SOURCE="$state_root/enrollment.credential" \
     KONCLAVE_ACCEPTANCE_PROFILE_ROOT="$state_root/profiles" \
-    KONCLAVE_ACCEPTANCE_WRAPPING_KEY="$state_root/wrapping.key" \
+    KONCLAVE_ACCEPTANCE_PROFILE_KEYS="$state_root/profile-keys" \
+    KONCLAVE_ACCEPTANCE_SERVICE_IDENTITY="$state_root/service/identity.key" \
+    KONCLAVE_ACCEPTANCE_EXTENSION_ROOT="$state_root/extension" \
     KONCLAVE_ACCEPTANCE_RELAY_STATE="$state_root/relay" \
     KONCLAVE_ACCEPTANCE_RELAY_DATABASE="$state_root/relay/relay.sqlite" \
         cargo test \
@@ -180,11 +184,19 @@ run_harness() {
 assert_untrusted_tls_rejected() {
     local state_root="$1"
     local endpoint="$2"
-    local profile_root="$state_root/untrusted-profiles"
+    local untrusted_root="$state_root/untrusted"
+    local profile_root="$untrusted_root/profiles"
+    local extension_root="$untrusted_root/extension"
+    local identity_file="$untrusted_root/service/identity.key"
+    local profile_keys="$untrusted_root/profile-keys"
     "$client_root_a/bin/konclave" init \
         --relay-endpoint "$endpoint" \
+        --authorization-policy account-trusted \
         --profile-root "$profile_root" \
         --external-source "$state_root/enrollment.credential" \
+        --copilot-extension-root "$extension_root" \
+        --local-service-identity-file "$identity_file" \
+        --local-service-profile-key-directory "$profile_keys" \
         >"$state_root/untrusted-init.log"
     if "$client_root_a/bin/konclave" doctor \
         --profile-root "$profile_root" \
@@ -305,14 +317,24 @@ container_validation_assert_baseline_intact "$container_baseline"
 
 native_profiles="$(find "$native_state/profiles" -name profile.sqlite -type f | wc -l)"
 container_profiles="$(find "$container_state/profiles" -name profile.sqlite -type f | wc -l)"
-if [ "$native_profiles" -ne 2 ] || [ "$container_profiles" -ne 2 ]; then
-    echo '::error::Packaged sessions did not preserve two profile databases per relay mode.' >&2
+if [ "$native_profiles" -ne 3 ] || [ "$container_profiles" -ne 3 ]; then
+    echo '::error::Packaged clients did not preserve three profile databases per relay mode.' >&2
     exit 1
 fi
+for state_root in "$native_state" "$container_state"; do
+    for profile in session-packaged-a session-packaged-b generic-packaged; do
+        if [ ! -f "$state_root/profiles/$profile/profile.sqlite" ]; then
+            echo "::error::Packaged client profile is missing: $profile." >&2
+            exit 1
+        fi
+    done
+done
 
 rm -rf -- "$acceptance_root/client-a" "$acceptance_root/client-b" "$acceptance_root/relay-install"
-if [ ! -f "$native_state/profiles/alice/profile.sqlite" ] ||
-    [ ! -f "$container_state/profiles/bob/profile.sqlite" ]; then
+if [ ! -f "$native_state/profiles/session-packaged-a/profile.sqlite" ] ||
+    [ ! -f "$container_state/profiles/session-packaged-b/profile.sqlite" ] ||
+    [ ! -f "$native_state/profiles/generic-packaged/profile.sqlite" ] ||
+    [ ! -f "$container_state/profiles/generic-packaged/profile.sqlite" ]; then
     echo '::error::Removing installed artifacts also removed durable profile state.' >&2
     exit 1
 fi
