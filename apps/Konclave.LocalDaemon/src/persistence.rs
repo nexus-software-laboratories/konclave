@@ -25,6 +25,7 @@ use KonclaveProtocolContracts::v1::{
 };
 use KonclaveSecretStorage::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
+    SecretStorageError,
 };
 use fs4::{FileExt, TryLockError};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -65,6 +66,7 @@ const REMOTE_EVENT_HEAD_RECORD_SCOPE: u8 = 16;
 const REMOTE_EVENT_POLICY_RECORD_VERSION: u8 = 1;
 const REMOTE_EVENT_POLICY_RECORD_SCOPE: u8 = 17;
 const REMOTE_EVENT_FLOOR_RECORD_SCOPE: u8 = 18;
+const DERIVED_OPERATION_RECORD_CONTEXT_VERSION: &[u8] = b"operation-record-context-v2";
 const MAX_REMOTE_EVENT_BATCH: usize = 50;
 const MAX_REMOTE_EVENT_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_REMOTE_EVENTS: usize = 1_024;
@@ -2253,6 +2255,7 @@ impl ProfileStore {
     /// # Errors
     ///
     /// Returns a typed validation, sealing, duplicate, or storage error.
+    #[cfg(test)]
     pub(crate) fn insert_conversation(
         &self,
         routing_id: RoutingId,
@@ -2260,10 +2263,40 @@ impl ProfileStore {
         state: &ConversationState,
         bindings: &[DeviceCredentialBinding],
     ) -> Result<(), ProfileStoreError> {
-        self.insert_conversation_at_cursor(routing_id, signing_material, state, bindings, 0, None)
+        self.insert_conversation_at_cursor(
+            routing_id,
+            signing_material,
+            state,
+            bindings,
+            ConversationInsertOptions::local(None),
+        )
     }
 
-    /// Inserts one joined conversation at its verified relay baseline cursor.
+    /// Inserts one conversation with its initial automatic-delivery policy in the
+    /// same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation, sealing, duplicate, or storage error.
+    pub(crate) fn insert_conversation_with_adapter_delivery(
+        &self,
+        routing_id: RoutingId,
+        signing_material: &ConversationSigningMaterial,
+        state: &ConversationState,
+        bindings: &[DeviceCredentialBinding],
+        enabled: bool,
+    ) -> Result<(), ProfileStoreError> {
+        self.insert_conversation_at_cursor(
+            routing_id,
+            signing_material,
+            state,
+            bindings,
+            ConversationInsertOptions::local(Some(enabled)),
+        )
+    }
+
+    /// Inserts one joined conversation at its verified relay baseline cursor and
+    /// optionally records its initial automatic-delivery policy atomically.
     ///
     /// # Errors
     ///
@@ -2274,9 +2307,13 @@ impl ProfileStore {
         signing_material: &ConversationSigningMaterial,
         state: &ConversationState,
         bindings: &[DeviceCredentialBinding],
-        replay_cursor: u64,
-        replay_receipt: Option<&StoredRelayEnvelope>,
+        options: ConversationInsertOptions<'_>,
     ) -> Result<(), ProfileStoreError> {
+        let ConversationInsertOptions {
+            replay_cursor,
+            replay_receipt,
+            adapter_delivery_enabled,
+        } = options;
         let conversation_id = signing_material.binding().conversation_id();
         if state.conversation_id() != conversation_id {
             return Err(ProfileStoreError::ConversationMismatch);
@@ -2303,6 +2340,18 @@ impl ProfileStore {
             None,
             &state_bytes,
         )?;
+        let adapter_delivery_policy = adapter_delivery_enabled
+            .map(|enabled| {
+                self.seal_operation_record(
+                    SecretRecordKind::RemoteEventDeliveryPolicy,
+                    conversation_id,
+                    routing_id,
+                    REMOTE_EVENT_POLICY_RECORD_SCOPE,
+                    conversation_id.as_bytes(),
+                    &encode_remote_event_delivery_policy(enabled),
+                )
+            })
+            .transpose()?;
         let mut sealed_bindings = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let bytes = encode_device_credential_binding(binding)
@@ -2344,15 +2393,17 @@ impl ProfileStore {
                     sealed_policy_state,
                     sender_counter,
                     replay_cursor,
-                    sealed_replay_head
-                 ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                    sealed_replay_head,
+                    sealed_adapter_delivery_policy
+                 ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)",
                 params![
                     conversation_id.as_bytes().as_slice(),
                     routing_id.as_bytes().as_slice(),
                     signing_blob.as_bytes(),
                     state_blob.as_bytes(),
                     to_sql_integer(replay_cursor)?,
-                    replay_head.as_ref().map(SealedBlob::as_bytes)
+                    replay_head.as_ref().map(SealedBlob::as_bytes),
+                    adapter_delivery_policy.as_ref().map(SealedBlob::as_bytes)
                 ],
             )
             .map_err(|error| match error {
@@ -7596,6 +7647,35 @@ pub(crate) struct StoredConversation {
     pub replay_cursor: u64,
 }
 
+/// Optional state committed with a new conversation record.
+pub(crate) struct ConversationInsertOptions<'a> {
+    replay_cursor: u64,
+    replay_receipt: Option<&'a StoredRelayEnvelope>,
+    adapter_delivery_enabled: Option<bool>,
+}
+
+impl<'a> ConversationInsertOptions<'a> {
+    const fn local(adapter_delivery_enabled: Option<bool>) -> Self {
+        Self {
+            replay_cursor: 0,
+            replay_receipt: None,
+            adapter_delivery_enabled,
+        }
+    }
+
+    /// Creates options for a joined conversation at its verified relay cursor.
+    pub(crate) const fn joined(
+        replay_cursor: u64,
+        replay_receipt: &'a StoredRelayEnvelope,
+    ) -> Self {
+        Self {
+            replay_cursor,
+            replay_receipt: Some(replay_receipt),
+            adapter_delivery_enabled: Some(true),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OutboundReservation {
     pub conversation_id: ConversationId,
@@ -9767,7 +9847,25 @@ fn operation_record_context(
     identifier.extend_from_slice(routing_id.as_bytes());
     identifier.push(scope);
     identifier.extend_from_slice(record_id);
-    SecretRecordContext::new(kind, identifier).map_err(|_| ProfileStoreError::Storage)
+    match SecretRecordContext::new(kind, identifier) {
+        Ok(context) => Ok(context),
+        // Every representable legacy context keeps its original bytes. An oversized
+        // context could never have produced ciphertext, so using a versioned derived
+        // context here adds support without changing any readable persisted record.
+        Err(SecretStorageError::InvalidRecordIdentifier { .. }) => SecretRecordContext::derive(
+            kind,
+            &[
+                DERIVED_OPERATION_RECORD_CONTEXT_VERSION,
+                profile_id.as_bytes(),
+                conversation_id.as_bytes(),
+                routing_id.as_bytes(),
+                &[scope],
+                record_id,
+            ],
+        )
+        .map_err(|_| ProfileStoreError::Storage),
+        Err(_) => Err(ProfileStoreError::Storage),
+    }
 }
 
 fn local_request_outcome_context(
@@ -14488,6 +14586,33 @@ mod tests {
                 .unwrap()
                 .replay_cursor,
             0
+        );
+    }
+
+    #[test]
+    fn remote_event_delivery_policy_supports_full_length_session_profiles() {
+        let fixture = conversation_fixture("session-0123456789abcdef01234567");
+
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .adapter_delivery_enabled(fixture.conversation_id)
+                .unwrap()
+        );
+
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, false)
+            .unwrap();
+        assert!(
+            !fixture
+                .store
+                .adapter_delivery_enabled(fixture.conversation_id)
+                .unwrap()
         );
     }
 

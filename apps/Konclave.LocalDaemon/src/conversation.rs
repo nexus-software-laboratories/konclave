@@ -23,10 +23,10 @@ use crate::activity::ProfileActivity;
 use crate::pairing::PairingOperationState;
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
-    ExpireOutboundResult, HistoryPage, InboxOperation, MAX_CONVERSATION_PAGE_SIZE,
-    MembershipInboxOperation, MembershipOutboxStatus, MessageDirection, OutboundReservation,
-    PendingOutbox, ProfileStore, ProfileStoreError, StoredMembershipTransition,
-    StoredOutboundApplication,
+    ConversationInsertOptions, ExpireOutboundResult, HistoryPage, InboxOperation,
+    MAX_CONVERSATION_PAGE_SIZE, MembershipInboxOperation, MembershipOutboxStatus, MessageDirection,
+    OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
+    StoredMembershipTransition, StoredOutboundApplication,
 };
 
 const MAX_RECOVERED_PAIRINGS: usize = 32;
@@ -247,14 +247,14 @@ impl ConversationCoordinator {
         };
         let state = initial_conversation_state(conversation_id, device_id)?;
         let binding = signing_material.binding().clone();
-        self.store
-            .insert_conversation(routing_id, &signing_material, &state, &[binding])?;
+        self.store.insert_conversation_with_adapter_delivery(
+            routing_id,
+            &signing_material,
+            &state,
+            &[binding],
+            true,
+        )?;
         let conversation = self.open_unlocked(conversation_id)?;
-        // Creating a conversation is the explicit act that asks for its messages.
-        // Requiring a separate opt-in would leave a session silently undelivered
-        // whenever it forgot the extra step, which is the failure this exists to fix.
-        self.store
-            .set_adapter_delivery_enabled(conversation_id, true)?;
         self.membership_changed.notify_one();
         Ok(conversation.summary())
     }
@@ -867,8 +867,7 @@ impl ConversationCoordinator {
                 .signing_material,
             &state,
             &bindings,
-            join_receipt.cursor(),
-            Some(join_receipt),
+            ConversationInsertOptions::joined(join_receipt.cursor(), join_receipt),
         ) {
             Ok(()) => {}
             Err(ProfileStoreError::ConversationExists) => {
@@ -879,6 +878,8 @@ impl ConversationCoordinator {
                 {
                     return Err(ConversationCoordinatorError::StateMismatch);
                 }
+                self.store
+                    .set_adapter_delivery_enabled(conversation_id, true)?;
             }
             Err(error) => return Err(error.into()),
         }
@@ -888,9 +889,6 @@ impl ConversationCoordinator {
                 Err(error) => return Err(error.into()),
             }
         }
-        // Joining is the same explicit act as creating, so delivery starts here too.
-        self.store
-            .set_adapter_delivery_enabled(conversation_id, true)?;
         self.membership_changed.notify_one();
         Ok(ConversationSummary {
             conversation_id,
@@ -2447,6 +2445,12 @@ pub(crate) mod tests {
         let coordinator = open_coordinator(root.path(), "conversation-service");
         let created = coordinator.create().unwrap();
         assert_eq!(created.epoch, 0);
+        assert!(
+            coordinator
+                .store
+                .adapter_delivery_enabled(created.conversation_id)
+                .unwrap()
+        );
         assert_eq!(
             coordinator.conversation_ids(None, 10).unwrap(),
             vec![created.conversation_id]
@@ -2819,6 +2823,11 @@ pub(crate) mod tests {
         assert_eq!(
             bob.open(created.conversation_id).unwrap().group.state(),
             alice.open(created.conversation_id).unwrap().group.state()
+        );
+        assert!(
+            bob.store
+                .adapter_delivery_enabled(created.conversation_id)
+                .unwrap()
         );
         assert!(bob.store.pending_join_ids(None, 10).unwrap().is_empty());
     }
