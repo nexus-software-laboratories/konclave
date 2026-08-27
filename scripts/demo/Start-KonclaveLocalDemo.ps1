@@ -740,6 +740,38 @@ function Test-OwnedGenericSkill {
     return $true
 }
 
+function Remove-OwnedGenericSkill {
+    $ownedSkill = Read-OwnedGenericSkill
+    if ($null -eq $ownedSkill) {
+        if (Test-Path -LiteralPath $copilotGenericSkillRoot) {
+            $skillRoot = Get-Item -LiteralPath $copilotGenericSkillRoot
+            if (
+                -not $skillRoot.PSIsContainer -or
+                $skillRoot.Attributes -band [IO.FileAttributes]::ReparsePoint
+            ) {
+                throw 'Existing Konclave generic skill root is unsafe.'
+            }
+            Write-Warning (
+                'A pre-existing Konclave generic skill remains externally managed; ' +
+                'the demo will not replace or remove it.'
+            )
+        }
+        return
+    }
+    if (-not (Test-OwnedGenericSkill -State $ownedSkill)) {
+        Remove-Item -LiteralPath $genericSkillStatePath -Force
+        Write-Warning (
+            'The Konclave generic skill changed after demo installation; ' +
+            'it is now externally managed and will be preserved.'
+        )
+        return
+    }
+
+    Remove-Item -LiteralPath (Join-Path $copilotGenericSkillRoot 'SKILL.md') -Force
+    Remove-Item -LiteralPath $copilotGenericSkillRoot -Force
+    Remove-Item -LiteralPath $genericSkillStatePath -Force
+}
+
 function Install-CopilotExtension {
     foreach ($source in @(
         $extensionSource,
@@ -768,36 +800,6 @@ function Install-CopilotExtension {
     if (-not (Test-Path -LiteralPath $serviceConfig -PathType Leaf)) {
         throw 'Shared-service initialization did not install the extension sidecar.'
     }
-    $ownedSkill = Read-OwnedGenericSkill
-    if (
-        $null -ne $ownedSkill -and
-        -not (Test-OwnedGenericSkill -State $ownedSkill)
-    ) {
-        Remove-Item -LiteralPath $genericSkillStatePath -Force
-        $ownedSkill = $null
-        Write-Warning (
-            'The Konclave generic skill changed after demo installation; ' +
-            'it is now externally managed and will be preserved.'
-        )
-    }
-    if ($null -eq $ownedSkill -and (Test-Path -LiteralPath $copilotGenericSkillRoot)) {
-        $skillRoot = Get-Item -LiteralPath $copilotGenericSkillRoot
-        if (
-            -not $skillRoot.PSIsContainer -or
-            $skillRoot.Attributes -band [IO.FileAttributes]::ReparsePoint
-        ) {
-            throw 'Existing Konclave generic skill root is unsafe.'
-        }
-        Write-Warning (
-            'A pre-existing Konclave generic skill remains externally managed; ' +
-            'the demo will not replace or remove it.'
-        )
-    }
-    elseif ($null -eq $ownedSkill) {
-        New-Item -ItemType Directory -Path $copilotGenericSkillRoot -Force | Out-Null
-        $ownedSkill = @{}
-    }
-
     [void](Enable-CopilotExperimentalExtensions)
     Install-AtomicExtensionFile `
         -Source $extensionSource `
@@ -808,37 +810,12 @@ function Install-CopilotExtension {
     Install-AtomicExtensionFile `
         -Source $genericSource `
         -Destination (Join-Path $copilotExtensionRoot 'generic.mjs')
-    if ($null -ne $ownedSkill) {
-        $installedSkill = Join-Path $copilotGenericSkillRoot 'SKILL.md'
-        Install-AtomicExtensionFile `
-            -Source $genericSkillSource `
-            -Destination $installedSkill
-        Write-AtomicJsonObject `
-            -Path $genericSkillStatePath `
-            -Value ([ordered]@{
-                schemaVersion = 1
-                path = $copilotGenericSkillRoot
-                sha256 = (
-                    Get-FileHash -LiteralPath $installedSkill -Algorithm SHA256
-                ).Hash.ToLowerInvariant()
-            })
-    }
+    Remove-OwnedGenericSkill
     Remove-LegacyExtensionAssets
 }
 
 function Remove-CopilotExtension {
-    $ownedSkill = Read-OwnedGenericSkill
-    if (
-        $null -ne $ownedSkill -and
-        -not (Test-OwnedGenericSkill -State $ownedSkill)
-    ) {
-        Remove-Item -LiteralPath $genericSkillStatePath -Force
-        $ownedSkill = $null
-        Write-Warning (
-            'The Konclave generic skill changed after demo installation; ' +
-            'uninstall will preserve it.'
-        )
-    }
+    Remove-OwnedGenericSkill
     if (Test-Path -LiteralPath $copilotExtensionRoot) {
         $extension = Get-Item -LiteralPath $copilotExtensionRoot
         if (
@@ -858,13 +835,6 @@ function Remove-CopilotExtension {
             throw 'Konclave extension state root is unsafe to remove.'
         }
         Remove-Item -LiteralPath $copilotExtensionStateRoot -Recurse -Force
-    }
-    if ($null -ne $ownedSkill) {
-        Remove-Item `
-            -LiteralPath (Join-Path $copilotGenericSkillRoot 'SKILL.md') `
-            -Force
-        Remove-Item -LiteralPath $copilotGenericSkillRoot -Force
-        Remove-Item -LiteralPath $genericSkillStatePath -Force
     }
     Restore-CopilotExperimentalSetting
 }
@@ -1469,6 +1439,27 @@ function Test-GenericSkillOwnership {
         if ($null -eq $state -or -not (Test-OwnedGenericSkill -State $state)) {
             throw 'Demo generic skill ownership was not recognized.'
         }
+        Remove-OwnedGenericSkill
+        if (
+            (Test-Path -LiteralPath $script:copilotGenericSkillRoot) -or
+            (Test-Path -LiteralPath $script:genericSkillStatePath)
+        ) {
+            throw 'Demo-owned generic skill was not removed from the paved harness.'
+        }
+
+        New-Item -ItemType Directory -Path $script:copilotGenericSkillRoot -Force |
+            Out-Null
+        Install-AtomicExtensionFile -Source $source -Destination $installed
+        Write-AtomicJsonObject `
+            -Path $script:genericSkillStatePath `
+            -Value ([ordered]@{
+                schemaVersion = 1
+                path = $script:copilotGenericSkillRoot
+                sha256 = (
+                    Get-FileHash -LiteralPath $installed -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+            })
+        $state = Read-OwnedGenericSkill
         Add-Content -LiteralPath $installed -Value 'modified'
         if (Test-OwnedGenericSkill -State $state) {
             throw 'A modified generic skill remained demo-owned.'
@@ -1735,8 +1726,8 @@ Write-Output "Relay process ID: $($relayProcess.Id)"
 Write-Output "Shared service process ID: $($serviceProcess.Id)"
 Write-Output "Copilot extension: $copilotExtensionRoot"
 Write-Output 'Close existing Copilot CLI sessions, then open fresh sessions in two repositories.'
-Write-Output 'In one session, ask: Use Konclave to create a pairing capability requesting member role.'
-Write-Output 'Give that one capability to the other session and ask it to redeem and authorize the joiner.'
-Write-Output 'Back in the first session, review and authorize the inviter. Automatic delivery is then active.'
+Write-Output 'Session A: run /konclave connect and keep the command active.'
+Write-Output 'Session B: paste the capability into /konclave connect <capability>.'
+Write-Output 'After both report connected, either session can run /konclave send -- hello.'
 Write-Output ''
 Write-Output "Stop later with: pwsh -NoProfile -File `"$PSCommandPath`" -Stop"

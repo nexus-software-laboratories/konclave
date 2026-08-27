@@ -26,6 +26,8 @@ export interface CommandOutputOptions {
 export interface CommandDependencies {
   readonly client: LocalServiceClient;
   readonly output: CommandOutput;
+  readonly nowUnixMilliseconds?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
 export interface RegisteredCommand extends CommandDefinition {
@@ -40,6 +42,9 @@ const maxMessageBytes = 8 * 1024;
 const maxDisplayedMessageCharacters = 2_048;
 const maxDisplayedMessages = 10;
 const commandMessageRequestDomain = 'konclave:command-message-request:1\0';
+const connectPollMilliseconds = 500;
+const maxConnectIterations = 640;
+const maxConnectWaitMilliseconds = 5 * 60 * 1_000;
 const pairingIdCharacters = 32;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
@@ -70,6 +75,8 @@ interface PairingStatus {
   readonly inviterDeviceId: string | undefined;
   readonly grantedRole: ConversationRole | undefined;
   readonly conversationId: string | undefined;
+  readonly authorizationDeadlineUnixSeconds: number;
+  readonly completionDeadlineUnixSeconds: number | undefined;
 }
 
 interface MessageSummary {
@@ -113,6 +120,8 @@ const helpLines = [
   '  /konclave status                                    Show profile, delivery, and relay state.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
+  '  /konclave connect                                   Create a two-session connection capability.',
+  '  /konclave connect <capability>                      Join and complete an AccountTrusted connection.',
   '  /konclave pair [member|administrator]               Create a one-time pairing capability.',
   '  /konclave join <capability>                         Redeem a pairing capability.',
   '  /konclave new                                       Create a conversation for an approved peer.',
@@ -122,7 +131,7 @@ const helpLines = [
   '                                                       Approve displayed inviter fields.',
   '  /konclave sync <pairing>                            Process one pairing progress page.',
   '  /konclave cancel <pairing>                          Cancel an active pairing.',
-  '  /konclave send <conversation> [message-id] -- <text>',
+  '  /konclave send [conversation] [message-id] -- <text>',
   '                                                       Send or retry a message.',
   '  /konclave reply <conversation> <reply-to> [message-id] -- <text>',
   '                                                       Reply or retry with an explicit ID.',
@@ -232,6 +241,33 @@ function requiredString(
   return value;
 }
 
+function requiredNonnegativeSafeInteger(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  error: string,
+): number {
+  const value = record[key];
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(error);
+  }
+  return value;
+}
+
+function optionalNonnegativeSafeInteger(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  error: string,
+): number | undefined {
+  const value = record[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(error);
+  }
+  return value;
+}
+
 function optionalIdentifier(
   record: Readonly<Record<string, unknown>>,
   key: string,
@@ -296,6 +332,16 @@ function parsePairingStatus(value: unknown): PairingStatus {
       conversationIdCharacters,
       'conversation identifier',
     ),
+    authorizationDeadlineUnixSeconds: requiredNonnegativeSafeInteger(
+      value,
+      'authorization_deadline_unix_seconds',
+      'the local service pairing authorization deadline is malformed',
+    ),
+    completionDeadlineUnixSeconds: optionalNonnegativeSafeInteger(
+      value,
+      'completion_deadline_unix_seconds',
+      'the local service pairing completion deadline is malformed',
+    ),
   };
 }
 
@@ -317,6 +363,18 @@ function parsePairingCapability(value: unknown): {
     pairing: parsePairingStatus(value.pairing),
     capability: value.capability,
   };
+}
+
+function requirePairingCapability(value: string): string {
+  const capability = value.trim();
+  if (
+    Buffer.byteLength(capability, 'utf8') === 0 ||
+    Buffer.byteLength(capability, 'utf8') > maxCapabilityBytes ||
+    !/^[A-Za-z0-9_-]+$/u.test(capability)
+  ) {
+    throw new Error('a valid pairing capability is required');
+  }
+  return capability;
 }
 
 function parsePairingSync(value: unknown): {
@@ -430,8 +488,8 @@ function parseDelimitedMessage(
   maximumIdentifiers: number,
   usage: string,
 ): { readonly identifiers: readonly string[]; readonly text: string } {
-  const separator = /\s+--\s+/u.exec(raw);
-  if (!separator || separator.index === 0) {
+  const separator = /(?:^|\s+)--\s+/u.exec(raw);
+  if (!separator) {
     throw new Error(`usage: ${usage}`);
   }
   const identifiers = parseCommandArguments(raw.slice(0, separator.index));
@@ -449,6 +507,154 @@ function messageRequestId(messageId: string): Buffer {
     .update(Buffer.from(messageId, 'hex'))
     .digest()
     .subarray(0, 16);
+}
+
+function defaultSleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function requireAccountTrusted(client: LocalServiceClient): Promise<void> {
+  const status = parseServiceStatus(await client.request(serviceOperations.status, {}));
+  if (!status.relayConfigured) {
+    throw new Error('connect requires a configured relay; run /konclave status');
+  }
+  if (
+    status.authorizationPolicy !== 'AccountTrusted' ||
+    status.authorizationProvider !== 'AccountTrusted' ||
+    !status.authorizationEvidence.includes('account_trusted')
+  ) {
+    throw new Error('connect requires the AccountTrusted authorization policy');
+  }
+}
+
+function pairingDeadlineMilliseconds(status: PairingStatus): number {
+  const seconds = status.completionDeadlineUnixSeconds ?? status.authorizationDeadlineUnixSeconds;
+  if (seconds > Math.floor(Number.MAX_SAFE_INTEGER / 1_000)) {
+    throw new Error('the local service pairing deadline exceeds the supported range');
+  }
+  return seconds * 1_000;
+}
+
+function remainingPairingRequestMilliseconds(
+  status: PairingStatus,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+): number {
+  const remaining =
+    Math.min(commandDeadline, pairingDeadlineMilliseconds(status)) - nowUnixMilliseconds();
+  if (remaining <= 0) {
+    throw new Error(`connect timed out for pairing ${status.pairingId}`);
+  }
+  return Math.min(remaining, 30_000);
+}
+
+async function completeAccountTrustedPairing(
+  client: LocalServiceClient,
+  initialStatus: PairingStatus,
+  output: CommandOutput,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<PairingStatus> {
+  let status = initialStatus;
+
+  try {
+    for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+      if (status.phase === 'completed') {
+        return status;
+      }
+      if (status.phase === 'cancelled') {
+        throw new Error('pairing was cancelled before connection completed');
+      }
+      if (
+        status.localRole === 'joiner' &&
+        status.phase === 'joiner_awaiting_inviter_authorization'
+      ) {
+        if (!status.inviterDeviceId || !status.conversationId || status.grantedRole !== 'member') {
+          throw new Error('the AccountTrusted pairing authorization is malformed');
+        }
+        const previousPhase = status.phase;
+        status = parsePairingStatus(
+          await client.request(
+            'authorize_pairing_inviter',
+            {
+              pairing_id: status.pairingId,
+              inviter_device_id: status.inviterDeviceId,
+              conversation_id: status.conversationId,
+              granted_role: status.grantedRole,
+            },
+            {
+              deadlineMs: remainingPairingRequestMilliseconds(
+                status,
+                commandDeadline,
+                nowUnixMilliseconds,
+              ),
+            },
+          ),
+        );
+        if (status.phase !== previousPhase) {
+          await output.write(`connect phase: ${status.phase}`);
+        }
+        continue;
+      }
+      const previousPhase = status.phase;
+      const synced = parsePairingSync(
+        await client.request(
+          'sync_pairing',
+          { pairing_id: status.pairingId },
+          {
+            deadlineMs: remainingPairingRequestMilliseconds(
+              status,
+              commandDeadline,
+              nowUnixMilliseconds,
+            ),
+          },
+        ),
+      );
+      if (synced.pairing.pairingId !== status.pairingId) {
+        throw new Error('the local service pairing sync identity is malformed');
+      }
+      status = synced.pairing;
+      if (status.phase !== previousPhase) {
+        await output.write(`connect phase: ${status.phase}`);
+      } else {
+        await sleep(connectPollMilliseconds);
+      }
+    }
+
+    throw new Error(`connect exceeded its progress limit for pairing ${status.pairingId}`);
+  } catch (error) {
+    await output.write(`recovery: /konclave pairing ${status.pairingId}`);
+    if (status.phase === 'cancelled') {
+      await output.write('next: run /konclave connect to start a new pairing');
+    } else {
+      await output.write(`cancel: /konclave cancel ${status.pairingId}`);
+    }
+    throw error;
+  }
+}
+
+async function requireSingleConversation(
+  client: LocalServiceClient,
+  activeConversationId: string | undefined,
+): Promise<string> {
+  if (activeConversationId) {
+    return activeConversationId;
+  }
+  const list = conversations(await client.request('list_conversations', {}));
+  if (list.length === 0) {
+    throw new Error('no conversation is available; run /konclave connect first');
+  }
+  if (list.length > 1) {
+    throw new Error('multiple conversations exist; provide the conversation identifier');
+  }
+  const conversation = list[0];
+  if (!conversation) {
+    throw new Error('the local service conversation response is malformed');
+  }
+  return conversation;
 }
 
 function parseCursor(value: string | undefined): number {
@@ -519,6 +725,9 @@ function conversations(value: unknown): readonly string[] {
 
 export function createKonclaveCommands(dependencies: CommandDependencies): RegisteredCommand[] {
   const { client, output } = dependencies;
+  const nowUnixMilliseconds = dependencies.nowUnixMilliseconds ?? Date.now;
+  const sleep = dependencies.sleep ?? defaultSleep;
+  let activeConversationId: string | undefined;
 
   const run = async (args: string): Promise<void> => {
     const { subcommand, argumentsText } = parseCommand(args);
@@ -575,6 +784,84 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'connect': {
+        await requireAccountTrusted(client);
+        const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
+        let status: PairingStatus;
+        if (argumentsText.length === 0) {
+          const created = parsePairingCapability(
+            await client.request('create_pairing_capability', {
+              requested_role: 'member',
+            }),
+          );
+          await output.write(
+            'approval policy: AccountTrusted capability possession; no independent identity verification',
+          );
+          await output.write(`pairing: ${created.pairing.pairingId}`);
+          await output.write(`recovery: /konclave pairing ${created.pairing.pairingId}`);
+          await output.write(`cancel: /konclave cancel ${created.pairing.pairingId}`);
+          await output.write('capability (ephemeral; paste the next line in the other session):');
+          await output.write(created.capability, { ephemeral: true });
+          await output.write('waiting for the other session to run /konclave connect <capability>');
+          status = await completeAccountTrustedPairing(
+            client,
+            created.pairing,
+            output,
+            commandDeadline,
+            nowUnixMilliseconds,
+            sleep,
+          );
+        } else {
+          const capability = requirePairingCapability(argumentsText);
+          const redeemed = parsePairingStatus(
+            await client.request('redeem_pairing_capability', { capability }),
+          );
+          if (redeemed.requestedRole !== 'member') {
+            throw new Error('connect accepts only member pairing requests');
+          }
+          await output.write(
+            'approval policy: AccountTrusted capability possession; no independent identity verification',
+          );
+          await output.write(`pairing: ${redeemed.pairingId}`);
+          await output.write(`recovery: /konclave pairing ${redeemed.pairingId}`);
+          await output.write(`cancel: /konclave cancel ${redeemed.pairingId}`);
+          const conversationId = parseConversation(await client.request('create_conversation', {}));
+          await output.write(`conversation: ${conversationId}`);
+          const approved = parsePairingStatus(
+            await client.request(
+              'authorize_pairing_joiner',
+              {
+                pairing_id: redeemed.pairingId,
+                conversation_id: conversationId,
+                granted_role: 'member',
+              },
+              {
+                deadlineMs: remainingPairingRequestMilliseconds(
+                  redeemed,
+                  commandDeadline,
+                  nowUnixMilliseconds,
+                ),
+              },
+            ),
+          );
+          status = await completeAccountTrustedPairing(
+            client,
+            approved,
+            output,
+            commandDeadline,
+            nowUnixMilliseconds,
+            sleep,
+          );
+        }
+        if (!status.conversationId) {
+          throw new Error('completed pairing is missing its conversation');
+        }
+        activeConversationId = status.conversationId;
+        await renderPairing(output, status);
+        await output.write(`connected: ${status.conversationId}`);
+        await output.write('next: /konclave send -- <message>');
+        return;
+      }
       case 'pair': {
         const parts = parseCommandArguments(argumentsText);
         requireArgumentCount(parts, 0, 1, '/konclave pair [member|administrator]');
@@ -591,14 +878,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         return;
       }
       case 'join': {
-        const capability = argumentsText.trim();
-        if (
-          Buffer.byteLength(capability, 'utf8') === 0 ||
-          Buffer.byteLength(capability, 'utf8') > maxCapabilityBytes ||
-          !/^[A-Za-z0-9_-]+$/u.test(capability)
-        ) {
-          throw new Error('usage: /konclave join <capability>');
-        }
+        const capability = requirePairingCapability(argumentsText);
         const status = parsePairingStatus(
           await client.request('redeem_pairing_capability', { capability }),
         );
@@ -611,6 +891,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       case 'new': {
         requireNoArguments(argumentsText, subcommand);
         const conversationId = parseConversation(await client.request('create_conversation', {}));
+        activeConversationId = conversationId;
         await output.write(`conversation: ${conversationId}`);
         await output.write(
           'conversation created durably; it remains if the pending pairing is abandoned',
@@ -739,18 +1020,41 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const isReply = subcommand === 'reply';
         const usage = isReply
           ? '/konclave reply <conversation> <reply-to> [message-id] -- <text>'
-          : '/konclave send <conversation> [message-id] -- <text>';
+          : '/konclave send [conversation] [message-id] -- <text>';
         const parsed = parseDelimitedMessage(
           argumentsText,
-          isReply ? 2 : 1,
+          isReply ? 2 : 0,
           isReply ? 3 : 2,
           usage,
         );
-        const conversationId = requireHexIdentifier(
-          parsed.identifiers[0],
-          conversationIdCharacters,
-          'conversation identifier',
-        );
+        let conversationId: string;
+        let suppliedMessageId: string | undefined;
+        if (isReply || parsed.identifiers.length === 2) {
+          conversationId = requireHexIdentifier(
+            parsed.identifiers[0],
+            conversationIdCharacters,
+            'conversation identifier',
+          );
+          suppliedMessageId = parsed.identifiers[isReply ? 2 : 1];
+        } else if (parsed.identifiers.length === 1) {
+          const identifier = parsed.identifiers[0];
+          if (identifier?.length === conversationIdCharacters) {
+            conversationId = requireHexIdentifier(
+              identifier,
+              conversationIdCharacters,
+              'conversation identifier',
+            );
+          } else {
+            conversationId = await requireSingleConversation(client, activeConversationId);
+            suppliedMessageId = requireHexIdentifier(
+              identifier,
+              messageIdCharacters,
+              'message identifier',
+            );
+          }
+        } else {
+          conversationId = await requireSingleConversation(client, activeConversationId);
+        }
         const replyToMessageId = isReply
           ? requireHexIdentifier(
               parsed.identifiers[1],
@@ -758,7 +1062,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
               'reply-to message identifier',
             )
           : undefined;
-        const suppliedMessageId = parsed.identifiers[isReply ? 2 : 1];
         const messageId = suppliedMessageId
           ? requireHexIdentifier(suppliedMessageId, messageIdCharacters, 'message identifier')
           : randomBytes(16).toString('hex');
@@ -772,7 +1075,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         await output.write(`message id: ${messageId}`);
         await output.write(
-          `retry: /konclave ${subcommand} ${parsed.identifiers.slice(0, isReply ? 2 : 1).join(' ')} ${messageId} -- <same text>`,
+          `retry: /konclave ${subcommand} ${conversationId}${replyToMessageId ? ` ${replyToMessageId}` : ''} ${messageId} -- <same text>`,
         );
         const sent = parseSentMessage(
           await client.request('send_message', payload, {
@@ -782,6 +1085,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (sent.conversationId !== conversationId || sent.messageId !== messageId) {
           throw new Error('the local service sent-message identity does not match the request');
         }
+        activeConversationId = conversationId;
         await output.write(`conversation: ${sent.conversationId}`);
         await output.write(`relay cursor: ${sent.cursor}`);
         return;

@@ -20,12 +20,12 @@ before cleanup and performs setup automatically.
 
 Choose the artifact matching the machine:
 
-| Platform | Target |
-| --- | --- |
-| Linux x64 | `x86_64-unknown-linux-gnu` |
-| Windows x64 | `x86_64-pc-windows-msvc` |
-| macOS Apple silicon | `aarch64-apple-darwin` |
-| macOS Intel | `x86_64-apple-darwin` |
+| Platform            | Target                     |
+| ------------------- | -------------------------- |
+| Linux x64           | `x86_64-unknown-linux-gnu` |
+| Windows x64         | `x86_64-pc-windows-msvc`   |
+| macOS Apple silicon | `aarch64-apple-darwin`     |
+| macOS Intel         | `x86_64-apple-darwin`      |
 
 Extract the archive into an owner-controlled directory. The extracted top-level
 directory is the installation root used by the commands below.
@@ -49,8 +49,9 @@ On Linux or macOS, run `init` first so the owner-protected extension directory a
 sidecar exist, then copy `extension.mjs`, `client.mjs`, and `generic.mjs` from
 `<install-root>/share/konclave/plugin/extensions/Konclave.Extension/` into that
 directory. Copy
-`<install-root>/share/konclave/plugin/skills/konclave-generic/SKILL.md` to
-`~/.copilot/skills/konclave-generic/SKILL.md` when the best-effort skill is wanted.
+`<install-root>/share/konclave/plugin/skills/konclave-generic/SKILL.md` only into an
+unsupported harness's own skill location when the best-effort fallback is wanted.
+Do not install it into Copilot CLI; the paved extension owns that harness.
 Do not copy a native executable or create a `bin/` child under the extension.
 
 ## Initialize the installation

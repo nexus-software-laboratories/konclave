@@ -114,6 +114,11 @@ approves the joiner's root-signed device offer before issuing an invitation. The
 joiner approves the inviter identity authenticated by that invitation before emitting
 a JoinProof. Policy may automate either decision only when it states that it is
 trusting bearer-capability possession rather than independently verified identity.
+The local `AccountTrusted` two-command policy makes that tradeoff explicitly: creating
+and redeeming the capability are the two same-account approval actions, output states
+that no independent identity verification occurred, and the policy grants only
+`member`. Stronger evidence policies and administrator grants retain explicit
+approval.
 
 Pairing records are encrypted before relay submission. Their clear header is
 authenticated as associated data and binds pairing, logical message, sender role,

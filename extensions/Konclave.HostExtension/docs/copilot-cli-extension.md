@@ -63,6 +63,8 @@ not persist those sensitive values as command output.
 /konclave status
 /konclave identity
 /konclave conversations
+/konclave connect
+/konclave connect <capability>
 /konclave pair [member|administrator]
 /konclave join <capability>
 /konclave new
@@ -71,7 +73,7 @@ not persist those sensitive values as command output.
 /konclave approve <pairing> <inviter> <conversation> <role>
 /konclave sync <pairing>
 /konclave cancel <pairing>
-/konclave send <conversation> [message-id] -- <text>
+/konclave send [conversation] [message-id] -- <text>
 /konclave reply <conversation> <reply-to> [message-id] -- <text>
 /konclave messages <conversation> [after-cursor]
 /konclave mute <conversation>
@@ -80,7 +82,17 @@ not persist those sensitive values as command output.
 
 Arguments and rendered output are bounded. High-level commands orchestrate only the
 existing closed operations; they do not implement a second pairing or messaging
-domain. `/konclave approve` reads authenticated pairing state before selecting the
+domain. Under `AccountTrusted`, `/konclave connect` treats the explicit transfer and
+redemption of one short-lived capability as the configured approval evidence, grants
+only `member`, and drives both durable pairing state machines to completion. It
+labels that policy as capability-possession trust and never claims independent
+identity verification. Stronger evidence policies and administrator grants retain the
+manual approval workflow. The command refuses before creating pairing or conversation
+state when no relay is configured. Every progress request receives the remaining
+pairing/command deadline, non-advancing phases back off, phase changes are rendered,
+and failures leave explicit pairing-status and cancellation commands.
+
+`/konclave approve` reads authenticated pairing state before selecting the
 role-specific authorization operation. Inviter-side approval defaults to `member`;
 granting `administrator` is explicit. Joiner-side approval requires the operator to
 repeat the displayed inviter, conversation, and role, and rejects any mismatch. The
@@ -89,7 +101,8 @@ non-atomic create-and-authorize sequence.
 
 When `send` or `reply` generates a message identifier, it displays the identifier and
 an exact retry shape before submitting the operation. Supplying that identifier on a
-retry preserves both message and request idempotency. `messages` syncs one bounded
+retry preserves both message and request idempotency. `send` may omit the conversation
+identifier only when the profile owns exactly one conversation. `messages` syncs one bounded
 relay page, reads at most ten records after the requested cursor, and displays an
 explicit resume cursor.
 
@@ -119,15 +132,18 @@ extension reuses the established delivery coordinator to:
 - `extensions/Konclave.Extension/extension.mjs` is the bundled entry loaded by
   Copilot CLI.
 - `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client
-  bundle used by local smoke and future harness adapters.
+  and command bundle used by local smoke and future harness adapters.
 - `plugin.json` is the distribution manifest.
 - `skills/copilot-cli-extension-maintainer/SKILL.md` is the contributor skill.
+- `skills/konclave-generic/SKILL.md` is packaged for manual installation by
+  unsupported harnesses; the manifest's empty skill list prevents Copilot from
+  auto-loading it.
 - `build/outputs/<plugin-name>-<version>.zip` is the deterministic release bundle.
 
 `scripts/verify-package.mjs` rejects a compiled extension that omits the shared-client
 tool, command, or delivery surfaces; writes to stdout; names `KonclaveLocalDaemon`;
 or declares a stdio MCP server. The archive contains exactly the manifest, thin
-extension, and maintainer skill—never a daemon binary.
+extension, reusable clients, and documented skills—never a daemon binary.
 
 ## Safe send seam
 

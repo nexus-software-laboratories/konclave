@@ -2,6 +2,7 @@ export { connectInstalledService } from './service/installed.js';
 export { connectInstalledGenericService } from './service/installed.js';
 export { ServiceConfigurationError } from './service/config.js';
 export { createKonclaveTools } from './service/tools.js';
+export { createKonclaveCommands } from './service/commands.js';
 export {
   LocalServiceError,
   LocalServiceProtocolError,

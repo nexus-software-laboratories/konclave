@@ -75,6 +75,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0010-account-trusted-two-command-pairing.md",
+        "title": "ADR 0010: AccountTrusted two-command pairing",
+        "section": "Architecture",
+        "order": 100,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

@@ -52,6 +52,14 @@ describe('generic harness command', () => {
     ]) {
       expect(() => parseGenericCommandArguments(invalid)).toThrow('invalid_arguments');
     }
+    expect(() =>
+      parseGenericCommandArguments([
+        '--profile',
+        'session-0123456789abcdef01234567',
+        '--operation',
+        'get_identity',
+      ]),
+    ).toThrow('paved_profile_reserved');
   });
 
   it('uses the generic connector, forwards cancellation, and retires cleanly', async () => {
@@ -119,6 +127,20 @@ describe('generic harness command', () => {
     });
     expect(genericCommandFailure(new LocalServiceUpgradeRequiredError())).toEqual({
       error: 'service_upgrade_required',
+    });
+    let reserved: unknown;
+    try {
+      parseGenericCommandArguments([
+        '--profile',
+        'session-0123456789abcdef01234567',
+        '--operation',
+        'get_identity',
+      ]);
+    } catch (error) {
+      reserved = error;
+    }
+    expect(genericCommandFailure(reserved)).toEqual({
+      error: 'paved_profile_reserved',
     });
   });
 

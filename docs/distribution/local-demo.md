@@ -39,9 +39,10 @@ The first run:
 6. generates enrollment authority directly into Windows native credential custody;
 7. starts the loopback relay as a hidden process;
 8. runs `init --authorization-policy account-trusted` and `doctor`;
-9. creates owner-protected service/issuer state, installs the thin extension,
-   sidecar-adjacent generic client, and user-local generic skill in place, and starts
-   exactly one hidden shared-service process;
+9. creates owner-protected service/issuer state, installs the thin extension and
+   sidecar-adjacent Generic client, removes any unchanged Generic skill owned by an
+   earlier demo from Copilot's paved harness, and starts exactly one hidden
+   shared-service process;
 10. runs `doctor` through the live owner-authenticated named pipe; and
 11. records the exact relay and service process identities for safe shutdown.
 
@@ -76,56 +77,47 @@ recorded service; profile and conversation state remain.
 
 Open fresh Copilot CLI sessions in two repositories.
 
-Record `/konclave identity` in both sessions so each authorization can be compared
-with the intended peer. In the first session:
+In the first session:
 
 ```text
-/konclave pair member
+/konclave connect
 ```
 
-Copy the single ephemeral capability to the other session:
+Keep that command running and copy its single ephemeral capability to the other
+session:
 
 ```text
-/konclave join <capability>
+/konclave connect <capability>
 ```
+
+Both commands complete with the same conversation identifier. Send from either side
+with:
+
+```text
+/konclave send -- <message text>
+```
+
+The two-command flow is an explicit `AccountTrusted` convenience policy. Capability
+creation and redemption are treated as the two same-account approval actions; status
+states that no independent identity verification occurred, and only the `member` role
+is granted. Stronger authorization policies and administrator grants use the manual
+`pair`, `join`, `new`, `approve`, and `sync` commands.
 
 The capability remains terminal-visible and may appear in local CLI input history. It
 is protected by short expiry, one-time consumption, and daemon-side zeroization, not
 by the ephemeral display flag. Do not paste it into logs or public artifacts.
 
-Verify that the displayed joiner device is the first session's recorded identity.
-Create the conversation and explicitly approve that peer:
-
-```text
-/konclave new
-/konclave approve <pairing-id> <conversation-id>
-```
-
-Back in the first session, process the authorization record, compare the displayed
-inviter device with the second session's recorded identity, and approve it:
-
-```text
-/konclave sync <pairing-id>
-/konclave approve <pairing-id> <inviter-device-id> <conversation-id> <granted-role>
-```
-
-Run `/konclave sync <pairing-id>` in each session until both display `completed`.
-Send from either side with:
-
-```text
-/konclave send <conversation-id> [message-id] -- <message text>
-```
-
-The idle peer receives the message automatically. `/konclave messages
+The idle peer receives messages automatically. `/konclave messages
 <conversation-id>` performs an explicit bounded sync/read when diagnosing delivery,
 and `/konclave reply <conversation-id> <reply-to-message-id> [message-id] --
 <message text>` records a reply relationship when desired. Both commands print the
 generated message identifier before sending; reuse it in the optional position after
 a transport failure to reconcile the same operation instead of creating a duplicate.
 
-`/konclave new` creates a durable conversation before approval. If the pairing is
-abandoned, that empty conversation remains visible in `/konclave conversations`; the
-command does not hide this non-atomic boundary.
+The accepting `connect` command creates a durable conversation before the remote
+command completes. If the pairing is abandoned or times out, that empty conversation
+remains visible in `/konclave conversations`; the command does not hide this
+non-atomic boundary.
 
 ## Automated two-session smoke
 
@@ -137,9 +129,12 @@ pwsh -NoProfile -File .\scripts\demo\Invoke-KonclaveCopilotSmoke.ps1
 
 The entry point composes the deterministic installer with a typed Copilot SDK runner.
 It creates two isolated headless Copilot sessions using the current developer's local
-authentication, loads only the packaged shared-client SDK tools, declares no MCP
-server, transfers the capability without printing it, completes both authorization
-paths, and verifies an exact message plus reply through the one recorded service PID.
+authentication, loads the packaged shared-client commands and SDK tools, declares no
+MCP server, and runs both `connect` command handlers concurrently against full-length
+`session-*` profiles. The harness observes the ephemeral capability before the first
+handler resolves, transfers it without printing it, requires both handlers to return
+the same conversation, sends through the implicit-conversation command, and verifies
+an exact message plus reply through the one recorded service PID.
 
 The final JSON report contains session, pairing, conversation, message, phase, tool,
 duration, and token evidence. It never includes the capability, prompts, model
@@ -172,9 +167,10 @@ pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1 -Stop -Uninstal
 
 If setup enabled Copilot's experimental setting, explicit extension removal restores
 the prior setting. The script also removes the obsolete direct-plugin registration
-created by earlier demo versions. The demo removes the generic skill only when its
-ownership record and exact installed hash still match. A pre-existing or modified
-user skill is never overwritten or recursively removed.
+created by earlier demo versions. Setup and uninstall remove a Generic skill installed
+by an earlier demo only when its ownership record and exact installed hash still
+match. A pre-existing or modified user skill is never overwritten or recursively
+removed.
 
 The demo uses an HTTP loopback relay. Packaged acceptance separately proves the same
 flows through trusted TLS and the Docker-loaded relay candidate.
