@@ -13809,13 +13809,8 @@ mod tests {
         // look like a profile that has no identity yet and generate a second one.
         let wrong = LockedProfile::acquire(root.path(), profile_id.clone())
             .unwrap()
-            .open_store(sealer_with_key(2))
-            .unwrap();
-        assert_eq!(
-            wrong.load_or_create_device().err(),
-            Some(ProfileStoreError::Cryptographic)
-        );
-        drop(wrong);
+            .open_store(sealer_with_key(2));
+        assert_eq!(wrong.err(), Some(ProfileStoreError::CorruptData));
 
         let reopened = LockedProfile::acquire(root.path(), profile_id)
             .unwrap()
@@ -14498,13 +14493,11 @@ mod tests {
         downgrade_v7_to_v6(&connection);
         drop(connection);
 
-        let store = LockedProfile::acquire(&root_path, profile_id)
-            .unwrap()
-            .open_store(sealer())
-            .unwrap();
-
         assert_eq!(
-            store.load_conversation(fixture.conversation_id).err(),
+            LockedProfile::acquire(&root_path, profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
             Some(ProfileStoreError::CorruptData)
         );
     }
