@@ -26,8 +26,8 @@ use crate::conversation::{
     MembershipRequestState, PreparedApplication, PreparedMembership, ProcessedApplication,
 };
 use crate::persistence::{
-    CollaborationPolicyActivationOperation, ExpireOutboundResult, HistoryPage,
-    OutboundApplicationStatus, ProfileStoreError, StoredCollaborationPolicyProposal,
+    CollaborationActionAuthorization, CollaborationPolicyActivationOperation, ExpireOutboundResult,
+    HistoryPage, OutboundApplicationStatus, ProfileStoreError, StoredCollaborationPolicyProposal,
 };
 
 /// Outbound application input with caller-supplied display and expiry times.
@@ -36,6 +36,7 @@ pub(crate) struct SendApplicationRequest {
     pub(crate) message_id: MessageId,
     pub(crate) content: ApplicationContent,
     pub(crate) reply_to: Option<MessageId>,
+    pub(crate) collaboration_action_authorization: Option<CollaborationActionAuthorization>,
     pub(crate) sent_at_unix_milliseconds: u64,
     pub(crate) now_unix_seconds: u64,
     pub(crate) expires_at_unix_seconds: u64,
@@ -263,6 +264,7 @@ where
                     request.message_id,
                     request.content,
                     request.reply_to,
+                    request.collaboration_action_authorization,
                     request.sent_at_unix_milliseconds,
                     request.expires_at_unix_seconds,
                 )
@@ -1259,6 +1261,7 @@ fn policy_send_request(
         message_id,
         content,
         reply_to,
+        collaboration_action_authorization: None,
         sent_at_unix_milliseconds,
         now_unix_seconds,
         expires_at_unix_seconds,
@@ -1353,17 +1356,17 @@ fn current_unix_seconds() -> Result<u64, ApplicationServiceError> {
 mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use KonclaveClientLibrary::{
         RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
     };
     use KonclaveDomainCore::{
-        AcknowledgeRequest, ApplicationContent, CollaborationPolicyBundle,
-        CollaborationPolicyEffect, CollaborationPolicyLimits, CollaborationPolicyProposal,
-        CollaborationPolicyProposalId, CollaborationPolicyStatement, DeliveryClass, EnvelopeId,
-        ProtocolVersion, RelayEnvelope, ReplayPage, ReplayRequest,
+        AcknowledgeRequest, AdapterConsumerId, AdapterLeaseId, ApplicationContent,
+        CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
+        CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyStatement,
+        DeliveryClass, EnvelopeId, ProtocolVersion, RelayEnvelope, ReplayPage, ReplayRequest,
     };
     use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
     use KonclaveSecretStorage::{
@@ -1374,8 +1377,12 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+    use crate::clock::{SystemUnixClock, UnixClock};
     use crate::conversation::tests::{invited_coordinators, paired_coordinators};
-    use crate::persistence::{LockedProfile, MessageDirection, ProfileId};
+    use crate::persistence::{
+        CollaborationActionAuthorization, LockedProfile, MessageDirection, ProfileId,
+        ProfileStoreError,
+    };
     use crate::test_support::TestRelay;
 
     struct RecordingRelay {
@@ -1388,6 +1395,14 @@ mod tests {
         replay_requests: Mutex<Vec<ReplayRequest>>,
         acknowledgments: Mutex<Vec<AcknowledgeRequest>>,
         acknowledged_high_water: Mutex<Vec<(KonclaveDomainCore::RoutingId, u64)>>,
+    }
+
+    struct MutableClock(AtomicU64);
+
+    impl UnixClock for MutableClock {
+        fn now_unix_milliseconds(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
     }
 
     struct ObservingRelay {
@@ -1546,11 +1561,19 @@ mod tests {
     }
 
     fn coordinator(root: &Path, profile_name: &str) -> ConversationCoordinator {
+        coordinator_with_clock(root, profile_name, Arc::new(SystemUnixClock))
+    }
+
+    fn coordinator_with_clock(
+        root: &Path,
+        profile_name: &str,
+        clock: Arc<dyn UnixClock>,
+    ) -> ConversationCoordinator {
         let locked = LockedProfile::acquire(root, ProfileId::parse(profile_name).unwrap()).unwrap();
         let mls_path = locked.mls_database_path();
         let profile_sealer = sealer();
         let mls_storage = SealedSqliteMlsStorage::open(&mls_path, profile_sealer.share()).unwrap();
-        let store = locked.open_store(profile_sealer).unwrap();
+        let store = locked.open_store_with_clock(profile_sealer, clock).unwrap();
         let device = store.load_or_create_device().unwrap();
         ConversationCoordinator::new(store, mls_storage, device)
     }
@@ -1575,6 +1598,7 @@ mod tests {
             message_id: MessageId::from_bytes(message_id),
             content: ApplicationContent::text(text).unwrap(),
             reply_to: None,
+            collaboration_action_authorization: None,
             sent_at_unix_milliseconds: now_unix_seconds.checked_mul(1_000).unwrap(),
             now_unix_seconds,
             expires_at_unix_seconds,
@@ -2182,6 +2206,7 @@ mod tests {
                 message_id: response_message_id,
                 content: ApplicationContent::text("preempt the response identifier").unwrap(),
                 reply_to: None,
+                collaboration_action_authorization: None,
                 sent_at_unix_milliseconds: 1_700_000_000_000,
                 now_unix_seconds: 1_700_000_000,
                 expires_at_unix_seconds: 1_900_000_000,
@@ -2331,6 +2356,66 @@ mod tests {
             .unwrap();
         assert_eq!(second_page.messages.len(), 1);
         assert!(!second_page.has_more);
+    }
+
+    #[tokio::test]
+    async fn collaboration_authorization_expires_while_waiting_for_submission() {
+        let root = tempfile::tempdir().unwrap();
+        let clock = Arc::new(MutableClock(AtomicU64::new(1_000)));
+        let coordinator = coordinator_with_clock(root.path(), "policy-send-expiry", clock.clone());
+        let conversation = coordinator.create().unwrap();
+        let store = coordinator.store();
+        let canonical_bundle =
+            collaboration_policy_bytes("contract-alignment", "Align the contract.");
+        let digest = store
+            .store_collaboration_policy_bundle(&canonical_bundle)
+            .unwrap();
+        store
+            .activate_collaboration_policy(conversation.conversation_id, digest, 0)
+            .unwrap();
+        let consumer_id = AdapterConsumerId::from_bytes([31; AdapterConsumerId::LENGTH]);
+        store
+            .acquire_adapter_consumer(
+                consumer_id,
+                AdapterLeaseId::from_bytes([32; AdapterLeaseId::LENGTH]),
+                1_000,
+                2_000,
+            )
+            .unwrap();
+        let service = ApplicationService::new(coordinator.clone(), RecordingRelay::new(false));
+        let mut request = request(conversation.conversation_id, "authorized reply");
+        request.collaboration_action_authorization = Some(CollaborationActionAuthorization {
+            policy_digest: digest,
+            consumer_id,
+            not_after_unix_milliseconds: 2_000,
+        });
+        let message_id = request.message_id;
+        let submission = service.submissions.lock().await;
+        let mut send = Box::pin(service.send(request));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(send.as_mut(), &mut context).is_pending());
+
+        clock.0.store(2_000, Ordering::SeqCst);
+        drop(submission);
+        assert!(matches!(
+            send.await,
+            Err(ApplicationServiceError::Conversation(
+                ConversationCoordinatorError::Profile(ProfileStoreError::InvalidAdapterLease)
+            ))
+        ));
+        assert!(
+            coordinator
+                .outbound_application(conversation.conversation_id, message_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .load_conversation(conversation.conversation_id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
     }
 
     #[tokio::test]

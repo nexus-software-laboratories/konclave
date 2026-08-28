@@ -144,7 +144,8 @@ fn repository_examples_compile_through_the_explicit_catalog() {
         .compile("contract-alignment", CollaborationPolicyLimits::default())
         .unwrap();
     assert_eq!(compiled.bundle().name(), "contract-alignment");
-    assert_eq!(compiled.bundle().statements().len(), 3);
+    assert_eq!(compiled.bundle().statements().len(), 1);
+    assert_eq!(compiled.bundle().required_harness_claims().len(), 3);
 }
 
 #[test]

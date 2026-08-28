@@ -29,6 +29,7 @@ export const toolOperations = [
   'propose_collaboration_policy_source',
   'resume_collaboration_policy_proposal',
   'get_collaboration_policy_status',
+  'inspect_collaboration_policy_proposal',
   'accept_collaboration_policy',
   'reject_collaboration_policy',
   'revoke_collaboration_policy',
@@ -50,6 +51,12 @@ export const deliveryOperations = {
   release: 'delivery.release',
 } as const;
 
+/** Paved Copilot policy decisions that remain outside the agent tool surface. */
+export const collaborationOperations = {
+  authorizeTurn: 'collaboration.turn.authorize',
+  evaluateAction: 'collaboration.action.evaluate',
+} as const;
+
 /** Operations that report bounded service state for deterministic commands. */
 export const serviceOperations = {
   status: 'service.status',
@@ -58,6 +65,7 @@ export const serviceOperations = {
 export const allOperations: readonly string[] = [
   ...toolOperations,
   ...Object.values(deliveryOperations),
+  ...Object.values(collaborationOperations),
   ...Object.values(serviceOperations),
 ];
 

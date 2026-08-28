@@ -176,6 +176,11 @@ const defaultDeadlineMs = 30_000;
 const defaultReconnectAttempts = 1;
 const defaultReconnectDelayMs = 50;
 
+/** Returns whether an operation must share the lease-owning delivery lane. */
+export function isDeliveryLaneOperation(operation: string): boolean {
+  return operation.startsWith('delivery.') || operation === 'collaboration.turn.authorize';
+}
+
 function defaultCreateSocket(endpoint: string): Socket {
   return connect(endpoint);
 }
@@ -994,7 +999,7 @@ export async function connectLocalService(
       const requestId = normalized.requestId ?? randomBytes(requestIdLength);
       const encoded = encodeRequestPayload(operation, payload ?? {});
       encodeRequest(requestId, operation, encoded);
-      const deliveryOperation = operation.startsWith('delivery.');
+      const deliveryOperation = isDeliveryLaneOperation(operation);
       const lane = deliveryOperation ? deliveryLane : interactiveLane;
       const allowedReconnects = deliveryOperation ? 0 : reconnectAttempts;
 

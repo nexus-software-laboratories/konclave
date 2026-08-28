@@ -139,7 +139,8 @@ authority. Indexing a proposal, accepted response, or revocation never calls the
 bundle store or binding operations. Schema migration performs one bounded,
 restart-safe pass over completed sealed history so policy messages accepted by an
 earlier reader are not lost from the index; it creates no binding. Local
-decision/status operations remain a subsequent service layer over this journal.
+decision/status operations are implemented as a separate service layer over this
+journal.
 
 ## Explicit local exchange operations
 
@@ -205,7 +206,13 @@ source path. Editing a source requires a new proposal identifier. Status represe
 `u64` activation and limit values as canonical decimal strings across the Rust and
 JavaScript boundary.
 
-Policy proposal notifications include complete identifiers and a local review command
+An authenticated peer proposal can be inspected before acceptance. The paved command
+shows its complete identity, proposer, replacement intent, statements, required
+claims, limits, and guidance. Peer-proposed guidance is explicitly labeled untrusted
+and emitted ephemerally; only the later explicit accept operation can make that exact
+digest the local policy binding.
+
+Policy proposal notifications include complete identifiers and a local inspect command
 inside the existing untrusted-content fence. Receiving that notification still
 cannot activate authority; the operator must invoke the deterministic accept command.
 
@@ -241,9 +248,9 @@ content, but it does not itself mutate a binding.
 
 Receiving a proposal, accepted response, or revocation never activates, replaces, or
 deletes local authority at this layer. These messages establish an authenticated
-exchange vocabulary only. A subsequent service state machine must durably track
-pending proposals and call the local binding boundary only after an authorized local
-decision. An accepted response authenticates which member reported acceptance of
+exchange vocabulary only. The explicit service state machine resolves proposals from
+the sealed exchange journal and mutates a binding only after a locally authorized
+operation. An accepted response authenticates which member reported acceptance of
 which proposal and digest; it is not independent proof of that endpoint's effective
 harness controls.
 
@@ -320,3 +327,33 @@ cannot claim paved tool, permission, resource, or lifecycle controls.
 Peer content remains quoted inside the untrusted collaborator boundary. A locally
 active binding supplies the separate trusted instruction to evaluate that content and
 act only within the effective policy.
+
+The paved Copilot integration evaluates `conversation.reply` before converting an
+idle delivery into an autonomous collaboration turn. The shared service derives
+local authority from positive targets in the locally activated bundle, supplies only
+the claims and exact controls the Copilot adapter proves, and evaluates duration plus
+one active collaboration request. The profile's single live delivery consumer and
+the extension's one-outstanding-turn gate enforce concurrency conservatively at one.
+
+During that turn, Copilot's pre-tool hook maps only Konclave's `send_message` tool to
+`conversation.reply`. A successful evaluation issues a one-use authorization bound to
+the exact conversation and message arguments, active policy digest, delivery consumer,
+and the earliest policy, lease, or proof expiry. The daemon consumes it into the same
+SQLite reservation that verifies the digest, live consumer lease, and expiry before
+allocating a sender counter or preparing the send.
+Workspace, shell, web, MCP, and subagent tools deny because their effects occur
+outside that atomic boundary. Approval-required actions also deny until the harness
+can compose policy approval with, rather than replace, native permissions.
+
+The extension prepares a pending gate before enqueue and activates it only after the
+session observes the exact synthetic prompt carrying a fresh local turn token. Any
+other user prompt clears the pending state, preventing collaboration policy from
+leaking across an enqueue race into foreground user work. A later token-bearing
+collaboration prompt without its matching pending authorization enters a deny-all
+tool state until idle instead of running outside the gate.
+
+Locally accepted policy guidance is placed outside the peer-content fence as trusted
+configuration, while collaborator text remains quoted as untrusted task input.
+Finite turn and token limits currently deny autonomous execution because the adapter
+does not yet prove durable accounting for them. This is a truthful reduction, not an
+implicit unlimited fallback.

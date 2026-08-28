@@ -11,21 +11,11 @@
         "id": "conversation-reply",
         "effect": "allow",
         "action": "conversation.reply"
-      },
-      {
-        "id": "validation-run",
-        "effect": "allow",
-        "action": "validation.run",
-        "resource": "workspace.current"
-      },
-      {
-        "id": "workspace-modify",
-        "effect": "require_local_approval",
-        "action": "workspace.modify",
-        "resource": "workspace.current"
       }
     ],
     "requiredHarnessClaims": [
+      "harness.native-permission-intersection",
+      "harness.pre-tool-policy-gate",
       "harness.session-identity"
     ],
     "limits": {

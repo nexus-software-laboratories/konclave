@@ -483,6 +483,7 @@ describe('deterministic commands', () => {
     const policyDigest = '66'.repeat(32);
     const messageId = '77'.repeat(16);
     const source = '{"apiVersion":"konclave.dev/v1"}';
+    const peerGuidance = `${'g'.repeat(2_050)}guidance-tail`;
     const request = vi.fn(async (operation: string, payload: unknown) => {
       const record =
         typeof payload === 'object' && payload !== null ? (payload as Record<string, unknown>) : {};
@@ -514,6 +515,33 @@ describe('deterministic commands', () => {
                 tokens: '18446744073709551615',
                 concurrent_requests: 1,
               },
+            },
+          };
+        case 'inspect_collaboration_policy_proposal':
+          return {
+            conversation_id: conversationId,
+            proposal_id: record.proposal_id,
+            policy_digest: policyDigest,
+            replaces_policy_digest: null,
+            proposer_device_id: '88'.repeat(32),
+            message_id: '89'.repeat(16),
+            relay_cursor: 3,
+            name: 'peer-contract-alignment',
+            untrusted_guidance: peerGuidance,
+            statements: [
+              {
+                statement_id: 'conversation-reply',
+                effect: 'allow',
+                action: 'conversation.reply',
+                resource: null,
+              },
+            ],
+            required_harness_claims: ['harness.session-identity'],
+            limits: {
+              duration_milliseconds: null,
+              turns: null,
+              tokens: null,
+              concurrent_requests: 1,
             },
           };
         case 'propose_collaboration_policy_source':
@@ -558,6 +586,7 @@ describe('deterministic commands', () => {
       'policy status',
       `policy propose ${proposalId} -- policy examples/contract.json`,
       `policy resume ${proposalId}`,
+      `policy inspect ${proposalId}`,
       `policy replace ${policyDigest} ${replacementProposalId} -- policy examples/replacement.json`,
       `policy accept ${proposalId} ${policyDigest}`,
       `policy reject ${replacementProposalId} ${policyDigest}`,
@@ -568,6 +597,10 @@ describe('deterministic commands', () => {
 
     expect(readPolicySource).toHaveBeenNthCalledWith(1, 'policy examples/contract.json');
     expect(readPolicySource).toHaveBeenNthCalledWith(2, 'policy examples/replacement.json');
+    expect(request).toHaveBeenCalledWith('inspect_collaboration_policy_proposal', {
+      conversation_id: conversationId,
+      proposal_id: proposalId,
+    });
     expect(request).toHaveBeenCalledWith(
       'resume_collaboration_policy_proposal',
       {
@@ -624,6 +657,8 @@ describe('deterministic commands', () => {
     );
     expect(lines.join('\n')).toContain('policy: contract-alignment');
     expect(lines.join('\n')).toContain('18446744073709551615');
+    expect(lines.join('\n')).toContain('peer-proposed guidance (UNTRUSTED; review as data)');
+    expect(lines.join('\n')).toContain('guidance-tail');
     expect(lines.join('\n')).toContain('statement conversation-reply: allow conversation.reply');
     expect(lines.join('\n')).toContain('local binding changed: yes');
   });
