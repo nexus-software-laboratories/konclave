@@ -8,14 +8,18 @@ mod model;
 
 pub use collaboration_policy::{
     COLLABORATION_POLICY_BUNDLE_MAJOR, COLLABORATION_POLICY_BUNDLE_MINOR,
-    CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
-    CollaborationPolicyProposal, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
-    CollaborationPolicyRevocation, CollaborationPolicyStatement,
+    CollaborationPolicyBundle, CollaborationPolicyCost, CollaborationPolicyDecision,
+    CollaborationPolicyDenialReason, CollaborationPolicyEffect,
+    CollaborationPolicyEvaluationContext, CollaborationPolicyEvaluationRequest,
+    CollaborationPolicyLimits, CollaborationPolicyProposal, CollaborationPolicyResponse,
+    CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation,
+    CollaborationPolicyStatement, CollaborationPolicyTarget, CollaborationPolicyUsage,
     MAX_COLLABORATION_POLICY_ACTION_BYTES, MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
     MAX_COLLABORATION_POLICY_GUIDANCE_BYTES, MAX_COLLABORATION_POLICY_HARNESS_CLAIM_BYTES,
     MAX_COLLABORATION_POLICY_HARNESS_CLAIMS, MAX_COLLABORATION_POLICY_NAME_BYTES,
     MAX_COLLABORATION_POLICY_RESOURCE_BYTES, MAX_COLLABORATION_POLICY_STATEMENT_ID_BYTES,
-    MAX_COLLABORATION_POLICY_STATEMENTS, validate_collaboration_policy_name,
+    MAX_COLLABORATION_POLICY_STATEMENTS, evaluate_collaboration_policy,
+    validate_collaboration_policy_name,
 };
 pub use error::KonclaveDomainError;
 pub use identifiers::{
