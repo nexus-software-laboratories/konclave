@@ -237,7 +237,8 @@ binding side effect, so a peer cannot grant itself local authority by proposing 
 accepting policy content. Explicit local proposal, acceptance, rejection, and
 revocation operations use a sealed terminal journal and atomically mutate local
 bindings before their outbound notification can be submitted. Deterministic
-effective-policy evaluation and harness enforcement remain unimplemented, so peer
+effective-policy evaluation is implemented as a pure domain boundary. Durable usage
+reservation and harness-driven activity enforcement remain unimplemented, so peer
 text retains the existing explicit-send behavior.
 
 Shared-local-service automatic delivery exposes only typed policy-exchange
@@ -290,6 +291,8 @@ the mutually supported maximum.
 | Collaboration-policy proposal substitution | Fixed-width proposal identity, complete bounded canonical bundle, exact digest verification, and responses bound to both proposal identifier and digest |
 | Collaboration-policy exchange-index substitution | Foreign-key every allowlisted index row to sealed history, seal each row's exact metadata, commit row count/backfill completion in separate profile-bound sealed state, verify cursors against sealed delivery evidence, insert atomically with cursor completion, and re-derive typed metadata from sealed history at startup |
 | Remote policy activation | Exchange messages have no binding side effect; only a separately authorized local service operation may activate or remove local authority |
+| Policy broadening during evaluation | Exact-target base matching, deny-over-approval-over-allow precedence, positive local-authority and harness-control intersections, deny-only local restrictions, and fail-closed missing evidence |
+| Policy-limit overflow or approval bypass | Checked usage-plus-cost arithmetic, explicit unlimited values, fresh local approval that satisfies only approval requirements, and no approval override for denial, authority, evidence, or limit failures |
 | Contradictory local policy responses | Derive one stable response message identifier per conversation, device, and proposal, then bind its one terminal outcome in a sealed local-operation record |
 | Partial local policy exchange operation | Commit the terminal local-operation record and binding mutation in one transaction before submission; retain the owned serialization guard through blocking work; preserve the source proposal identifier; retry returns historical mutation state and reconciles the stable outbox message |
 | Policy-operation journal erasure or schema downgrade | Create the initial sealed journal state atomically with schema adoption, authenticate the adopted schema floor inside the sealed device identity, and reject null state or a plaintext version below that floor |

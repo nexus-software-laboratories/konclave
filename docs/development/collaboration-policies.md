@@ -236,6 +236,43 @@ intersects that bundle with local user authority, harness-proven controls, and l
 restrictions. The public effective projection may be stricter on either endpoint,
 while the accepted base definition remains byte-identical.
 
+## Deterministic effective-policy evaluation
+
+The domain evaluator accepts only validated inputs:
+
+- one locally accepted canonical bundle;
+- one exact namespaced action and optional exact resource;
+- bounded exact-target local-authority and harness-control allowlists;
+- bounded canonical harness claims proven by the local integration;
+- bounded exact-target local denials and local approval requirements;
+- an authenticated usage snapshot; and
+- the prospective turn, token, and concurrent-request cost.
+
+Target matching is exact. An absent resource matches only an unscoped action and is
+never a wildcard. Unknown actions, unknown resources, and missing base statements
+deny. When multiple base statements match, `deny` takes precedence over
+`require-local-approval`, which takes precedence over `allow`. A local denial takes
+precedence over every positive result. Local authority and harness controls are
+positive intersections; neither local restrictions nor a supplied approval can
+broaden the accepted bundle.
+
+Every bundle-level required harness claim must appear in the locally proven claim set,
+and the harness must separately prove control of the requested exact target. Missing
+evidence denies rather than becoming advisory. Model guidance, policy names, peer
+responses, and peer instructions are not evaluator inputs.
+
+Finite duration expires when elapsed time reaches the limit. Turn, token, and
+concurrency decisions compare existing usage plus the requested reservation against
+the finite limit with checked arithmetic. Arithmetic overflow denies. Absent limits
+remain explicitly unlimited and do not perform artificial overflow checks.
+
+The evaluator is pure and returns `allow`, `require-local-approval`, or `deny` with a
+stable bounded reason. A fresh local approval can satisfy only an approval
+requirement; it cannot override a denial, missing authority, missing harness evidence,
+or an exhausted limit. The enforcing service must atomically reserve accepted usage
+before executing a side effect; the pure evaluator does not claim mutable accounting
+or harness enforcement by itself.
+
 Rust-generated immutable fixtures cover every exchange content kind, and both Rust
 and TypeScript readers decode and re-encode those application messages byte for byte.
 The local daemon verifies proposed bundle identity before outbound encryption or
