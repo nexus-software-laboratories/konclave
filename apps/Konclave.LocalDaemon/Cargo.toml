@@ -44,8 +44,8 @@ opentelemetry = { version = "0.32.0", features = ["trace"], default-features = f
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio", "trace"], default-features = false, optional = true }
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic", "trace"], default-features = false, optional = true }
 rmcp = { version = "3.1.2", features = ["client", "server", "transport-io"], optional = true }
-serde = { version = "1.0.229", features = ["derive"], optional = true }
-serde_json = { version = "1.0.151", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing = { version = "0.1.44", optional = true }

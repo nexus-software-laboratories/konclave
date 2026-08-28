@@ -1,0 +1,12 @@
+{
+  "apiVersion": "konclave.dev/v1",
+  "kind": "CollaborationPolicy",
+  "metadata": {
+    "name": "overflow"
+  },
+  "spec": {
+    "limits": {
+      "turns": 18446744073709551616
+    }
+  }
+}

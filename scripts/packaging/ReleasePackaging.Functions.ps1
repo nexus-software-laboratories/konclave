@@ -440,6 +440,24 @@ function Copy-ClientPayload {
     $pluginRoot = Join-Path $DestinationRoot 'share' 'konclave' 'plugin'
     Expand-ProtectedPluginArchive $PluginArchivePath $pluginRoot
     Assert-PackagedPlugin $pluginRoot $Version
+    $policyRoot = Join-Path $DestinationRoot 'share' 'konclave' 'policy'
+    foreach ($relative in @(
+        'collaboration-policy-source-v1.schema.json',
+        'collaboration-policy-catalog-v1.schema.json'
+    )) {
+        Copy-ReleaseFile (
+            Join-Path $ProjectRoot 'policy' $relative
+        ) (
+            Join-Path $policyRoot $relative
+        )
+    }
+    foreach ($relative in @('contract-alignment.json', 'catalog.json')) {
+        Copy-ReleaseFile (
+            Join-Path $ProjectRoot 'policy' 'examples' $relative
+        ) (
+            Join-Path $policyRoot 'examples' $relative
+        )
+    }
     $serviceRoot = Join-Path $DestinationRoot 'share' 'konclave' 'service'
     switch ([string]$Artifact.operatingSystem) {
         'linux' {

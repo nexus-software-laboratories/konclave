@@ -48,6 +48,7 @@ This map lists the documentation contributed by the selected project shape.
 
 ## Guides
 
+- [Author collaboration policies](../policy/README.md)
 - [Install an unsigned prerelease](distribution/installation.md)
 - [Verify release integrity and contents](distribution/integrity.md)
 - [Packaged clean-install acceptance](distribution/acceptance.md)

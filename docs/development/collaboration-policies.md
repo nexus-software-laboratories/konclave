@@ -51,18 +51,30 @@ Canonical bundle limits are already materialized:
 - mandatory parser, frame, queue, journal, and storage bounds are outside the policy
   and cannot be disabled.
 
-Editable source formats will additionally represent inherited values. The source
-compiler resolves activation overrides, source values, user defaults, and shipped
-defaults before producing canonical bytes.
+An omitted source limit represents inheritance. The current compiler accepts one
+fully materialized caller-default set and resolves source values against it before
+producing canonical bytes. Future activation and provider layers own the precedence
+between activation overrides, user defaults, provider defaults, and shipped defaults.
 
 ## Source and catalog boundary
 
-The next source layer will accept explicit user files and repository proposals. It
-will not scan or activate repository content automatically. A source may include
-human comments, inheritance, and unresolved defaults; none of those cross into the
-canonical bundle.
+The implemented source compiler accepts bounded strict JSON with API version
+`konclave.dev/v1` and kind `CollaborationPolicy`. Unknown fields, unsupported effects,
+oversized arrays, malformed canonical identifiers, zero finite limits, and trailing
+content fail closed. Editable sources may order statements and harness claims
+arbitrarily; compilation canonicalizes them before encoding and digesting.
 
-Source providers compile into the same bundle:
+Missing source limits inherit from caller-provided defaults. Explicit JSON `null`
+means unlimited, and a positive integer is a finite override. No inherited or
+unresolved value crosses into the canonical bundle.
+
+The explicit file catalog is one bounded JSON descriptor containing a schema version
+and listed name-to-source mappings. It never scans its directory. Sources must be
+regular `.json` files that physically resolve beneath the descriptor's directory;
+duplicate names, duplicate paths, traversal, absent files, and source-name mismatch
+fail closed.
+
+Future source providers compile into the same bundle:
 
 - explicit user catalog;
 - explicitly selected repository proposal;
@@ -72,6 +84,23 @@ Source providers compile into the same bundle:
 
 Provider names and mutable URLs are not persisted as policy authority. Activation
 pins canonical bytes and their digest.
+
+The command-line surface operates only on explicit paths:
+
+```text
+konclave policy create --name <policy-name> --output <new-source.json>
+konclave policy validate --source <source.json>
+konclave policy inspect --source <source.json>
+konclave policy compile --source <source.json> --output <new-bundle.bin>
+konclave policy diff --left <source.json> --right <source.json>
+konclave policy list --catalog <catalog.json>
+konclave policy validate-catalog --catalog <catalog.json>
+```
+
+Create and compile use exclusive file creation and never overwrite existing content.
+Inspect and validation output only bounded names, digests, counts, and resolved limits;
+model guidance and complete policy bodies are not printed. The repository includes
+schemas and editable examples, but repository presence never activates them.
 
 ## Binding and exchange boundary
 

@@ -1,0 +1,23 @@
+{
+  "apiVersion": "konclave.dev/v1",
+  "kind": "CollaborationPolicy",
+  "metadata": {
+    "name": "boundary-values"
+  },
+  "spec": {
+    "statements": [
+      {
+        "id": "reply",
+        "effect": "allow",
+        "action": "conversation.reply",
+        "resource": null
+      }
+    ],
+    "limits": {
+      "durationMilliseconds": 18446744073709551615,
+      "turns": 18446744073709551615,
+      "tokens": 18446744073709551615,
+      "concurrentRequests": 4294967295
+    }
+  }
+}

@@ -25,6 +25,21 @@ pub const MAX_COLLABORATION_POLICY_HARNESS_CLAIMS: usize = 64;
 /// Maximum UTF-8 bytes in one namespaced harness claim.
 pub const MAX_COLLABORATION_POLICY_HARNESS_CLAIM_BYTES: usize = 256;
 
+/// Validates one canonical collaboration-policy display name.
+///
+/// # Errors
+///
+/// Returns a validation error when the name is empty, oversized, or not canonical
+/// lowercase ASCII.
+pub fn validate_collaboration_policy_name(value: &str) -> Result<(), KonclaveDomainError> {
+    canonical_identifier(
+        value.to_string(),
+        "collaboration_policy_name",
+        MAX_COLLABORATION_POLICY_NAME_BYTES,
+    )
+    .map(|_| ())
+}
+
 /// Primitive decision attached to one collaboration-policy statement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CollaborationPolicyEffect {
@@ -205,11 +220,8 @@ impl CollaborationPolicyBundle {
         mut required_harness_claims: Vec<String>,
         limits: CollaborationPolicyLimits,
     ) -> Result<Self, KonclaveDomainError> {
-        let name = canonical_identifier(
-            name.into(),
-            "collaboration_policy_name",
-            MAX_COLLABORATION_POLICY_NAME_BYTES,
-        )?;
+        let name = name.into();
+        validate_collaboration_policy_name(&name)?;
         let guidance = guidance
             .map(|value| {
                 bounded_text(

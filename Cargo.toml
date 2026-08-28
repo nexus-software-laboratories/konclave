@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CollaborationPolicies", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
 
 [workspace.dependencies]
 async-trait = "0.1.92"
@@ -20,6 +20,8 @@ rusqlite = { version = "=0.32.1", features = ["bundled"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustix = { version = "1.1.4", default-features = false, features = ["process", "std"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 sha2 = "0.10.9"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls"], default-features = false }
 thiserror = "2.0.20"

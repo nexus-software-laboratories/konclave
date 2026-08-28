@@ -2,10 +2,11 @@
 
 Konclave packaging produces native archives for supported Linux, Windows, and macOS
 targets. Each client archive contains the CLI, one shared local-service binary,
-platform lifecycle managers, and a thin Copilot CLI extension payload. The extension
-contains no daemon binary. Relay archives contain the standalone Community Relay
-binary and its self-hosting examples. No source checkout or compiler is required after
-extraction.
+platform lifecycle managers, a thin Copilot CLI extension payload, and editable
+collaboration-policy schemas and examples under
+`<install-root>/share/konclave/policy/`. The extension contains no daemon binary.
+Relay archives contain the standalone Community Relay binary and its self-hosting
+examples. No source checkout or compiler is required after extraction.
 
 Package-validation artifacts are transient CI transport and are deleted immediately
 after each run. No public release download is currently published. A maintainer must
