@@ -44,6 +44,8 @@ pub enum SecretRecordKind {
     LocalServiceRequestOutcome = 17,
     CollaborationPolicyBundle = 18,
     CollaborationPolicyBinding = 19,
+    CollaborationPolicyExchangeRecord = 20,
+    CollaborationPolicyExchangeState = 21,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.
