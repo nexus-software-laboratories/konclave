@@ -21,7 +21,9 @@ evidence that implementations honor both.
 - local daemon control and decrypted history.
 - remote-event ordering, acknowledgment, mute, and suppression state.
 - canonical collaboration-policy bundle content, digest identity, and sealed local
-  conversation bindings.
+  conversation bindings;
+- collaboration-policy exchange metadata and its references to sealed message
+  history.
 
 ## Components and trust boundaries
 
@@ -284,6 +286,7 @@ the mutually supported maximum.
 | Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, no automatic tool execution, and explicit send operations |
 | Collaboration-policy bundle ambiguity | Canonical bounded encoding, duplicate rejection, exact re-encoding checks, and a domain-separated content digest |
 | Collaboration-policy proposal substitution | Fixed-width proposal identity, complete bounded canonical bundle, exact digest verification, and responses bound to both proposal identifier and digest |
+| Collaboration-policy exchange-index substitution | Foreign-key every allowlisted index row to sealed history, seal each row's exact metadata, commit row count/backfill completion in separate profile-bound sealed state, verify cursors against sealed delivery evidence, insert atomically with cursor completion, and re-derive typed metadata from sealed history at startup |
 | Remote policy activation | Exchange messages have no binding side effect; only a separately authorized local service operation may activate or remove local authority |
 | Collaboration-policy persistence tampering | Sealed canonical bundle and binding records, profile/conversation/digest context binding, startup verification, hard capacity, and fail-closed binding deletion |
 | Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |

@@ -116,6 +116,31 @@ It survives restart, replacement is atomic, and deletion immediately removes loc
 authority. Schema migration creates no bundle or binding, and no client or agent
 activation operation is exposed in this persistence-only slice.
 
+Profile schema version 16 adds a bounded append-only exchange index. A completed
+proposal, response, or revocation is indexed in the same transaction that completes
+its sealed history record, advances the replay cursor, and publishes its delivery
+event. The index stores only allowlisted identifiers, digest, kind, outcome, and
+cursor metadata; canonical bundle bytes and guidance remain in sealed history.
+
+Every indexed row has a foreign key to that exact conversation and message. Startup
+reopens the sealed message and requires its authenticated content to reproduce the
+indexed metadata, including canonical proposal verification. Each row also seals its
+conversation, message, cursor, kind, proposal identifier, digest, and outcome. A
+separate profile-bound sealed state commits the exact row count and one-time backfill
+completion, so coordinated clear-metadata edits, row deletion/addition, and a forged
+completion marker fail closed. Cursor verification also reuses the sealed inbox
+envelope or outbound cursor observation rather than trusting history-table cursor
+metadata. The index is bounded to 4,096 profile records and 1,024 records per
+conversation without eviction. Capacity failure leaves cursor completion visibly
+blocked rather than dropping an authenticated exchange record.
+
+Exchange records are evidence of what authenticated members sent, not policy
+authority. Indexing a proposal, accepted response, or revocation never calls the
+bundle store or binding operations. Schema migration performs one bounded,
+restart-safe pass over completed sealed history so policy messages accepted by an
+earlier reader are not lost from the index; it creates no binding. Local
+decision/status operations remain a subsequent service layer over this journal.
+
 Protocol-v1 application content now carries three typed exchange messages:
 
 - a proposal identifier, claimed policy digest, complete canonical bundle, and

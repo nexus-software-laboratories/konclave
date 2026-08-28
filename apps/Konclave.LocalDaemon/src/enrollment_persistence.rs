@@ -834,7 +834,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_collaboration_policy_binding;
+                    "DROP TABLE daemon_collaboration_policy_exchange_state;
+                     DROP TABLE daemon_collaboration_policy_exchange;
+                     DROP TABLE daemon_collaboration_policy_binding;
                      DROP TABLE daemon_collaboration_policy_bundle;
                      DROP TABLE daemon_active_conversation;
                      DROP TABLE daemon_local_request_outcome;
@@ -860,7 +862,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_binding;
+                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                 DROP TABLE daemon_collaboration_policy_exchange;
+                 DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
                  DROP TABLE daemon_active_conversation;
                  DROP TABLE daemon_local_request_outcome;

@@ -69,7 +69,8 @@ Schema version 15 stores:
   restart-safe implicit sends;
 - bounded sealed canonical collaboration-policy bundles addressed by their public
   content digest; and
-- one sealed local collaboration-policy binding per conversation.
+- one sealed local collaboration-policy binding per conversation; and
+- a bounded collaboration-policy exchange index backed by sealed message history.
 
 Version 1 through 8 schema changes use explicit transactions. Before changing a v2
 schema, startup rejects ready or accepted outbound rows whose plaintext cannot be
@@ -98,6 +99,16 @@ Version 15 adds an empty collaboration-policy bundle catalog and binding table i
 transaction. Migration never infers, imports, or activates a policy. Bundle guidance,
 statements, claims, and limits remain sealed; only the content digest, conversation
 identifier, activation timestamp, and bounded ciphertext lengths are queryable.
+
+Version 16 adds an empty append-only index for completed collaboration-policy
+proposal, response, and revocation messages. Each row references one sealed history
+message and exposes only its conversation, message, cursor, proposal identifier,
+digest, kind, and response outcome. A one-time bounded migration pass indexes any
+already-completed policy exchange messages from sealed history; it creates no policy
+authority. Each row seals its indexed metadata, and one profile-bound sealed state
+commits the exact record count and backfill completion. Startup verifies those seals,
+reopens every referenced history record, and rejects metadata substitution, row
+deletion/addition, or premature backfill completion.
 Startup opens and verifies every retained bundle and binding before accepting the
 profile. Deleting a binding removes authority, while substituting its digest,
 conversation, timestamp, or ciphertext fails authentication.
