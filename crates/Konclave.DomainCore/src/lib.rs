@@ -9,19 +9,20 @@ mod model;
 pub use collaboration_policy::{
     COLLABORATION_POLICY_BUNDLE_MAJOR, COLLABORATION_POLICY_BUNDLE_MINOR,
     CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
-    CollaborationPolicyStatement, MAX_COLLABORATION_POLICY_ACTION_BYTES,
-    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_COLLABORATION_POLICY_GUIDANCE_BYTES,
-    MAX_COLLABORATION_POLICY_HARNESS_CLAIM_BYTES, MAX_COLLABORATION_POLICY_HARNESS_CLAIMS,
-    MAX_COLLABORATION_POLICY_NAME_BYTES, MAX_COLLABORATION_POLICY_RESOURCE_BYTES,
-    MAX_COLLABORATION_POLICY_STATEMENT_ID_BYTES, MAX_COLLABORATION_POLICY_STATEMENTS,
-    validate_collaboration_policy_name,
+    CollaborationPolicyProposal, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
+    CollaborationPolicyRevocation, CollaborationPolicyStatement,
+    MAX_COLLABORATION_POLICY_ACTION_BYTES, MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+    MAX_COLLABORATION_POLICY_GUIDANCE_BYTES, MAX_COLLABORATION_POLICY_HARNESS_CLAIM_BYTES,
+    MAX_COLLABORATION_POLICY_HARNESS_CLAIMS, MAX_COLLABORATION_POLICY_NAME_BYTES,
+    MAX_COLLABORATION_POLICY_RESOURCE_BYTES, MAX_COLLABORATION_POLICY_STATEMENT_ID_BYTES,
+    MAX_COLLABORATION_POLICY_STATEMENTS, validate_collaboration_policy_name,
 };
 pub use error::KonclaveDomainError;
 pub use identifiers::{
-    AdapterConsumerId, AdapterLeaseId, CollaborationPolicyDigest, ConversationId,
-    CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature, EnvelopeId, InvitationId,
-    InvitationNonce, MembershipOperationId, MessageId, NotificationId, PairingContextHash,
-    PairingId, PairingMessageId, PairingNonce, RoutingId,
+    AdapterConsumerId, AdapterLeaseId, CollaborationPolicyDigest, CollaborationPolicyProposalId,
+    ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
+    EnvelopeId, InvitationId, InvitationNonce, MembershipOperationId, MessageId, NotificationId,
+    PairingContextHash, PairingId, PairingMessageId, PairingNonce, RoutingId,
 };
 pub use model::{
     APPLICATION_PROTOCOL_MAJOR, APPLICATION_PROTOCOL_MINOR, AcknowledgeRequest, AddMember,

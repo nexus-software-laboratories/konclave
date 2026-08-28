@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use KonclaveClientLibrary::{PairingCapability, RelayEndpoint};
 use KonclaveCryptographicCore::{
     DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit, MlsConversation,
-    MlsConversationClient, MlsWelcome, OutboundMembershipCommit, verify_device_credential_binding,
+    MlsConversationClient, MlsWelcome, OutboundMembershipCommit,
+    verify_collaboration_policy_proposal, verify_device_credential_binding,
 };
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
@@ -1043,6 +1044,7 @@ impl ConversationCoordinator {
         sent_at_unix_milliseconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
+        verify_application_content(&content)?;
         let message = ApplicationMessage::new(
             ProtocolVersion::application_v1(),
             reservation.message_id,
@@ -2112,7 +2114,18 @@ fn decrypt_application(
     let sender = decrypted.authenticated_sender();
     let message = decode_application_message(decrypted.plaintext())
         .map_err(|_| ConversationCoordinatorError::Protocol)?;
+    verify_application_content(message.content())?;
     Ok((sender, message))
+}
+
+fn verify_application_content(
+    content: &ApplicationContent,
+) -> Result<(), ConversationCoordinatorError> {
+    if let ApplicationContent::CollaborationPolicyProposal(proposal) = content {
+        verify_collaboration_policy_proposal(proposal)
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+    }
+    Ok(())
 }
 
 fn application_messages_equal(
@@ -2138,6 +2151,42 @@ pub(crate) mod tests {
     use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
 
     use super::*;
+
+    #[test]
+    fn policy_proposal_content_requires_a_matching_canonical_digest() {
+        let canonical_bundle =
+            include_bytes!("../../../fixtures/protocol/v1/collaboration-policy-bundle.bin");
+        let proposal_id = KonclaveDomainCore::CollaborationPolicyProposalId::from_bytes([1; 16]);
+        let digest = KonclaveDomainCore::CollaborationPolicyDigest::from_bytes([
+            0xf8, 0x18, 0x9b, 0x64, 0x71, 0x27, 0xaa, 0x9f, 0xf9, 0xd0, 0x3f, 0x5c, 0x2d, 0x04,
+            0x8b, 0xcd, 0x8e, 0xb8, 0x60, 0x06, 0x20, 0xbc, 0x17, 0x96, 0xc4, 0xc6, 0x68, 0xfa,
+            0x59, 0x90, 0xeb, 0x2e,
+        ]);
+        let valid = ApplicationContent::collaboration_policy_proposal(
+            KonclaveDomainCore::CollaborationPolicyProposal::new(
+                proposal_id,
+                digest,
+                canonical_bundle.to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(verify_application_content(&valid).is_ok());
+
+        let invalid = ApplicationContent::collaboration_policy_proposal(
+            KonclaveDomainCore::CollaborationPolicyProposal::new(
+                proposal_id,
+                KonclaveDomainCore::CollaborationPolicyDigest::from_bytes([2; 32]),
+                canonical_bundle.to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            verify_application_content(&invalid),
+            Err(ConversationCoordinatorError::Cryptographic)
+        ));
+    }
     use crate::persistence::{LockedProfile, ProfileId};
 
     fn sealer() -> SecretSealer {

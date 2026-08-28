@@ -9,7 +9,10 @@ mod local_service;
 mod mls;
 mod pairing;
 
-pub use collaboration_policy::derive_collaboration_policy_digest;
+pub use collaboration_policy::{
+    VerifiedCollaborationPolicyProposal, derive_collaboration_policy_digest,
+    verify_collaboration_policy_proposal,
+};
 pub use error::KonclaveCryptographicError;
 pub use hmac::{HMAC_SHA256_TAG_LENGTH, HmacSha256Key, fill_random};
 pub use identity::{

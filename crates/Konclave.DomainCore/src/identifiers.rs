@@ -146,6 +146,12 @@ define_fixed_bytes!(
     "collaboration_policy_digest"
 );
 define_fixed_bytes!(
+    /// Identifier for one collaboration-policy proposal exchange.
+    CollaborationPolicyProposalId,
+    16,
+    "collaboration_policy_proposal_id"
+);
+define_fixed_bytes!(
     /// Public Ed25519 verification key.
     Ed25519PublicKey,
     32,

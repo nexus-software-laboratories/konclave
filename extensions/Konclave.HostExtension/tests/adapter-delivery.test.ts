@@ -133,6 +133,47 @@ describe('untrusted content framing', () => {
     expect(framed).toContain('this device was removed');
   });
 
+  it('describes policy exchange metadata without granting authority', () => {
+    const framed = frameDelivery([
+      event({
+        payload: {
+          kind: 'collaboration-policy-proposal',
+          proposalId: Buffer.alloc(16, 8),
+          policyDigest: Buffer.alloc(32, 9),
+        },
+      }),
+      event({
+        payload: {
+          kind: 'collaboration-policy-proposal',
+          proposalId: Buffer.alloc(16, 10),
+          policyDigest: Buffer.alloc(32, 11),
+          replacesPolicyDigest: Buffer.alloc(32, 12),
+        },
+      }),
+      event({
+        payload: {
+          kind: 'collaboration-policy-response',
+          proposalId: Buffer.alloc(16, 13),
+          policyDigest: Buffer.alloc(32, 14),
+          outcome: 'accepted',
+        },
+      }),
+      event({
+        payload: {
+          kind: 'collaboration-policy-revocation',
+          policyDigest: Buffer.alloc(32, 15),
+        },
+      }),
+    ]);
+
+    expect(framed).toContain('policy proposal');
+    expect(framed).toContain('no local authority was activated');
+    expect(framed).toContain('replacing 0c0c0c0c0c0c0c0c');
+    expect(framed).toContain('remote endpoint reported proposal');
+    expect(framed).toContain('as accepted');
+    expect(framed).toContain('remote endpoint withdrew');
+  });
+
   it('names one update in the singular', () => {
     expect(frameDelivery([event()])).toContain('1 update from');
   });

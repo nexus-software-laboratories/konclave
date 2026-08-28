@@ -7,8 +7,14 @@ import {
 } from '../src/generated/konclave/protocol/v1/application_pb.js';
 import {
   CollaborationPolicyBundleSchema,
+  CollaborationPolicyDigestSchema,
   CollaborationPolicyEffect,
   CollaborationPolicyLimitsSchema,
+  CollaborationPolicyProposalIdSchema,
+  CollaborationPolicyProposalSchema,
+  CollaborationPolicyResponseOutcome,
+  CollaborationPolicyResponseSchema,
+  CollaborationPolicyRevocationSchema,
   CollaborationPolicyStatementSchema,
   type CollaborationPolicyBundle,
 } from '../src/generated/konclave/protocol/v1/collaboration_policy_pb.js';
@@ -175,6 +181,68 @@ export function collaborationPolicyBundle(options?: {
       tokens: 10_000n,
       concurrentRequests: 1,
     }),
+  });
+}
+
+export function collaborationPolicyProposalMessage(
+  canonicalBundle: Uint8Array,
+): ApplicationMessage {
+  return policyApplicationMessage(3, {
+    case: 'collaborationPolicyProposal',
+    value: create(CollaborationPolicyProposalSchema, {
+      proposalId: create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 40) }),
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+      canonicalBundle,
+      replacesPolicyDigest: create(CollaborationPolicyDigestSchema, {
+        value: bytes(32, 41),
+      }),
+    }),
+  });
+}
+
+export function collaborationPolicyResponseMessage(): ApplicationMessage {
+  return policyApplicationMessage(4, {
+    case: 'collaborationPolicyResponse',
+    value: create(CollaborationPolicyResponseSchema, {
+      proposalId: create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 40) }),
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+      outcome: CollaborationPolicyResponseOutcome.ACCEPTED,
+    }),
+  });
+}
+
+export function collaborationPolicyRevocationMessage(): ApplicationMessage {
+  return policyApplicationMessage(5, {
+    case: 'collaborationPolicyRevocation',
+    value: create(CollaborationPolicyRevocationSchema, {
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+    }),
+  });
+}
+
+export function collaborationPolicyDigest(): Uint8Array {
+  return Uint8Array.from([
+    0xf8, 0x18, 0x9b, 0x64, 0x71, 0x27, 0xaa, 0x9f, 0xf9, 0xd0, 0x3f, 0x5c, 0x2d, 0x04, 0x8b, 0xcd,
+    0x8e, 0xb8, 0x60, 0x06, 0x20, 0xbc, 0x17, 0x96, 0xc4, 0xc6, 0x68, 0xfa, 0x59, 0x90, 0xeb, 0x2e,
+  ]);
+}
+
+function policyApplicationMessage(
+  id: number,
+  content: ApplicationMessage['content'],
+): ApplicationMessage {
+  return create(ApplicationMessageSchema, {
+    version: create(ProtocolVersionSchema, { major: 1, minor: 0 }),
+    messageId: create(MessageIdSchema, { value: bytes(16, id) }),
+    senderCounter: BigInt(id),
+    sentAtUnixMilliseconds: 1_700_000_000_000n + BigInt(id),
+    content,
   });
 }
 

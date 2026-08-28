@@ -38,19 +38,9 @@ pub(super) fn require_repeated_field_limits<const N: usize>(
     let mut remaining = bytes;
     while remaining.has_remaining() {
         field_count += 1;
-        if field_count > MAX_PROTOBUF_TOP_LEVEL_FIELDS {
-            return Err(KonclaveDomainError::OutOfRange {
-                field: "protobuf_top_level_fields",
-                minimum: 0,
-                maximum: MAX_PROTOBUF_TOP_LEVEL_FIELDS,
-                actual: field_count,
-            }
-            .into());
-        }
+        require_field_count(field_count)?;
         let (tag, wire_type) = decode_key(&mut remaining).map_err(|_| malformed_wire(contract))?;
-        if matches!(wire_type, WireType::StartGroup | WireType::EndGroup) {
-            return Err(malformed_wire(contract));
-        }
+        reject_group(wire_type, contract)?;
         if wire_type == WireType::LengthDelimited {
             for (index, (field_number, maximum, field)) in limits.iter().enumerate() {
                 if tag == *field_number {
@@ -71,6 +61,108 @@ pub(super) fn require_repeated_field_limits<const N: usize>(
             .map_err(|_| malformed_wire(contract))?;
     }
     Ok(())
+}
+
+pub(super) fn require_nested_bytes_field_limit(
+    bytes: &[u8],
+    maximum_bytes: usize,
+    contract: &'static str,
+    outer_field: u32,
+    nested_field: u32,
+    nested_maximum: usize,
+    field: &'static str,
+) -> Result<(), KonclaveProtocolError> {
+    require_input_size(bytes, maximum_bytes, contract)?;
+    let mut remaining = bytes;
+    let mut field_count = 0_usize;
+    while remaining.has_remaining() {
+        field_count += 1;
+        require_field_count(field_count)?;
+        let (tag, wire_type) = decode_key(&mut remaining).map_err(|_| malformed_wire(contract))?;
+        reject_group(wire_type, contract)?;
+        if tag == outer_field {
+            if wire_type != WireType::LengthDelimited {
+                return Err(malformed_wire(contract));
+            }
+            let nested = take_length_delimited(&mut remaining, contract)?;
+            require_bytes_field_limit(nested, contract, nested_field, nested_maximum, field)?;
+        } else {
+            skip_field(wire_type, tag, &mut remaining, DecodeContext::default())
+                .map_err(|_| malformed_wire(contract))?;
+        }
+    }
+    Ok(())
+}
+
+fn require_bytes_field_limit(
+    bytes: &[u8],
+    contract: &'static str,
+    target_field: u32,
+    maximum: usize,
+    field: &'static str,
+) -> Result<(), KonclaveProtocolError> {
+    let mut remaining = bytes;
+    let mut field_count = 0_usize;
+    while remaining.has_remaining() {
+        field_count += 1;
+        require_field_count(field_count)?;
+        let (tag, wire_type) = decode_key(&mut remaining).map_err(|_| malformed_wire(contract))?;
+        reject_group(wire_type, contract)?;
+        if tag == target_field {
+            if wire_type != WireType::LengthDelimited {
+                return Err(malformed_wire(contract));
+            }
+            let value = take_length_delimited(&mut remaining, contract)?;
+            if value.len() > maximum {
+                return Err(KonclaveDomainError::OutOfRange {
+                    field,
+                    minimum: 1,
+                    maximum,
+                    actual: value.len(),
+                }
+                .into());
+            }
+        } else {
+            skip_field(wire_type, tag, &mut remaining, DecodeContext::default())
+                .map_err(|_| malformed_wire(contract))?;
+        }
+    }
+    Ok(())
+}
+
+fn take_length_delimited<'a>(
+    remaining: &mut &'a [u8],
+    contract: &'static str,
+) -> Result<&'a [u8], KonclaveProtocolError> {
+    let length =
+        prost::decode_length_delimiter(&mut *remaining).map_err(|_| malformed_wire(contract))?;
+    if remaining.len() < length {
+        return Err(malformed_wire(contract));
+    }
+    let (value, rest) = remaining.split_at(length);
+    *remaining = rest;
+    Ok(value)
+}
+
+fn require_field_count(actual: usize) -> Result<(), KonclaveProtocolError> {
+    if actual > MAX_PROTOBUF_TOP_LEVEL_FIELDS {
+        return Err(KonclaveDomainError::OutOfRange {
+            field: "protobuf_top_level_fields",
+            minimum: 0,
+            maximum: MAX_PROTOBUF_TOP_LEVEL_FIELDS,
+            actual,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn reject_group(wire_type: WireType, contract: &'static str) -> Result<(), KonclaveProtocolError> {
+    if matches!(wire_type, WireType::StartGroup | WireType::EndGroup) {
+        Err(malformed_wire(contract))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn encode_bounded<M>(

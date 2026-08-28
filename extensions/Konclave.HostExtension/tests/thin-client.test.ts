@@ -1107,6 +1107,96 @@ describe('deterministic commands', () => {
     expect(entries.some((entry) => entry.line.includes('more messages are available'))).toBe(true);
   });
 
+  it('displays typed policy history without treating receipt as authority', async () => {
+    const proposalId = '31'.repeat(16);
+    const policyDigest = '32'.repeat(32);
+    const replacementDigest = '33'.repeat(32);
+    const baseMessage = {
+      conversation_id: conversationId,
+      envelope_id: '34'.repeat(16),
+      sender_device_id: inviterDeviceId,
+      epoch: 1,
+      sender_counter: 2,
+      sent_at_unix_milliseconds: 1,
+      reply_to_message_id: null,
+      duplicate: false,
+    };
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'sync_messages') {
+        return { messages: [], has_more: false };
+      }
+      if (operation === 'read_messages') {
+        return {
+          messages: [
+            {
+              ...baseMessage,
+              message_id: '35'.repeat(16),
+              cursor: 1,
+              direction: 'inbound',
+              content_type: 'collaboration_policy_proposal',
+              proposal_id: proposalId,
+              policy_digest: policyDigest,
+              replaces_policy_digest: null,
+            },
+            {
+              ...baseMessage,
+              message_id: '36'.repeat(16),
+              cursor: 2,
+              direction: 'inbound',
+              content_type: 'collaboration_policy_proposal',
+              proposal_id: proposalId,
+              policy_digest: policyDigest,
+              replaces_policy_digest: replacementDigest,
+            },
+            {
+              ...baseMessage,
+              message_id: '37'.repeat(16),
+              cursor: 3,
+              direction: 'outbound',
+              content_type: 'collaboration_policy_response',
+              proposal_id: proposalId,
+              policy_digest: policyDigest,
+              outcome: 'accepted',
+            },
+            {
+              ...baseMessage,
+              message_id: '38'.repeat(16),
+              cursor: 4,
+              direction: 'inbound',
+              content_type: 'collaboration_policy_revocation',
+              policy_digest: policyDigest,
+            },
+          ],
+          has_more: false,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line, options) => {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`messages ${conversationId}`));
+
+    const output = entries.map((entry) => entry.line).join('\n');
+    expect(output).toContain('receipt does not activate local authority');
+    expect(output).toContain(`replacing ${replacementDigest}`);
+    expect(output).toContain('local policy response');
+    expect(output).toContain('reported accepted');
+    expect(output).toContain('untrusted peer policy revocation');
+    expect(
+      entries
+        .filter((entry) => entry.line.includes('policy '))
+        .every((entry) => entry.options?.ephemeral === true),
+    ).toBe(true);
+  });
+
   it('restores the active conversation for implicit sends after restart', async () => {
     const otherConversationId = '99'.repeat(32);
     const request = vi.fn(async (operation: string, payload: unknown) => {
@@ -1557,6 +1647,115 @@ describe('shared-service delivery adaptation', () => {
     expect(client.close).toHaveBeenCalledTimes(1);
   });
 
+  it('maps collaboration policy exchange payloads without bundle content', async () => {
+    const base = {
+      leaseGeneration: 2,
+      conversation: '04'.repeat(32),
+      sender: '05'.repeat(32),
+    };
+    const request = vi.fn().mockResolvedValue({
+      events: [
+        {
+          ...base,
+          notificationId: '01'.repeat(16),
+          sequence: 3,
+          relayCursor: 6,
+          payload: {
+            kind: 'collaboration_policy_proposal',
+            proposalId: '06'.repeat(16),
+            policyDigest: '07'.repeat(32),
+            replacesPolicyDigest: null,
+          },
+        },
+        {
+          ...base,
+          notificationId: '02'.repeat(16),
+          sequence: 4,
+          relayCursor: 7,
+          payload: {
+            kind: 'collaboration_policy_proposal',
+            proposalId: '08'.repeat(16),
+            policyDigest: '09'.repeat(32),
+            replacesPolicyDigest: '0a'.repeat(32),
+          },
+        },
+        {
+          ...base,
+          notificationId: '03'.repeat(16),
+          sequence: 5,
+          relayCursor: 8,
+          payload: {
+            kind: 'collaboration_policy_response',
+            proposalId: '0b'.repeat(16),
+            policyDigest: '0c'.repeat(32),
+            outcome: 'rejected',
+          },
+        },
+        {
+          ...base,
+          notificationId: '04'.repeat(16),
+          sequence: 6,
+          relayCursor: 9,
+          payload: {
+            kind: 'collaboration_policy_response',
+            proposalId: '0d'.repeat(16),
+            policyDigest: '0e'.repeat(32),
+            outcome: 'accepted',
+          },
+        },
+        {
+          ...base,
+          notificationId: '05'.repeat(16),
+          sequence: 7,
+          relayCursor: 10,
+          payload: {
+            kind: 'collaboration_policy_revocation',
+            policyDigest: '0f'.repeat(32),
+          },
+        },
+      ],
+    });
+    const channel = createLocalServiceDeliveryChannel(stubClient(request));
+
+    await expect(
+      channel.request({ kind: 'wait-and-claim', maxEvents: 5, waitMilliseconds: 0 }),
+    ).resolves.toMatchObject({
+      kind: 'batch',
+      events: [
+        {
+          payload: {
+            kind: 'collaboration-policy-proposal',
+            replacesPolicyDigest: undefined,
+          },
+        },
+        {
+          payload: {
+            kind: 'collaboration-policy-proposal',
+            replacesPolicyDigest: Buffer.alloc(32, 10),
+          },
+        },
+        {
+          payload: {
+            kind: 'collaboration-policy-response',
+            outcome: 'rejected',
+          },
+        },
+        {
+          payload: {
+            kind: 'collaboration-policy-response',
+            outcome: 'accepted',
+          },
+        },
+        {
+          payload: {
+            kind: 'collaboration-policy-revocation',
+            policyDigest: Buffer.alloc(32, 15),
+          },
+        },
+      ],
+    });
+  });
+
   it('rejects malformed batches, payloads, roles, counts, and status values', async () => {
     const validEvent = {
       notificationId: '01'.repeat(16),
@@ -1582,6 +1781,31 @@ describe('shared-service delivery adaptation', () => {
           {
             ...validEvent,
             payload: { kind: 'application_text', text: 'é'.repeat(40_000) },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'collaboration_policy_proposal',
+              proposalId: '06'.repeat(16),
+              policyDigest: '07'.repeat(32),
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'collaboration_policy_response',
+              proposalId: '06'.repeat(16),
+              policyDigest: '07'.repeat(32),
+              outcome: 'unknown',
+            },
           },
         ],
       },

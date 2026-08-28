@@ -49,6 +49,8 @@ const pairingIdCharacters = 32;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
+const policyProposalIdCharacters = 32;
+const policyDigestCharacters = 64;
 
 type ConversationRole = 'administrator' | 'member';
 type PairingLocalRole = 'joiner' | 'inviter';
@@ -84,9 +86,25 @@ interface MessageSummary {
   readonly senderDeviceId: string;
   readonly cursor: number;
   readonly direction: 'inbound' | 'outbound';
-  readonly text: string;
+  readonly content: MessageContentSummary;
   readonly duplicate: boolean;
 }
+
+type MessageContentSummary =
+  | { readonly kind: 'text'; readonly text: string }
+  | {
+      readonly kind: 'collaboration-policy-proposal';
+      readonly proposalId: string;
+      readonly policyDigest: string;
+      readonly replacesPolicyDigest: string | undefined;
+    }
+  | {
+      readonly kind: 'collaboration-policy-response';
+      readonly proposalId: string;
+      readonly policyDigest: string;
+      readonly outcome: 'accepted' | 'rejected';
+    }
+  | { readonly kind: 'collaboration-policy-revocation'; readonly policyDigest: string };
 
 interface ConversationSelection {
   readonly conversationIds: readonly string[];
@@ -459,7 +477,6 @@ function parseMessageList(value: unknown): {
       !Number.isSafeInteger(message.cursor) ||
       message.cursor < 0 ||
       (message.direction !== 'inbound' && message.direction !== 'outbound') ||
-      typeof message.text !== 'string' ||
       typeof message.duplicate !== 'boolean'
     ) {
       throw new Error('the local service message-list response is malformed');
@@ -481,11 +498,73 @@ function parseMessageList(value: unknown): {
       ),
       cursor: message.cursor,
       direction: message.direction,
-      text: message.text,
+      content: parseMessageContent(message),
       duplicate: message.duplicate,
     };
   });
   return { messages, hasMore: value.has_more };
+}
+
+function parseMessageContent(message: Record<string, unknown>): MessageContentSummary {
+  switch (message.content_type) {
+    case undefined:
+    case 'text':
+      if (typeof message.text !== 'string') {
+        throw new Error('the local service message-list response is malformed');
+      }
+      return { kind: 'text', text: message.text };
+    case 'collaboration_policy_proposal':
+      return {
+        kind: 'collaboration-policy-proposal',
+        proposalId: policyIdentifier(message.proposal_id, policyProposalIdCharacters, 'proposal'),
+        policyDigest: policyIdentifier(
+          message.policy_digest,
+          policyDigestCharacters,
+          'policy digest',
+        ),
+        replacesPolicyDigest:
+          message.replaces_policy_digest === null
+            ? undefined
+            : policyIdentifier(
+                message.replaces_policy_digest,
+                policyDigestCharacters,
+                'replacement policy digest',
+              ),
+      };
+    case 'collaboration_policy_response': {
+      if (message.outcome !== 'accepted' && message.outcome !== 'rejected') {
+        throw new Error('the local service message-list response is malformed');
+      }
+      return {
+        kind: 'collaboration-policy-response',
+        proposalId: policyIdentifier(message.proposal_id, policyProposalIdCharacters, 'proposal'),
+        policyDigest: policyIdentifier(
+          message.policy_digest,
+          policyDigestCharacters,
+          'policy digest',
+        ),
+        outcome: message.outcome,
+      };
+    }
+    case 'collaboration_policy_revocation':
+      return {
+        kind: 'collaboration-policy-revocation',
+        policyDigest: policyIdentifier(
+          message.policy_digest,
+          policyDigestCharacters,
+          'policy digest',
+        ),
+      };
+    default:
+      throw new Error('the local service message-list response is malformed');
+  }
+}
+
+function policyIdentifier(value: unknown, length: number, label: string): string {
+  if (typeof value !== 'string') {
+    throw new Error('the local service message-list response is malformed');
+  }
+  return requireHexIdentifier(value, length, label);
 }
 
 function parseDelimitedMessage(
@@ -680,6 +759,31 @@ function displayText(value: string): string {
       ? `${characters.slice(0, maxDisplayedMessageCharacters).join('')}…`
       : safe;
   return JSON.stringify(boundedText);
+}
+
+function displayMessageContent(message: MessageSummary): string {
+  const source = message.direction === 'inbound' ? 'untrusted peer' : 'local';
+  switch (message.content.kind) {
+    case 'text':
+      return `${message.direction === 'inbound' ? 'untrusted peer text' : 'local message text'}: ${displayText(message.content.text)}`;
+    case 'collaboration-policy-proposal': {
+      const replacement =
+        message.content.replacesPolicyDigest === undefined
+          ? ''
+          : `, replacing ${message.content.replacesPolicyDigest}`;
+      return (
+        `${source} policy proposal: ${message.content.proposalId}, digest ` +
+        `${message.content.policyDigest}${replacement}; receipt does not activate local authority`
+      );
+    }
+    case 'collaboration-policy-response':
+      return (
+        `${source} policy response: proposal ${message.content.proposalId}, digest ` +
+        `${message.content.policyDigest}, reported ${message.content.outcome}`
+      );
+    case 'collaboration-policy-revocation':
+      return `${source} policy revocation: digest ${message.content.policyDigest}`;
+  }
 }
 
 async function renderPairing(output: CommandOutput, status: PairingStatus): Promise<void> {
@@ -1170,10 +1274,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await output.write(
             `message ${message.messageId}: ${message.direction}, sender ${message.senderDeviceId}, cursor ${message.cursor}, duplicate ${message.duplicate ? 'yes' : 'no'}`,
           );
-          await output.write(
-            `${message.direction === 'inbound' ? 'untrusted peer text' : 'local message text'}: ${displayText(message.text)}`,
-            { ephemeral: true },
-          );
+          await output.write(displayMessageContent(message), { ephemeral: true });
         }
         const lastCursor = history.messages.at(-1)?.cursor;
         if (lastCursor !== undefined) {

@@ -22,9 +22,23 @@ export const maxWaitMilliseconds = 30_000;
 export const maxEventTextBytes = 64 * 1024;
 
 export type DeliveredRole = 'administrator' | 'member';
+export type DeliveredPolicyResponseOutcome = 'accepted' | 'rejected';
 
 export type DeliveredPayload =
   | { readonly kind: 'application-text'; readonly text: string }
+  | {
+      readonly kind: 'collaboration-policy-proposal';
+      readonly proposalId: Buffer;
+      readonly policyDigest: Buffer;
+      readonly replacesPolicyDigest?: Buffer;
+    }
+  | {
+      readonly kind: 'collaboration-policy-response';
+      readonly proposalId: Buffer;
+      readonly policyDigest: Buffer;
+      readonly outcome: DeliveredPolicyResponseOutcome;
+    }
+  | { readonly kind: 'collaboration-policy-revocation'; readonly policyDigest: Buffer }
   | { readonly kind: 'member-added'; readonly device: Buffer; readonly role: DeliveredRole }
   | { readonly kind: 'member-removed'; readonly device: Buffer }
   | { readonly kind: 'member-role-changed'; readonly device: Buffer; readonly role: DeliveredRole }

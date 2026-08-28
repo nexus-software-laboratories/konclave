@@ -7,7 +7,9 @@ use KonclaveAdapterTransport::{
     MAX_AUTHENTICATED_FRAME_BYTES, OsChallenges, complete_daemon_handshake,
     connect_adapter_endpoint, read_frame, write_frame,
 };
-use KonclaveDomainCore::{AdapterConsumerId, AdapterLeaseId, ConversationRole, NotificationId};
+use KonclaveDomainCore::{
+    AdapterConsumerId, AdapterLeaseId, ApplicationContent, ConversationRole, NotificationId,
+};
 use anyhow::{Context, bail};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
@@ -185,25 +187,27 @@ impl DeliveryAttachment {
         shutdown: &mut watch::Receiver<bool>,
         max_events: u16,
         wait_milliseconds: u32,
-    ) -> Result<Vec<DeliveredEvent>, ProfileStoreError> {
+    ) -> Result<Vec<ClaimedRemoteEvent>, ProfileStoreError> {
         let attachment = self.clone();
         let store = std::sync::Arc::clone(store);
-        let response = wait_for_claim(shutdown, wait_milliseconds, move || {
-            let attachment = attachment.clone();
-            let store = std::sync::Arc::clone(&store);
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    claim_delivery_events(&attachment, &store, &SystemUnixClock, max_events)
-                })
-                .await
-                .map_err(|_| ProfileStoreError::Storage)?
-            }
-        })
-        .await?;
-        match response {
-            AdapterResponse::Batch(events) => Ok(events),
-            _ => Err(ProfileStoreError::InvalidTransition),
-        }
+        wait_for_claim(
+            shutdown,
+            wait_milliseconds,
+            move || {
+                let attachment = attachment.clone();
+                let store = std::sync::Arc::clone(&store);
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        claim_remote_events(&attachment, &store, &SystemUnixClock, max_events)
+                    })
+                    .await
+                    .map_err(|_| ProfileStoreError::Storage)?
+                }
+            },
+            Vec::is_empty,
+            Vec::new(),
+        )
+        .await
     }
 
     /// Acknowledges one claimed delivery event.
@@ -548,32 +552,39 @@ async fn wait_and_claim(
     max_events: u16,
     wait_milliseconds: u32,
 ) -> Result<AdapterResponse, ProfileStoreError> {
-    wait_for_claim(shutdown, wait_milliseconds, || {
-        std::future::ready(claim_delivery_events(attachment, store, clock, max_events))
-    })
+    wait_for_claim(
+        shutdown,
+        wait_milliseconds,
+        || std::future::ready(claim_delivery_events(attachment, store, clock, max_events)),
+        |response| matches!(response, AdapterResponse::Batch(events) if events.is_empty()),
+        AdapterResponse::Batch(Vec::new()),
+    )
     .await
 }
 
-async fn wait_for_claim<F, Fut>(
+async fn wait_for_claim<T, F, Fut, IsEmpty>(
     shutdown: &mut watch::Receiver<bool>,
     wait_milliseconds: u32,
     mut claim: F,
-) -> Result<AdapterResponse, ProfileStoreError>
+    is_empty: IsEmpty,
+    empty: T,
+) -> Result<T, ProfileStoreError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<AdapterResponse, ProfileStoreError>>,
+    Fut: std::future::Future<Output = Result<T, ProfileStoreError>>,
+    IsEmpty: Fn(&T) -> bool,
 {
     let deadline =
         tokio::time::Instant::now() + Duration::from_millis(u64::from(wait_milliseconds));
     loop {
         let response = claim().await?;
-        if !matches!(&response, AdapterResponse::Batch(events) if events.is_empty()) {
+        if !is_empty(&response) {
             return Ok(response);
         }
         if tokio::time::Instant::now() >= deadline {
             // An expired wait is not an event, so the empty batch tells the adapter
             // to reissue rather than reporting work that does not exist.
-            return Ok(AdapterResponse::Batch(Vec::new()));
+            return Ok(empty);
         }
         let poll = tokio::time::sleep(
             CLAIM_POLL_INTERVAL
@@ -583,7 +594,7 @@ where
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return Ok(AdapterResponse::Batch(Vec::new()));
+                    return Ok(empty);
                 }
             }
             () = poll => {}
@@ -597,19 +608,30 @@ fn claim_delivery_events(
     clock: &dyn UnixClock,
     max_events: u16,
 ) -> Result<AdapterResponse, ProfileStoreError> {
+    Ok(AdapterResponse::Batch(
+        claim_remote_events(attachment, store, clock, max_events)?
+            .into_iter()
+            .map(deliver)
+            .collect(),
+    ))
+}
+
+fn claim_remote_events(
+    attachment: &DeliveryAttachment,
+    store: &ProfileStore,
+    clock: &dyn UnixClock,
+    max_events: u16,
+) -> Result<Vec<ClaimedRemoteEvent>, ProfileStoreError> {
     let now = clock.now_unix_milliseconds();
     let expires_at =
         now.saturating_add(u64::try_from(CONSUMER_LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
-    let claimed = store.claim_remote_events(
+    store.claim_remote_events(
         attachment.consumer_id,
         attachment.lease_id,
         now,
         expires_at,
         usize::from(max_events),
-    )?;
-    Ok(AdapterResponse::Batch(
-        claimed.into_iter().map(deliver).collect(),
-    ))
+    )
 }
 
 fn finish_claim(
@@ -691,10 +713,24 @@ fn deliver(claimed: ClaimedRemoteEvent) -> DeliveredEvent {
         sender: *event.sender.as_bytes(),
         relay_cursor: event.relay_cursor,
         payload: match event.payload {
-            RemoteEventPayload::ApplicationMessage(message) => {
-                let KonclaveDomainCore::ApplicationContent::Text(text) = message.content();
-                DeliveredPayload::ApplicationText(text.clone())
-            }
+            RemoteEventPayload::ApplicationMessage(message) =>             match message.content() {
+                ApplicationContent::Text(text) => DeliveredPayload::ApplicationText(text.clone()),
+                ApplicationContent::CollaborationPolicyProposal(_) => {
+                    DeliveredPayload::ApplicationText(
+                        "Konclave received a collaboration-policy proposal through a legacy adapter; no local authority was activated.".to_string(),
+                    )
+                }
+                ApplicationContent::CollaborationPolicyResponse(_) => {
+                    DeliveredPayload::ApplicationText(
+                        "Konclave received a collaboration-policy response through a legacy adapter; no local authority changed.".to_string(),
+                    )
+                }
+                ApplicationContent::CollaborationPolicyRevocation(_) => {
+                    DeliveredPayload::ApplicationText(
+                        "Konclave received a collaboration-policy revocation through a legacy adapter; no local authority changed.".to_string(),
+                    )
+                }
+            },
             RemoteEventPayload::MemberAdded { device_id, role } => DeliveredPayload::MemberAdded {
                 device: *device_id.as_bytes(),
                 role: deliver_role(role),
@@ -744,8 +780,15 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    use super::{AdapterLaunchConfig, parse_consumer_id};
-    use KonclaveDomainCore::AdapterConsumerId;
+    use super::{AdapterLaunchConfig, deliver, parse_consumer_id};
+    use crate::persistence::{ClaimedRemoteEvent, RemoteEvent, RemoteEventPayload};
+    use KonclaveAdapterTransport::DeliveredPayload;
+    use KonclaveDomainCore::{
+        AdapterConsumerId, ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
+        CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
+        CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
+        DeviceId, MessageId, NotificationId, ProtocolVersion,
+    };
 
     #[test]
     fn accepts_a_canonical_consumer_identifier() {
@@ -760,6 +803,69 @@ mod tests {
         assert!(parse_consumer_id(&URL_SAFE_NO_PAD.encode([3_u8; 8])).is_err());
         assert!(parse_consumer_id(&URL_SAFE_NO_PAD.encode([3_u8; 32])).is_err());
         assert!(parse_consumer_id("not base64!!").is_err());
+    }
+
+    #[test]
+    fn legacy_adapter_policy_delivery_never_claims_activation() {
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([1; 16]);
+        let digest = CollaborationPolicyDigest::from_bytes([2; 32]);
+        let replacement = CollaborationPolicyDigest::from_bytes([3; 32]);
+        let payloads = [
+            (
+                ApplicationContent::collaboration_policy_proposal(
+                    CollaborationPolicyProposal::new(
+                        proposal_id,
+                        digest,
+                        vec![4],
+                        Some(replacement),
+                    )
+                    .unwrap(),
+                ),
+                "no local authority was activated",
+            ),
+            (
+                ApplicationContent::CollaborationPolicyResponse(CollaborationPolicyResponse::new(
+                    proposal_id,
+                    digest,
+                    CollaborationPolicyResponseOutcome::Accepted,
+                )),
+                "no local authority changed",
+            ),
+            (
+                ApplicationContent::CollaborationPolicyRevocation(
+                    CollaborationPolicyRevocation::new(digest),
+                ),
+                "no local authority changed",
+            ),
+        ];
+
+        for (index, (content, expected)) in payloads.into_iter().enumerate() {
+            let message = ApplicationMessage::new(
+                ProtocolVersion::application_v1(),
+                MessageId::from_bytes([u8::try_from(index).unwrap(); 16]),
+                u64::try_from(index).unwrap() + 1,
+                1_700_000_000_000,
+                None,
+                content,
+            )
+            .unwrap();
+            let delivered = deliver(ClaimedRemoteEvent {
+                event: RemoteEvent {
+                    sequence: 1,
+                    notification_id: NotificationId::from_bytes([5; 16]),
+                    conversation_id: ConversationId::from_bytes([6; 32]),
+                    relay_cursor: 7,
+                    sender: DeviceId::from_bytes([8; 32]),
+                    payload: RemoteEventPayload::ApplicationMessage(message),
+                },
+                lease_generation: 9,
+            });
+            assert!(matches!(
+                delivered.payload,
+                DeliveredPayload::ApplicationText(ref text)
+                    if text.contains("legacy adapter") && text.contains(expected)
+            ));
+        }
     }
 
     #[cfg(unix)]
@@ -1160,6 +1266,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unconfigured_adapter_channel_returns_without_blocking_the_daemon() {
         // No launch variables are set, so the channel must be a no-op rather than

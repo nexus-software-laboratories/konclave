@@ -212,8 +212,30 @@ struct MessageResult {
     reply_to_message_id: Option<String>,
     cursor: u64,
     direction: String,
-    text: String,
+    #[serde(flatten)]
+    content: MessageContentResult,
     duplicate: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(tag = "content_type", rename_all = "snake_case")]
+enum MessageContentResult {
+    Text {
+        text: String,
+    },
+    CollaborationPolicyProposal {
+        proposal_id: String,
+        policy_digest: String,
+        replaces_policy_digest: Option<String>,
+    },
+    CollaborationPolicyResponse {
+        proposal_id: String,
+        policy_digest: String,
+        outcome: &'static str,
+    },
+    CollaborationPolicyRevocation {
+        policy_digest: String,
+    },
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -1359,8 +1381,32 @@ fn message_result(
     direction: &'static str,
     duplicate: bool,
 ) -> Result<MessageResult, String> {
-    let text = match message.content() {
-        ApplicationContent::Text(text) => text.clone(),
+    let content = match message.content() {
+        ApplicationContent::Text(text) => MessageContentResult::Text { text: text.clone() },
+        ApplicationContent::CollaborationPolicyProposal(proposal) => {
+            MessageContentResult::CollaborationPolicyProposal {
+                proposal_id: encode_hex(proposal.proposal_id().as_bytes()),
+                policy_digest: encode_hex(proposal.policy_digest().as_bytes()),
+                replaces_policy_digest: proposal
+                    .replaces_policy_digest()
+                    .map(|digest| encode_hex(digest.as_bytes())),
+            }
+        }
+        ApplicationContent::CollaborationPolicyResponse(response) => {
+            MessageContentResult::CollaborationPolicyResponse {
+                proposal_id: encode_hex(response.proposal_id().as_bytes()),
+                policy_digest: encode_hex(response.policy_digest().as_bytes()),
+                outcome: match response.outcome() {
+                    KonclaveDomainCore::CollaborationPolicyResponseOutcome::Accepted => "accepted",
+                    KonclaveDomainCore::CollaborationPolicyResponseOutcome::Rejected => "rejected",
+                },
+            }
+        }
+        ApplicationContent::CollaborationPolicyRevocation(revocation) => {
+            MessageContentResult::CollaborationPolicyRevocation {
+                policy_digest: encode_hex(revocation.policy_digest().as_bytes()),
+            }
+        }
     };
     Ok(MessageResult {
         conversation_id: encode_hex(conversation_id.as_bytes()),
@@ -1375,7 +1421,7 @@ fn message_result(
             .map(|identifier| encode_hex(identifier.as_bytes())),
         cursor,
         direction: direction.to_string(),
-        text,
+        content,
         duplicate,
     })
 }
@@ -1482,8 +1528,10 @@ mod tests {
     use std::sync::Arc;
 
     use KonclaveDomainCore::{
-        ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, DeviceId,
-        EnvelopeId, MessageId, PairingId, ProtocolVersion,
+        ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
+        CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
+        CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
+        ConversationRole, DeviceId, EnvelopeId, MessageId, PairingId, ProtocolVersion,
     };
     use rmcp::model::CallToolRequestParams;
     use rmcp::{ClientHandler, ServiceExt};
@@ -1512,6 +1560,17 @@ mod tests {
         .unwrap();
         let actual = serde_json::to_value(StdioServer::tool_router().list_all()).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "regenerates the checked-in Copilot tool contract fixture"]
+    fn regenerate_copilot_tool_contract_fixture() {
+        let tools = StdioServer::tool_router().list_all();
+        let mut bytes = serde_json::to_vec_pretty(&tools).unwrap();
+        bytes.push(b'\n');
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/local-service/v1/copilot-tools.json");
+        std::fs::write(path, bytes).unwrap();
     }
 
     #[test]
@@ -1656,6 +1715,64 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.direction, "outbound");
+    }
+
+    #[test]
+    fn message_results_preserve_typed_policy_exchange_metadata() {
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([5; 16]);
+        let digest = CollaborationPolicyDigest::from_bytes([6; 32]);
+        let replacement = CollaborationPolicyDigest::from_bytes([7; 32]);
+        let contents = [
+            ApplicationContent::collaboration_policy_proposal(
+                CollaborationPolicyProposal::new(proposal_id, digest, vec![1], Some(replacement))
+                    .unwrap(),
+            ),
+            ApplicationContent::CollaborationPolicyResponse(CollaborationPolicyResponse::new(
+                proposal_id,
+                digest,
+                CollaborationPolicyResponseOutcome::Rejected,
+            )),
+            ApplicationContent::CollaborationPolicyRevocation(CollaborationPolicyRevocation::new(
+                digest,
+            )),
+        ];
+
+        let results = contents.map(|content| {
+            let message = ApplicationMessage::new(
+                ProtocolVersion::application_v1(),
+                MessageId::from_bytes([4; MessageId::LENGTH]),
+                1,
+                1_700_000_000_000,
+                None,
+                content,
+            )
+            .unwrap();
+            serde_json::to_value(
+                super::message_result(
+                    ConversationId::from_bytes([1; ConversationId::LENGTH]),
+                    1,
+                    EnvelopeId::from_bytes([2; EnvelopeId::LENGTH]),
+                    DeviceId::from_bytes([3; DeviceId::LENGTH]),
+                    0,
+                    message,
+                    "inbound",
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        });
+
+        assert_eq!(results[0]["content_type"], "collaboration_policy_proposal");
+        assert_eq!(results[0]["proposal_id"], "05".repeat(16));
+        assert_eq!(results[0]["replaces_policy_digest"], "07".repeat(32));
+        assert_eq!(results[1]["content_type"], "collaboration_policy_response");
+        assert_eq!(results[1]["outcome"], "rejected");
+        assert_eq!(
+            results[2]["content_type"],
+            "collaboration_policy_revocation"
+        );
+        assert_eq!(results[2]["policy_digest"], "06".repeat(32));
     }
 
     #[test]

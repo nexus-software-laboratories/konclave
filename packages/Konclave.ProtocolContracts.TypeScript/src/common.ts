@@ -77,6 +77,66 @@ export function validateRepeatedFieldLimits(
 ): void {
   assertEncodedSize(bytes, maximumBytes, contract);
   const counts = new Map<number, number>();
+  visitWireFields(bytes, contract, (fieldNumber, wireType) => {
+    if (wireType === WireType.LengthDelimited) {
+      for (const limit of limits) {
+        if (limit.fieldNumber === fieldNumber) {
+          const count = (counts.get(fieldNumber) ?? 0) + 1;
+          counts.set(fieldNumber, count);
+          if (count > limit.maximum) {
+            throw new ProtocolValidationError(
+              protocolErrorCodes.outOfRange,
+              `${limit.field} exceeds its collection bound`,
+            );
+          }
+        }
+      }
+    }
+    return false;
+  });
+}
+
+export function validateNestedBytesFieldLimit(
+  bytes: Uint8Array,
+  maximumBytes: number,
+  contract: string,
+  outerField: number,
+  nestedField: number,
+  nestedMaximum: number,
+  field: string,
+): void {
+  assertEncodedSize(bytes, maximumBytes, contract);
+  visitWireFields(bytes, contract, (fieldNumber, wireType, reader, source) => {
+    if (fieldNumber !== outerField) {
+      return false;
+    }
+    requireLengthDelimited(wireType, contract);
+    const nested = readLengthDelimited(reader, source, contract);
+    visitWireFields(
+      nested,
+      contract,
+      (nestedFieldNumber, nestedWireType, nestedReader, nestedBytes) => {
+        if (nestedFieldNumber !== nestedField) {
+          return false;
+        }
+        requireLengthDelimited(nestedWireType, contract);
+        const value = readLengthDelimited(nestedReader, nestedBytes, contract);
+        validateLengthRange(value.byteLength, 1, nestedMaximum, field);
+        return true;
+      },
+    );
+    return true;
+  });
+}
+
+type WireFieldVisitor = (
+  fieldNumber: number,
+  wireType: WireType,
+  reader: BinaryReader,
+  source: Uint8Array,
+) => boolean;
+
+function visitWireFields(bytes: Uint8Array, contract: string, visit: WireFieldVisitor): void {
   const reader = new BinaryReader(bytes);
   let fieldCount = 0;
   try {
@@ -95,21 +155,9 @@ export function validateRepeatedFieldLimits(
           `${contract} contains unsupported group framing`,
         );
       }
-      if (wireType === WireType.LengthDelimited) {
-        for (const limit of limits) {
-          if (limit.fieldNumber === fieldNumber) {
-            const count = (counts.get(fieldNumber) ?? 0) + 1;
-            counts.set(fieldNumber, count);
-            if (count > limit.maximum) {
-              throw new ProtocolValidationError(
-                protocolErrorCodes.outOfRange,
-                `${limit.field} exceeds its collection bound`,
-              );
-            }
-          }
-        }
+      if (!visit(fieldNumber, wireType, reader, bytes)) {
+        reader.skip(wireType, fieldNumber);
       }
-      reader.skip(wireType, fieldNumber);
     }
   } catch (error: unknown) {
     if (error instanceof ProtocolValidationError) {
@@ -120,6 +168,33 @@ export function validateRepeatedFieldLimits(
       `${contract} is not valid Protocol Buffers`,
     );
   }
+}
+
+function requireLengthDelimited(wireType: WireType, contract: string): void {
+  if (wireType !== WireType.LengthDelimited) {
+    throw new ProtocolValidationError(
+      protocolErrorCodes.malformed,
+      `${contract} contains an invalid nested field`,
+    );
+  }
+}
+
+function readLengthDelimited(
+  reader: BinaryReader,
+  source: Uint8Array,
+  contract: string,
+): Uint8Array {
+  const length = reader.uint32();
+  const end = reader.pos + length;
+  if (end > reader.len) {
+    throw new ProtocolValidationError(
+      protocolErrorCodes.malformed,
+      `${contract} contains a truncated nested field`,
+    );
+  }
+  const value = source.subarray(reader.pos, end);
+  reader.pos = end;
+  return value;
 }
 
 export function required<T>(value: T | undefined, field: string): T {

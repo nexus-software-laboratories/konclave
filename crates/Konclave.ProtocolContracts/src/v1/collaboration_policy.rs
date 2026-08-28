@@ -1,7 +1,10 @@
 use KonclaveDomainCore::{
-    COLLABORATION_POLICY_BUNDLE_MAJOR, CollaborationPolicyBundle, CollaborationPolicyEffect,
-    CollaborationPolicyLimits, CollaborationPolicyStatement, MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
-    MAX_COLLABORATION_POLICY_HARNESS_CLAIMS, MAX_COLLABORATION_POLICY_STATEMENTS,
+    COLLABORATION_POLICY_BUNDLE_MAJOR, CollaborationPolicyBundle, CollaborationPolicyDigest,
+    CollaborationPolicyEffect, CollaborationPolicyLimits, CollaborationPolicyProposal,
+    CollaborationPolicyProposalId, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
+    CollaborationPolicyRevocation, CollaborationPolicyStatement,
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_COLLABORATION_POLICY_HARNESS_CLAIMS,
+    MAX_COLLABORATION_POLICY_STATEMENTS,
 };
 
 use crate::KonclaveProtocolError;
@@ -144,4 +147,127 @@ fn limits_from_wire(
         value.tokens,
         value.concurrent_requests,
     )?)
+}
+
+pub(crate) fn proposal_to_wire(
+    value: &CollaborationPolicyProposal,
+) -> wire::CollaborationPolicyProposal {
+    wire::CollaborationPolicyProposal {
+        proposal_id: Some(proposal_id_to_wire(value.proposal_id())),
+        policy_digest: Some(policy_digest_to_wire(value.policy_digest())),
+        canonical_bundle: value.canonical_bundle().to_vec().into(),
+        replaces_policy_digest: value.replaces_policy_digest().map(policy_digest_to_wire),
+    }
+}
+
+pub(crate) fn proposal_from_wire(
+    value: wire::CollaborationPolicyProposal,
+) -> Result<CollaborationPolicyProposal, KonclaveProtocolError> {
+    Ok(CollaborationPolicyProposal::new(
+        proposal_id_from_wire(required(
+            value.proposal_id,
+            "collaboration_policy_proposal.proposal_id",
+        )?)?,
+        policy_digest_from_wire(required(
+            value.policy_digest,
+            "collaboration_policy_proposal.policy_digest",
+        )?)?,
+        value.canonical_bundle.to_vec(),
+        value
+            .replaces_policy_digest
+            .map(policy_digest_from_wire)
+            .transpose()?,
+    )?)
+}
+
+pub(crate) fn response_to_wire(
+    value: &CollaborationPolicyResponse,
+) -> wire::CollaborationPolicyResponse {
+    wire::CollaborationPolicyResponse {
+        proposal_id: Some(proposal_id_to_wire(value.proposal_id())),
+        policy_digest: Some(policy_digest_to_wire(value.policy_digest())),
+        outcome: match value.outcome() {
+            CollaborationPolicyResponseOutcome::Accepted => {
+                wire::CollaborationPolicyResponseOutcome::Accepted as i32
+            }
+            CollaborationPolicyResponseOutcome::Rejected => {
+                wire::CollaborationPolicyResponseOutcome::Rejected as i32
+            }
+        },
+    }
+}
+
+pub(crate) fn response_from_wire(
+    value: wire::CollaborationPolicyResponse,
+) -> Result<CollaborationPolicyResponse, KonclaveProtocolError> {
+    let outcome = match wire::CollaborationPolicyResponseOutcome::try_from(value.outcome) {
+        Ok(wire::CollaborationPolicyResponseOutcome::Accepted) => {
+            CollaborationPolicyResponseOutcome::Accepted
+        }
+        Ok(wire::CollaborationPolicyResponseOutcome::Rejected) => {
+            CollaborationPolicyResponseOutcome::Rejected
+        }
+        Ok(wire::CollaborationPolicyResponseOutcome::Unspecified) | Err(_) => {
+            return Err(KonclaveProtocolError::UnsupportedEnum {
+                field: "collaboration_policy_response_outcome",
+                value: value.outcome,
+            });
+        }
+    };
+    Ok(CollaborationPolicyResponse::new(
+        proposal_id_from_wire(required(
+            value.proposal_id,
+            "collaboration_policy_response.proposal_id",
+        )?)?,
+        policy_digest_from_wire(required(
+            value.policy_digest,
+            "collaboration_policy_response.policy_digest",
+        )?)?,
+        outcome,
+    ))
+}
+
+pub(crate) fn revocation_to_wire(
+    value: &CollaborationPolicyRevocation,
+) -> wire::CollaborationPolicyRevocation {
+    wire::CollaborationPolicyRevocation {
+        policy_digest: Some(policy_digest_to_wire(value.policy_digest())),
+    }
+}
+
+pub(crate) fn revocation_from_wire(
+    value: wire::CollaborationPolicyRevocation,
+) -> Result<CollaborationPolicyRevocation, KonclaveProtocolError> {
+    Ok(CollaborationPolicyRevocation::new(policy_digest_from_wire(
+        required(
+            value.policy_digest,
+            "collaboration_policy_revocation.policy_digest",
+        )?,
+    )?))
+}
+
+fn proposal_id_to_wire(
+    value: CollaborationPolicyProposalId,
+) -> wire::CollaborationPolicyProposalId {
+    wire::CollaborationPolicyProposalId {
+        value: value.as_bytes().to_vec().into(),
+    }
+}
+
+fn proposal_id_from_wire(
+    value: wire::CollaborationPolicyProposalId,
+) -> Result<CollaborationPolicyProposalId, KonclaveProtocolError> {
+    Ok(CollaborationPolicyProposalId::from_slice(&value.value)?)
+}
+
+fn policy_digest_to_wire(value: CollaborationPolicyDigest) -> wire::CollaborationPolicyDigest {
+    wire::CollaborationPolicyDigest {
+        value: value.as_bytes().to_vec().into(),
+    }
+}
+
+fn policy_digest_from_wire(
+    value: wire::CollaborationPolicyDigest,
+) -> Result<CollaborationPolicyDigest, KonclaveProtocolError> {
+    Ok(CollaborationPolicyDigest::from_slice(&value.value)?)
 }

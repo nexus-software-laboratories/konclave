@@ -226,11 +226,22 @@ gains system, developer, permission, or tool authority. Automatic delivery is
 explicitly enabled per conversation, bounded by wake budgets, and limited to one
 outstanding synthetic turn.
 
-The collaboration-policy bundle contract and profile binding storage do not expose a
-client activation path yet. Canonical bytes and a domain-separated digest prevent
-ambiguous bundle identity; sealed binding records detect conversation, digest,
-timestamp, and ciphertext substitution. Peer proposal and harness enforcement remain
-unimplemented, so peer text retains the existing explicit-send behavior.
+The collaboration-policy exchange is authenticated inside normal MLS application
+messages. Canonical bytes and a domain-separated digest prevent ambiguous bundle
+identity, and proposal verification rejects a claimed digest that does not identify
+the embedded canonical bundle. Responses bind both the proposal identifier and
+digest; revocations bind the withdrawn digest. Receipt of any exchange message has no
+binding side effect, so a peer cannot grant itself local authority by proposing or
+accepting policy content. The durable proposal state machine, client activation path,
+and harness enforcement remain unimplemented, so peer text retains the existing
+explicit-send behavior.
+
+Shared-local-service automatic delivery exposes only typed policy-exchange
+identifiers, digests, replacement intent, and response state. It does not project
+canonical bundle content or model guidance into the harness turn. The notification
+remains inside the untrusted collaborator fence and states that proposal receipt did
+not activate local authority. The legacy binary adapter receives only a bounded
+daemon-authored non-authorizing notice, preserving its closed v1 event grammar.
 
 ### Version integrity
 
@@ -272,6 +283,8 @@ the mutually supported maximum.
 | Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
 | Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, no automatic tool execution, and explicit send operations |
 | Collaboration-policy bundle ambiguity | Canonical bounded encoding, duplicate rejection, exact re-encoding checks, and a domain-separated content digest |
+| Collaboration-policy proposal substitution | Fixed-width proposal identity, complete bounded canonical bundle, exact digest verification, and responses bound to both proposal identifier and digest |
+| Remote policy activation | Exchange messages have no binding side effect; only a separately authorized local service operation may activate or remove local authority |
 | Collaboration-policy persistence tampering | Sealed canonical bundle and binding records, profile/conversation/digest context binding, startup verification, hard capacity, and fail-closed binding deletion |
 | Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |
 | Agent-to-agent feedback loop | Authenticated sender classification, local-echo suppression, stable notification identifiers, and no send side effect from receipt alone |

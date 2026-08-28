@@ -10,6 +10,9 @@ production identifiers, or cryptographic test vectors.
 | `acknowledge-request.bin` | 38 | `4a916b322d0af333cc657e200f2daa669af79887b8a8502efd1af87b83d2cf9f` |
 | `application-message.bin` | 62 | `9d1bf4649b3f47bba9124a91f3f22e879da3a928651b2558f9c2c09cbfdf8cdf` |
 | `collaboration-policy-bundle.bin` | 232 | `231426b414fc6c05e571e891447824f5ee23694a429f944630680949407df3d7` |
+| `collaboration-policy-proposal-message.bin` | 363 | `789c3ebfba50fb10a21badfe9a8c55323b9f1bedbe182c5e13d029b48f78989c` |
+| `collaboration-policy-response-message.bin` | 93 | `18b0e8839f799b3ee7d24172f75107b664c5469115df61169d6753de4ee5b108` |
+| `collaboration-policy-revocation-message.bin` | 71 | `fbd646563ac08e4825dff21e220c9b385cbf2fa3a91f9d3b117e1082a09781d9` |
 | `conversation-state.bin` | 164 | `3c78dc0c93743ee53dcaa8737b7ed4e8c69004d831b4287a0faafdf44884bb58` |
 | `device-credential-binding.bin` | 212 | `8d9d93e470d0adccdc0298312304b9669e1102769bf69ecadac3453d75651ab3` |
 | `invitation.bin` | 240 | `cdca99b5057721c7f557b3fe2d04a5cd5ffb0e8b022790e592371612d9b65183` |

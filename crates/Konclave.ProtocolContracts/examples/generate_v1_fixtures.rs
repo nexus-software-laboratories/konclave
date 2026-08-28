@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use KonclaveDomainCore::{
     AcknowledgeRequest, AddMember, ApplicationContent, ApplicationMessage,
-    CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
+    CollaborationPolicyBundle, CollaborationPolicyDigest, CollaborationPolicyEffect,
+    CollaborationPolicyLimits, CollaborationPolicyProposal, CollaborationPolicyProposalId,
+    CollaborationPolicyResponse, CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation,
     CollaborationPolicyStatement, ConversationId, ConversationRole, ConversationState,
     CredentialBindingHash, DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
     Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce, JoinProof, Member,
@@ -32,10 +34,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "application-message.bin",
         encode_application_message(&application_message())?,
     )?;
+    let bundle_bytes = encode_collaboration_policy_bundle(&collaboration_policy_bundle())?;
     write(
         &output,
         "collaboration-policy-bundle.bin",
-        encode_collaboration_policy_bundle(&collaboration_policy_bundle())?,
+        bundle_bytes.clone(),
+    )?;
+    write(
+        &output,
+        "collaboration-policy-proposal-message.bin",
+        encode_application_message(&collaboration_policy_proposal_message(bundle_bytes))?,
+    )?;
+    write(
+        &output,
+        "collaboration-policy-response-message.bin",
+        encode_application_message(&collaboration_policy_response_message())?,
+    )?;
+    write(
+        &output,
+        "collaboration-policy-revocation-message.bin",
+        encode_application_message(&collaboration_policy_revocation_message())?,
     )?;
     write(
         &output,
@@ -165,6 +183,61 @@ fn application_message() -> ApplicationMessage {
         ApplicationContent::text("hello").expect("fixture text is valid"),
     )
     .expect("fixture message is valid")
+}
+
+fn collaboration_policy_proposal_message(canonical_bundle: Vec<u8>) -> ApplicationMessage {
+    application_message_with(
+        3,
+        ApplicationContent::collaboration_policy_proposal(
+            CollaborationPolicyProposal::new(
+                CollaborationPolicyProposalId::from_bytes([40; 16]),
+                collaboration_policy_digest(),
+                canonical_bundle,
+                Some(CollaborationPolicyDigest::from_bytes([41; 32])),
+            )
+            .expect("fixture proposal is valid"),
+        ),
+    )
+}
+
+fn collaboration_policy_response_message() -> ApplicationMessage {
+    application_message_with(
+        4,
+        ApplicationContent::CollaborationPolicyResponse(CollaborationPolicyResponse::new(
+            CollaborationPolicyProposalId::from_bytes([40; 16]),
+            collaboration_policy_digest(),
+            CollaborationPolicyResponseOutcome::Accepted,
+        )),
+    )
+}
+
+fn collaboration_policy_revocation_message() -> ApplicationMessage {
+    application_message_with(
+        5,
+        ApplicationContent::CollaborationPolicyRevocation(CollaborationPolicyRevocation::new(
+            collaboration_policy_digest(),
+        )),
+    )
+}
+
+fn application_message_with(id: u8, content: ApplicationContent) -> ApplicationMessage {
+    ApplicationMessage::new(
+        ProtocolVersion::application_v1(),
+        MessageId::from_bytes([id; 16]),
+        u64::from(id),
+        1_700_000_000_000 + u64::from(id),
+        None,
+        content,
+    )
+    .expect("fixture message is valid")
+}
+
+fn collaboration_policy_digest() -> CollaborationPolicyDigest {
+    CollaborationPolicyDigest::from_bytes([
+        0xf8, 0x18, 0x9b, 0x64, 0x71, 0x27, 0xaa, 0x9f, 0xf9, 0xd0, 0x3f, 0x5c, 0x2d, 0x04, 0x8b,
+        0xcd, 0x8e, 0xb8, 0x60, 0x06, 0x20, 0xbc, 0x17, 0x96, 0xc4, 0xc6, 0x68, 0xfa, 0x59, 0x90,
+        0xeb, 0x2e,
+    ])
 }
 
 fn collaboration_policy_bundle() -> CollaborationPolicyBundle {

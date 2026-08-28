@@ -7,6 +7,8 @@ import {
   decodeBounded,
   encodeBounded,
   required,
+  validateFixedBytes,
+  validateLengthRange,
   validateRepeatedFieldLimits,
   validateUint64,
   validateVersion,
@@ -14,8 +16,12 @@ import {
 import {
   CollaborationPolicyBundleSchema,
   CollaborationPolicyEffect,
+  CollaborationPolicyResponseOutcome,
   type CollaborationPolicyBundle,
   type CollaborationPolicyLimits,
+  type CollaborationPolicyProposal,
+  type CollaborationPolicyResponse,
+  type CollaborationPolicyRevocation,
   type CollaborationPolicyStatement,
 } from './generated/konclave/protocol/v1/collaboration_policy_pb.js';
 import { protocolErrorCodes, ProtocolValidationError } from './error.js';
@@ -107,6 +113,91 @@ export function deriveCollaborationPolicyDigest(value: CollaborationPolicyBundle
   return Uint8Array.from(hash.digest());
 }
 
+/**
+ * Verifies a collaboration-policy proposal and decodes its canonical bundle.
+ *
+ * @throws {ProtocolValidationError} When proposal metadata is invalid, the bundle is
+ * malformed or noncanonical, or its digest does not match.
+ */
+export function verifyCollaborationPolicyProposal(
+  proposal: CollaborationPolicyProposal,
+): CollaborationPolicyBundle {
+  validateCollaborationPolicyProposal(proposal);
+  const bundle = decodeCollaborationPolicyBundle(proposal.canonicalBundle);
+  const actualDigest = deriveCollaborationPolicyDigest(bundle);
+  if (!bytesEqual(actualDigest, required(proposal.policyDigest, 'policy_digest').value)) {
+    throw new ProtocolValidationError(
+      protocolErrorCodes.invalidCollaborationPolicyDigest,
+      'collaboration policy digest does not match the proposed bundle',
+    );
+  }
+  return bundle;
+}
+
+/**
+ * Validates one collaboration-policy proposal envelope.
+ *
+ * @throws {ProtocolValidationError} When an identifier, digest, or bundle violates
+ * the protocol v1 contract.
+ */
+export function validateCollaborationPolicyProposal(value: CollaborationPolicyProposal): void {
+  validateFixedBytes(
+    required(value.proposalId, 'collaboration_policy_proposal.proposal_id').value,
+    16,
+    'collaboration_policy_proposal_id',
+  );
+  validatePolicyDigest(
+    required(value.policyDigest, 'collaboration_policy_proposal.policy_digest').value,
+  );
+  validateLengthRange(
+    value.canonicalBundle.byteLength,
+    1,
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+    'collaboration_policy_bundle',
+  );
+  if (value.replacesPolicyDigest !== undefined) {
+    validatePolicyDigest(value.replacesPolicyDigest.value);
+  }
+}
+
+/**
+ * Validates one collaboration-policy proposal response.
+ *
+ * @throws {ProtocolValidationError} When its proposal identity, digest, or outcome
+ * violates the protocol v1 contract.
+ */
+export function validateCollaborationPolicyResponse(value: CollaborationPolicyResponse): void {
+  validateFixedBytes(
+    required(value.proposalId, 'collaboration_policy_response.proposal_id').value,
+    16,
+    'collaboration_policy_proposal_id',
+  );
+  validatePolicyDigest(
+    required(value.policyDigest, 'collaboration_policy_response.policy_digest').value,
+  );
+  if (
+    value.outcome !== CollaborationPolicyResponseOutcome.ACCEPTED &&
+    value.outcome !== CollaborationPolicyResponseOutcome.REJECTED
+  ) {
+    throw new ProtocolValidationError(
+      protocolErrorCodes.unsupportedEnum,
+      'collaboration_policy_response_outcome is unsupported',
+    );
+  }
+}
+
+/**
+ * Validates one collaboration-policy revocation.
+ *
+ * @throws {ProtocolValidationError} When its policy digest violates the protocol v1
+ * contract.
+ */
+export function validateCollaborationPolicyRevocation(value: CollaborationPolicyRevocation): void {
+  validatePolicyDigest(
+    required(value.policyDigest, 'collaboration_policy_revocation.policy_digest').value,
+  );
+}
+
 function validateCollaborationPolicyBundle(value: CollaborationPolicyBundle): void {
   validateVersion(value.version, contract);
   validateCanonicalIdentifier(
@@ -124,6 +215,10 @@ function validateCollaborationPolicyBundle(value: CollaborationPolicyBundle): vo
   validateSortedStatements(value.statements);
   validateSortedHarnessClaims(value.requiredHarnessClaims);
   validateLimits(required(value.limits, 'collaboration_policy.limits'));
+}
+
+function validatePolicyDigest(value: Uint8Array): void {
+  validateFixedBytes(value, 32, 'collaboration_policy_digest');
 }
 
 function canonicalizeCollaborationPolicyBundle(

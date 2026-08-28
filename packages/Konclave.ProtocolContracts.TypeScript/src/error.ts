@@ -12,6 +12,7 @@ export const protocolErrorCodes = {
   duplicateIdentifier: 'duplicate_identifier',
   nonCanonicalEncoding: 'non_canonical_encoding',
   nonCanonicalValue: 'non_canonical_value',
+  invalidCollaborationPolicyDigest: 'invalid_collaboration_policy_digest',
   missingAdministrator: 'missing_administrator',
   mismatchedInvitedDevice: 'mismatched_invited_device',
   mismatchedInvitedConversation: 'mismatched_invited_conversation',
