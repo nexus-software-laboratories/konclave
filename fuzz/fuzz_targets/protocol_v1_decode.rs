@@ -3,8 +3,8 @@
 use KonclaveClientLibrary::PairingCapability;
 use KonclaveCryptographicCore::{DeviceIdentity, MlsApplicationMessage, MlsCommit, MlsWelcome};
 use KonclaveProtocolContracts::v1::{
-    decode_acknowledge_request, decode_application_message, decode_conversation_state,
-    decode_collaboration_policy_bundle, decode_device_credential_binding, decode_invitation,
+    decode_acknowledge_request, decode_application_message, decode_collaboration_policy_bundle,
+    decode_conversation_state, decode_device_credential_binding, decode_invitation,
     decode_join_proof, decode_membership_change, decode_pairing_control, decode_pairing_envelope,
     decode_pairing_invitation, decode_pairing_offer, decode_pairing_welcome,
     decode_relay_enrollment_request, decode_relay_enrollment_response, decode_relay_envelope,
