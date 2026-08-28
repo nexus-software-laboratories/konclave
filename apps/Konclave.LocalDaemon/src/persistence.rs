@@ -10884,6 +10884,8 @@ mod tests {
 
     use super::*;
 
+    type CollaborationPolicyExchangeRow = (i64, Option<Vec<u8>>, Vec<u8>, Option<i64>);
+
     fn sealer() -> SecretSealer {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap()
     }
@@ -15444,7 +15446,7 @@ mod tests {
             .complete_inbox(fixture.conversation_id, 3)
             .unwrap();
 
-        let rows: Vec<(i64, Option<Vec<u8>>, Vec<u8>, Option<i64>)> = {
+        let rows: Vec<CollaborationPolicyExchangeRow> = {
             let connection = fixture.store.lock().unwrap();
             let mut statement = connection
                 .prepare(
