@@ -54,6 +54,14 @@ export interface DeliveredEvent {
   readonly payload: DeliveredPayload;
 }
 
+export interface CollaborationTurnAuthorization {
+  readonly conversation: string;
+  readonly policyDigest: string;
+  readonly policyName: string;
+  readonly guidance?: string;
+  readonly turnToken: string;
+}
+
 export type AdapterRequest =
   | {
       readonly kind: 'wait-and-claim';

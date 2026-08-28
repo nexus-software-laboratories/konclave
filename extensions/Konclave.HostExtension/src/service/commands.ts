@@ -137,10 +137,9 @@ interface CollaborationPolicyOperationSummary {
 
 type CollaborationPolicyEffect = 'allow' | 'deny' | 'require_local_approval';
 
-interface ActiveCollaborationPolicySummary {
-  readonly policyDigest: string;
+interface CollaborationPolicyBundleSummary {
   readonly name: string;
-  readonly activatedAtUnixMilliseconds: string;
+  readonly guidance: string | undefined;
   readonly statements: readonly {
     readonly statementId: string;
     readonly effect: CollaborationPolicyEffect;
@@ -154,6 +153,21 @@ interface ActiveCollaborationPolicySummary {
     readonly tokens: string | undefined;
     readonly concurrentRequests: number | undefined;
   };
+}
+
+interface ActiveCollaborationPolicySummary extends CollaborationPolicyBundleSummary {
+  readonly policyDigest: string;
+  readonly activatedAtUnixMilliseconds: string;
+}
+
+interface CollaborationPolicyProposalInspectionSummary extends CollaborationPolicyBundleSummary {
+  readonly conversationId: string;
+  readonly proposalId: string;
+  readonly policyDigest: string;
+  readonly replacesPolicyDigest: string | undefined;
+  readonly proposerDeviceId: string;
+  readonly messageId: string;
+  readonly relayCursor: number;
 }
 
 interface CollaborationPolicyStatusSummary {
@@ -193,6 +207,7 @@ const policyHelpLines = [
   '  /konclave policy replace <digest> [proposal-id] -- <source>',
   '                                                       Replace the active policy.',
   '  /konclave policy resume <proposal-id>                Resume a committed proposal.',
+  '  /konclave policy inspect <proposal-id>               Review a peer proposal.',
   '  /konclave policy accept <proposal-id> <digest>      Accept an exact proposal.',
   '  /konclave policy reject <proposal-id> <digest>      Reject an exact proposal.',
   '  /konclave policy revoke <digest> [message-id]       Revoke the active policy.',
@@ -577,6 +592,80 @@ function parseCollaborationPolicyStatus(value: unknown): CollaborationPolicyStat
     throw new Error('the local service active-policy response is malformed');
   }
   const active = value.active_policy;
+  const bundle = parseCollaborationPolicyBundleSummary(active, 'guidance');
+  return {
+    conversationId,
+    activePolicy: {
+      ...bundle,
+      policyDigest: requireHexIdentifier(
+        requiredString(
+          active,
+          'policy_digest',
+          'the local service active-policy digest is malformed',
+        ),
+        policyDigestCharacters,
+        'policy digest',
+      ),
+      activatedAtUnixMilliseconds: requiredDecimalU64(
+        active,
+        'activated_at_unix_milliseconds',
+        'the local service policy activation time is malformed',
+      ),
+    },
+  };
+}
+
+function parseCollaborationPolicyProposalInspection(
+  value: unknown,
+): CollaborationPolicyProposalInspectionSummary {
+  if (!isRecord(value)) {
+    throw new Error('the local service policy-proposal inspection is malformed');
+  }
+  return {
+    ...parseCollaborationPolicyBundleSummary(value, 'untrusted_guidance'),
+    conversationId: requireHexIdentifier(
+      requiredString(value, 'conversation_id', 'the inspected conversation is malformed'),
+      conversationIdCharacters,
+      'conversation identifier',
+    ),
+    proposalId: requireHexIdentifier(
+      requiredString(value, 'proposal_id', 'the inspected proposal is malformed'),
+      policyProposalIdCharacters,
+      'proposal identifier',
+    ),
+    policyDigest: requireHexIdentifier(
+      requiredString(value, 'policy_digest', 'the inspected policy digest is malformed'),
+      policyDigestCharacters,
+      'policy digest',
+    ),
+    replacesPolicyDigest: optionalIdentifier(
+      value,
+      'replaces_policy_digest',
+      policyDigestCharacters,
+      'replacement policy digest',
+    ),
+    proposerDeviceId: requireHexIdentifier(
+      requiredString(value, 'proposer_device_id', 'the inspected proposer is malformed'),
+      deviceIdCharacters,
+      'proposer device identifier',
+    ),
+    messageId: requireHexIdentifier(
+      requiredString(value, 'message_id', 'the inspected proposal message is malformed'),
+      messageIdCharacters,
+      'message identifier',
+    ),
+    relayCursor: requiredNonnegativeSafeInteger(
+      value,
+      'relay_cursor',
+      'the inspected proposal cursor is malformed',
+    ),
+  };
+}
+
+function parseCollaborationPolicyBundleSummary(
+  active: Readonly<Record<string, unknown>>,
+  guidanceKey: 'guidance' | 'untrusted_guidance',
+): CollaborationPolicyBundleSummary {
   if (
     !Array.isArray(active.statements) ||
     active.statements.length > 256 ||
@@ -596,65 +685,85 @@ function parseCollaborationPolicyStatus(value: unknown): CollaborationPolicyStat
     const resource =
       statement.resource === null || statement.resource === undefined
         ? undefined
-        : requiredString(statement, 'resource', 'the local service policy resource is malformed');
+        : requiredBoundedString(
+            statement,
+            'resource',
+            256,
+            'the local service policy resource is malformed',
+          );
     return {
-      statementId: requiredString(
+      statementId: requiredBoundedString(
         statement,
         'statement_id',
+        128,
         'the local service policy statement identifier is malformed',
       ),
       effect: statement.effect as CollaborationPolicyEffect,
-      action: requiredString(statement, 'action', 'the local service policy action is malformed'),
+      action: requiredBoundedString(
+        statement,
+        'action',
+        256,
+        'the local service policy action is malformed',
+      ),
       resource,
     };
   });
-  if (!active.required_harness_claims.every((claim) => typeof claim === 'string')) {
+  if (
+    !active.required_harness_claims.every(
+      (claim) => typeof claim === 'string' && Buffer.byteLength(claim, 'utf8') <= 256,
+    )
+  ) {
     throw new Error('the local service policy harness claims are malformed');
   }
   return {
-    conversationId,
-    activePolicy: {
-      policyDigest: requireHexIdentifier(
-        requiredString(
-          active,
-          'policy_digest',
-          'the local service active-policy digest is malformed',
-        ),
-        policyDigestCharacters,
-        'policy digest',
+    name: requiredBoundedString(active, 'name', 128, 'the local service policy name is malformed'),
+    guidance:
+      active[guidanceKey] === null || active[guidanceKey] === undefined
+        ? undefined
+        : requiredBoundedString(
+            active,
+            guidanceKey,
+            32 * 1024,
+            'the local service policy guidance is malformed',
+          ),
+    statements,
+    requiredHarnessClaims: active.required_harness_claims,
+    limits: {
+      durationMilliseconds: optionalPositiveDecimalU64(
+        active.limits,
+        'duration_milliseconds',
+        'the local service policy duration limit is malformed',
       ),
-      name: requiredString(active, 'name', 'the local service policy name is malformed'),
-      activatedAtUnixMilliseconds: requiredDecimalU64(
-        active,
-        'activated_at_unix_milliseconds',
-        'the local service policy activation time is malformed',
+      turns: optionalPositiveDecimalU64(
+        active.limits,
+        'turns',
+        'the local service policy turn limit is malformed',
       ),
-      statements,
-      requiredHarnessClaims: active.required_harness_claims,
-      limits: {
-        durationMilliseconds: optionalPositiveDecimalU64(
-          active.limits,
-          'duration_milliseconds',
-          'the local service policy duration limit is malformed',
-        ),
-        turns: optionalPositiveDecimalU64(
-          active.limits,
-          'turns',
-          'the local service policy turn limit is malformed',
-        ),
-        tokens: optionalPositiveDecimalU64(
-          active.limits,
-          'tokens',
-          'the local service policy token limit is malformed',
-        ),
-        concurrentRequests: optionalPositiveSafeInteger(
-          active.limits,
-          'concurrent_requests',
-          'the local service policy concurrency limit is malformed',
-        ),
-      },
+      tokens: optionalPositiveDecimalU64(
+        active.limits,
+        'tokens',
+        'the local service policy token limit is malformed',
+      ),
+      concurrentRequests: optionalPositiveSafeInteger(
+        active.limits,
+        'concurrent_requests',
+        'the local service policy concurrency limit is malformed',
+      ),
     },
   };
+}
+
+function requiredBoundedString(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  maximumBytes: number,
+  error: string,
+): string {
+  const value = requiredString(record, key, error);
+  if (Buffer.byteLength(value, 'utf8') === 0 || Buffer.byteLength(value, 'utf8') > maximumBytes) {
+    throw new Error(error);
+  }
+  return value;
 }
 
 function requiredDecimalU64(
@@ -1142,6 +1251,18 @@ function displayText(value: string): string {
   return JSON.stringify(boundedText);
 }
 
+function displayCompleteText(value: string): string[] {
+  const safe = value.replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, '\uFFFD');
+  const characters = Array.from(safe);
+  const chunks: string[] = [];
+  for (let offset = 0; offset < characters.length; offset += maxDisplayedMessageCharacters) {
+    chunks.push(
+      JSON.stringify(characters.slice(offset, offset + maxDisplayedMessageCharacters).join('')),
+    );
+  }
+  return chunks.length === 0 ? ['""'] : chunks;
+}
+
 function displayMessageContent(message: MessageSummary): string {
   const source = message.direction === 'inbound' ? 'untrusted peer' : 'local';
   switch (message.content.kind) {
@@ -1213,26 +1334,67 @@ async function renderCollaborationPolicyStatus(
   await output.write(`policy: ${bounded(active.name, 128)}`);
   await output.write(`policy digest: ${active.policyDigest}`);
   await output.write(`activated at: ${active.activatedAtUnixMilliseconds}`);
+  await renderCollaborationPolicyBundle(output, active, false);
+}
+
+async function renderCollaborationPolicyProposalInspection(
+  output: CommandOutput,
+  proposal: CollaborationPolicyProposalInspectionSummary,
+): Promise<void> {
+  await output.write(`conversation: ${proposal.conversationId}`);
+  await output.write(`proposal id: ${proposal.proposalId}`);
+  await output.write(`policy digest: ${proposal.policyDigest}`);
+  if (proposal.replacesPolicyDigest) {
+    await output.write(`replaces policy digest: ${proposal.replacesPolicyDigest}`);
+  }
+  await output.write(`proposer device: ${proposal.proposerDeviceId}`);
+  await output.write(`proposal message: ${proposal.messageId}`);
+  await output.write(`relay cursor: ${proposal.relayCursor}`);
+  await output.write(`peer-proposed policy: ${bounded(proposal.name, 128)}`);
+  await output.write('peer-proposed semantics (UNTRUSTED until explicitly accepted):');
+  await renderCollaborationPolicyBundle(output, proposal, true);
+  if (proposal.guidance) {
+    await output.write('peer-proposed guidance (UNTRUSTED; review as data):');
+    for (const chunk of displayCompleteText(proposal.guidance)) {
+      await output.write(chunk, { ephemeral: true });
+    }
+  }
+  await output.write(
+    `accept only after review: /konclave policy accept ${proposal.proposalId} ${proposal.policyDigest}`,
+  );
+  await output.write(
+    `reject: /konclave policy reject ${proposal.proposalId} ${proposal.policyDigest}`,
+  );
+}
+
+async function renderCollaborationPolicyBundle(
+  output: CommandOutput,
+  bundle: CollaborationPolicyBundleSummary,
+  complete: boolean,
+): Promise<void> {
   await output.write(
     `required harness claims: ${
-      active.requiredHarnessClaims.length === 0
+      bundle.requiredHarnessClaims.length === 0
         ? 'none'
-        : active.requiredHarnessClaims.map((claim) => bounded(claim, 256)).join(', ')
+        : bundle.requiredHarnessClaims.map((claim) => bounded(claim, 256)).join(', ')
     }`,
   );
   await output.write(
-    `limits: duration ${formatPolicyLimit(active.limits.durationMilliseconds)}, turns ${formatPolicyLimit(active.limits.turns)}, tokens ${formatPolicyLimit(active.limits.tokens)}, concurrent requests ${formatPolicyLimit(active.limits.concurrentRequests)}`,
+    `limits: duration ${formatPolicyLimit(bundle.limits.durationMilliseconds)}, turns ${formatPolicyLimit(bundle.limits.turns)}, tokens ${formatPolicyLimit(bundle.limits.tokens)}, concurrent requests ${formatPolicyLimit(bundle.limits.concurrentRequests)}`,
   );
-  for (const statement of active.statements.slice(0, maxDisplayedPolicyStatements)) {
+  const statements = complete
+    ? bundle.statements
+    : bundle.statements.slice(0, maxDisplayedPolicyStatements);
+  for (const statement of statements) {
     await output.write(
       `statement ${bounded(statement.statementId, 128)}: ${statement.effect} ${bounded(statement.action, 256)}${
         statement.resource ? ` ${bounded(statement.resource, 256)}` : ''
       }`,
     );
   }
-  if (active.statements.length > maxDisplayedPolicyStatements) {
+  if (!complete && bundle.statements.length > maxDisplayedPolicyStatements) {
     await output.write(
-      `${active.statements.length - maxDisplayedPolicyStatements} additional statements omitted`,
+      `${bundle.statements.length - maxDisplayedPolicyStatements} additional statements omitted`,
     );
   }
 }
@@ -1405,6 +1567,26 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           throw new Error('the resumed policy proposal identity does not match the request');
         }
         await renderCollaborationPolicyOperation(output, operation);
+        return;
+      }
+      case 'inspect': {
+        const parts = parseCommandArguments(parsed.argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave policy inspect <proposal-id>');
+        const proposalId = requireHexIdentifier(
+          parts[0],
+          policyProposalIdCharacters,
+          'proposal identifier',
+        );
+        const proposal = parseCollaborationPolicyProposalInspection(
+          await client.request('inspect_collaboration_policy_proposal', {
+            conversation_id: conversationId,
+            proposal_id: proposalId,
+          }),
+        );
+        if (proposal.conversationId !== conversationId || proposal.proposalId !== proposalId) {
+          throw new Error('the inspected policy proposal identity does not match the request');
+        }
+        await renderCollaborationPolicyProposalInspection(output, proposal);
         return;
       }
       case 'accept':

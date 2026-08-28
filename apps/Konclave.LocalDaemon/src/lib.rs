@@ -4,6 +4,7 @@ mod activity;
 mod adapter;
 #[allow(dead_code)]
 mod application;
+mod clock;
 #[allow(dead_code)]
 mod conversation;
 #[allow(dead_code)]

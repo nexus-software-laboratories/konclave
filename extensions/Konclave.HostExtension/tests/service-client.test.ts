@@ -11,6 +11,7 @@ import {
   LocalServiceError,
   LocalServiceProtocolError,
   LocalServiceUpgradeRequiredError,
+  isDeliveryLaneOperation,
   type LocalServiceClientOptions,
 } from '../src/service/client.js';
 import { FrameError, FrameReader, writeFrame } from '../src/service/framing.js';
@@ -748,6 +749,13 @@ describe('shared local service client', () => {
 
     client.close();
     await service.close();
+  });
+
+  it('routes turn authorization with delivery while action checks stay interactive', () => {
+    expect(isDeliveryLaneOperation('delivery.claim')).toBe(true);
+    expect(isDeliveryLaneOperation('collaboration.turn.authorize')).toBe(true);
+    expect(isDeliveryLaneOperation('collaboration.action.evaluate')).toBe(false);
+    expect(isDeliveryLaneOperation('get_identity')).toBe(false);
   });
 
   it('surfaces finite service failures without treating them as protocol text', async () => {

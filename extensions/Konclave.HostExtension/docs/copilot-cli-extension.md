@@ -5,7 +5,7 @@
 The generated extension is a thin Node.js process that joins the foreground Copilot
 CLI session with `@github/copilot-sdk/extension`. It registers:
 
-- the 22 bounded Konclave agent tools as native SDK handlers;
+- the bounded Konclave agent tools as native SDK handlers;
 - one deterministic `/konclave` command surface;
 - automatic delivery through the existing bounded coalescing and wake policy;
 - no MCP server, child command, or per-session daemon; and
@@ -82,6 +82,7 @@ not persist those sensitive values as command output.
 /konclave policy propose [proposal-id] -- <relative-source>
 /konclave policy replace <digest> [proposal-id] -- <relative-source>
 /konclave policy resume <proposal-id>
+/konclave policy inspect <proposal-id>
 /konclave policy accept <proposal-id> <digest>
 /konclave policy reject <proposal-id> <digest>
 /konclave policy revoke <digest> [message-id]
@@ -122,13 +123,15 @@ policy operation. A generated proposal identifier is displayed with a source-ind
 `resume` command before submission; resume reconstructs the exact canonical bundle
 from the daemon's terminal journal, so editing the source requires a new proposal
 identifier. Revocation displays an exact retry command. `accept` and `reject` require
-the complete proposal identifier and digest; `status` returns bounded active metadata
-but not guidance or canonical source content. JSON `u64` values are returned as
-canonical decimal strings so JavaScript never truncates a valid policy limit.
+the complete proposal identifier and digest. `inspect` renders the authenticated
+proposal metadata and peer-proposed guidance as explicitly untrusted ephemeral data
+before displaying exact accept and reject commands. `status` returns bounded active
+metadata but not guidance or canonical source content. JSON `u64` values are returned
+as canonical decimal strings so JavaScript never truncates a valid policy limit.
 
-Automatic policy-proposal delivery now shows complete identifiers plus the exact
-local review command. It remains inside the untrusted collaborator fence and does not
-activate policy or instruct the model to accept it.
+Automatic policy-proposal delivery shows the complete proposal identifier plus the
+exact local `inspect` command. It remains inside the untrusted collaborator fence and
+does not activate policy or instruct the model to accept it.
 
 Ephemeral SDK logs remain visible to the terminal and in-memory session consumers;
 they are not a confidentiality boundary. Pairing capabilities are protected by their
@@ -150,6 +153,49 @@ extension reuses the established delivery coordinator to:
 - enforce global and per-conversation wake budgets;
 - acknowledge only after the harness accepts a synthetic turn; and
 - release or reclaim work after rejection, disconnect, or restart.
+
+When a conversation has a locally active collaboration policy, the delivery client
+asks the shared service to authorize `conversation.reply` before injecting the
+synthetic turn. The service requires an authenticated Copilot grant, the profile's
+live single-consumer delivery lease, the exact active digest, all bundle-required
+harness claims, and a positive evaluator result. Inactive, denied,
+approval-required, malformed, or unavailable authorization preserves the original
+notification-only prompt.
+
+An authorized prompt places locally accepted policy identity and optional guidance
+outside the collaborator fence, then keeps every peer message inside the same
+untrusted markers. It authorizes evaluating that data under the local policy; it
+never reclassifies peer text as user or developer authority. The prompt requires any
+collaborator response to use `send_message` for the exact conversation rather than
+merely describing a reply locally.
+
+The gate is prepared before enqueue but becomes active only when the session observes
+the exact synthetic prompt carrying a fresh extension-generated turn token. Any
+ordinary user prompt clears the pending gate. This prevents an enqueue race from
+applying collaboration restrictions or authority to a foreground user turn. If the
+already-enqueued token-bearing collaboration prompt arrives after that clearance,
+the extension recognizes its trusted header and denies every tool for that delayed
+turn instead of running it without the policy gate.
+
+The Copilot pre-tool hook remains active only until that synthetic turn returns to
+idle. The initial paved control maps only Konclave's `send_message` tool to
+`conversation.reply`, verifies the exact conversation and message arguments, and
+requires a one-use daemon authorization. Consuming that authorization routes into
+the sender-counter and outbox reservation transaction, which verifies the exact
+active digest, delivery consumer, and bounded expiry before preparing the send.
+Every workspace, shell, web, MCP, and subagent tool denies. Those tools execute
+outside the daemon and cannot be advertised as enforced until they have an atomic
+authorization boundary. Policy approval also denies in this initial path because the
+SDK's hook `ask` result can replace rather than compose with native permissions.
+
+The initial paved integration proves `harness.session-identity`,
+`harness.pre-tool-policy-gate`, `harness.native-permission-intersection`, and
+`harness.single-delivery-consumer`. One delivery consumer plus one outstanding
+synthetic turn enforces collaboration concurrency conservatively at one. Finite
+duration is enforced from the sealed activation time. Finite turn and token limits
+deny autonomous turns until durable accounting is implemented; they are never
+silently treated as enforced. Explicitly unlimited turn and token values remain
+supported.
 
 ## Build and package contract
 

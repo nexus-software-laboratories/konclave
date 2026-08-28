@@ -237,16 +237,21 @@ binding side effect, so a peer cannot grant itself local authority by proposing 
 accepting policy content. Explicit local proposal, acceptance, rejection, and
 revocation operations use a sealed terminal journal and atomically mutate local
 bindings before their outbound notification can be submitted. Deterministic
-effective-policy evaluation is implemented as a pure domain boundary. Durable usage
-reservation and harness-driven activity enforcement remain unimplemented, so peer
-text retains the existing explicit-send behavior.
+effective-policy evaluation is implemented as a pure domain boundary. The paved
+Copilot integration now authorizes idle collaboration turns and gates their tools
+through the active digest while preserving native permissions. Finite turn and token
+policies deny this autonomous path until durable accounting exists. Unsupported and
+generic harnesses retain explicit-send behavior.
 
 Shared-local-service automatic delivery exposes only typed policy-exchange
-identifiers, digests, replacement intent, and response state. It does not project
-canonical bundle content or model guidance into the harness turn. The notification
-remains inside the untrusted collaborator fence and states that proposal receipt did
-not activate local authority. The legacy binary adapter receives only a bounded
-daemon-authored non-authorizing notice, preserving its closed v1 event grammar.
+identifiers, digests, replacement intent, and response state for exchange
+notifications. Those notifications do not project canonical bundle content or model
+guidance, remain inside the untrusted collaborator fence, and state that proposal
+receipt did not activate local authority. For application text under an already
+active local policy, the service may return that locally accepted policy's bounded
+guidance to the paved Copilot adapter, which places it outside the peer-content fence.
+The legacy binary adapter receives only a bounded daemon-authored non-authorizing
+notice, preserving its closed v1 event grammar.
 
 ### Version integrity
 
@@ -286,19 +291,25 @@ the mutually supported maximum.
 | Delivery cursor or lease tampering | Sealed profile-global event state, consumer-bound lease identifiers and generations, checked expiry, idempotent acknowledgment, and stale-ack rejection |
 | Adapter crash before harness delivery | Pending or expired claim is reclaimed without advancing adapter acknowledgment |
 | Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
-| Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, no automatic tool execution, and explicit send operations |
+| Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, and no automatic tool execution unless an exact locally activated policy and paved harness gate authorize the action |
 | Collaboration-policy bundle ambiguity | Canonical bounded encoding, duplicate rejection, exact re-encoding checks, and a domain-separated content digest |
 | Collaboration-policy proposal substitution | Fixed-width proposal identity, complete bounded canonical bundle, exact digest verification, and responses bound to both proposal identifier and digest |
 | Collaboration-policy exchange-index substitution | Foreign-key every allowlisted index row to sealed history, seal each row's exact metadata, commit row count/backfill completion in separate profile-bound sealed state, verify cursors against sealed delivery evidence, insert atomically with cursor completion, and re-derive typed metadata from sealed history at startup |
 | Remote policy activation | Exchange messages have no binding side effect; only a separately authorized local service operation may activate or remove local authority |
 | Policy broadening during evaluation | Exact-target base matching, deny-over-approval-over-allow precedence, positive local-authority and harness-control intersections, deny-only local restrictions, and fail-closed missing evidence |
 | Policy-limit overflow or approval bypass | Checked usage-plus-cost arithmetic, explicit unlimited values, fresh local approval that satisfies only approval requirements, and no approval override for denial, authority, evidence, or limit failures |
+| Peer request becomes local authority | Keep peer text inside immutable untrusted markers and place only locally activated policy identity and guidance outside; policy authorizes evaluation of data without changing its trust class |
+| Copilot tool escapes collaboration policy | Keep a turn-scoped pre-tool gate, support only the daemon-owned `send_message` action, bind a one-use authorization to exact arguments, active digest, live delivery consumer, and bounded expiry, verify those conditions in the send reservation, and deny external, unknown, approval-required, or cross-conversation tools |
+| Collaboration gate leaks into a user turn | Prepare with a fresh local turn token, activate only on the matching observed synthetic prompt, clear pending state on every other user prompt, deny every tool if a delayed token-bearing prompt arrives after that clearance, and clear active state on idle or disposal |
+| External work outlives the policy gate | Do not register workspace, shell, web, MCP, subagent, or delegation controls until each paved integration can prove atomic effect and descendant lifecycle enforcement |
+| Unsupported harness accounting claim | Require the live single-consumer delivery lease for paved autonomy, enforce duration and one outstanding turn, and deny finite turn or token policies until durable accounting exists |
 | Contradictory local policy responses | Derive one stable response message identifier per conversation, device, and proposal, then bind its one terminal outcome in a sealed local-operation record |
 | Partial local policy exchange operation | Commit the terminal local-operation record and binding mutation in one transaction before submission; retain the owned serialization guard through blocking work; preserve the source proposal identifier; retry returns historical mutation state and reconciles the stable outbox message |
 | Policy-operation journal erasure or schema downgrade | Create the initial sealed journal state atomically with schema adoption, authenticate the adopted schema floor inside the sealed device identity, and reject null state or a plaintext version below that floor |
 | Policy response identifier preemption | Reserve the application identifier in the terminal-operation transaction, reject pre-existing history or outbox records before authority mutation, reject later inbound collisions, and require outbound content to reproduce the sealed operation |
 | Paved policy-source path escape or replacement | Accept only an explicit relative path whose physical target remains under the current workspace, require a regular bounded UTF-8 file, compare file-descriptor identity and metadata before and after the read, re-resolve the final path, and compile the transferred source through the shared strict Rust compiler |
 | Mutable-source proposal retry | Recover by stable proposal identifier from the sealed terminal operation and content-addressed bundle rather than rereading the source path; an edited source requires a new identifier |
+| Blind trust in peer-proposed policy guidance | Provide an explicit inspection operation that renders authenticated proposal semantics and labels guidance as untrusted before a separate exact-digest acceptance |
 | Repeated revocation after reactivation | Require a caller-stable revocation message identifier so a later activation cycle can emit a distinct revocation while retries remain idempotent |
 | Collaboration-policy persistence tampering | Sealed canonical bundle and binding records, profile/conversation/digest context binding, startup verification, hard capacity, and fail-closed binding deletion |
 | Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |

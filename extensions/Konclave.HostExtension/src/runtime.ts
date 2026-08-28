@@ -2,11 +2,13 @@ import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { JoinSessionConfig as CopilotJoinSessionConfig } from '@github/copilot-sdk/extension';
+import type { SessionHooks } from '@github/copilot-sdk';
 
 import { createDeliveryCoordinator, startDeliveryRuntime } from './adapter/runtime.js';
 import type { LocalServiceClient } from './service/client.js';
 import { createLocalServiceDeliveryChannel } from './service/delivery.js';
 import { connectInstalledService } from './service/installed.js';
+import { createCopilotPolicyGate, type CopilotPolicyGate } from './service/policy-enforcement.js';
 import {
   createKonclaveCommands,
   type CommandOutput,
@@ -32,6 +34,12 @@ export interface PromptMessage {
 export interface AssistantMessageEvent {
   data: {
     messageId: string;
+  };
+}
+
+export interface UserMessageEvent {
+  data: {
+    content: string;
   };
 }
 
@@ -103,7 +111,7 @@ export interface TimerController {
 export type JoinSessionConfig = CopilotJoinSessionConfig & {
   tools: RegisteredTool[];
   commands: RegisteredCommand[];
-  hooks: Record<string, never>;
+  hooks: SessionHooks;
   /**
    * Kept empty on purpose.
    *
@@ -272,8 +280,9 @@ export async function bootExtension(
     const profile = deriveProfileId(environment);
     client = await connect(environment, runtimeModuleDir, profile, platform);
     const connectedClient = client;
+    const policyGate = createCopilotPolicyGate(connectedClient);
     const session = await options.joinSession(
-      createExtensionJoinConfig(connectedClient, commandOutput),
+      createExtensionJoinConfig(connectedClient, commandOutput, policyGate.hooks),
     );
     joinedSession = session;
     const controller = attachExtension(
@@ -281,12 +290,16 @@ export async function bootExtension(
       options.diagnostics,
       options.processController,
       options.timers,
+      policyGate,
     );
     const deliveryChannel = createLocalServiceDeliveryChannel(connectedClient);
     const coordinator = createDeliveryCoordinator({
       channel: deliveryChannel,
       session,
       diagnostics: options.diagnostics,
+      authorizeTurn: (events) => policyGate.authorizeTurn(events),
+      activateAuthorizedTurn: (authorization) => policyGate.activate(authorization),
+      clearAuthorizedTurn: () => policyGate.clear(),
     });
     const deliveryRuntime = startDeliveryRuntime({
       channel: deliveryChannel,
@@ -332,11 +345,12 @@ export function deriveProfileId(environment: Readonly<Record<string, string | un
 export function createExtensionJoinConfig(
   client: LocalServiceClient,
   output: CommandOutput,
+  hooks: SessionHooks = {},
 ): JoinSessionConfig {
   return {
     tools: createKonclaveTools({ client }),
     commands: createKonclaveCommands({ client, output }),
-    hooks: {},
+    hooks,
     mcpServers: {},
   };
 }
@@ -346,6 +360,7 @@ function attachExtension(
   diagnostics: Diagnostics,
   processController: ProcessController,
   timers = defaultTimers,
+  policyGate?: CopilotPolicyGate,
 ): ExtensionController {
   const state = createExtensionState();
   const pendingTimers = new Set<TimerHandle>();
@@ -408,6 +423,7 @@ function attachExtension(
     }
 
     disposed = true;
+    policyGate?.clear();
     delivery = null;
     while (deliveryDisposals.length > 0) {
       deliveryDisposals.pop()?.();
@@ -475,7 +491,11 @@ function attachExtension(
   };
 
   unsubscriptions.push(
-    session.on('user.message', () => {
+    session.on('user.message', (event) => {
+      const userEvent = event as UserMessageEvent;
+      policyGate?.observePrompt(
+        typeof userEvent.data?.content === 'string' ? userEvent.data.content : '',
+      );
       markActive();
     }),
   );

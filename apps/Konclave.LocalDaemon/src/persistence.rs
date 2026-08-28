@@ -34,6 +34,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::clock::{SystemUnixClock, UnixClock};
+
 mod collaboration_policy_exchange;
 mod collaboration_policy_operation;
 pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
@@ -151,6 +153,24 @@ pub(crate) struct ActiveCollaborationPolicy {
     bundle: CollaborationPolicyBundle,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CollaborationActionAuthorization {
+    pub(crate) policy_digest: CollaborationPolicyDigest,
+    pub(crate) consumer_id: AdapterConsumerId,
+    pub(crate) not_after_unix_milliseconds: u64,
+}
+
+enum OutboundApplicationPolicy<'a> {
+    Unrestricted,
+    PolicyOperation {
+        content: &'a ApplicationContent,
+        reply_to: Option<MessageId>,
+    },
+    CollaborationAction {
+        authorization: CollaborationActionAuthorization,
+    },
+}
+
 impl ActiveCollaborationPolicy {
     #[must_use]
     pub(crate) const fn digest(&self) -> CollaborationPolicyDigest {
@@ -266,6 +286,23 @@ impl LockedProfile {
         self,
         sealer: SecretSealer,
     ) -> Result<ProfileStore, ProfileStoreError> {
+        self.open_store_inner(sealer, Arc::new(SystemUnixClock))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_store_with_clock(
+        self,
+        sealer: SecretSealer,
+        clock: Arc<dyn UnixClock>,
+    ) -> Result<ProfileStore, ProfileStoreError> {
+        self.open_store_inner(sealer, clock)
+    }
+
+    fn open_store_inner(
+        self,
+        sealer: SecretSealer,
+        clock: Arc<dyn UnixClock>,
+    ) -> Result<ProfileStore, ProfileStoreError> {
         let connection =
             Connection::open(self.profile_database_path()).map_err(|_| ProfileStoreError::Io)?;
         let source_version: u32 = connection
@@ -305,6 +342,7 @@ impl LockedProfile {
             connection: Mutex::new(connection),
             sealer: Arc::new(sealer),
             locked_profile: self,
+            clock,
         };
         store.initialize_collaboration_policy_operation_schema(source_version)?;
         store.active_conversation_id()?;
@@ -325,6 +363,7 @@ pub(crate) struct ProfileStore {
     connection: Mutex<Connection>,
     sealer: Arc<SecretSealer>,
     locked_profile: LockedProfile,
+    clock: Arc<dyn UnixClock>,
 }
 
 impl ProfileStore {
@@ -1669,6 +1708,53 @@ impl ProfileStore {
             self.prune_terminal_remote_events_in(connection, excess.min(MAX_REMOTE_EVENT_BATCH))?;
         }
         Ok(())
+    }
+
+    /// Reports whether one consumer identifier currently owns the live delivery lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or integrity error when retained lease metadata is malformed.
+    pub(crate) fn adapter_consumer_is_active(
+        &self,
+        consumer_id: AdapterConsumerId,
+        now_unix_milliseconds: u64,
+    ) -> Result<bool, ProfileStoreError> {
+        Ok(self
+            .active_adapter_consumer_expiry(consumer_id)?
+            .is_some_and(|expires_at| expires_at > now_unix_milliseconds))
+    }
+
+    /// Returns the lease expiry when one consumer identifier owns delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or integrity error when retained lease metadata is malformed.
+    pub(crate) fn active_adapter_consumer_expiry(
+        &self,
+        consumer_id: AdapterConsumerId,
+    ) -> Result<Option<u64>, ProfileStoreError> {
+        let current: Option<(Option<Vec<u8>>, i64)> = self
+            .lock()?
+            .query_row(
+                "SELECT
+                    CASE WHEN length(consumer_id) = 16 THEN consumer_id END,
+                    lease_expires_at_unix_milliseconds
+                 FROM daemon_adapter_consumer
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some((active_consumer, expires_at)) = current else {
+            return Ok(None);
+        };
+        let active_consumer =
+            AdapterConsumerId::from_slice(&active_consumer.ok_or(ProfileStoreError::CorruptData)?)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+        let expires_at = from_sql_integer(expires_at)?;
+        Ok((active_consumer == consumer_id).then_some(expires_at))
     }
 
     fn finish_remote_event_claim(
@@ -3882,7 +3968,7 @@ impl ProfileStore {
             conversation_id,
             message_id,
             envelope_id,
-            None,
+            OutboundApplicationPolicy::Unrestricted,
         )
     }
 
@@ -3903,7 +3989,28 @@ impl ProfileStore {
             conversation_id,
             message_id,
             envelope_id,
-            Some((content, reply_to)),
+            OutboundApplicationPolicy::PolicyOperation { content, reply_to },
+        )
+    }
+
+    /// Reserves an outbound message only while one exact local policy remains active.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, stale-policy, conflicting, sequence, capacity, or storage
+    /// error.
+    pub(crate) fn reserve_outbound_collaboration_action(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        envelope_id: EnvelopeId,
+        authorization: CollaborationActionAuthorization,
+    ) -> Result<OutboundReservation, ProfileStoreError> {
+        self.reserve_outbound_application_with_policy(
+            conversation_id,
+            message_id,
+            envelope_id,
+            OutboundApplicationPolicy::CollaborationAction { authorization },
         )
     }
 
@@ -3912,21 +4019,42 @@ impl ProfileStore {
         conversation_id: ConversationId,
         message_id: MessageId,
         envelope_id: EnvelopeId,
-        policy_operation: Option<(&ApplicationContent, Option<MessageId>)>,
+        policy: OutboundApplicationPolicy<'_>,
     ) -> Result<OutboundReservation, ProfileStoreError> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
-        match policy_operation {
-            Some((content, reply_to)) => self.verify_outbound_collaboration_policy_operation(
-                &transaction,
-                conversation_id,
-                message_id,
-                content,
-                reply_to,
-            )?,
-            None => {
+        match policy {
+            OutboundApplicationPolicy::PolicyOperation { content, reply_to } => self
+                .verify_outbound_collaboration_policy_operation(
+                    &transaction,
+                    conversation_id,
+                    message_id,
+                    content,
+                    reply_to,
+                )?,
+            OutboundApplicationPolicy::CollaborationAction { authorization } => {
+                let now_unix_milliseconds = self.clock.now_unix_milliseconds();
+                require_active_collaboration_policy_digest(
+                    &transaction,
+                    conversation_id,
+                    authorization.policy_digest,
+                )?;
+                require_collaboration_action_lease(
+                    &transaction,
+                    authorization,
+                    now_unix_milliseconds,
+                )?;
+                if self.collaboration_policy_operation_reserves_message_id(
+                    &transaction,
+                    conversation_id,
+                    message_id,
+                )? {
+                    return Err(ProfileStoreError::DuplicateOperation);
+                }
+            }
+            OutboundApplicationPolicy::Unrestricted => {
                 if self.collaboration_policy_operation_reserves_message_id(
                     &transaction,
                     conversation_id,
@@ -8348,6 +8476,69 @@ impl ProfileStore {
     }
 }
 
+fn require_active_collaboration_policy_digest(
+    connection: &Connection,
+    conversation_id: ConversationId,
+    required_digest: CollaborationPolicyDigest,
+) -> Result<(), ProfileStoreError> {
+    let current: Option<Option<Vec<u8>>> = connection
+        .query_row(
+            "SELECT CASE WHEN length(policy_digest) = 32 THEN policy_digest END
+             FROM daemon_collaboration_policy_binding
+             WHERE conversation_id = ?1",
+            params![conversation_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ProfileStoreError::Storage)?;
+    match current {
+        Some(Some(current)) => {
+            let current = CollaborationPolicyDigest::from_slice(&current)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            if current == required_digest {
+                Ok(())
+            } else {
+                Err(ProfileStoreError::CollaborationPolicyReplacementMismatch)
+            }
+        }
+        Some(None) => Err(ProfileStoreError::CorruptData),
+        None => Err(ProfileStoreError::CollaborationPolicyReplacementMismatch),
+    }
+}
+
+fn require_collaboration_action_lease(
+    connection: &Connection,
+    authorization: CollaborationActionAuthorization,
+    now_unix_milliseconds: u64,
+) -> Result<(), ProfileStoreError> {
+    if now_unix_milliseconds >= authorization.not_after_unix_milliseconds {
+        return Err(ProfileStoreError::InvalidAdapterLease);
+    }
+    let now_unix_milliseconds =
+        i64::try_from(now_unix_milliseconds).map_err(|_| ProfileStoreError::Storage)?;
+    let active = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM daemon_adapter_consumer
+                 WHERE singleton_id = 1
+                   AND consumer_id = ?1
+                   AND lease_expires_at_unix_milliseconds > ?2
+             )",
+            params![
+                authorization.consumer_id.as_bytes().as_slice(),
+                now_unix_milliseconds
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| ProfileStoreError::Storage)?;
+    if active == 1 {
+        Ok(())
+    } else {
+        Err(ProfileStoreError::InvalidAdapterLease)
+    }
+}
+
 /// Reopened conversation inputs for the cryptographic client and relay transport.
 pub(crate) struct StoredConversation {
     pub routing_id: RoutingId,
@@ -10960,6 +11151,7 @@ fn map_history_update_error(error: rusqlite::Error) -> ProfileStoreError {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use KonclaveDomainCore::{
         ApplicationContent, ChangeMemberRole, CollaborationPolicyEffect, CollaborationPolicyLimits,
@@ -10974,6 +11166,14 @@ mod tests {
     use super::*;
 
     type CollaborationPolicyExchangeRow = (i64, Option<Vec<u8>>, Vec<u8>, Option<i64>);
+
+    struct MutableClock(AtomicU64);
+
+    impl UnixClock for MutableClock {
+        fn now_unix_milliseconds(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
 
     fn sealer() -> SecretSealer {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap()
@@ -11184,11 +11384,18 @@ mod tests {
     }
 
     fn conversation_fixture(name: &str) -> ConversationFixture {
+        conversation_fixture_with_clock(name, Arc::new(SystemUnixClock))
+    }
+
+    fn conversation_fixture_with_clock(
+        name: &str,
+        clock: Arc<dyn UnixClock>,
+    ) -> ConversationFixture {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse(name).unwrap();
         let store = LockedProfile::acquire(root.path(), profile_id.clone())
             .unwrap()
-            .open_store(sealer())
+            .open_store_with_clock(sealer(), clock)
             .unwrap();
         let identity = store.load_or_create_device().unwrap();
         let conversation_id = identity.generate_conversation_id().unwrap();
@@ -15779,6 +15986,136 @@ mod tests {
                 )
                 .err(),
             Some(ProfileStoreError::DuplicateOperation)
+        );
+    }
+
+    #[test]
+    fn collaboration_action_reservation_checks_authorization_atomically() {
+        let clock = Arc::new(MutableClock(AtomicU64::new(1_000)));
+        let fixture = conversation_fixture_with_clock("policy-action-reserve", clock.clone());
+        let canonical_bundle =
+            collaboration_policy_bytes("contract-alignment", "Align this contract.");
+        let digest = fixture
+            .store
+            .store_collaboration_policy_bundle(&canonical_bundle)
+            .unwrap();
+        fixture
+            .store
+            .activate_collaboration_policy(fixture.conversation_id, digest, 100)
+            .unwrap();
+        let consumer_id = AdapterConsumerId::from_bytes([40; AdapterConsumerId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(
+                consumer_id,
+                AdapterLeaseId::from_bytes([40; AdapterLeaseId::LENGTH]),
+                100,
+                10_000,
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .reserve_outbound_collaboration_action(
+                    fixture.conversation_id,
+                    MessageId::from_bytes([41; MessageId::LENGTH]),
+                    EnvelopeId::from_bytes([41; EnvelopeId::LENGTH]),
+                    CollaborationActionAuthorization {
+                        policy_digest: CollaborationPolicyDigest::from_bytes(
+                            [42; CollaborationPolicyDigest::LENGTH]
+                        ),
+                        consumer_id,
+                        not_after_unix_milliseconds: 9_000,
+                    },
+                )
+                .err(),
+            Some(ProfileStoreError::CollaborationPolicyReplacementMismatch)
+        );
+        let reserved = fixture
+            .store
+            .reserve_outbound_collaboration_action(
+                fixture.conversation_id,
+                MessageId::from_bytes([43; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([43; EnvelopeId::LENGTH]),
+                CollaborationActionAuthorization {
+                    policy_digest: digest,
+                    consumer_id,
+                    not_after_unix_milliseconds: 9_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(reserved.sender_counter, 1);
+        for (message_byte, authorization, now) in [
+            (
+                44,
+                CollaborationActionAuthorization {
+                    policy_digest: digest,
+                    consumer_id: AdapterConsumerId::from_bytes([41; AdapterConsumerId::LENGTH]),
+                    not_after_unix_milliseconds: 9_000,
+                },
+                1_000,
+            ),
+            (
+                45,
+                CollaborationActionAuthorization {
+                    policy_digest: digest,
+                    consumer_id,
+                    not_after_unix_milliseconds: 1_000,
+                },
+                1_000,
+            ),
+            (
+                46,
+                CollaborationActionAuthorization {
+                    policy_digest: digest,
+                    consumer_id,
+                    not_after_unix_milliseconds: 11_000,
+                },
+                10_000,
+            ),
+        ] {
+            clock.0.store(now, Ordering::SeqCst);
+            assert_eq!(
+                fixture
+                    .store
+                    .reserve_outbound_collaboration_action(
+                        fixture.conversation_id,
+                        MessageId::from_bytes([message_byte; MessageId::LENGTH]),
+                        EnvelopeId::from_bytes([message_byte; EnvelopeId::LENGTH]),
+                        authorization,
+                    )
+                    .err(),
+                Some(ProfileStoreError::InvalidAdapterLease)
+            );
+        }
+        fixture
+            .store
+            .deactivate_collaboration_policy(fixture.conversation_id)
+            .unwrap();
+        clock.0.store(1_000, Ordering::SeqCst);
+        assert_eq!(
+            fixture
+                .store
+                .reserve_outbound_collaboration_action(
+                    fixture.conversation_id,
+                    MessageId::from_bytes([47; MessageId::LENGTH]),
+                    EnvelopeId::from_bytes([47; EnvelopeId::LENGTH]),
+                    CollaborationActionAuthorization {
+                        policy_digest: digest,
+                        consumer_id,
+                        not_after_unix_milliseconds: 9_000,
+                    },
+                )
+                .err(),
+            Some(ProfileStoreError::CollaborationPolicyReplacementMismatch)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .sender_counter,
+            1
         );
     }
 

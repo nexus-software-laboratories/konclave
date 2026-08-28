@@ -287,6 +287,7 @@ describe('bootExtension', () => {
     }
     expect(joined.mcpServers).toEqual({});
     expect(joined.tools.length).toBeGreaterThan(0);
+    expect(joined.hooks.onPreToolUse).toEqual(expect.any(Function));
     expect([...sessionMock.handlers.keys()].sort()).toEqual([
       'assistant.message',
       'assistant.turn_start',

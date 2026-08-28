@@ -1,5 +1,6 @@
 import { frameDelivery } from './framing.js';
 import {
+  type CollaborationTurnAuthorization,
   maxClaimBatch,
   type AdapterChannel,
   type AdapterResponse,
@@ -53,6 +54,11 @@ export interface DeliveryCoordinatorOptions {
   readonly diagnostics: DeliveryDiagnostics;
   readonly clock?: DeliveryClock;
   readonly budget?: WakeBudget;
+  readonly authorizeTurn?: (
+    events: readonly DeliveredEvent[],
+  ) => Promise<CollaborationTurnAuthorization | null>;
+  readonly activateAuthorizedTurn?: (authorization: CollaborationTurnAuthorization) => void;
+  readonly clearAuthorizedTurn?: () => void;
 }
 
 export interface DeliveryCoordinator {
@@ -209,11 +215,30 @@ export function createDeliveryCoordinator(
 
     outstanding = true;
     turns.push({ at: now, conversation });
+    let authorization: CollaborationTurnAuthorization | null = null;
 
     try {
-      await options.session.send({ prompt: frameDelivery(batch), mode: 'enqueue' });
+      if (options.authorizeTurn) {
+        try {
+          authorization = await options.authorizeTurn(batch);
+        } catch (error) {
+          options.diagnostics.error(
+            `Konclave policy authorization failed: ${describeError(error)}`,
+          );
+        }
+      }
+      if (authorization) {
+        options.activateAuthorizedTurn?.(authorization);
+      }
+      await options.session.send({
+        prompt: frameDelivery(batch, authorization ?? undefined),
+        mode: 'enqueue',
+      });
       await settle(batch, true);
     } catch (error) {
+      if (authorization) {
+        options.clearAuthorizedTurn?.();
+      }
       options.diagnostics.error(`Konclave delivery was not accepted: ${describeError(error)}`);
       await settle(batch, false);
     } finally {
@@ -229,6 +254,7 @@ export function createDeliveryCoordinator(
       queue.push(...events);
     },
     async markIdle() {
+      options.clearAuthorizedTurn?.();
       idle = true;
       await deliver();
     },

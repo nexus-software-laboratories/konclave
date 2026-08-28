@@ -24,9 +24,9 @@ use crate::activity::ProfileActivity;
 use crate::pairing::PairingOperationState;
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
-    ConversationInsertOptions, ExpireOutboundResult, HistoryPage, InboxOperation,
-    MAX_CONVERSATION_PAGE_SIZE, MembershipInboxOperation, MembershipOutboxStatus, MessageDirection,
-    OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
+    CollaborationActionAuthorization, ConversationInsertOptions, ExpireOutboundResult, HistoryPage,
+    InboxOperation, MAX_CONVERSATION_PAGE_SIZE, MembershipInboxOperation, MembershipOutboxStatus,
+    MessageDirection, OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
     StoredMembershipTransition, StoredOutboundApplication,
 };
 
@@ -970,6 +970,7 @@ impl ConversationCoordinator {
             message_id,
             content,
             reply_to,
+            None,
             sent_at_unix_milliseconds,
             expires_at_unix_seconds,
         )
@@ -990,6 +991,7 @@ impl ConversationCoordinator {
         message_id: MessageId,
         content: ApplicationContent,
         reply_to: Option<MessageId>,
+        collaboration_action_authorization: Option<CollaborationActionAuthorization>,
         sent_at_unix_milliseconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
@@ -998,6 +1000,7 @@ impl ConversationCoordinator {
             message_id,
             content,
             reply_to,
+            collaboration_action_authorization,
             sent_at_unix_milliseconds,
             expires_at_unix_seconds,
             policy_operation: false,
@@ -1023,6 +1026,7 @@ impl ConversationCoordinator {
             message_id,
             content,
             reply_to,
+            collaboration_action_authorization: None,
             sent_at_unix_milliseconds,
             expires_at_unix_seconds,
             policy_operation: true,
@@ -1052,6 +1056,13 @@ impl ConversationCoordinator {
                     &request.content,
                     request.reply_to,
                 )?
+        } else if let Some(authorization) = request.collaboration_action_authorization {
+            self.store.reserve_outbound_collaboration_action(
+                request.conversation_id,
+                request.message_id,
+                envelope_id,
+                authorization,
+            )?
         } else {
             self.store.reserve_outbound_application(
                 request.conversation_id,
@@ -2041,6 +2052,7 @@ struct PrepareApplicationRequest {
     message_id: MessageId,
     content: ApplicationContent,
     reply_to: Option<MessageId>,
+    collaboration_action_authorization: Option<CollaborationActionAuthorization>,
     sent_at_unix_milliseconds: u64,
     expires_at_unix_seconds: u64,
     policy_operation: bool,
