@@ -20,7 +20,8 @@ evidence that implementations honor both.
 - message authenticity, ordering, acknowledgment, and replay state;
 - local daemon control and decrypted history.
 - remote-event ordering, acknowledgment, mute, and suppression state.
-- canonical collaboration-policy bundle content and digest identity.
+- canonical collaboration-policy bundle content, digest identity, and sealed local
+  conversation bindings.
 
 ## Components and trust boundaries
 
@@ -225,10 +226,11 @@ gains system, developer, permission, or tool authority. Automatic delivery is
 explicitly enabled per conversation, bounded by wake budgets, and limited to one
 outstanding synthetic turn.
 
-The current collaboration-policy bundle contract grants no authority. Its canonical
-bytes and domain-separated digest prevent ambiguous bundle identity, but local
-activation, peer proposal, and harness enforcement are not implemented yet. Peer text
-therefore retains the existing explicit-send behavior.
+The collaboration-policy bundle contract and profile binding storage do not expose a
+client activation path yet. Canonical bytes and a domain-separated digest prevent
+ambiguous bundle identity; sealed binding records detect conversation, digest,
+timestamp, and ciphertext substitution. Peer proposal and harness enforcement remain
+unimplemented, so peer text retains the existing explicit-send behavior.
 
 ### Version integrity
 
@@ -270,6 +272,7 @@ the mutually supported maximum.
 | Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
 | Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, no automatic tool execution, and explicit send operations |
 | Collaboration-policy bundle ambiguity | Canonical bounded encoding, duplicate rejection, exact re-encoding checks, and a domain-separated content digest |
+| Collaboration-policy persistence tampering | Sealed canonical bundle and binding records, profile/conversation/digest context binding, startup verification, hard capacity, and fail-closed binding deletion |
 | Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |
 | Agent-to-agent feedback loop | Authenticated sender classification, local-echo suppression, stable notification identifiers, and no send side effect from receipt alone |
 | Adapter backlog exhaustion | Hard count/byte bounds, terminal suppression while muted, replay backpressure before enabled events would be dropped, and visible degraded state |

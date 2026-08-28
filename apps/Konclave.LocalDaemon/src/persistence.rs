@@ -7,21 +7,23 @@ use std::time::Duration;
 use KonclaveClientLibrary::{RelayAccessCredential, RelayEndpoint};
 use KonclaveCryptographicCore::{
     ConversationSigningMaterial, DeviceIdentity, MlsWelcome, VerifiedDeviceCredentialBinding,
-    verify_device_credential_binding,
+    derive_collaboration_policy_digest, verify_device_credential_binding,
 };
 use KonclaveDomainCore::{
-    AdapterConsumerId, AdapterLeaseId, ApplicationMessage, ConversationId, ConversationRole,
-    ConversationState, DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
-    EnvelopeId, Invitation, InvitationId, JoinProof, MAX_MEMBERS, MembershipChange,
+    AdapterConsumerId, AdapterLeaseId, ApplicationMessage, CollaborationPolicyBundle,
+    CollaborationPolicyDigest, ConversationId, ConversationRole, ConversationState, DeliveryClass,
+    DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation, InvitationId,
+    JoinProof, MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_MEMBERS, MembershipChange,
     MembershipOperationId, MessageId, NotificationId, RelayEnvelope, RoutingId,
     StoredRelayEnvelope,
 };
 use KonclaveLocalServiceTransport::MAX_RPC_FRAME_BYTES;
 use KonclaveProtocolContracts::v1::{
-    decode_application_message, decode_conversation_state, decode_device_credential_binding,
-    decode_invitation, decode_join_proof, decode_membership_control, decode_relay_envelope,
-    encode_application_message, encode_conversation_state, encode_device_credential_binding,
-    encode_invitation, encode_join_proof, encode_relay_envelope,
+    decode_application_message, decode_collaboration_policy_bundle, decode_conversation_state,
+    decode_device_credential_binding, decode_invitation, decode_join_proof,
+    decode_membership_control, decode_relay_envelope, encode_application_message,
+    encode_collaboration_policy_bundle, encode_conversation_state,
+    encode_device_credential_binding, encode_invitation, encode_join_proof, encode_relay_envelope,
 };
 use KonclaveSecretStorage::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
@@ -37,7 +39,7 @@ pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 14;
+const PROFILE_SCHEMA_VERSION: u32 = 15;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -81,6 +83,15 @@ const MAX_LOCAL_REQUEST_OUTCOMES: usize = 256;
 const MAX_LOCAL_REQUEST_OUTCOME_BYTES: usize =
     1 + 4 + MAX_RPC_FRAME_BYTES + 4 + MAX_RPC_FRAME_BYTES;
 const MAX_SEALED_LOCAL_REQUEST_OUTCOME_BYTES: usize = MAX_LOCAL_REQUEST_OUTCOME_BYTES + 64;
+const MAX_STORED_COLLABORATION_POLICY_BUNDLES: usize = 256;
+const MAX_STORED_COLLABORATION_POLICY_BINDINGS: usize = 1_024;
+const MAX_SEALED_COLLABORATION_POLICY_BUNDLE_BYTES: usize =
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES + 64;
+const COLLABORATION_POLICY_BINDING_RECORD_VERSION: u8 = 1;
+const COLLABORATION_POLICY_BINDING_RECORD_BYTES: usize =
+    1 + ConversationId::LENGTH + CollaborationPolicyDigest::LENGTH + 8;
+const MAX_SEALED_COLLABORATION_POLICY_BINDING_BYTES: usize =
+    COLLABORATION_POLICY_BINDING_RECORD_BYTES + 64;
 const MAX_ADAPTER_LEASE_MILLISECONDS: u64 = 5 * 60 * 1_000;
 const OUTBOX_TERMINAL_REASON_EXPIRED: i64 = 1;
 const OUTBOX_TERMINAL_REASON_REMOVED: i64 = 2;
@@ -128,6 +139,30 @@ type RemoteEventStorageMetadata = (
     i64,
     i64,
 );
+
+/// One locally active collaboration policy and its immutable bundle.
+pub(crate) struct ActiveCollaborationPolicy {
+    digest: CollaborationPolicyDigest,
+    activated_at_unix_milliseconds: u64,
+    bundle: CollaborationPolicyBundle,
+}
+
+impl ActiveCollaborationPolicy {
+    #[must_use]
+    pub(crate) const fn digest(&self) -> CollaborationPolicyDigest {
+        self.digest
+    }
+
+    #[must_use]
+    pub(crate) const fn activated_at_unix_milliseconds(&self) -> u64 {
+        self.activated_at_unix_milliseconds
+    }
+
+    #[must_use]
+    pub(crate) const fn bundle(&self) -> &CollaborationPolicyBundle {
+        &self.bundle
+    }
+}
 
 /// Portable, filesystem-safe local profile identifier.
 ///
@@ -268,6 +303,7 @@ impl LockedProfile {
             locked_profile: self,
         };
         store.active_conversation_id()?;
+        store.verify_collaboration_policies()?;
         store.verify_remote_event_journal()?;
         store.verify_local_request_outcomes()?;
         store.invalidate_remote_event_leases()?;
@@ -509,6 +545,100 @@ impl ProfileStore {
         Ok(())
     }
 
+    fn verify_collaboration_policies(&self) -> Result<(), ProfileStoreError> {
+        let (digests, bindings) = {
+            let connection = self.lock()?;
+            let bundle_count: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM daemon_collaboration_policy_bundle",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            let binding_count: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM daemon_collaboration_policy_binding",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if bundle_count < 0
+                || usize::try_from(bundle_count)
+                    .ok()
+                    .is_none_or(|count| count > MAX_STORED_COLLABORATION_POLICY_BUNDLES)
+                || binding_count < 0
+                || usize::try_from(binding_count)
+                    .ok()
+                    .is_none_or(|count| count > MAX_STORED_COLLABORATION_POLICY_BINDINGS)
+            {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            let digests = {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT CASE WHEN length(policy_digest) = 32
+                            THEN policy_digest END
+                         FROM daemon_collaboration_policy_bundle
+                         ORDER BY policy_digest",
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                statement
+                    .query_map([], |row| row.get::<_, Option<Vec<u8>>>(0))
+                    .map_err(|_| ProfileStoreError::Storage)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ProfileStoreError::Storage)?
+            };
+            let bindings = {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT
+                            CASE WHEN length(conversation_id) = 32
+                                THEN conversation_id END,
+                            CASE WHEN length(policy_digest) = 32
+                                THEN policy_digest END
+                         FROM daemon_collaboration_policy_binding
+                         ORDER BY conversation_id",
+                    )
+                    .map_err(|_| ProfileStoreError::Storage)?;
+                statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, Option<Vec<u8>>>(0)?,
+                            row.get::<_, Option<Vec<u8>>>(1)?,
+                        ))
+                    })
+                    .map_err(|_| ProfileStoreError::Storage)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ProfileStoreError::Storage)?
+            };
+            (digests, bindings)
+        };
+        for digest in digests {
+            let digest = CollaborationPolicyDigest::from_slice(
+                &digest.ok_or(ProfileStoreError::CorruptData)?,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+            self.collaboration_policy_bundle(digest)?
+                .ok_or(ProfileStoreError::CorruptData)?;
+        }
+        for (conversation_id, digest) in bindings {
+            let conversation_id =
+                ConversationId::from_slice(&conversation_id.ok_or(ProfileStoreError::CorruptData)?)
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+            let digest = CollaborationPolicyDigest::from_slice(
+                &digest.ok_or(ProfileStoreError::CorruptData)?,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+            let active = self
+                .active_collaboration_policy(conversation_id)?
+                .ok_or(ProfileStoreError::CorruptData)?;
+            if active.digest() != digest {
+                return Err(ProfileStoreError::CorruptData);
+            }
+        }
+        Ok(())
+    }
+
     /// Enables or mutes automatic adapter delivery for one conversation.
     ///
     /// Muting affects future remote events only. Relay replay and sealed history
@@ -689,6 +819,340 @@ impl ProfileStore {
             )
             .map_err(|_| ProfileStoreError::Storage)?;
         Ok(())
+    }
+
+    /// Stores one canonical collaboration-policy bundle idempotently.
+    ///
+    /// The returned digest is the bundle's immutable content identity. Repeating the
+    /// same canonical bytes succeeds without replacing their sealed record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization, digest, capacity, integrity, sealing, or storage
+    /// failure.
+    pub(crate) fn store_collaboration_policy_bundle(
+        &self,
+        canonical_bytes: &[u8],
+    ) -> Result<CollaborationPolicyDigest, ProfileStoreError> {
+        let bundle = decode_collaboration_policy_bundle(canonical_bytes)
+            .map_err(|_| ProfileStoreError::Protocol)?;
+        let digest = derive_collaboration_policy_digest(&bundle)
+            .map_err(|_| ProfileStoreError::Cryptographic)?;
+        let context = collaboration_policy_bundle_context(&self.locked_profile.profile_id, digest)?;
+        let sealed = self
+            .sealer
+            .seal(&context, canonical_bytes)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let existing_length: Option<i64> = transaction
+            .query_row(
+                "SELECT length(sealed_bundle)
+                 FROM daemon_collaboration_policy_bundle
+                 WHERE policy_digest = ?1",
+                params![digest.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if let Some(length) = existing_length {
+            let length = validate_collaboration_policy_blob_length(length)?;
+            let existing: Vec<u8> = transaction
+                .query_row(
+                    "SELECT sealed_bundle
+                     FROM daemon_collaboration_policy_bundle
+                     WHERE policy_digest = ?1",
+                    params![digest.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if existing.len() != length {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            let opened = self.open_collaboration_policy_bundle(digest, existing)?;
+            return if encode_collaboration_policy_bundle(&opened)
+                .map_err(|_| ProfileStoreError::CorruptData)?
+                == canonical_bytes
+            {
+                Ok(digest)
+            } else {
+                Err(ProfileStoreError::CorruptData)
+            };
+        }
+        let count: i64 = transaction
+            .query_row(
+                "SELECT count(*) FROM daemon_collaboration_policy_bundle",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if count < 0
+            || usize::try_from(count)
+                .ok()
+                .is_none_or(|count| count >= MAX_STORED_COLLABORATION_POLICY_BUNDLES)
+        {
+            return Err(ProfileStoreError::CollaborationPolicyCapacityExceeded);
+        }
+        transaction
+            .execute(
+                "INSERT INTO daemon_collaboration_policy_bundle (
+                    policy_digest,
+                    sealed_bundle
+                 ) VALUES (?1, ?2)",
+                params![digest.as_bytes().as_slice(), sealed.as_bytes()],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(digest)
+    }
+
+    /// Opens one stored canonical collaboration-policy bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage or integrity failure when the digest, bound, ciphertext,
+    /// canonical bytes, or content identity does not validate.
+    pub(crate) fn collaboration_policy_bundle(
+        &self,
+        digest: CollaborationPolicyDigest,
+    ) -> Result<Option<CollaborationPolicyBundle>, ProfileStoreError> {
+        let connection = self.lock()?;
+        let length: Option<i64> = connection
+            .query_row(
+                "SELECT length(sealed_bundle)
+                 FROM daemon_collaboration_policy_bundle
+                 WHERE policy_digest = ?1",
+                params![digest.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some(length) = length else {
+            return Ok(None);
+        };
+        let length = validate_collaboration_policy_blob_length(length)?;
+        let sealed: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_bundle
+                 FROM daemon_collaboration_policy_bundle
+                 WHERE policy_digest = ?1",
+                params![digest.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        drop(connection);
+        if sealed.len() != length {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        self.open_collaboration_policy_bundle(digest, sealed)
+            .map(Some)
+    }
+
+    fn open_collaboration_policy_bundle(
+        &self,
+        digest: CollaborationPolicyDigest,
+        sealed: Vec<u8>,
+    ) -> Result<CollaborationPolicyBundle, ProfileStoreError> {
+        let blob = SealedBlob::from_bytes(sealed).map_err(|_| ProfileStoreError::CorruptData)?;
+        let plaintext = self
+            .sealer
+            .open(
+                &collaboration_policy_bundle_context(&self.locked_profile.profile_id, digest)?,
+                &blob,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let bundle = decode_collaboration_policy_bundle(&plaintext)
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        if derive_collaboration_policy_digest(&bundle)
+            .map_err(|_| ProfileStoreError::CorruptData)?
+            != digest
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(bundle)
+    }
+
+    /// Activates one stored policy bundle for an existing local conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing conversation or bundle, capacity, sequence, integrity,
+    /// sealing, or storage failure.
+    pub(crate) fn activate_collaboration_policy(
+        &self,
+        conversation_id: ConversationId,
+        digest: CollaborationPolicyDigest,
+        activated_at_unix_milliseconds: u64,
+    ) -> Result<(), ProfileStoreError> {
+        self.conversation_routing_id(conversation_id)?;
+        self.collaboration_policy_bundle(digest)?
+            .ok_or(ProfileStoreError::CollaborationPolicyNotFound)?;
+        let binding = encode_collaboration_policy_binding(
+            conversation_id,
+            digest,
+            activated_at_unix_milliseconds,
+        );
+        let context = collaboration_policy_binding_context(
+            &self.locked_profile.profile_id,
+            conversation_id,
+            digest,
+        )?;
+        let sealed = self
+            .sealer
+            .seal(&context, &binding)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let activated_at = to_sql_integer(activated_at_unix_milliseconds)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let existing: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM daemon_collaboration_policy_binding
+                    WHERE conversation_id = ?1
+                 )",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if !existing {
+            let count: i64 = transaction
+                .query_row(
+                    "SELECT count(*) FROM daemon_collaboration_policy_binding",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            if count < 0
+                || usize::try_from(count)
+                    .ok()
+                    .is_none_or(|count| count >= MAX_STORED_COLLABORATION_POLICY_BINDINGS)
+            {
+                return Err(ProfileStoreError::CollaborationPolicyCapacityExceeded);
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO daemon_collaboration_policy_binding (
+                    conversation_id,
+                    policy_digest,
+                    activated_at_unix_milliseconds,
+                    sealed_binding
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(conversation_id) DO UPDATE
+                 SET policy_digest = excluded.policy_digest,
+                     activated_at_unix_milliseconds =
+                        excluded.activated_at_unix_milliseconds,
+                     sealed_binding = excluded.sealed_binding",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    digest.as_bytes().as_slice(),
+                    activated_at,
+                    sealed.as_bytes()
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
+    /// Removes one conversation's local collaboration-policy authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage failure.
+    pub(crate) fn deactivate_collaboration_policy(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<bool, ProfileStoreError> {
+        self.lock()?
+            .execute(
+                "DELETE FROM daemon_collaboration_policy_binding
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+            )
+            .map(|changed| changed == 1)
+            .map_err(|_| ProfileStoreError::Storage)
+    }
+
+    /// Opens the active policy for one conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage or integrity failure when binding metadata, ciphertext, bundle,
+    /// or content identity does not validate.
+    pub(crate) fn active_collaboration_policy(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ActiveCollaborationPolicy>, ProfileStoreError> {
+        let connection = self.lock()?;
+        let metadata: Option<(Option<Vec<u8>>, i64, i64)> = connection
+            .query_row(
+                "SELECT
+                    CASE WHEN length(policy_digest) = 32 THEN policy_digest END,
+                    activated_at_unix_milliseconds,
+                    length(sealed_binding)
+                 FROM daemon_collaboration_policy_binding
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let Some((digest, activated_at, sealed_length)) = metadata else {
+            return Ok(None);
+        };
+        let digest =
+            CollaborationPolicyDigest::from_slice(&digest.ok_or(ProfileStoreError::CorruptData)?)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+        let activated_at = from_sql_integer(activated_at)?;
+        let sealed_length = validate_collaboration_policy_binding_blob_length(sealed_length)?;
+        let sealed: Vec<u8> = connection
+            .query_row(
+                "SELECT sealed_binding
+                 FROM daemon_collaboration_policy_binding
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        drop(connection);
+        match self.conversation_routing_id(conversation_id) {
+            Ok(_) => {}
+            Err(ProfileStoreError::ConversationNotFound) => {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            Err(error) => return Err(error),
+        }
+        if sealed.len() != sealed_length {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let blob = SealedBlob::from_bytes(sealed).map_err(|_| ProfileStoreError::CorruptData)?;
+        let binding = self
+            .sealer
+            .open(
+                &collaboration_policy_binding_context(
+                    &self.locked_profile.profile_id,
+                    conversation_id,
+                    digest,
+                )?,
+                &blob,
+            )
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        decode_collaboration_policy_binding(&binding, conversation_id, digest, activated_at)?;
+        let bundle = self
+            .collaboration_policy_bundle(digest)?
+            .ok_or(ProfileStoreError::CorruptData)?;
+        Ok(Some(ActiveCollaborationPolicy {
+            digest,
+            activated_at_unix_milliseconds: activated_at,
+            bundle,
+        }))
     }
 
     /// Acquires or renews the single active adapter consumer lease.
@@ -8133,6 +8597,8 @@ pub(crate) enum ProfileStoreError {
     ConversationNotFound,
     #[error("conversation data does not agree")]
     ConversationMismatch,
+    #[error("collaboration policy does not exist")]
+    CollaborationPolicyNotFound,
     #[error("conversation protocol encoding failed")]
     Protocol,
     #[error("conversation cryptographic operation failed")]
@@ -8161,6 +8627,8 @@ pub(crate) enum ProfileStoreError {
     RemoteEventCapacityExceeded,
     #[error("local pairing journal reached its active-operation limit")]
     PairingCapacityExceeded,
+    #[error("local collaboration-policy storage reached its limit")]
+    CollaborationPolicyCapacityExceeded,
     #[error("another local adapter consumer owns the profile")]
     AdapterConsumerActive,
     #[error("local adapter lease is missing, expired, or stale")]
@@ -8197,6 +8665,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
         PROFILE_SCHEMA_VERSION => return Ok(()),
+        14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
         12 => return initialize_local_request_outcome_schema(connection),
         11 => {
@@ -8454,6 +8923,38 @@ fn initialize_active_conversation_schema(connection: &Connection) -> Result<(), 
                     ON DELETE CASCADE
              );
              PRAGMA user_version = 14;
+             COMMIT;",
+        )
+        .map_err(|_| ProfileStoreError::Storage)?;
+    initialize_collaboration_policy_schema(connection)
+}
+
+fn initialize_collaboration_policy_schema(
+    connection: &Connection,
+) -> Result<(), ProfileStoreError> {
+    connection
+        .execute_batch(
+            "BEGIN;
+             CREATE TABLE daemon_collaboration_policy_bundle (
+                policy_digest BLOB PRIMARY KEY CHECK (length(policy_digest) = 32),
+                sealed_bundle BLOB NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE daemon_collaboration_policy_binding (
+                conversation_id BLOB PRIMARY KEY CHECK (length(conversation_id) = 32),
+                policy_digest BLOB NOT NULL CHECK (length(policy_digest) = 32),
+                activated_at_unix_milliseconds INTEGER NOT NULL
+                    CHECK (activated_at_unix_milliseconds >= 0),
+                sealed_binding BLOB NOT NULL,
+                FOREIGN KEY (conversation_id)
+                    REFERENCES daemon_conversation(conversation_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (policy_digest)
+                    REFERENCES daemon_collaboration_policy_bundle(policy_digest)
+                    ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE INDEX daemon_collaboration_policy_binding_digest_idx
+                ON daemon_collaboration_policy_binding(policy_digest, conversation_id);
+             PRAGMA user_version = 15;
              COMMIT;",
         )
         .map_err(|_| ProfileStoreError::Storage)
@@ -10053,6 +10554,84 @@ fn local_request_outcome_context(
     .map_err(|_| ProfileStoreError::Storage)
 }
 
+fn collaboration_policy_bundle_context(
+    profile_id: &ProfileId,
+    digest: CollaborationPolicyDigest,
+) -> Result<SecretRecordContext, ProfileStoreError> {
+    SecretRecordContext::derive(
+        SecretRecordKind::CollaborationPolicyBundle,
+        &[profile_id.as_bytes(), digest.as_bytes()],
+    )
+    .map_err(|_| ProfileStoreError::Storage)
+}
+
+fn collaboration_policy_binding_context(
+    profile_id: &ProfileId,
+    conversation_id: ConversationId,
+    digest: CollaborationPolicyDigest,
+) -> Result<SecretRecordContext, ProfileStoreError> {
+    SecretRecordContext::derive(
+        SecretRecordKind::CollaborationPolicyBinding,
+        &[
+            profile_id.as_bytes(),
+            conversation_id.as_bytes(),
+            digest.as_bytes(),
+        ],
+    )
+    .map_err(|_| ProfileStoreError::Storage)
+}
+
+fn encode_collaboration_policy_binding(
+    conversation_id: ConversationId,
+    digest: CollaborationPolicyDigest,
+    activated_at_unix_milliseconds: u64,
+) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(COLLABORATION_POLICY_BINDING_RECORD_BYTES);
+    encoded.push(COLLABORATION_POLICY_BINDING_RECORD_VERSION);
+    encoded.extend_from_slice(conversation_id.as_bytes());
+    encoded.extend_from_slice(digest.as_bytes());
+    encoded.extend_from_slice(&activated_at_unix_milliseconds.to_be_bytes());
+    encoded
+}
+
+fn decode_collaboration_policy_binding(
+    bytes: &[u8],
+    expected_conversation_id: ConversationId,
+    expected_digest: CollaborationPolicyDigest,
+    expected_activated_at_unix_milliseconds: u64,
+) -> Result<(), ProfileStoreError> {
+    if bytes.len() != COLLABORATION_POLICY_BINDING_RECORD_BYTES
+        || bytes[0] != COLLABORATION_POLICY_BINDING_RECORD_VERSION
+        || bytes[1..1 + ConversationId::LENGTH] != expected_conversation_id.as_bytes()[..]
+        || bytes[1 + ConversationId::LENGTH
+            ..1 + ConversationId::LENGTH + CollaborationPolicyDigest::LENGTH]
+            != expected_digest.as_bytes()[..]
+        || bytes[1 + ConversationId::LENGTH + CollaborationPolicyDigest::LENGTH..]
+            != expected_activated_at_unix_milliseconds.to_be_bytes()
+    {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(())
+}
+
+fn validate_collaboration_policy_blob_length(length: i64) -> Result<usize, ProfileStoreError> {
+    let length = usize::try_from(length).map_err(|_| ProfileStoreError::CorruptData)?;
+    if length == 0 || length > MAX_SEALED_COLLABORATION_POLICY_BUNDLE_BYTES {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(length)
+}
+
+fn validate_collaboration_policy_binding_blob_length(
+    length: i64,
+) -> Result<usize, ProfileStoreError> {
+    let length = usize::try_from(length).map_err(|_| ProfileStoreError::CorruptData)?;
+    if length == 0 || length > MAX_SEALED_COLLABORATION_POLICY_BINDING_BYTES {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(length)
+}
+
 fn remote_event_head_record_context(
     profile_id: &ProfileId,
 ) -> Result<SecretRecordContext, ProfileStoreError> {
@@ -10271,7 +10850,8 @@ mod tests {
     use std::process::Command;
 
     use KonclaveDomainCore::{
-        ApplicationContent, ChangeMemberRole, ConversationRole, MAX_TEXT_BODY_BYTES, Member,
+        ApplicationContent, ChangeMemberRole, CollaborationPolicyEffect, CollaborationPolicyLimits,
+        CollaborationPolicyStatement, ConversationRole, MAX_TEXT_BODY_BYTES, Member,
         MembershipAuthorization, MembershipChange, ProtocolVersion, RemoveMember,
     };
     use KonclaveProtocolContracts::v1::encode_membership_control;
@@ -10286,6 +10866,34 @@ mod tests {
     /// Builds a sealer whose wrapping key is distinct per test key byte.
     fn sealer_with_key(key: u8) -> SecretSealer {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([key; 32])).unwrap()
+    }
+
+    fn collaboration_policy_bytes(name: &str, guidance: &str) -> Vec<u8> {
+        let bundle = CollaborationPolicyBundle::new(
+            ProtocolVersion::application_v1(),
+            name,
+            Some(guidance.to_string()),
+            vec![
+                CollaborationPolicyStatement::new(
+                    "reply",
+                    CollaborationPolicyEffect::Allow,
+                    "conversation.reply",
+                    None,
+                )
+                .unwrap(),
+                CollaborationPolicyStatement::new(
+                    "workspace-write",
+                    CollaborationPolicyEffect::RequireLocalApproval,
+                    "workspace.modify",
+                    Some("workspace.current".to_string()),
+                )
+                .unwrap(),
+            ],
+            vec!["copilot.session-identity".to_string()],
+            CollaborationPolicyLimits::new(None, None, Some(10_000), Some(1)).unwrap(),
+        )
+        .unwrap();
+        encode_collaboration_policy_bundle(&bundle).unwrap()
     }
 
     #[test]
@@ -10931,7 +11539,9 @@ mod tests {
     fn downgrade_v10_to_v9(connection: &Connection) {
         connection
             .execute_batch(
-                "DROP TABLE daemon_active_conversation;
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 DROP TABLE daemon_active_conversation;
                  DROP TABLE daemon_local_request_outcome;
                  DROP TABLE daemon_relay_enrollment;
                  DROP TABLE daemon_pairing;
@@ -13197,6 +13807,79 @@ mod tests {
     }
 
     #[test]
+    fn profile_schema_migrates_v14_to_current_transactionally() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::parse("collaboration-policy-migration").unwrap();
+        let database_path = {
+            let store = LockedProfile::acquire(root.path(), profile_id.clone())
+                .unwrap()
+                .open_store(sealer())
+                .unwrap();
+            store.locked_profile.profile_database_path()
+        };
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let version: u32 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert!(
+            store
+                .active_collaboration_policy(ConversationId::from_bytes([1; 32]))
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 CREATE TABLE daemon_collaboration_policy_bundle (sentinel INTEGER);
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let sentinel_columns: i64 = connection
+            .query_row(
+                "SELECT count(*)
+                 FROM pragma_table_info('daemon_collaboration_policy_bundle')
+                 WHERE name = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 14);
+        assert_eq!(sentinel_columns, 1);
+    }
+
+    #[test]
     fn profile_schema_migrates_v13_to_current_transactionally() {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse("active-conversation-migration").unwrap();
@@ -13210,7 +13893,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_active_conversation;
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 DROP TABLE daemon_active_conversation;
                  PRAGMA user_version = 13;",
             )
             .unwrap();
@@ -13232,7 +13917,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_active_conversation;
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 DROP TABLE daemon_active_conversation;
                  CREATE TABLE daemon_active_conversation (sentinel INTEGER);
                  PRAGMA user_version = 13;",
             )
@@ -13275,7 +13962,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_active_conversation;
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 DROP TABLE daemon_active_conversation;
                  DROP TABLE daemon_local_request_outcome;
                  PRAGMA user_version = 12;",
             )
@@ -13297,7 +13986,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_active_conversation;
+                "DROP TABLE daemon_collaboration_policy_binding;
+                 DROP TABLE daemon_collaboration_policy_bundle;
+                 DROP TABLE daemon_active_conversation;
                  DROP TABLE daemon_local_request_outcome;
                  CREATE TABLE daemon_local_request_outcome (sentinel INTEGER);
                  PRAGMA user_version = 12;",
@@ -13353,6 +14044,8 @@ mod tests {
             "daemon_relay_enrollment",
             "daemon_local_request_outcome",
             "daemon_active_conversation",
+            "daemon_collaboration_policy_bundle",
+            "daemon_collaboration_policy_binding",
         ] {
             let exists: i64 = store
                 .lock()
@@ -14320,6 +15013,268 @@ mod tests {
         assert_eq!(
             store.load_conversation(conversation_id).err(),
             Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn collaboration_policy_bundles_and_bindings_are_sealed_durable_and_revocable() {
+        let fixture = conversation_fixture("collaboration-policy-storage");
+        let first_bytes =
+            collaboration_policy_bytes("contract-alignment", "Align the first contract.");
+        let second_bytes =
+            collaboration_policy_bytes("contract-alignment", "Align the second contract.");
+        let first_digest = fixture
+            .store
+            .store_collaboration_policy_bundle(&first_bytes)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .store_collaboration_policy_bundle(&first_bytes)
+                .unwrap(),
+            first_digest
+        );
+        let second_digest = fixture
+            .store
+            .store_collaboration_policy_bundle(&second_bytes)
+            .unwrap();
+        assert_ne!(first_digest, second_digest);
+        assert_eq!(
+            fixture
+                .store
+                .collaboration_policy_bundle(first_digest)
+                .unwrap()
+                .unwrap()
+                .name(),
+            "contract-alignment"
+        );
+        assert_eq!(
+            fixture.store.activate_collaboration_policy(
+                fixture.conversation_id,
+                CollaborationPolicyDigest::from_bytes([99; 32]),
+                100,
+            ),
+            Err(ProfileStoreError::CollaborationPolicyNotFound)
+        );
+        assert_eq!(
+            fixture.store.activate_collaboration_policy(
+                ConversationId::from_bytes([98; 32]),
+                first_digest,
+                100,
+            ),
+            Err(ProfileStoreError::ConversationNotFound)
+        );
+
+        fixture
+            .store
+            .activate_collaboration_policy(fixture.conversation_id, first_digest, 123)
+            .unwrap();
+        let active = fixture
+            .store
+            .active_collaboration_policy(fixture.conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.digest(), first_digest);
+        assert_eq!(active.activated_at_unix_milliseconds(), 123);
+        assert_eq!(
+            active.bundle().guidance(),
+            Some("Align the first contract.")
+        );
+
+        let (sealed_bundle, sealed_binding): (Vec<u8>, Vec<u8>) = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bundle.sealed_bundle, binding.sealed_binding
+                 FROM daemon_collaboration_policy_binding AS binding
+                 JOIN daemon_collaboration_policy_bundle AS bundle
+                    ON bundle.policy_digest = binding.policy_digest
+                 WHERE binding.conversation_id = ?1",
+                params![fixture.conversation_id.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            !sealed_bundle
+                .windows(first_bytes.len())
+                .any(|window| window == first_bytes)
+        );
+        let binding_plaintext =
+            encode_collaboration_policy_binding(fixture.conversation_id, first_digest, 123);
+        assert!(
+            !sealed_binding
+                .windows(binding_plaintext.len())
+                .any(|window| window == binding_plaintext)
+        );
+
+        fixture
+            .store
+            .activate_collaboration_policy(fixture.conversation_id, second_digest, 124)
+            .unwrap();
+        let profile_id = fixture.profile_id.clone();
+        let conversation_id = fixture.conversation_id;
+        let root = fixture.root;
+        drop(fixture.store);
+        let reopened = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let active = reopened
+            .active_collaboration_policy(conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.digest(), second_digest);
+        assert_eq!(active.activated_at_unix_milliseconds(), 124);
+        assert_eq!(
+            active.bundle().guidance(),
+            Some("Align the second contract.")
+        );
+        assert!(
+            reopened
+                .deactivate_collaboration_policy(conversation_id)
+                .unwrap()
+        );
+        assert!(
+            !reopened
+                .deactivate_collaboration_policy(conversation_id)
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .active_collaboration_policy(conversation_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn collaboration_policy_tampering_fails_closed() {
+        let bundle_fixture = conversation_fixture("policy-bundle-tamper");
+        let bytes = collaboration_policy_bytes("contract-alignment", "Sensitive guidance.");
+        let digest = bundle_fixture
+            .store
+            .store_collaboration_policy_bundle(&bytes)
+            .unwrap();
+        bundle_fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_collaboration_policy_bundle
+                 SET sealed_bundle = zeroblob(64)
+                 WHERE policy_digest = ?1",
+                params![digest.as_bytes().as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            bundle_fixture
+                .store
+                .collaboration_policy_bundle(digest)
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+        let bundle_profile_id = bundle_fixture.profile_id.clone();
+        let bundle_root = bundle_fixture.root;
+        drop(bundle_fixture.store);
+        assert_eq!(
+            LockedProfile::acquire(bundle_root.path(), bundle_profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+
+        let binding_fixture = conversation_fixture("policy-binding-tamper");
+        let first_digest = binding_fixture
+            .store
+            .store_collaboration_policy_bundle(&collaboration_policy_bytes(
+                "first-policy",
+                "First.",
+            ))
+            .unwrap();
+        let second_digest = binding_fixture
+            .store
+            .store_collaboration_policy_bundle(&collaboration_policy_bytes(
+                "second-policy",
+                "Second.",
+            ))
+            .unwrap();
+        binding_fixture
+            .store
+            .activate_collaboration_policy(binding_fixture.conversation_id, first_digest, 123)
+            .unwrap();
+        binding_fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_collaboration_policy_binding
+                 SET policy_digest = ?1
+                 WHERE conversation_id = ?2",
+                params![
+                    second_digest.as_bytes().as_slice(),
+                    binding_fixture.conversation_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            binding_fixture
+                .store
+                .active_collaboration_policy(binding_fixture.conversation_id)
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+
+        binding_fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM daemon_collaboration_policy_binding
+                 WHERE conversation_id = ?1",
+                params![binding_fixture.conversation_id.as_bytes().as_slice()],
+            )
+            .unwrap();
+        assert!(
+            binding_fixture
+                .store
+                .active_collaboration_policy(binding_fixture.conversation_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn collaboration_policy_bundle_capacity_denies_without_eviction() {
+        let fixture = conversation_fixture("policy-capacity");
+        let mut first_digest = None;
+        for index in 0..MAX_STORED_COLLABORATION_POLICY_BUNDLES {
+            let bytes = collaboration_policy_bytes(
+                &format!("policy-{index}"),
+                &format!("Guidance {index}."),
+            );
+            let digest = fixture
+                .store
+                .store_collaboration_policy_bundle(&bytes)
+                .unwrap();
+            first_digest.get_or_insert(digest);
+        }
+        assert_eq!(
+            fixture
+                .store
+                .store_collaboration_policy_bundle(&collaboration_policy_bytes(
+                    "overflow-policy",
+                    "Overflow.",
+                )),
+            Err(ProfileStoreError::CollaborationPolicyCapacityExceeded)
+        );
+        assert!(
+            fixture
+                .store
+                .collaboration_policy_bundle(first_digest.unwrap())
+                .unwrap()
+                .is_some()
         );
     }
 

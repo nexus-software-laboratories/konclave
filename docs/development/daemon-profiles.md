@@ -32,7 +32,7 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 
 ## Profile store
 
-Schema version 14 stores:
+Schema version 15 stores:
 
 - one profile row with a sealed device root and optional sealed relay credential;
 - normalized non-secret relay endpoint;
@@ -66,7 +66,10 @@ Schema version 14 stores:
 - durable pairing and relay-enrollment journals;
 - bounded sealed outcomes for exact local-service request reconciliation; and
 - one authenticated, foreign-key-backed active conversation selection for
-  restart-safe implicit sends.
+  restart-safe implicit sends;
+- bounded sealed canonical collaboration-policy bundles addressed by their public
+  content digest; and
+- one sealed local collaboration-policy binding per conversation.
 
 Version 1 through 8 schema changes use explicit transactions. Before changing a v2
 schema, startup rejects ready or accepted outbound rows whose plaintext cannot be
@@ -90,6 +93,14 @@ Migration does not infer an active conversation from recency or relay progress:
 profiles upgraded from version 13 remain unselected until an operator selects one.
 Each schema change runs in its own transaction and leaves the preceding version
 authoritative if it fails.
+
+Version 15 adds an empty collaboration-policy bundle catalog and binding table in one
+transaction. Migration never infers, imports, or activates a policy. Bundle guidance,
+statements, claims, and limits remain sealed; only the content digest, conversation
+identifier, activation timestamp, and bounded ciphertext lengths are queryable.
+Startup opens and verifies every retained bundle and binding before accepting the
+profile. Deleting a binding removes authority, while substituting its digest,
+conversation, timestamp, or ciphertext fails authentication.
 
 Remote application and membership completion create one context-bound event before
 advancing the relay cursor. Local echoes do not create events. Muted conversations

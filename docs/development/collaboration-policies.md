@@ -104,10 +104,21 @@ schemas and editable examples, but repository presence never activates them.
 
 ## Binding and exchange boundary
 
-A future profile-schema migration will store sealed policy bundles and local
-conversation bindings. Only a locally authorized operation may activate, replace, or
-revoke a binding. A peer proposal carries a digest and, when needed, the complete
-bounded bundle; receiving it does not activate it.
+Profile schema version 15 stores bounded canonical bundles as profile-global sealed
+records keyed by their public content digest. Repeating identical bytes is
+idempotent; a same-digest ciphertext conflict, malformed canonical bundle, or content
+identity mismatch fails closed. Bundle count is bounded without evicting an existing
+record.
+
+One sealed binding may select a stored digest for each existing local conversation.
+The binding authenticates the profile, conversation, digest, and activation timestamp.
+It survives restart, replacement is atomic, and deletion immediately removes local
+authority. Schema migration creates no bundle or binding, and no client or agent
+activation operation is exposed in this persistence-only slice.
+
+A future peer proposal carries a digest and, when needed, the complete bounded bundle;
+receiving it does not activate it. Only a locally authorized operation may call the
+binding boundary added here.
 
 Participants acknowledge the same base digest independently. Each endpoint then
 intersects that bundle with local user authority, harness-proven controls, and local
