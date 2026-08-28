@@ -193,6 +193,9 @@ The terminal operation also reserves its application message identifier. A
 pre-existing history or outbox record prevents the authority mutation, inbound
 content cannot claim an identifier after it is reserved, and outbound preparation
 must reproduce the sealed operation's exact policy content and reply target.
+When the relay returns that local operation as an own echo, only the already-recorded
+outbound envelope may attach its durable cursor; a different envelope or message
+remains a conflicting attempt to claim the reserved identifier.
 
 The paved Copilot command surface exposes these operations under `/konclave policy`.
 It can compile and propose one explicitly selected strict-JSON source, replace an

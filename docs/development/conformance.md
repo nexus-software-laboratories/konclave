@@ -126,6 +126,8 @@ crash or excessive-allocation case becomes a permanent regression input.
 - exchange and activate one exact policy digest across packaged clients, restart the
   shared service, and complete two proof-authorized reply actions without bypassing
   native permission or delivery-lease checks;
+- reconcile an exact policy-operation own echo against its reserved outbound message
+  while continuing to reject different local or remote content under that identifier;
 - prove tools expose no raw identity key, MLS secret, or storage wrapping key;
 - test cancellation, backpressure, bounded watches, reconnect, and daemon restart;
 - verify CLI and Copilot adapters produce the same domain outcomes through the public
