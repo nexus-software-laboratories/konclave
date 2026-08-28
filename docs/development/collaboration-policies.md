@@ -141,6 +141,69 @@ restart-safe pass over completed sealed history so policy messages accepted by a
 earlier reader are not lost from the index; it creates no binding. Local
 decision/status operations remain a subsequent service layer over this journal.
 
+## Explicit local exchange operations
+
+The local service exposes four write operations:
+
+- `propose_collaboration_policy` accepts one caller-stable proposal identifier, one
+  complete canonical bundle, and optional replacement digest;
+- `accept_collaboration_policy` targets an exact received proposal identifier and
+  digest, activates it locally, and reports acceptance;
+- `reject_collaboration_policy` targets the same exact identity, reports rejection,
+  and never changes local authority; and
+- `revoke_collaboration_policy` targets one digest, removes matching local authority,
+  and announces the revocation.
+
+Proposing is an explicit local activation decision, not authority derived from peer
+content. Before any exchange message is submitted, schema version 17 atomically
+commits one terminal local-operation record with its binding activation, replacement,
+rejection, or revocation. The record stores the historical `binding_changed` result.
+Response records also preserve the exact source proposal message identifier needed
+to reconstruct their reply after a crash, independently of later conflicting peer
+assertions. The sealed zero-count state is created in the same migration transaction
+as the schema-17 tables and version update. That transaction also advances the
+authenticated schema floor inside an existing sealed device identity; a plaintext
+schema downgrade cannot recreate an erased journal. A missing or null state on a
+version-17 profile is corruption, not a bootstrap signal.
+If submission is interrupted before or after outbox preparation, retry returns that
+record without reapplying authority and resumes the same stable message.
+
+This ordering is conservative: proposal and acceptance authority is local before its
+notification, and revocation removes local authority before attempting delivery. A
+generic ready-outbox retry can submit only a policy message whose local operation was
+already committed. Retrying an older proposal or acceptance after a later revocation
+cannot resurrect the binding.
+
+Replacement is exact and fail-closed. A new proposal without `replaces_policy_digest`
+can activate only when no policy is active. A replacement must name the currently
+active digest. Retrying an operation whose proposed digest is already active is
+idempotent and does not rewrite its activation timestamp only when the exact terminal
+operation already exists. A new operation targeting the active digest must still
+carry replacement intent naming that digest.
+
+Konclave derives application message identifiers with separate proposal and response
+SHA-256 domains over fixed-width conversation, local device, and proposal inputs,
+retaining the first 16 bytes. Acceptance and rejection for one proposal deliberately
+share a message identifier, so contradictory terminal responses conflict in the
+local-operation journal before either can become a second valid statement. The caller
+supplies the stable proposal identifier.
+
+The terminal operation also reserves its application message identifier. A
+pre-existing history or outbox record prevents the authority mutation, inbound
+content cannot claim an identifier after it is reserved, and outbound preparation
+must reproduce the sealed operation's exact policy content and reply target.
+
+Revocation accepts a caller-stable 16-byte message identifier. A retry reuses it and
+returns the historical revocation result; reactivating and later revoking the same
+digest uses a new identifier so peers receive the later revocation as a distinct
+event.
+
+Accept and reject resolve the proposal through the sealed exchange journal. A
+conflicted proposal identifier, wrong expected digest, locally authored proposal, or
+replacement mismatch fails before the operation reports success. Remote response and
+revocation messages remain authenticated information; receiving either never mutates
+the local binding.
+
 Protocol-v1 application content now carries three typed exchange messages:
 
 - a proposal identifier, claimed policy digest, complete canonical bundle, and

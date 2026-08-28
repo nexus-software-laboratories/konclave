@@ -4,8 +4,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use KonclaveClientLibrary::RelayClient;
 use KonclaveCryptographicCore::MlsWelcome;
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, DeviceId,
-    Ed25519PublicKey, EnvelopeId, MAX_RELAY_PAYLOAD_BYTES, MessageId, PairingId, RoutingId,
+    ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
+    CollaborationPolicyProposalId, CollaborationPolicyResponseOutcome, ConversationId,
+    ConversationRole, DeviceId, Ed25519PublicKey, EnvelopeId,
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MessageId, PairingId,
+    RoutingId,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, decode_invitation, decode_join_proof,
@@ -22,7 +25,11 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use zeroize::Zeroize;
 
-use crate::application::{ApplicationService, SendApplicationRequest, SentMembership};
+use crate::application::{
+    ApplicationService, ApplicationServiceError, ProposeCollaborationPolicyRequest,
+    RespondCollaborationPolicyRequest, RevokeCollaborationPolicyRequest, SendApplicationRequest,
+    SentCollaborationPolicyExchange, SentMembership,
+};
 use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
     ProcessedApplication,
@@ -30,7 +37,7 @@ use crate::conversation::{
 use crate::health::DeliveryHealth;
 use crate::pairing_service::{MAX_AUTHORIZATION_WINDOW_SECONDS, PairingService, PairingStatus};
 use crate::persistence::pairing::{PairingPhase, PairingRole};
-use crate::persistence::{MessageDirection, StoredHistoryMessage};
+use crate::persistence::{MessageDirection, ProfileStoreError, StoredHistoryMessage};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
@@ -60,6 +67,28 @@ struct SendMessageRequest {
     message_id: String,
     text: String,
     reply_to_message_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ProposeCollaborationPolicyToolRequest {
+    conversation_id: String,
+    proposal_id: String,
+    canonical_bundle: String,
+    replaces_policy_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RespondCollaborationPolicyToolRequest {
+    conversation_id: String,
+    proposal_id: String,
+    policy_digest: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RevokeCollaborationPolicyToolRequest {
+    conversation_id: String,
+    message_id: String,
+    policy_digest: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -198,6 +227,16 @@ struct SentMessageResult {
     message_id: String,
     sender_counter: u64,
     cursor: u64,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CollaborationPolicyOperationResult {
+    conversation_id: String,
+    proposal_id: Option<String>,
+    policy_digest: String,
+    message_id: String,
+    cursor: u64,
+    local_binding_changed: bool,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -357,6 +396,22 @@ impl StdioServer {
             "send_message" => {
                 Self::encode_json(self.send_message(Self::parse_parameters(payload)?).await?)
             }
+            "propose_collaboration_policy" => Self::encode_json(
+                self.propose_collaboration_policy(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "accept_collaboration_policy" => Self::encode_json(
+                self.accept_collaboration_policy(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "reject_collaboration_policy" => Self::encode_json(
+                self.reject_collaboration_policy(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "revoke_collaboration_policy" => Self::encode_json(
+                self.revoke_collaboration_policy(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             "read_messages" => {
                 Self::encode_json(self.read_messages(Self::parse_parameters(payload)?).await?)
             }
@@ -860,10 +915,7 @@ impl StdioServer {
         Parameters(request): Parameters<SendMessageRequest>,
     ) -> Result<Json<SentMessageResult>, String> {
         self.authorize("send_message")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let message_id = parse_message_id(&request.message_id)?;
         let reply_to = request
@@ -895,6 +947,116 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "propose_collaboration_policy",
+        description = "Propose and locally activate one exact canonical collaboration-policy bundle."
+    )]
+    async fn propose_collaboration_policy(
+        &self,
+        Parameters(request): Parameters<ProposeCollaborationPolicyToolRequest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        self.authorize("propose_collaboration_policy")?;
+        let applications = self.application_service()?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let proposal_id = parse_collaboration_policy_proposal_id(&request.proposal_id)?;
+        let canonical_bundle = decode_hex_bytes(
+            &request.canonical_bundle,
+            MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+            "invalid_collaboration_policy_bundle",
+        )?;
+        let replaces_policy_digest = request
+            .replaces_policy_digest
+            .as_deref()
+            .map(parse_collaboration_policy_digest)
+            .transpose()?;
+        let (sent_at, now, expires_at) = message_times()?;
+        let sent = applications
+            .propose_collaboration_policy(ProposeCollaborationPolicyRequest {
+                conversation_id,
+                proposal_id,
+                canonical_bundle,
+                replaces_policy_digest,
+                sent_at_unix_milliseconds: sent_at,
+                now_unix_seconds: now,
+                expires_at_unix_seconds: expires_at,
+            })
+            .await
+            .map_err(collaboration_policy_operation_error)?;
+        Ok(Json(collaboration_policy_operation_result(
+            conversation_id,
+            sent,
+        )))
+    }
+
+    #[tool(
+        name = "accept_collaboration_policy",
+        description = "Locally activate one exact received proposal and report acceptance."
+    )]
+    async fn accept_collaboration_policy(
+        &self,
+        Parameters(request): Parameters<RespondCollaborationPolicyToolRequest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        self.authorize("accept_collaboration_policy")?;
+        Ok(Json(
+            respond_collaboration_policy(
+                self.application_service()?,
+                request,
+                CollaborationPolicyResponseOutcome::Accepted,
+            )
+            .await?,
+        ))
+    }
+
+    #[tool(
+        name = "reject_collaboration_policy",
+        description = "Reject one exact received proposal without changing local authority."
+    )]
+    async fn reject_collaboration_policy(
+        &self,
+        Parameters(request): Parameters<RespondCollaborationPolicyToolRequest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        self.authorize("reject_collaboration_policy")?;
+        Ok(Json(
+            respond_collaboration_policy(
+                self.application_service()?,
+                request,
+                CollaborationPolicyResponseOutcome::Rejected,
+            )
+            .await?,
+        ))
+    }
+
+    #[tool(
+        name = "revoke_collaboration_policy",
+        description = "Remove matching local authority and report revocation using a caller-stable 16-byte message_id."
+    )]
+    async fn revoke_collaboration_policy(
+        &self,
+        Parameters(request): Parameters<RevokeCollaborationPolicyToolRequest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        self.authorize("revoke_collaboration_policy")?;
+        let applications = self.application_service()?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let message_id = parse_message_id(&request.message_id)?;
+        let policy_digest = parse_collaboration_policy_digest(&request.policy_digest)?;
+        let (sent_at, now, expires_at) = message_times()?;
+        let sent = applications
+            .revoke_collaboration_policy(RevokeCollaborationPolicyRequest {
+                conversation_id,
+                message_id,
+                policy_digest,
+                sent_at_unix_milliseconds: sent_at,
+                now_unix_seconds: now,
+                expires_at_unix_seconds: expires_at,
+            })
+            .await
+            .map_err(collaboration_policy_operation_error)?;
+        Ok(Json(collaboration_policy_operation_result(
+            conversation_id,
+            sent,
+        )))
+    }
+
+    #[tool(
         name = "add_member",
         description = "Validate a JoinProof and submit its encrypted membership Commit."
     )]
@@ -903,10 +1065,7 @@ impl StdioServer {
         Parameters(request): Parameters<AddMemberRequest>,
     ) -> Result<Json<MembershipResult>, String> {
         self.authorize("add_member")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let proof = decode_join_proof(&decode_hex_bytes(
             &request.join_proof,
@@ -934,10 +1093,7 @@ impl StdioServer {
         Parameters(request): Parameters<AcceptWelcomeRequest>,
     ) -> Result<Json<ConversationResult>, String> {
         self.authorize("accept_welcome")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let welcome = MlsWelcome::from_bytes(&decode_hex_bytes(
             &request.welcome,
@@ -961,10 +1117,7 @@ impl StdioServer {
         Parameters(request): Parameters<RemoveMemberRequest>,
     ) -> Result<Json<MembershipResult>, String> {
         self.authorize("remove_member")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let device_id = parse_device_id(&request.device_id)?;
         let now = current_unix_seconds()?;
@@ -987,10 +1140,7 @@ impl StdioServer {
         Parameters(request): Parameters<ChangeMemberRoleRequest>,
     ) -> Result<Json<MembershipResult>, String> {
         self.authorize("change_member_role")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let device_id = parse_device_id(&request.device_id)?;
         let role = parse_role(&request.role)?;
@@ -1043,10 +1193,7 @@ impl StdioServer {
         Parameters(request): Parameters<ConversationRequest>,
     ) -> Result<Json<MessageListResult>, String> {
         self.authorize("sync_messages")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let replay = applications
             .replay_once(
@@ -1075,10 +1222,7 @@ impl StdioServer {
         Parameters(request): Parameters<ConversationRequest>,
     ) -> Result<Json<MessageListResult>, String> {
         self.authorize("watch_messages")?;
-        let applications = self
-            .applications
-            .as_ref()
-            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let replay = applications
             .watch_once(conversation_id, current_unix_seconds()?)
@@ -1098,10 +1242,81 @@ impl StdioServer {
         (self.authorize)(AuthorizationContext { method }).map_err(tool_error)
     }
 
+    fn application_service(&self) -> Result<&ApplicationService<RelayClient>, String> {
+        self.applications
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())
+    }
+
     fn pairing_service(&self) -> Result<&PairingService<RelayClient>, String> {
         self.pairings
             .as_ref()
             .ok_or_else(|| "relay_not_configured".to_string())
+    }
+}
+
+async fn respond_collaboration_policy(
+    applications: &ApplicationService<RelayClient>,
+    request: RespondCollaborationPolicyToolRequest,
+    outcome: CollaborationPolicyResponseOutcome,
+) -> Result<CollaborationPolicyOperationResult, String> {
+    let conversation_id = parse_conversation_id(&request.conversation_id)?;
+    let proposal_id = parse_collaboration_policy_proposal_id(&request.proposal_id)?;
+    let policy_digest = parse_collaboration_policy_digest(&request.policy_digest)?;
+    let (sent_at, now, expires_at) = message_times()?;
+    let request = RespondCollaborationPolicyRequest {
+        conversation_id,
+        proposal_id,
+        policy_digest,
+        sent_at_unix_milliseconds: sent_at,
+        now_unix_seconds: now,
+        expires_at_unix_seconds: expires_at,
+    };
+    let sent = match outcome {
+        CollaborationPolicyResponseOutcome::Accepted => {
+            applications.accept_collaboration_policy(request).await
+        }
+        CollaborationPolicyResponseOutcome::Rejected => {
+            applications.reject_collaboration_policy(request).await
+        }
+    }
+    .map_err(collaboration_policy_operation_error)?;
+    Ok(collaboration_policy_operation_result(conversation_id, sent))
+}
+
+fn collaboration_policy_operation_result(
+    conversation_id: ConversationId,
+    sent: SentCollaborationPolicyExchange,
+) -> CollaborationPolicyOperationResult {
+    CollaborationPolicyOperationResult {
+        conversation_id: encode_hex(conversation_id.as_bytes()),
+        proposal_id: sent
+            .proposal_id
+            .map(|proposal_id| encode_hex(proposal_id.as_bytes())),
+        policy_digest: encode_hex(sent.policy_digest.as_bytes()),
+        message_id: encode_hex(sent.message_id.as_bytes()),
+        cursor: sent.cursor,
+        local_binding_changed: sent.local_binding_changed,
+    }
+}
+
+fn collaboration_policy_operation_error(error: ApplicationServiceError) -> String {
+    match error {
+        ApplicationServiceError::PolicyStorage(
+            ProfileStoreError::CollaborationPolicyProposalNotFound,
+        ) => "collaboration_policy_proposal_not_found".to_string(),
+        ApplicationServiceError::IdempotencyConflict
+        | ApplicationServiceError::LocalPolicyProposal
+        | ApplicationServiceError::PolicyProposalMismatch
+        | ApplicationServiceError::PolicyStorage(
+            ProfileStoreError::CollaborationPolicyProposalConflict
+            | ProfileStoreError::CollaborationPolicyReplacementMismatch,
+        ) => "collaboration_policy_conflict".to_string(),
+        ApplicationServiceError::PolicyStorage(
+            ProfileStoreError::CollaborationPolicyCapacityExceeded,
+        ) => "busy".to_string(),
+        ApplicationServiceError::Protocol => "invalid_collaboration_policy_bundle".to_string(),
+        other => tool_error(other),
     }
 }
 
@@ -1134,6 +1349,10 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "remove_member"
         | "change_member_role"
         | "send_message"
+        | "propose_collaboration_policy"
+        | "accept_collaboration_policy"
+        | "reject_collaboration_policy"
+        | "revoke_collaboration_policy"
         | "sync_messages"
         | "set_active_conversation"
         | "set_auto_delivery"
@@ -1212,6 +1431,20 @@ fn parse_message_id(value: &str) -> Result<MessageId, String> {
     decode_hex(value)
         .map(MessageId::from_bytes)
         .map_err(|_| "invalid_message_id".to_string())
+}
+
+fn parse_collaboration_policy_proposal_id(
+    value: &str,
+) -> Result<CollaborationPolicyProposalId, String> {
+    decode_hex(value)
+        .map(CollaborationPolicyProposalId::from_bytes)
+        .map_err(|_| "invalid_collaboration_policy_proposal_id".to_string())
+}
+
+fn parse_collaboration_policy_digest(value: &str) -> Result<CollaborationPolicyDigest, String> {
+    decode_hex(value)
+        .map(CollaborationPolicyDigest::from_bytes)
+        .map_err(|_| "invalid_collaboration_policy_digest".to_string())
 }
 
 fn parse_device_id(value: &str) -> Result<DeviceId, String> {
@@ -1539,7 +1772,9 @@ mod tests {
 
     use super::{
         AuthorizationContext, AuthorizationHook, DeliveryHealth, StdioServer,
-        ensure_stdout_safe_diagnostics, local_stdio_authorization, pairing_status_result,
+        collaboration_policy_operation_error, ensure_stdout_safe_diagnostics,
+        local_stdio_authorization, pairing_status_result, parse_collaboration_policy_digest,
+        parse_collaboration_policy_proposal_id,
     };
     use crate::conversation::ProcessedApplication;
     use crate::conversation::tests::open_coordinator;
@@ -1617,6 +1852,12 @@ mod tests {
             })
             .is_err()
         );
+        assert!(
+            read_only(AuthorizationContext {
+                method: "propose_collaboration_policy",
+            })
+            .is_err()
+        );
         let writable = local_stdio_authorization(true);
         writable(AuthorizationContext {
             method: "create_conversation",
@@ -1658,6 +1899,14 @@ mod tests {
             method: "set_active_conversation",
         })
         .unwrap();
+        for method in [
+            "propose_collaboration_policy",
+            "accept_collaboration_policy",
+            "reject_collaboration_policy",
+            "revoke_collaboration_policy",
+        ] {
+            writable(AuthorizationContext { method }).unwrap();
+        }
         assert!(writable(AuthorizationContext { method: "unknown" }).is_err());
     }
 
@@ -1691,6 +1940,26 @@ mod tests {
         let error = ensure_stdout_safe_diagnostics("stdout").unwrap_err();
         assert!(error.to_string().contains("stdout"));
         assert!(ensure_stdout_safe_diagnostics("stderr").is_ok());
+    }
+
+    #[test]
+    fn collaboration_policy_tool_values_and_failures_are_stable() {
+        assert!(parse_collaboration_policy_proposal_id(&"01".repeat(16)).is_ok());
+        assert!(parse_collaboration_policy_digest(&"02".repeat(32)).is_ok());
+        assert!(parse_collaboration_policy_proposal_id("01").is_err());
+        assert!(parse_collaboration_policy_digest("02").is_err());
+        assert_eq!(
+            collaboration_policy_operation_error(super::ApplicationServiceError::PolicyStorage(
+                super::ProfileStoreError::CollaborationPolicyProposalNotFound,
+            ),),
+            "collaboration_policy_proposal_not_found"
+        );
+        assert_eq!(
+            collaboration_policy_operation_error(super::ApplicationServiceError::PolicyStorage(
+                super::ProfileStoreError::CollaborationPolicyReplacementMismatch,
+            ),),
+            "collaboration_policy_conflict"
+        );
     }
 
     #[test]

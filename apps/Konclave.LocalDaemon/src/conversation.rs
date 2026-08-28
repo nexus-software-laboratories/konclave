@@ -993,6 +993,46 @@ impl ConversationCoordinator {
         sent_at_unix_milliseconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
+        self.prepare_application_request(PrepareApplicationRequest {
+            conversation_id,
+            message_id,
+            content,
+            reply_to,
+            sent_at_unix_milliseconds,
+            expires_at_unix_seconds,
+            policy_operation: false,
+        })
+    }
+
+    /// Encrypts a policy message whose identifier is reserved by a terminal operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile, protocol, cryptographic, reservation, or state error.
+    pub(crate) fn prepare_collaboration_policy_application_with_id(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        content: ApplicationContent,
+        reply_to: Option<MessageId>,
+        sent_at_unix_milliseconds: u64,
+        expires_at_unix_seconds: u64,
+    ) -> Result<PreparedApplication, ConversationCoordinatorError> {
+        self.prepare_application_request(PrepareApplicationRequest {
+            conversation_id,
+            message_id,
+            content,
+            reply_to,
+            sent_at_unix_milliseconds,
+            expires_at_unix_seconds,
+            policy_operation: true,
+        })
+    }
+
+    fn prepare_application_request(
+        &self,
+        request: PrepareApplicationRequest,
+    ) -> Result<PreparedApplication, ConversationCoordinatorError> {
         let _operation = self
             .operations
             .lock()
@@ -1003,15 +1043,28 @@ impl ConversationCoordinator {
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
             .generate_envelope_id()
             .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        let reservation =
+        let reservation = if request.policy_operation {
             self.store
-                .reserve_outbound_application(conversation_id, message_id, envelope_id)?;
+                .reserve_outbound_collaboration_policy_application(
+                    request.conversation_id,
+                    request.message_id,
+                    envelope_id,
+                    &request.content,
+                    request.reply_to,
+                )?
+        } else {
+            self.store.reserve_outbound_application(
+                request.conversation_id,
+                request.message_id,
+                envelope_id,
+            )?
+        };
         match self.prepare_reserved_application(
             reservation,
-            content,
-            reply_to,
-            sent_at_unix_milliseconds,
-            expires_at_unix_seconds,
+            request.content,
+            request.reply_to,
+            request.sent_at_unix_milliseconds,
+            request.expires_at_unix_seconds,
         ) {
             Ok(prepared) => Ok(prepared),
             Err(error) => {
@@ -1981,6 +2034,16 @@ pub(crate) struct PreparedApplication {
     pub(crate) conversation_id: ConversationId,
     pub(crate) message: ApplicationMessage,
     pub(crate) envelope: RelayEnvelope,
+}
+
+struct PrepareApplicationRequest {
+    conversation_id: ConversationId,
+    message_id: MessageId,
+    content: ApplicationContent,
+    reply_to: Option<MessageId>,
+    sent_at_unix_milliseconds: u64,
+    expires_at_unix_seconds: u64,
+    policy_operation: bool,
 }
 
 /// One pending MLS membership transition and its opaque relay envelope.

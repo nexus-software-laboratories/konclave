@@ -2,13 +2,21 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
-use KonclaveCryptographicCore::MlsWelcome;
-use KonclaveDomainCore::{
-    AcknowledgeRequest, ApplicationContent, ApplicationMessage, ConversationId, ConversationRole,
-    DeviceId, JoinProof, MembershipOperationId, MessageId, ReplayPage, ReplayRequest,
-    StoredRelayEnvelope,
+use KonclaveCryptographicCore::{
+    MlsWelcome, derive_collaboration_policy_digest,
+    derive_collaboration_policy_proposal_message_id,
+    derive_collaboration_policy_response_message_id,
 };
-use KonclaveProtocolContracts::v1::{decode_join_proof, encode_join_proof};
+use KonclaveDomainCore::{
+    AcknowledgeRequest, ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
+    CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
+    CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
+    ConversationRole, DeviceId, JoinProof, MembershipOperationId, MessageId, ReplayPage,
+    ReplayRequest, StoredRelayEnvelope,
+};
+use KonclaveProtocolContracts::v1::{
+    decode_collaboration_policy_bundle, decode_join_proof, encode_join_proof,
+};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -16,7 +24,10 @@ use crate::conversation::{
     AcceptedMembership, ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
     MembershipRequestState, PreparedApplication, PreparedMembership, ProcessedApplication,
 };
-use crate::persistence::{ExpireOutboundResult, HistoryPage, OutboundApplicationStatus};
+use crate::persistence::{
+    CollaborationPolicyActivationOperation, ExpireOutboundResult, HistoryPage,
+    OutboundApplicationStatus, ProfileStoreError, StoredCollaborationPolicyProposal,
+};
 
 /// Outbound application input with caller-supplied display and expiry times.
 pub(crate) struct SendApplicationRequest {
@@ -34,6 +45,42 @@ pub(crate) struct SentApplication {
     pub(crate) conversation_id: ConversationId,
     pub(crate) message: ApplicationMessage,
     pub(crate) cursor: u64,
+}
+
+pub(crate) struct ProposeCollaborationPolicyRequest {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) proposal_id: CollaborationPolicyProposalId,
+    pub(crate) canonical_bundle: Vec<u8>,
+    pub(crate) replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    pub(crate) sent_at_unix_milliseconds: u64,
+    pub(crate) now_unix_seconds: u64,
+    pub(crate) expires_at_unix_seconds: u64,
+}
+
+pub(crate) struct RespondCollaborationPolicyRequest {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) proposal_id: CollaborationPolicyProposalId,
+    pub(crate) policy_digest: CollaborationPolicyDigest,
+    pub(crate) sent_at_unix_milliseconds: u64,
+    pub(crate) now_unix_seconds: u64,
+    pub(crate) expires_at_unix_seconds: u64,
+}
+
+pub(crate) struct RevokeCollaborationPolicyRequest {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) message_id: MessageId,
+    pub(crate) policy_digest: CollaborationPolicyDigest,
+    pub(crate) sent_at_unix_milliseconds: u64,
+    pub(crate) now_unix_seconds: u64,
+    pub(crate) expires_at_unix_seconds: u64,
+}
+
+pub(crate) struct SentCollaborationPolicyExchange {
+    pub(crate) proposal_id: Option<CollaborationPolicyProposalId>,
+    pub(crate) policy_digest: CollaborationPolicyDigest,
+    pub(crate) message_id: MessageId,
+    pub(crate) cursor: u64,
+    pub(crate) local_binding_changed: bool,
 }
 
 /// One accepted membership transition and optional add-member Welcome.
@@ -61,6 +108,7 @@ pub(crate) struct ApplicationService<T> {
     conversations: ConversationCoordinator,
     transport: Arc<T>,
     submissions: Arc<tokio::sync::Mutex<()>>,
+    policy_operations: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<T> ApplicationService<T> {
@@ -81,6 +129,7 @@ impl<T> Clone for ApplicationService<T> {
             conversations: self.conversations.clone(),
             transport: Arc::clone(&self.transport),
             submissions: Arc::clone(&self.submissions),
+            policy_operations: Arc::clone(&self.policy_operations),
         }
     }
 }
@@ -100,7 +149,24 @@ where
             conversations,
             transport,
             submissions: Arc::new(tokio::sync::Mutex::new(())),
+            policy_operations: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    async fn serialized_policy_transition<R, F>(
+        &self,
+        transition: F,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, R), ApplicationServiceError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, ApplicationServiceError> + Send + 'static,
+    {
+        let policy_operation = Arc::clone(&self.policy_operations).lock_owned().await;
+        let (policy_operation, result) =
+            tokio::task::spawn_blocking(move || (policy_operation, transition()))
+                .await
+                .map_err(|_| ApplicationServiceError::Task)?;
+        Ok((policy_operation, result?))
     }
 
     /// Encrypts, journals, submits, and accepts one application message.
@@ -118,6 +184,21 @@ where
     pub(crate) async fn send(
         &self,
         request: SendApplicationRequest,
+    ) -> Result<SentApplication, ApplicationServiceError> {
+        self.send_with_policy_reservation(request, false).await
+    }
+
+    async fn send_policy_operation(
+        &self,
+        request: SendApplicationRequest,
+    ) -> Result<SentApplication, ApplicationServiceError> {
+        self.send_with_policy_reservation(request, true).await
+    }
+
+    async fn send_with_policy_reservation(
+        &self,
+        request: SendApplicationRequest,
+        policy_operation: bool,
     ) -> Result<SentApplication, ApplicationServiceError> {
         let _submission = self.submissions.lock().await;
         let conversations = self.conversations.clone();
@@ -158,19 +239,227 @@ where
         self.retry_ready_locked(request.now_unix_seconds).await?;
         let conversations = self.conversations.clone();
         let prepared = tokio::task::spawn_blocking(move || {
-            conversations.prepare_application_with_id(
-                request.conversation_id,
-                request.message_id,
-                request.content,
-                request.reply_to,
-                request.sent_at_unix_milliseconds,
-                request.expires_at_unix_seconds,
-            )
+            if policy_operation {
+                conversations.prepare_collaboration_policy_application_with_id(
+                    request.conversation_id,
+                    request.message_id,
+                    request.content,
+                    request.reply_to,
+                    request.sent_at_unix_milliseconds,
+                    request.expires_at_unix_seconds,
+                )
+            } else {
+                conversations.prepare_application_with_id(
+                    request.conversation_id,
+                    request.message_id,
+                    request.content,
+                    request.reply_to,
+                    request.sent_at_unix_milliseconds,
+                    request.expires_at_unix_seconds,
+                )
+            }
         })
         .await
         .map_err(|_| ApplicationServiceError::Task)??;
         self.submit_prepared(prepared, request.now_unix_seconds)
             .await
+    }
+
+    pub(crate) async fn propose_collaboration_policy(
+        &self,
+        request: ProposeCollaborationPolicyRequest,
+    ) -> Result<SentCollaborationPolicyExchange, ApplicationServiceError> {
+        let bundle = decode_collaboration_policy_bundle(&request.canonical_bundle)
+            .map_err(|_| ApplicationServiceError::Protocol)?;
+        let policy_digest = derive_collaboration_policy_digest(&bundle)
+            .map_err(|_| ApplicationServiceError::Protocol)?;
+        let local_device = self.conversations.device_id()?;
+        let message_id = derive_collaboration_policy_proposal_message_id(
+            request.conversation_id,
+            local_device,
+            request.proposal_id,
+        );
+        let store = self.conversations.store();
+        let canonical_bundle = request.canonical_bundle.clone();
+        let (_policy_operation, local_binding_changed) = self
+            .serialized_policy_transition(move || {
+                Ok(store.apply_collaboration_policy_activation_operation(
+                    CollaborationPolicyActivationOperation {
+                        conversation_id: request.conversation_id,
+                        message_id,
+                        proposal_id: request.proposal_id,
+                        source_proposal_message_id: None,
+                        policy_digest,
+                        replaces_policy_digest: request.replaces_policy_digest,
+                        canonical_bundle: &canonical_bundle,
+                        activated_at_unix_milliseconds: request.sent_at_unix_milliseconds,
+                        is_acceptance: false,
+                    },
+                )?)
+            })
+            .await?;
+        let proposal = CollaborationPolicyProposal::new(
+            request.proposal_id,
+            policy_digest,
+            request.canonical_bundle,
+            request.replaces_policy_digest,
+        )
+        .map_err(|_| ApplicationServiceError::Protocol)?;
+        let sent = self
+            .send_policy_operation(policy_send_request(
+                request.conversation_id,
+                message_id,
+                ApplicationContent::collaboration_policy_proposal(proposal),
+                None,
+                request.sent_at_unix_milliseconds,
+                request.now_unix_seconds,
+                request.expires_at_unix_seconds,
+            ))
+            .await?;
+        Ok(SentCollaborationPolicyExchange {
+            proposal_id: Some(request.proposal_id),
+            policy_digest,
+            message_id: sent.message.message_id(),
+            cursor: sent.cursor,
+            local_binding_changed,
+        })
+    }
+
+    pub(crate) async fn accept_collaboration_policy(
+        &self,
+        request: RespondCollaborationPolicyRequest,
+    ) -> Result<SentCollaborationPolicyExchange, ApplicationServiceError> {
+        self.respond_collaboration_policy(request, CollaborationPolicyResponseOutcome::Accepted)
+            .await
+    }
+
+    pub(crate) async fn reject_collaboration_policy(
+        &self,
+        request: RespondCollaborationPolicyRequest,
+    ) -> Result<SentCollaborationPolicyExchange, ApplicationServiceError> {
+        self.respond_collaboration_policy(request, CollaborationPolicyResponseOutcome::Rejected)
+            .await
+    }
+
+    async fn respond_collaboration_policy(
+        &self,
+        request: RespondCollaborationPolicyRequest,
+        outcome: CollaborationPolicyResponseOutcome,
+    ) -> Result<SentCollaborationPolicyExchange, ApplicationServiceError> {
+        let local_device = self.conversations.device_id()?;
+        let message_id = derive_collaboration_policy_response_message_id(
+            request.conversation_id,
+            local_device,
+            request.proposal_id,
+        );
+        let store = self.conversations.store();
+        let conversations = self.conversations.clone();
+        let (_policy_operation, (proposal_message_id, local_binding_changed)) = self
+            .serialized_policy_transition(move || {
+                if let Some(operation) = store.collaboration_policy_response_operation(
+                    request.conversation_id,
+                    message_id,
+                    request.proposal_id,
+                    request.policy_digest,
+                    outcome,
+                )? {
+                    return Ok((
+                        operation.source_proposal_message_id,
+                        operation.binding_changed,
+                    ));
+                }
+                let proposal = store
+                    .collaboration_policy_proposal(request.conversation_id, request.proposal_id)?;
+                validate_collaboration_policy_response_target(
+                    &conversations,
+                    &proposal,
+                    request.policy_digest,
+                )?;
+                let local_binding_changed = match outcome {
+                    CollaborationPolicyResponseOutcome::Accepted => store
+                        .apply_collaboration_policy_activation_operation(
+                            CollaborationPolicyActivationOperation {
+                                conversation_id: request.conversation_id,
+                                message_id,
+                                proposal_id: request.proposal_id,
+                                source_proposal_message_id: Some(proposal.message_id),
+                                policy_digest: request.policy_digest,
+                                replaces_policy_digest: proposal.replaces_policy_digest,
+                                canonical_bundle: &proposal.canonical_bundle,
+                                activated_at_unix_milliseconds: request.sent_at_unix_milliseconds,
+                                is_acceptance: true,
+                            },
+                        )?,
+                    CollaborationPolicyResponseOutcome::Rejected => store
+                        .apply_collaboration_policy_rejection_operation(
+                            request.conversation_id,
+                            message_id,
+                            request.proposal_id,
+                            proposal.message_id,
+                            request.policy_digest,
+                        )?,
+                };
+                Ok((proposal.message_id, local_binding_changed))
+            })
+            .await?;
+        let response =
+            CollaborationPolicyResponse::new(request.proposal_id, request.policy_digest, outcome);
+        let sent = self
+            .send_policy_operation(policy_send_request(
+                request.conversation_id,
+                message_id,
+                ApplicationContent::CollaborationPolicyResponse(response),
+                Some(proposal_message_id),
+                request.sent_at_unix_milliseconds,
+                request.now_unix_seconds,
+                request.expires_at_unix_seconds,
+            ))
+            .await?;
+        Ok(SentCollaborationPolicyExchange {
+            proposal_id: Some(request.proposal_id),
+            policy_digest: request.policy_digest,
+            message_id: sent.message.message_id(),
+            cursor: sent.cursor,
+            local_binding_changed,
+        })
+    }
+
+    pub(crate) async fn revoke_collaboration_policy(
+        &self,
+        request: RevokeCollaborationPolicyRequest,
+    ) -> Result<SentCollaborationPolicyExchange, ApplicationServiceError> {
+        let revocation_store = self.conversations.store();
+        let (_policy_operation, local_binding_changed) = self
+            .serialized_policy_transition(move || {
+                Ok(
+                    revocation_store.apply_collaboration_policy_revocation_operation(
+                        request.conversation_id,
+                        request.message_id,
+                        request.policy_digest,
+                    )?,
+                )
+            })
+            .await?;
+        let sent = self
+            .send_policy_operation(policy_send_request(
+                request.conversation_id,
+                request.message_id,
+                ApplicationContent::CollaborationPolicyRevocation(
+                    CollaborationPolicyRevocation::new(request.policy_digest),
+                ),
+                None,
+                request.sent_at_unix_milliseconds,
+                request.now_unix_seconds,
+                request.expires_at_unix_seconds,
+            ))
+            .await?;
+        Ok(SentCollaborationPolicyExchange {
+            proposal_id: None,
+            policy_digest: request.policy_digest,
+            message_id: sent.message.message_id(),
+            cursor: sent.cursor,
+            local_binding_changed,
+        })
     }
 
     /// Adds one invited device through a durable encrypted membership commit.
@@ -894,6 +1183,40 @@ fn sent_membership(accepted: AcceptedMembership) -> SentMembership {
     }
 }
 
+fn policy_send_request(
+    conversation_id: ConversationId,
+    message_id: MessageId,
+    content: ApplicationContent,
+    reply_to: Option<MessageId>,
+    sent_at_unix_milliseconds: u64,
+    now_unix_seconds: u64,
+    expires_at_unix_seconds: u64,
+) -> SendApplicationRequest {
+    SendApplicationRequest {
+        conversation_id,
+        message_id,
+        content,
+        reply_to,
+        sent_at_unix_milliseconds,
+        now_unix_seconds,
+        expires_at_unix_seconds,
+    }
+}
+
+fn validate_collaboration_policy_response_target(
+    conversations: &ConversationCoordinator,
+    proposal: &StoredCollaborationPolicyProposal,
+    expected_digest: CollaborationPolicyDigest,
+) -> Result<(), ApplicationServiceError> {
+    if proposal.proposer == conversations.device_id()? {
+        return Err(ApplicationServiceError::LocalPolicyProposal);
+    }
+    if proposal.policy_digest != expected_digest {
+        return Err(ApplicationServiceError::PolicyProposalMismatch);
+    }
+    Ok(())
+}
+
 fn application_content_equal(left: &ApplicationContent, right: &ApplicationContent) -> bool {
     left == right
 }
@@ -910,6 +1233,12 @@ pub(crate) enum ApplicationServiceError {
     Task,
     #[error("application request is invalid")]
     Protocol,
+    #[error("collaboration-policy storage operation failed")]
+    PolicyStorage(#[from] ProfileStoreError),
+    #[error("collaboration-policy response targets a local proposal")]
+    LocalPolicyProposal,
+    #[error("collaboration-policy proposal does not match the expected digest")]
+    PolicyProposalMismatch,
     #[error("application idempotency key conflicts with a prior request")]
     IdempotencyConflict,
     #[error("application message expired before relay acceptance")]
@@ -969,9 +1298,12 @@ mod tests {
         RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
     };
     use KonclaveDomainCore::{
-        AcknowledgeRequest, ApplicationContent, DeliveryClass, EnvelopeId, ProtocolVersion,
-        RelayEnvelope, ReplayPage, ReplayRequest,
+        AcknowledgeRequest, ApplicationContent, CollaborationPolicyBundle,
+        CollaborationPolicyEffect, CollaborationPolicyLimits, CollaborationPolicyProposal,
+        CollaborationPolicyProposalId, CollaborationPolicyStatement, DeliveryClass, EnvelopeId,
+        ProtocolVersion, RelayEnvelope, ReplayPage, ReplayRequest,
     };
+    use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
     use KonclaveSecretStorage::{
         ExternalWrappingKeyProvider, SealedSqliteMlsStorage, SecretSealer,
     };
@@ -1185,6 +1517,600 @@ mod tests {
             now_unix_seconds,
             expires_at_unix_seconds,
         }
+    }
+
+    fn collaboration_policy_bytes(name: &str, guidance: &str) -> Vec<u8> {
+        encode_collaboration_policy_bundle(
+            &CollaborationPolicyBundle::new(
+                ProtocolVersion::application_v1(),
+                name,
+                Some(guidance.to_string()),
+                vec![
+                    CollaborationPolicyStatement::new(
+                        "reply",
+                        CollaborationPolicyEffect::Allow,
+                        "conversation.reply",
+                        None,
+                    )
+                    .unwrap(),
+                ],
+                vec!["copilot.session-identity".to_string()],
+                CollaborationPolicyLimits::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn policy_proposal_request(
+        conversation_id: ConversationId,
+        proposal_id: CollaborationPolicyProposalId,
+        canonical_bundle: &[u8],
+        replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    ) -> ProposeCollaborationPolicyRequest {
+        ProposeCollaborationPolicyRequest {
+            conversation_id,
+            proposal_id,
+            canonical_bundle: canonical_bundle.to_vec(),
+            replaces_policy_digest,
+            sent_at_unix_milliseconds: 1_700_000_000_000,
+            now_unix_seconds: 1_700_000_000,
+            expires_at_unix_seconds: 1_900_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_policy_transition_keeps_serialization_until_blocking_work_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "policy-cancellation");
+        let service = ApplicationService::new(coordinator, RecordingRelay::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_service = service.clone();
+        let first = tokio::spawn(async move {
+            first_service
+                .serialized_policy_transition(move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+        first.abort();
+        let _ = first.await;
+
+        let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
+        let (done_tx, mut done_rx) = oneshot::channel();
+        let second_service = service.clone();
+        tokio::spawn(async move {
+            attempted_tx.send(()).unwrap();
+            let result = second_service.serialized_policy_transition(|| Ok(())).await;
+            let _ = done_tx.send(result.is_ok());
+        });
+        tokio::task::spawn_blocking(move || attempted_rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            done_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        release_tx.send(()).unwrap();
+        assert!(done_rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_policy_proposal_is_idempotent_and_requires_explicit_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "policy-local-operations");
+        let conversation = coordinator.create().unwrap();
+        let service = ApplicationService::new(coordinator.clone(), RecordingRelay::new(false));
+        let first_bytes = collaboration_policy_bytes("first-policy", "Use the first contract.");
+        let first_digest = derive_collaboration_policy_digest(
+            &decode_collaboration_policy_bundle(&first_bytes).unwrap(),
+        )
+        .unwrap();
+        let first_id = CollaborationPolicyProposalId::from_bytes([11; 16]);
+
+        service.transport.fail_submit.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            service
+                .propose_collaboration_policy(policy_proposal_request(
+                    conversation.conversation_id,
+                    first_id,
+                    &first_bytes,
+                    None,
+                ))
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(
+            coordinator
+                .store()
+                .active_collaboration_policy(conversation.conversation_id)
+                .unwrap()
+                .unwrap()
+                .digest(),
+            first_digest
+        );
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
+        let first = service
+            .propose_collaboration_policy(policy_proposal_request(
+                conversation.conversation_id,
+                first_id,
+                &first_bytes,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(first.local_binding_changed);
+        let repeated = service
+            .propose_collaboration_policy(policy_proposal_request(
+                conversation.conversation_id,
+                first_id,
+                &first_bytes,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(repeated.cursor, first.cursor);
+        assert!(repeated.local_binding_changed);
+        assert!(matches!(
+            service
+                .propose_collaboration_policy(policy_proposal_request(
+                    conversation.conversation_id,
+                    CollaborationPolicyProposalId::from_bytes([16; 16]),
+                    &first_bytes,
+                    None,
+                ))
+                .await,
+            Err(ApplicationServiceError::PolicyStorage(
+                ProfileStoreError::CollaborationPolicyReplacementMismatch
+            ))
+        ));
+
+        let second_bytes = collaboration_policy_bytes("second-policy", "Use the second contract.");
+        let second_id = CollaborationPolicyProposalId::from_bytes([12; 16]);
+        assert!(matches!(
+            service
+                .propose_collaboration_policy(policy_proposal_request(
+                    conversation.conversation_id,
+                    second_id,
+                    &second_bytes,
+                    None,
+                ))
+                .await,
+            Err(ApplicationServiceError::PolicyStorage(
+                ProfileStoreError::CollaborationPolicyReplacementMismatch
+            ))
+        ));
+        assert_eq!(service.transport.envelopes.lock().unwrap().len(), 1);
+
+        let second = service
+            .propose_collaboration_policy(policy_proposal_request(
+                conversation.conversation_id,
+                second_id,
+                &second_bytes,
+                Some(first.policy_digest),
+            ))
+            .await
+            .unwrap();
+        assert!(second.local_binding_changed);
+        let active = coordinator
+            .store()
+            .active_collaboration_policy(conversation.conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.digest(), second.policy_digest);
+
+        let revocation_request = || RevokeCollaborationPolicyRequest {
+            conversation_id: conversation.conversation_id,
+            message_id: MessageId::from_bytes([13; MessageId::LENGTH]),
+            policy_digest: second.policy_digest,
+            sent_at_unix_milliseconds: 1_700_000_000_000,
+            now_unix_seconds: 1_700_000_000,
+            expires_at_unix_seconds: 1_900_000_000,
+        };
+        service.transport.fail_submit.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            service
+                .revoke_collaboration_policy(revocation_request())
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert!(
+            coordinator
+                .store()
+                .active_collaboration_policy(conversation.conversation_id)
+                .unwrap()
+                .is_none()
+        );
+        service.transport.fail_submit.store(false, Ordering::SeqCst);
+        let revoked = service
+            .revoke_collaboration_policy(revocation_request())
+            .await
+            .unwrap();
+        assert!(revoked.local_binding_changed);
+        assert!(
+            coordinator
+                .store()
+                .active_collaboration_policy(conversation.conversation_id)
+                .unwrap()
+                .is_none()
+        );
+        let historical_retry = service
+            .propose_collaboration_policy(policy_proposal_request(
+                conversation.conversation_id,
+                second_id,
+                &second_bytes,
+                Some(first.policy_digest),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(historical_retry.cursor, second.cursor);
+        assert!(
+            coordinator
+                .store()
+                .active_collaboration_policy(conversation.conversation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let third_id = CollaborationPolicyProposalId::from_bytes([14; 16]);
+        service
+            .propose_collaboration_policy(policy_proposal_request(
+                conversation.conversation_id,
+                third_id,
+                &second_bytes,
+                None,
+            ))
+            .await
+            .unwrap();
+        let second_revocation = service
+            .revoke_collaboration_policy(RevokeCollaborationPolicyRequest {
+                conversation_id: conversation.conversation_id,
+                message_id: MessageId::from_bytes([15; MessageId::LENGTH]),
+                policy_digest: second.policy_digest,
+                sent_at_unix_milliseconds: 1_700_000_000_001,
+                now_unix_seconds: 1_700_000_000,
+                expires_at_unix_seconds: 1_900_000_000,
+            })
+            .await
+            .unwrap();
+        assert!(second_revocation.cursor > revoked.cursor);
+        assert!(
+            coordinator
+                .store()
+                .active_collaboration_policy(conversation.conversation_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_policy_response_is_informational_and_terminal_outcomes_conflict() {
+        let (_root, alice, bob, conversation_id, _) = paired_coordinators();
+        let transport = Arc::new(RecordingRelay::new(false));
+        let alice_service = ApplicationService::from_shared(alice.clone(), Arc::clone(&transport));
+        let bob_service = ApplicationService::from_shared(bob.clone(), Arc::clone(&transport));
+        let canonical_bundle =
+            collaboration_policy_bytes("shared-policy", "Use the shared contract.");
+        let bundle = decode_collaboration_policy_bundle(&canonical_bundle).unwrap();
+        let digest = derive_collaboration_policy_digest(&bundle).unwrap();
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([21; 16]);
+        let proposal_message_id = derive_collaboration_policy_proposal_message_id(
+            conversation_id,
+            alice.device_id().unwrap(),
+            proposal_id,
+        );
+        let proposal =
+            CollaborationPolicyProposal::new(proposal_id, digest, canonical_bundle, None).unwrap();
+        alice_service
+            .send(policy_send_request(
+                conversation_id,
+                proposal_message_id,
+                ApplicationContent::collaboration_policy_proposal(proposal),
+                None,
+                1_700_000_000_000,
+                1_700_000_000,
+                1_900_000_000,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            alice
+                .store()
+                .active_collaboration_policy(conversation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let proposal_envelope = transport.envelopes.lock().unwrap()[0].clone();
+        transport
+            .push_replay_page(ReplayPage::new(vec![proposal_envelope.clone()], 1, false).unwrap());
+        bob_service
+            .replay_once(conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+        let response_request = || RespondCollaborationPolicyRequest {
+            conversation_id,
+            proposal_id,
+            policy_digest: digest,
+            sent_at_unix_milliseconds: 1_700_000_000_001,
+            now_unix_seconds: 1_700_000_000,
+            expires_at_unix_seconds: 1_900_000_000,
+        };
+        transport.fail_submit.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            bob_service
+                .accept_collaboration_policy(response_request())
+                .await,
+            Err(ApplicationServiceError::Relay(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert_eq!(
+            bob.store()
+                .active_collaboration_policy(conversation_id)
+                .unwrap()
+                .unwrap()
+                .digest(),
+            digest
+        );
+        transport.fail_submit.store(false, Ordering::SeqCst);
+        let accepted = bob_service
+            .accept_collaboration_policy(response_request())
+            .await
+            .unwrap();
+        assert!(accepted.local_binding_changed);
+        assert!(matches!(
+            bob_service
+                .reject_collaboration_policy(response_request())
+                .await,
+            Err(ApplicationServiceError::PolicyStorage(
+                ProfileStoreError::CollaborationPolicyProposalConflict
+            ))
+        ));
+        assert_eq!(
+            bob.store()
+                .active_collaboration_policy(conversation_id)
+                .unwrap()
+                .unwrap()
+                .digest(),
+            digest
+        );
+
+        let response_envelope = transport.envelopes.lock().unwrap()[1].clone();
+        transport.push_replay_page(
+            ReplayPage::new(vec![proposal_envelope, response_envelope], 2, false).unwrap(),
+        );
+        alice_service
+            .replay_once(conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+        assert!(
+            alice
+                .store()
+                .active_collaboration_policy(conversation_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_policy_response_recovers_after_later_proposal_conflict() {
+        let (_root, alice, bob, conversation_id, _) = paired_coordinators();
+        let transport = Arc::new(RecordingRelay::new(false));
+        let alice_service = ApplicationService::from_shared(alice.clone(), Arc::clone(&transport));
+        let bob_service = ApplicationService::from_shared(bob.clone(), Arc::clone(&transport));
+        let canonical_bundle =
+            collaboration_policy_bytes("recoverable-policy", "Use the recoverable contract.");
+        let digest = derive_collaboration_policy_digest(
+            &decode_collaboration_policy_bundle(&canonical_bundle).unwrap(),
+        )
+        .unwrap();
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([31; 16]);
+        let proposal_message_id = derive_collaboration_policy_proposal_message_id(
+            conversation_id,
+            alice.device_id().unwrap(),
+            proposal_id,
+        );
+        alice_service
+            .send(policy_send_request(
+                conversation_id,
+                proposal_message_id,
+                ApplicationContent::collaboration_policy_proposal(
+                    CollaborationPolicyProposal::new(
+                        proposal_id,
+                        digest,
+                        canonical_bundle.clone(),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                None,
+                1_700_000_000_000,
+                1_700_000_000,
+                1_900_000_000,
+            ))
+            .await
+            .unwrap();
+        let proposal_envelope = transport.envelopes.lock().unwrap()[0].clone();
+        transport.push_replay_page(ReplayPage::new(vec![proposal_envelope], 1, false).unwrap());
+        bob_service
+            .replay_once(conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let response_message_id = derive_collaboration_policy_response_message_id(
+            conversation_id,
+            bob.device_id().unwrap(),
+            proposal_id,
+        );
+        bob.store()
+            .apply_collaboration_policy_activation_operation(
+                CollaborationPolicyActivationOperation {
+                    conversation_id,
+                    message_id: response_message_id,
+                    proposal_id,
+                    source_proposal_message_id: Some(proposal_message_id),
+                    policy_digest: digest,
+                    replaces_policy_digest: None,
+                    canonical_bundle: &canonical_bundle,
+                    activated_at_unix_milliseconds: 1_700_000_000_001,
+                    is_acceptance: true,
+                },
+            )
+            .unwrap();
+
+        let conflicting_bundle =
+            collaboration_policy_bytes("conflicting-policy", "Use a conflicting contract.");
+        let conflicting_digest = derive_collaboration_policy_digest(
+            &decode_collaboration_policy_bundle(&conflicting_bundle).unwrap(),
+        )
+        .unwrap();
+        alice_service
+            .send(policy_send_request(
+                conversation_id,
+                MessageId::from_bytes([32; MessageId::LENGTH]),
+                ApplicationContent::collaboration_policy_proposal(
+                    CollaborationPolicyProposal::new(
+                        proposal_id,
+                        conflicting_digest,
+                        conflicting_bundle,
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                None,
+                1_700_000_000_002,
+                1_700_000_000,
+                1_900_000_000,
+            ))
+            .await
+            .unwrap();
+        let conflicting_envelope = transport.envelopes.lock().unwrap()[1].clone();
+        transport.push_replay_page(ReplayPage::new(vec![conflicting_envelope], 2, false).unwrap());
+        bob_service
+            .replay_once(conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            bob.store()
+                .collaboration_policy_proposal(conversation_id, proposal_id)
+                .err(),
+            Some(ProfileStoreError::CollaborationPolicyProposalConflict)
+        );
+
+        let recovered = bob_service
+            .accept_collaboration_policy(RespondCollaborationPolicyRequest {
+                conversation_id,
+                proposal_id,
+                policy_digest: digest,
+                sent_at_unix_milliseconds: 1_700_000_000_001,
+                now_unix_seconds: 1_700_000_000,
+                expires_at_unix_seconds: 1_900_000_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(recovered.message_id, response_message_id);
+        assert!(recovered.local_binding_changed);
+        assert_eq!(transport.envelopes.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn preempted_policy_response_id_cannot_mutate_local_authority() {
+        let (_root, alice, bob, conversation_id, _) = paired_coordinators();
+        let transport = Arc::new(RecordingRelay::new(false));
+        let alice_service = ApplicationService::from_shared(alice.clone(), Arc::clone(&transport));
+        let bob_service = ApplicationService::from_shared(bob.clone(), Arc::clone(&transport));
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([41; 16]);
+        let response_message_id = derive_collaboration_policy_response_message_id(
+            conversation_id,
+            bob.device_id().unwrap(),
+            proposal_id,
+        );
+        alice_service
+            .send(SendApplicationRequest {
+                conversation_id,
+                message_id: response_message_id,
+                content: ApplicationContent::text("preempt the response identifier").unwrap(),
+                reply_to: None,
+                sent_at_unix_milliseconds: 1_700_000_000_000,
+                now_unix_seconds: 1_700_000_000,
+                expires_at_unix_seconds: 1_900_000_000,
+            })
+            .await
+            .unwrap();
+        let preempting_envelope = transport.envelopes.lock().unwrap()[0].clone();
+        transport.push_replay_page(ReplayPage::new(vec![preempting_envelope], 1, false).unwrap());
+        bob_service
+            .replay_once(conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let canonical_bundle =
+            collaboration_policy_bytes("preempted-policy", "Use the preempted contract.");
+        let digest = derive_collaboration_policy_digest(
+            &decode_collaboration_policy_bundle(&canonical_bundle).unwrap(),
+        )
+        .unwrap();
+        let proposal_message_id = derive_collaboration_policy_proposal_message_id(
+            conversation_id,
+            alice.device_id().unwrap(),
+            proposal_id,
+        );
+        alice_service
+            .send(policy_send_request(
+                conversation_id,
+                proposal_message_id,
+                ApplicationContent::collaboration_policy_proposal(
+                    CollaborationPolicyProposal::new(proposal_id, digest, canonical_bundle, None)
+                        .unwrap(),
+                ),
+                None,
+                1_700_000_000_001,
+                1_700_000_000,
+                1_900_000_000,
+            ))
+            .await
+            .unwrap();
+        let proposal_envelope = transport.envelopes.lock().unwrap()[1].clone();
+        transport.push_replay_page(ReplayPage::new(vec![proposal_envelope], 2, false).unwrap());
+        bob_service
+            .replay_once(conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            bob_service
+                .accept_collaboration_policy(RespondCollaborationPolicyRequest {
+                    conversation_id,
+                    proposal_id,
+                    policy_digest: digest,
+                    sent_at_unix_milliseconds: 1_700_000_000_002,
+                    now_unix_seconds: 1_700_000_000,
+                    expires_at_unix_seconds: 1_900_000_000,
+                })
+                .await,
+            Err(ApplicationServiceError::PolicyStorage(
+                ProfileStoreError::CollaborationPolicyProposalConflict
+            ))
+        ));
+        assert!(
+            bob.store()
+                .active_collaboration_policy(conversation_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(transport.envelopes.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

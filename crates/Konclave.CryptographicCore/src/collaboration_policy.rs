@@ -1,5 +1,6 @@
 use KonclaveDomainCore::{
     CollaborationPolicyBundle, CollaborationPolicyDigest, CollaborationPolicyProposal,
+    CollaborationPolicyProposalId, ConversationId, DeviceId, MessageId,
 };
 use KonclaveProtocolContracts::v1::{
     decode_collaboration_policy_bundle, encode_collaboration_policy_bundle,
@@ -10,6 +11,10 @@ use crate::KonclaveCryptographicError;
 
 const COLLABORATION_POLICY_DIGEST_DOMAIN: &[u8] =
     b"konclave-collaboration-policy-bundle-digest-v1\0";
+const COLLABORATION_POLICY_PROPOSAL_MESSAGE_ID_DOMAIN: &[u8] =
+    b"konclave-collaboration-policy-proposal-message-id-v1\0";
+const COLLABORATION_POLICY_RESPONSE_MESSAGE_ID_DOMAIN: &[u8] =
+    b"konclave-collaboration-policy-response-message-id-v1\0";
 
 /// Derives the content identifier for one canonical collaboration-policy bundle.
 ///
@@ -68,6 +73,55 @@ pub fn verify_collaboration_policy_proposal(
         return Err(KonclaveCryptographicError::InvalidCollaborationPolicyDigest);
     }
     Ok(VerifiedCollaborationPolicyProposal { proposal, bundle })
+}
+
+/// Derives the stable application identifier for one local policy proposal.
+#[must_use]
+pub fn derive_collaboration_policy_proposal_message_id(
+    conversation_id: ConversationId,
+    device_id: DeviceId,
+    proposal_id: CollaborationPolicyProposalId,
+) -> MessageId {
+    derive_exchange_message_id(
+        COLLABORATION_POLICY_PROPOSAL_MESSAGE_ID_DOMAIN,
+        &[
+            conversation_id.as_bytes(),
+            device_id.as_bytes(),
+            proposal_id.as_bytes(),
+        ],
+    )
+}
+
+/// Derives the stable application identifier shared by either terminal response.
+///
+/// Acceptance and rejection intentionally use the same identifier so attempting to
+/// report contradictory outcomes becomes an application idempotency conflict.
+#[must_use]
+pub fn derive_collaboration_policy_response_message_id(
+    conversation_id: ConversationId,
+    device_id: DeviceId,
+    proposal_id: CollaborationPolicyProposalId,
+) -> MessageId {
+    derive_exchange_message_id(
+        COLLABORATION_POLICY_RESPONSE_MESSAGE_ID_DOMAIN,
+        &[
+            conversation_id.as_bytes(),
+            device_id.as_bytes(),
+            proposal_id.as_bytes(),
+        ],
+    )
+}
+
+fn derive_exchange_message_id(domain: &[u8], components: &[&[u8]]) -> MessageId {
+    let mut context = Context::new(&SHA256);
+    context.update(domain);
+    for component in components {
+        context.update(component);
+    }
+    let digest = context.finish();
+    let mut message_id = [0; MessageId::LENGTH];
+    message_id.copy_from_slice(&digest.as_ref()[..MessageId::LENGTH]);
+    MessageId::from_bytes(message_id)
 }
 
 #[cfg(test)]
@@ -186,6 +240,46 @@ mod tests {
         assert_eq!(
             verify_collaboration_policy_proposal(&malformed).err(),
             Some(KonclaveCryptographicError::ProtocolContractFailure)
+        );
+    }
+
+    #[test]
+    fn exchange_message_identifiers_are_stable_and_purpose_separated() {
+        let conversation_id = ConversationId::from_bytes([1; 32]);
+        let device_id = DeviceId::from_bytes([2; 32]);
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([3; 16]);
+        let proposal = derive_collaboration_policy_proposal_message_id(
+            conversation_id,
+            device_id,
+            proposal_id,
+        );
+        let response = derive_collaboration_policy_response_message_id(
+            conversation_id,
+            device_id,
+            proposal_id,
+        );
+        assert_eq!(
+            proposal,
+            derive_collaboration_policy_proposal_message_id(
+                conversation_id,
+                device_id,
+                proposal_id
+            )
+        );
+        assert_ne!(proposal, response);
+        assert_eq!(
+            proposal.as_bytes(),
+            &[
+                0x5e, 0xa1, 0x4c, 0xba, 0x72, 0xf8, 0x48, 0xb0, 0x95, 0xfb, 0x4b, 0x6c, 0x17, 0x38,
+                0x17, 0xbf,
+            ]
+        );
+        assert_eq!(
+            response.as_bytes(),
+            &[
+                0xa0, 0xd4, 0xba, 0xd6, 0x13, 0x91, 0xe6, 0x27, 0xfb, 0xb2, 0x29, 0x4a, 0x0d, 0x89,
+                0x5c, 0xb8,
+            ]
         );
     }
 }

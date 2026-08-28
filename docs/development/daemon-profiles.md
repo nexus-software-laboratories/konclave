@@ -109,6 +109,18 @@ authority. Each row seals its indexed metadata, and one profile-bound sealed sta
 commits the exact record count and backfill completion. Startup verifies those seals,
 reopens every referenced history record, and rejects metadata substitution, row
 deletion/addition, or premature backfill completion.
+
+Version 17 adds a bounded terminal journal for locally authorized policy operations.
+Each record seals the exact operation identity, proposal and replacement digests,
+source proposal message for responses, and historical binding-change result. A
+separate profile-bound sealed state commits the record count. Its initial sealed state,
+tables, and version update are one migration transaction; a version-17 profile cannot
+reinitialize a missing state. The same transaction upgrades the sealed device identity
+with an authenticated schema floor, so rewriting the plaintext SQLite version cannot
+turn an adopted schema back into a legitimate version-16 migration. The operation
+record and binding mutation share one immediate transaction, and the operation
+reserves its application message identifier against conflicting local or inbound
+content, so retry never infers historical intent from the current binding.
 Startup opens and verifies every retained bundle and binding before accepting the
 profile. Deleting a binding removes authority, while substituting its digest,
 conversation, timestamp, or ciphertext fails authentication.

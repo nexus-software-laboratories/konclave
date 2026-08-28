@@ -1257,7 +1257,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_collaboration_policy_exchange_state;
+                    "DROP TABLE daemon_collaboration_policy_operation_state;
+                     DROP TABLE daemon_collaboration_policy_operation;
+                     DROP TABLE daemon_collaboration_policy_exchange_state;
                      DROP TABLE daemon_collaboration_policy_exchange;
                      DROP TABLE daemon_collaboration_policy_binding;
                      DROP TABLE daemon_collaboration_policy_bundle;
@@ -1300,7 +1302,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_collaboration_policy_exchange_state;
+                    "DROP TABLE daemon_collaboration_policy_operation_state;
+                     DROP TABLE daemon_collaboration_policy_operation;
+                     DROP TABLE daemon_collaboration_policy_exchange_state;
                      DROP TABLE daemon_collaboration_policy_exchange;
                      DROP TABLE daemon_collaboration_policy_binding;
                      DROP TABLE daemon_collaboration_policy_bundle;
