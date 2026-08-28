@@ -847,6 +847,90 @@
     "outputSchema": {
       "$defs": {
         "MessageResult": {
+          "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "text",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_proposal",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                },
+                "replaces_policy_digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_response",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest",
+                "outcome"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_revocation",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "policy_digest"
+              ],
+              "type": "object"
+            }
+          ],
           "properties": {
             "conversation_id": {
               "type": "string"
@@ -891,9 +975,6 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
-            },
-            "text": {
-              "type": "string"
             }
           },
           "required": [
@@ -906,7 +987,6 @@
             "sent_at_unix_milliseconds",
             "cursor",
             "direction",
-            "text",
             "duplicate"
           ],
           "type": "object"
@@ -1215,6 +1295,90 @@
     "outputSchema": {
       "$defs": {
         "MessageResult": {
+          "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "text",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_proposal",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                },
+                "replaces_policy_digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_response",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest",
+                "outcome"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_revocation",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "policy_digest"
+              ],
+              "type": "object"
+            }
+          ],
           "properties": {
             "conversation_id": {
               "type": "string"
@@ -1259,9 +1423,6 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
-            },
-            "text": {
-              "type": "string"
             }
           },
           "required": [
@@ -1274,7 +1435,6 @@
             "sent_at_unix_milliseconds",
             "cursor",
             "direction",
-            "text",
             "duplicate"
           ],
           "type": "object"
@@ -1412,6 +1572,90 @@
     "outputSchema": {
       "$defs": {
         "MessageResult": {
+          "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "text",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_proposal",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                },
+                "replaces_policy_digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_response",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest",
+                "outcome"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_revocation",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "policy_digest"
+              ],
+              "type": "object"
+            }
+          ],
           "properties": {
             "conversation_id": {
               "type": "string"
@@ -1456,9 +1700,6 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
-            },
-            "text": {
-              "type": "string"
             }
           },
           "required": [
@@ -1471,7 +1712,6 @@
             "sent_at_unix_milliseconds",
             "cursor",
             "direction",
-            "text",
             "duplicate"
           ],
           "type": "object"

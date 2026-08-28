@@ -1563,6 +1563,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "regenerates the checked-in Copilot tool contract fixture"]
+    fn regenerate_copilot_tool_contract_fixture() {
+        let tools = StdioServer::tool_router().list_all();
+        let mut bytes = serde_json::to_vec_pretty(&tools).unwrap();
+        bytes.push(b'\n');
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/local-service/v1/copilot-tools.json");
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
     fn authorization_hook_is_explicit_and_deterministic() {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = called.clone();
