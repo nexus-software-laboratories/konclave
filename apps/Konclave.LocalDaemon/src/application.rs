@@ -1900,6 +1900,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_operation_own_echo_reconciles_the_reserved_message() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "policy-own-echo");
+        let conversation = coordinator.create().unwrap();
+        let service = ApplicationService::new(coordinator, RecordingRelay::new(false));
+        let canonical_bundle =
+            collaboration_policy_bytes("echo-policy", "Reconcile the policy echo.");
+        let sent = service
+            .propose_collaboration_policy(policy_proposal_request(
+                conversation.conversation_id,
+                CollaborationPolicyProposalId::from_bytes([17; 16]),
+                &canonical_bundle,
+                None,
+            ))
+            .await
+            .unwrap();
+        let echoed = service.transport.envelopes.lock().unwrap()[0].clone();
+        service
+            .transport
+            .push_replay_page(ReplayPage::new(vec![echoed], sent.cursor, false).unwrap());
+
+        let replayed = service
+            .replay_once(conversation.conversation_id, 100, 1_700_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(replayed.messages.len(), 1);
+        assert!(replayed.messages[0].duplicate);
+        assert_eq!(replayed.messages[0].direction, MessageDirection::Outbound);
+        assert_eq!(replayed.messages[0].message.message_id(), sent.message_id);
+    }
+
+    #[tokio::test]
     async fn policy_proposal_resume_reconstructs_a_committed_pre_outbox_operation() {
         let root = tempfile::tempdir().unwrap();
         let coordinator = coordinator(root.path(), "policy-proposal-resume");

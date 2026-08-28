@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use KonclaveCryptographicCore::LocalServiceIdentity;
+use KonclaveCryptographicCore::{LocalServiceIdentity, derive_local_service_session_consumer_id};
 use KonclaveDomainCore::{
     AdapterConsumerId, ApplicationContent, CollaborationPolicyBundle, CollaborationPolicyCost,
     CollaborationPolicyDecision, CollaborationPolicyEffect, CollaborationPolicyEvaluationContext,
@@ -206,20 +206,8 @@ async fn serve_client(
             )
             .await
         }
-        AuthorizationBinding::Session {
-            grant,
-            client_instance,
-        } => {
-            serve_session_client(
-                &mut stream,
-                registry,
-                supervisor,
-                ledger,
-                grant,
-                client_instance,
-                stop,
-            )
-            .await
+        AuthorizationBinding::Session { grant, .. } => {
+            serve_session_client(&mut stream, registry, supervisor, ledger, grant, stop).await
         }
     }
 }
@@ -230,7 +218,6 @@ async fn serve_session_client(
     supervisor: Arc<ProfileSupervisor>,
     ledger: Arc<Mutex<RequestLedger>>,
     grant: SessionGrant,
-    client_instance: KonclaveLocalServiceTransport::ClientInstanceId,
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let lease = supervisor
@@ -240,10 +227,11 @@ async fn serve_session_client(
     let services = lease.services().context("loading bound profile services")?;
     let handler = operation_handler(&services);
     let store = services.conversations().store();
+    let consumer = derive_local_service_session_consumer_id(grant.session_public_key());
     let mut state = ClientRequestState {
         ledger,
         registry,
-        consumer: AdapterConsumerId::from_bytes(*client_instance.as_bytes()),
+        consumer,
         grant,
         handler,
         services,

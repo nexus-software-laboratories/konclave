@@ -7,8 +7,18 @@ import type { LocalServiceClient } from './client.js';
 import { collaborationOperations } from './operations.js';
 
 const hex32 = /^[0-9a-f]{64}$/u;
+const hex16 = /^[0-9a-f]{32}$/u;
 const maxPolicyNameBytes = 128;
 const maxPolicyGuidanceBytes = 32 * 1024;
+const maxToolArgumentsBytes = 128 * 1024;
+const maxMessageTextBytes = 64 * 1024;
+const sendArgumentKeys = new Set([
+  'collaboration_authorization',
+  'conversation_id',
+  'message_id',
+  'reply_to_message_id',
+  'text',
+]);
 
 type ActiveCollaborationTurn =
   | {
@@ -31,10 +41,19 @@ export interface CopilotPolicyGate {
   observePrompt(prompt: string): void;
   clear(): void;
   readonly active: boolean;
+  readonly lastDecision: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function boundedString(value: unknown, maximum: number, label: string): string {
@@ -112,6 +131,25 @@ function normalizedToolName(toolName: string): string {
   return toolName.startsWith('functions.') ? toolName.slice('functions.'.length) : toolName;
 }
 
+function toolArgumentRecord(value: unknown): Record<string, unknown> | null {
+  if (isPlainRecord(value)) {
+    return value;
+  }
+  if (
+    typeof value !== 'string' ||
+    Buffer.byteLength(value, 'utf8') === 0 ||
+    Buffer.byteLength(value, 'utf8') > maxToolArgumentsBytes
+  ) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isPlainRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function authorizationTokenInTrustedHeader(prompt: string, expectedToken?: string): boolean {
   if (!prompt.startsWith('Konclave delivered ')) {
     return false;
@@ -137,75 +175,88 @@ function toolAction(toolName: string): ToolAction | null {
   }
 }
 
+function hasOnlySendArgumentKeys(value: Readonly<Record<string, unknown>>): boolean {
+  const keys = Object.keys(value);
+  return keys.length <= sendArgumentKeys.size && keys.every((key) => sendArgumentKeys.has(key));
+}
+
 function targetsAuthorizedConversation(
   action: ToolAction,
-  toolArgs: unknown,
+  toolArgs: Readonly<Record<string, unknown>>,
   conversation: string,
 ): boolean {
   if (!action.conversationBound) {
     return true;
   }
-  return (
-    isRecord(toolArgs) &&
-    typeof toolArgs.conversation_id === 'string' &&
-    toolArgs.conversation_id === conversation
-  );
+  return typeof toolArgs.conversation_id === 'string' && toolArgs.conversation_id === conversation;
 }
 
 export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPolicyGate {
   let active: ActiveCollaborationTurn | null = null;
   let pending: CollaborationTurnAuthorization | null = null;
+  let lastDecision: string | null = null;
+  const deny = (reason: string, message: string) => {
+    lastDecision = reason;
+    return {
+      permissionDecision: 'deny' as const,
+      permissionDecisionReason: message,
+    };
+  };
 
   const gate: CopilotPolicyGate = {
     hooks: {
       async onPreToolUse(input, invocation) {
         const turn = active;
         if (!turn) {
+          lastDecision = 'turn_inactive';
           return;
         }
-        if (turn.kind === 'blocked') {
-          return {
-            permissionDecision: 'deny',
-            permissionDecisionReason:
-              'Konclave could not bind this delayed collaboration prompt to its authorization.',
-          };
-        }
-        if (input.sessionId !== invocation.sessionId) {
-          return {
-            permissionDecision: 'deny',
-            permissionDecisionReason:
-              'Konclave collaboration policy does not authorize descendant sessions.',
-          };
-        }
-        const action = toolAction(input.toolName);
-        if (!action) {
-          return {
-            permissionDecision: 'deny',
-            permissionDecisionReason: 'The active Konclave policy does not map this tool.',
-          };
-        }
-        if (!targetsAuthorizedConversation(action, input.toolArgs, turn.conversation)) {
-          return {
-            permissionDecision: 'deny',
-            permissionDecisionReason:
-              'The active Konclave turn is bound to a different conversation.',
-          };
-        }
-        const toolArguments = isRecord(input.toolArgs) ? input.toolArgs : null;
-        if (
-          action.action === 'conversation.reply' &&
-          (!toolArguments ||
-            typeof toolArguments.message_id !== 'string' ||
-            typeof toolArguments.text !== 'string' ||
-            (toolArguments.reply_to_message_id !== undefined &&
-              typeof toolArguments.reply_to_message_id !== 'string'))
-        ) {
-          return {
-            permissionDecision: 'deny',
-            permissionDecisionReason: 'Konclave send arguments are malformed.',
-          };
-        }
         try {
+          if (turn.kind === 'blocked') {
+            return deny(
+              'delayed_prompt_unbound',
+              'Konclave could not bind this delayed collaboration prompt to its authorization.',
+            );
+          }
+          if (input.sessionId !== invocation.sessionId) {
+            return deny(
+              'descendant_session',
+              'Konclave collaboration policy does not authorize descendant sessions.',
+            );
+          }
+          const action = toolAction(input.toolName);
+          if (!action) {
+            return deny('tool_unmapped', 'The active Konclave policy does not map this tool.');
+          }
+          const toolArguments = toolArgumentRecord(input.toolArgs);
+          if (!toolArguments) {
+            return deny('tool_arguments_malformed', 'Konclave tool arguments are malformed.');
+          }
+          if (!targetsAuthorizedConversation(action, toolArguments, turn.conversation)) {
+            return deny(
+              'conversation_mismatch',
+              'The active Konclave turn is bound to a different conversation.',
+            );
+          }
+          if (
+            action.action === 'conversation.reply' &&
+            (!hasOnlySendArgumentKeys(toolArguments) ||
+              typeof toolArguments.message_id !== 'string' ||
+              !hex16.test(toolArguments.message_id) ||
+              typeof toolArguments.text !== 'string' ||
+              Buffer.byteLength(toolArguments.text, 'utf8') === 0 ||
+              Buffer.byteLength(toolArguments.text, 'utf8') > maxMessageTextBytes ||
+              (toolArguments.reply_to_message_id !== undefined &&
+                toolArguments.reply_to_message_id !== null &&
+                (typeof toolArguments.reply_to_message_id !== 'string' ||
+                  !hex16.test(toolArguments.reply_to_message_id))) ||
+              (toolArguments.collaboration_authorization !== undefined &&
+                toolArguments.collaboration_authorization !== null &&
+                (typeof toolArguments.collaboration_authorization !== 'string' ||
+                  Buffer.byteLength(toolArguments.collaboration_authorization, 'utf8') > 64)))
+          ) {
+            return deny('send_arguments_malformed', 'Konclave send arguments are malformed.');
+          }
           const result = parseActionDecision(
             await client.request(collaborationOperations.evaluateAction, {
               conversationId: turn.conversation,
@@ -218,24 +269,21 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
             }),
           );
           if (result.decision === 'deny') {
-            return {
-              permissionDecision: 'deny',
-              permissionDecisionReason: `Konclave policy denied this action (${result.reason}).`,
-            };
+            return deny(result.reason, `Konclave policy denied this action (${result.reason}).`);
           }
           if (result.decision === 'ask') {
-            return {
-              permissionDecision: 'deny',
-              permissionDecisionReason:
-                'Konclave cannot compose policy approval with native permissions.',
-            };
+            return deny(
+              'approval_not_composable',
+              'Konclave cannot compose policy approval with native permissions.',
+            );
           }
-          if (!result.authorization || !toolArguments) {
-            return {
-              permissionDecision: 'deny',
-              permissionDecisionReason: 'Konclave did not issue a send authorization.',
-            };
+          if (!result.authorization) {
+            return deny(
+              'send_authorization_missing',
+              'Konclave did not issue a send authorization.',
+            );
           }
+          lastDecision = 'authorized';
           return {
             modifiedArgs: {
               ...toolArguments,
@@ -245,10 +293,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
               'Konclave policy permits this action, but normal Copilot permissions still apply.',
           };
         } catch {
-          return {
-            permissionDecision: 'deny',
-            permissionDecisionReason: 'Konclave policy evaluation was unavailable.',
-          };
+          return deny('gate_unavailable', 'Konclave policy evaluation was unavailable.');
         }
       },
     },
@@ -274,6 +319,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
     activate(authorization) {
       active = null;
       pending = authorization;
+      lastDecision = null;
     },
     observePrompt(prompt) {
       const authorization = pending;
@@ -291,9 +337,13 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
     clear() {
       active = null;
       pending = null;
+      lastDecision = null;
     },
     get active() {
       return active !== null;
+    },
+    get lastDecision() {
+      return lastDecision;
     },
   };
   return gate;

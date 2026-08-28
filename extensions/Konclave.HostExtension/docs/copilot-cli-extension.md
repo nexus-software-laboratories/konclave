@@ -180,13 +180,18 @@ turn instead of running it without the policy gate.
 The Copilot pre-tool hook remains active only until that synthetic turn returns to
 idle. The initial paved control maps only Konclave's `send_message` tool to
 `conversation.reply`, verifies the exact conversation and message arguments, and
-requires a one-use daemon authorization. Consuming that authorization routes into
+accepts the SDK's bounded JSON object or serialized-object representation only when
+it contains the exact send field allowlist. It then requires a one-use daemon
+authorization. Consuming that authorization routes into
 the sender-counter and outbox reservation transaction, which verifies the exact
 active digest, delivery consumer, and bounded expiry before preparing the send.
 Every workspace, shell, web, MCP, and subagent tool denies. Those tools execute
 outside the daemon and cannot be advertised as enforced until they have an atomic
 authorization boundary. Policy approval also denies in this initial path because the
 SDK's hook `ask` result can replace rather than compose with native permissions.
+Interactive and delivery lanes keep fresh per-connection handshake identifiers. The
+daemon recognizes them as one policy-enforcement consumer only because both prove the
+same memory-only session public key.
 
 The initial paved integration proves `harness.session-identity`,
 `harness.pre-tool-policy-gate`, `harness.native-permission-intersection`, and
@@ -201,8 +206,9 @@ supported.
 
 - `extensions/Konclave.Extension/extension.mjs` is the bundled entry loaded by
   Copilot CLI.
-- `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client
-  and command bundle used by local smoke and future harness adapters.
+- `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client,
+  command, policy-gate, delivery-parser, and safety-framing bundle used by the local
+  smoke and future harness adapters.
 - `plugin.json` is the distribution manifest.
 - `skills/copilot-cli-extension-maintainer/SKILL.md` is the contributor skill.
 - `skills/konclave-generic/SKILL.md` is packaged for manual installation by

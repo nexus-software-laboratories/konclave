@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 
-use KonclaveDomainCore::{Ed25519PublicKey, Ed25519Signature};
+use KonclaveDomainCore::{AdapterConsumerId, Ed25519PublicKey, Ed25519Signature};
+use aws_lc_rs::digest::{Context, SHA256};
 use aws_lc_rs::rand::{SecureRandom as _, SystemRandom};
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use mls_rs::CipherSuiteProvider;
@@ -13,6 +14,27 @@ use crate::identity::{cipher_suite, configured_provider};
 
 /// Byte length of an Ed25519 seed accepted by every local-service client.
 pub const LOCAL_SERVICE_SIGNING_SEED_LENGTH: usize = 32;
+const LOCAL_SERVICE_SESSION_CONSUMER_ID_DOMAIN: &[u8] =
+    b"konclave-local-service-session-consumer-id-v1\0";
+
+/// Derives the delivery-consumer identifier shared by authenticated lanes for one
+/// session key.
+///
+/// Connection instance identifiers remain fresh per handshake. This local
+/// correlation instead binds interactive policy evaluation to the delivery lease
+/// owned by the same already-authenticated session identity.
+#[must_use]
+pub fn derive_local_service_session_consumer_id(
+    session_public_key: Ed25519PublicKey,
+) -> AdapterConsumerId {
+    let mut context = Context::new(&SHA256);
+    context.update(LOCAL_SERVICE_SESSION_CONSUMER_ID_DOMAIN);
+    context.update(session_public_key.as_bytes());
+    let digest = context.finish();
+    let mut consumer = [0_u8; AdapterConsumerId::LENGTH];
+    consumer.copy_from_slice(&digest.as_ref()[..AdapterConsumerId::LENGTH]);
+    AdapterConsumerId::from_bytes(consumer)
+}
 
 /// Exportable installation seed for a local-service participant.
 ///
@@ -206,7 +228,7 @@ pub fn verify_local_service_signature(
 mod tests {
     use super::{
         LOCAL_SERVICE_SIGNING_SEED_LENGTH, LocalServiceIdentity, LocalServiceSigningSeed,
-        verify_local_service_signature,
+        derive_local_service_session_consumer_id, verify_local_service_signature,
     };
     use crate::KonclaveCryptographicError;
     use KonclaveDomainCore::{Ed25519PublicKey, Ed25519Signature};
@@ -217,6 +239,21 @@ mod tests {
         let signature = identity.sign(b"canonical transcript").unwrap();
         verify_local_service_signature(identity.public_key(), b"canonical transcript", &signature)
             .unwrap();
+    }
+
+    #[test]
+    fn session_consumer_identity_is_stable_and_key_bound() {
+        let first = Ed25519PublicKey::from_bytes([1; Ed25519PublicKey::LENGTH]);
+        let second = Ed25519PublicKey::from_bytes([2; Ed25519PublicKey::LENGTH]);
+
+        assert_eq!(
+            derive_local_service_session_consumer_id(first),
+            derive_local_service_session_consumer_id(first)
+        );
+        assert_ne!(
+            derive_local_service_session_consumer_id(first),
+            derive_local_service_session_consumer_id(second)
+        );
     }
 
     #[test]

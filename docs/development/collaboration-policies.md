@@ -193,6 +193,9 @@ The terminal operation also reserves its application message identifier. A
 pre-existing history or outbox record prevents the authority mutation, inbound
 content cannot claim an identifier after it is reserved, and outbound preparation
 must reproduce the sealed operation's exact policy content and reply target.
+When the relay returns that local operation as an own echo, only the already-recorded
+outbound envelope may attach its durable cursor; a different envelope or message
+remains a conflicting attempt to claim the reserved identifier.
 
 The paved Copilot command surface exposes these operations under `/konclave policy`.
 It can compile and propose one explicitly selected strict-JSON source, replace an
@@ -341,6 +344,9 @@ local authority from positive targets in the locally activated bundle, supplies 
 the claims and exact controls the Copilot adapter proves, and evaluates duration plus
 one active collaboration request. The profile's single live delivery consumer and
 the extension's one-outstanding-turn gate enforce concurrency conservatively at one.
+Interactive and delivery connections retain fresh handshake instance identifiers;
+the daemon correlates their consumer authority only when both prove the same
+authenticated session public key.
 
 During that turn, Copilot's pre-tool hook maps only Konclave's `send_message` tool to
 `conversation.reply`. A successful evaluation issues a one-use authorization bound to
@@ -348,6 +354,9 @@ the exact conversation and message arguments, active policy digest, delivery con
 and the earliest policy, lease, or proof expiry. The daemon consumes it into the same
 SQLite reservation that verifies the digest, live consumer lease, and expiry before
 allocating a sender counter or preparing the send.
+The SDK may represent pre-tool arguments as a JSON object or a serialized JSON object;
+the extension accepts only a bounded form with the exact `send_message` field allowlist
+before evaluating or modifying it.
 Workspace, shell, web, MCP, and subagent tools deny because their effects occur
 outside that atomic boundary. Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.

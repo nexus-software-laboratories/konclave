@@ -1,7 +1,12 @@
-import type { Tool } from "@github/copilot-sdk";
+import type { SessionHooks, Tool } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
 
-import { createSessionConfig, type SmokeOptions } from "../src/scenario.js";
+import {
+  createSessionConfig,
+  createSmokePolicySource,
+  type SmokeOptions,
+} from "../src/scenario.js";
+import { requireArray, requireRecord, requireString } from "../src/json.js";
 
 describe("shared-client session configuration", () => {
   it("registers only custom Konclave tools and declares no MCP process", () => {
@@ -20,12 +25,55 @@ describe("shared-client session configuration", () => {
       maxAiCreditsPerSession: 30,
     };
 
-    const config = createSessionConfig(options, "session-a", tools);
+    const hooks: SessionHooks = {};
+    const config = createSessionConfig(options, "session-a", tools, hooks);
 
     expect(config.mcpServers).toEqual({});
     expect(config.tools).toBe(tools);
+    expect(config.hooks).toBe(hooks);
     expect(config.availableTools).toBeInstanceOf(Object);
     expect(JSON.stringify(config)).not.toContain("KonclaveLocalDaemon");
     expect(JSON.stringify(config)).not.toContain('"type":"stdio"');
+  });
+
+  it("builds an exact-digest policy source for two autonomous replies", () => {
+    const source = requireRecord(
+      JSON.parse(
+        createSmokePolicySource({
+          conversationId: "11".repeat(32),
+          firstText: "request",
+          firstMessageId: "22".repeat(16),
+          replyText: "reply",
+          replyMessageId: "33".repeat(16),
+          followUpText: "follow-up",
+          followUpMessageId: "44".repeat(16),
+        }),
+      ),
+      "policy source",
+    );
+    const spec = requireRecord(source.spec, "policy source spec");
+
+    expect(requireString(spec, "guidance", "policy source spec")).toContain(
+      '"message_id":"33333333333333333333333333333333"',
+    );
+    expect(requireString(spec, "guidance", "policy source spec")).toContain(
+      '"message_id":"44444444444444444444444444444444"',
+    );
+    expect(requireArray(spec, "statements", "policy source spec")).toEqual([
+      {
+        id: "conversation-reply",
+        effect: "allow",
+        action: "conversation.reply",
+      },
+    ]);
+    expect(
+      requireArray(spec, "requiredHarnessClaims", "policy source spec"),
+    ).toHaveLength(4);
+    expect(requireRecord(spec.limits, "policy source limits")).toEqual({
+      durationMilliseconds: null,
+      turns: null,
+      tokens: null,
+      concurrentRequests: 1,
+    });
   });
 });

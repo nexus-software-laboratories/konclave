@@ -6999,6 +6999,17 @@ impl ProfileStore {
                 conversation_id,
                 message.message_id(),
             )?
+            && self
+                .load_history_record(
+                    connection,
+                    conversation_id,
+                    routing_id,
+                    message.message_id(),
+                )?
+                .is_none_or(|existing| {
+                    existing.direction != MessageDirection::Outbound
+                        || existing.envelope_id != envelope_id
+                })
         {
             return Err(ProfileStoreError::DuplicateOperation);
         }

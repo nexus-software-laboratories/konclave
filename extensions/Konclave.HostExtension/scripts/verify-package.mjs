@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { unzipSync } from 'fflate';
 import {
   extensionEntryPath,
@@ -89,17 +91,23 @@ const compiledExtension = existsSync(extensionEntryPath)
   : '';
 const compiledClient = existsSync(clientEntryPath) ? readFileSync(clientEntryPath, 'utf8') : '';
 const compiledGeneric = existsSync(genericEntryPath) ? readFileSync(genericEntryPath, 'utf8') : '';
+const clientApi = existsSync(clientEntryPath)
+  ? await import(pathToFileURL(resolve(clientEntryPath)).href)
+  : {};
 
 check(
   compiledExtension.includes('joinSession'),
   'Compiled extension is missing the joinSession lifecycle.',
 );
 check(
-  compiledClient.includes('connectInstalledService') &&
-    compiledClient.includes('connectInstalledGenericService') &&
+  typeof clientApi.connectInstalledService === 'function' &&
+    typeof clientApi.connectInstalledGenericService === 'function' &&
     compiledClient.includes('request.cancel') &&
-    compiledClient.includes('createKonclaveTools'),
-  'Compiled client bundle is missing the paved/generic connector, cancellation, or SDK tools.',
+    typeof clientApi.createKonclaveTools === 'function' &&
+    typeof clientApi.createCopilotPolicyGate === 'function' &&
+    typeof clientApi.createLocalServiceDeliveryChannel === 'function' &&
+    typeof clientApi.frameDelivery === 'function',
+  'Compiled client bundle is missing a connector, cancellation, tools, or policy-aware delivery.',
 );
 check(
   !compiledClient.includes('KonclaveLocalDaemon') && !compiledClient.includes('type: "stdio"'),

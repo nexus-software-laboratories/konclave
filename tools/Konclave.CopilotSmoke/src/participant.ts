@@ -15,6 +15,7 @@ interface CompletedTool {
   readonly callId: string;
   readonly success: boolean;
   readonly structured: unknown;
+  readonly errorCode: string | undefined;
 }
 
 interface ToolCompletionResult {
@@ -23,6 +24,38 @@ interface ToolCompletionResult {
 }
 
 const maxToolResultBytes = 1024 * 1024;
+const boundedErrorCode = /^[a-zA-Z0-9._-]{1,64}$/u;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalJsonValue);
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => [key, canonicalJsonValue(item)]),
+  );
+}
+
+function argumentFingerprint(value: unknown): string {
+  const withoutAuthorization = isRecord(value)
+    ? Object.fromEntries(
+        Object.entries(value).filter(
+          ([key]) => key !== "collaboration_authorization",
+        ),
+      )
+    : value;
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalJsonValue(withoutAuthorization)), "utf8")
+    .digest("hex");
+}
 
 export function decodeToolCompletionResult(
   result: ToolCompletionResult | undefined,
@@ -87,9 +120,7 @@ export class SmokeParticipant {
         callId: event.data.toolCallId,
         serverName: event.data.mcpServerName,
         toolName: event.data.mcpToolName ?? event.data.toolName,
-        argumentFingerprint: createHash("sha256")
-          .update(JSON.stringify(event.data.arguments), "utf8")
-          .digest("hex"),
+        argumentFingerprint: argumentFingerprint(event.data.arguments),
       });
     });
     session.on("tool.execution_complete", (event) => {
@@ -97,6 +128,11 @@ export class SmokeParticipant {
         callId: event.data.toolCallId,
         success: event.data.success,
         structured: decodeToolCompletionResult(event.data.result),
+        errorCode:
+          typeof event.data.error?.code === "string" &&
+          boundedErrorCode.test(event.data.error.code)
+            ? event.data.error.code
+            : undefined,
       });
     });
     session.on("assistant.usage", (event) => {
@@ -120,12 +156,14 @@ export class SmokeParticipant {
     prompt: string,
     timeoutMs: number,
     allowRepeated = false,
+    expectedArguments?: Record<string, unknown>,
   ): Promise<JsonRecord> {
     const results = await this.invokeAll(
       expectedTool,
       prompt,
       timeoutMs,
       allowRepeated,
+      expectedArguments,
     );
     const last = results.at(-1);
     if (!last) {
@@ -141,6 +179,7 @@ export class SmokeParticipant {
     prompt: string,
     timeoutMs: number,
     allowRepeated = false,
+    expectedArguments?: Record<string, unknown>,
   ): Promise<JsonRecord[]> {
     this.iterations += 1;
     const startOffset = this.starts.length;
@@ -148,10 +187,8 @@ export class SmokeParticipant {
     try {
       await this.session.sendAndWait({ prompt }, timeoutMs);
     } catch (error) {
-      const reason =
-        error instanceof Error ? error.message : "unknown session failure";
       throw new Error(
-        `Session ${this.sessionId} failed while calling ${expectedTool}: ${reason}`,
+        `Session ${this.sessionId} failed while calling ${expectedTool}.`,
         { cause: error },
       );
     }
@@ -185,14 +222,29 @@ export class SmokeParticipant {
         `Session ${this.sessionId} repeated ${expectedTool} with conflicting arguments.`,
       );
     }
+    const expectedFingerprint =
+      expectedArguments === undefined
+        ? undefined
+        : argumentFingerprint(expectedArguments);
+    if (
+      expectedFingerprint !== undefined &&
+      starts.some(
+        (started) => started.argumentFingerprint !== expectedFingerprint,
+      )
+    ) {
+      throw new Error(
+        `Session ${this.sessionId} called ${expectedTool} with unexpected arguments.`,
+      );
+    }
     const results: JsonRecord[] = [];
     for (const started of starts) {
       const completed = completions.find(
         (candidate) => candidate.callId === started.callId,
       );
       if (!completed?.success) {
+        const code = completed?.errorCode ? ` (${completed.errorCode})` : "";
         throw new Error(
-          `Konclave tool ${expectedTool} failed in session ${this.sessionId}.`,
+          `Konclave tool ${expectedTool} failed in session ${this.sessionId}${code}.`,
         );
       }
       this.toolNames.push(expectedTool);

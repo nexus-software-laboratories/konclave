@@ -240,6 +240,7 @@ describe('Copilot collaboration policy gate', () => {
       additionalContext:
         'Konclave policy permits this action, but normal Copilot permissions still apply.',
     });
+    expect(gate.lastDecision).toBe('authorized');
     expect(request).toHaveBeenCalledWith('collaboration.action.evaluate', {
       conversationId: conversation,
       policyDigest,
@@ -249,6 +250,90 @@ describe('Copilot collaboration policy gate', () => {
       replyToMessageId: null,
       text: 'reply',
     });
+
+    const encodedResponse = await gate.hooks.onPreToolUse?.(
+      hookInput(
+        'functions.send_message',
+        JSON.stringify({
+          conversation_id: conversation,
+          message_id: '45'.repeat(16),
+          reply_to_message_id: null,
+          text: 'encoded reply',
+        }),
+      ),
+      { sessionId: 'session' },
+    );
+    expect(encodedResponse).toMatchObject({
+      modifiedArgs: {
+        conversation_id: conversation,
+        message_id: '45'.repeat(16),
+        reply_to_message_id: null,
+        text: 'encoded reply',
+        collaboration_authorization: 'aa'.repeat(16),
+      },
+    });
+    expect(gate.lastDecision).toBe('authorized');
+
+    await expect(
+      gate.hooks.onPreToolUse?.(
+        hookInput(
+          'send_message',
+          JSON.stringify({
+            conversation_id: conversation,
+            message_id: '46'.repeat(16),
+            text: 'reply',
+            unexpected: true,
+          }),
+        ),
+        { sessionId: 'session' },
+      ),
+    ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('send_arguments_malformed');
+  });
+
+  it('rejects malformed, scalar, collection, and oversized serialized arguments', async () => {
+    const request = vi.fn();
+    const gate = createCopilotPolicyGate(client(request));
+    activateGate(gate);
+
+    for (const toolArgs of [
+      'not-json',
+      'null',
+      '[]',
+      JSON.stringify({
+        conversation_id: conversation,
+        message_id: '47'.repeat(16),
+        text: 'reply',
+        unexpected: true,
+      }),
+      JSON.stringify({
+        conversation_id: conversation,
+        message_id: 'invalid',
+        text: 'reply',
+      }),
+      JSON.stringify({
+        conversation_id: conversation,
+        message_id: '48'.repeat(16),
+        text: 'x'.repeat(64 * 1024 + 1),
+      }),
+      'x'.repeat(128 * 1024 + 1),
+      new Proxy(
+        {},
+        {
+          getPrototypeOf() {
+            throw new Error('unexpected proxy access');
+          },
+        },
+      ),
+    ]) {
+      await expect(
+        gate.hooks.onPreToolUse?.(hookInput('send_message', toolArgs), {
+          sessionId: 'session',
+        }),
+      ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    }
+    expect(gate.lastDecision).toBe('gate_unavailable');
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('binds conversation tools and fails closed for unknown or unavailable decisions', async () => {
@@ -263,9 +348,11 @@ describe('Copilot collaboration policy gate', () => {
         sessionId: 'session',
       }),
     ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('conversation_mismatch');
     await expect(
       gate.hooks.onPreToolUse?.(hookInput('unknown_tool', {}), { sessionId: 'session' }),
     ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('tool_unmapped');
     expect(request).not.toHaveBeenCalled();
 
     await expect(
@@ -281,6 +368,7 @@ describe('Copilot collaboration policy gate', () => {
         { sessionId: 'session' },
       ),
     ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('descendant_session');
     expect(request).not.toHaveBeenCalled();
 
     request.mockResolvedValueOnce({ decision: 'ask', reason: 'local_approval_required' });
