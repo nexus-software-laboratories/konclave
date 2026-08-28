@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
     Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
@@ -22,7 +24,8 @@ const CREDENTIAL_HASH_DOMAIN: &[u8] = b"konclave-device-credential-binding-hash-
 const INVITATION_DOMAIN: &[u8] = b"konclave-invitation-v1\0";
 const PAIRING_OFFER_DOMAIN: &[u8] = b"konclave-pairing-offer-v1\0";
 const PAIRING_CONTROL_DOMAIN: &[u8] = b"konclave-pairing-control-v1\0";
-const DEVICE_IDENTITY_MAGIC: &[u8; 4] = b"KDI1";
+const DEVICE_IDENTITY_V1_MAGIC: &[u8; 4] = b"KDI1";
+const DEVICE_IDENTITY_V2_MAGIC: &[u8; 4] = b"KDI2";
 const CONVERSATION_SIGNING_MAGIC: &[u8; 4] = b"KCS1";
 
 /// Device-scoped root identity whose secret key remains inside the trusted daemon.
@@ -142,6 +145,30 @@ impl DeviceIdentity {
         sealer: &SecretSealer,
         profile_id: &[u8],
     ) -> Result<SealedBlob, KonclaveCryptographicError> {
+        self.seal_encoded(sealer, profile_id, None)
+    }
+
+    /// Seals this device root with an authenticated minimum profile-schema version.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed storage error when context construction, framing, or
+    /// authenticated encryption fails.
+    pub fn seal_with_profile_schema_floor(
+        &self,
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+        profile_schema_floor: u32,
+    ) -> Result<SealedBlob, KonclaveCryptographicError> {
+        self.seal_encoded(sealer, profile_id, Some(profile_schema_floor))
+    }
+
+    fn seal_encoded(
+        &self,
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+        profile_schema_floor: Option<u32>,
+    ) -> Result<SealedBlob, KonclaveCryptographicError> {
         let secret = self.secret_key.as_bytes();
         let length = u16::try_from(secret.len()).map_err(|_| {
             KonclaveCryptographicError::SecretStorageFailure {
@@ -149,9 +176,18 @@ impl DeviceIdentity {
             }
         })?;
         let mut plaintext = Zeroizing::new(Vec::with_capacity(
-            DEVICE_IDENTITY_MAGIC.len() + 2 + secret.len(),
+            DEVICE_IDENTITY_V2_MAGIC.len()
+                + profile_schema_floor.map_or(0, |_| size_of::<u32>())
+                + size_of::<u16>()
+                + secret.len(),
         ));
-        plaintext.extend_from_slice(DEVICE_IDENTITY_MAGIC);
+        match profile_schema_floor {
+            Some(profile_schema_floor) => {
+                plaintext.extend_from_slice(DEVICE_IDENTITY_V2_MAGIC);
+                plaintext.extend_from_slice(&profile_schema_floor.to_be_bytes());
+            }
+            None => plaintext.extend_from_slice(DEVICE_IDENTITY_V1_MAGIC),
+        }
         plaintext.extend_from_slice(&length.to_be_bytes());
         plaintext.extend_from_slice(secret);
         let context = device_identity_context(profile_id)?;
@@ -173,43 +209,85 @@ impl DeviceIdentity {
         profile_id: &[u8],
         blob: &SealedBlob,
     ) -> Result<Self, KonclaveCryptographicError> {
+        Self::open_with_profile_schema_floor(sealer, profile_id, blob).map(|(identity, _)| identity)
+    }
+
+    /// Reopens a device root and its authenticated minimum profile-schema version.
+    ///
+    /// Legacy device identities return a floor of zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when authentication, framing, key derivation, or
+    /// identifier reconstruction fails.
+    pub fn open_with_profile_schema_floor(
+        sealer: &SecretSealer,
+        profile_id: &[u8],
+        blob: &SealedBlob,
+    ) -> Result<(Self, u32), KonclaveCryptographicError> {
         let context = device_identity_context(profile_id)?;
         let plaintext = sealer.open(&context, blob).map_err(|_| {
             KonclaveCryptographicError::SecretStorageFailure {
                 operation: "device identity opening",
             }
         })?;
-        if plaintext.len() < DEVICE_IDENTITY_MAGIC.len() + 2
-            || &plaintext[..4] != DEVICE_IDENTITY_MAGIC
-        {
+        if plaintext.len() < DEVICE_IDENTITY_V1_MAGIC.len() + size_of::<u16>() {
             return Err(KonclaveCryptographicError::SecretStorageFailure {
                 operation: "device identity decoding",
             });
         }
-        let length = u16::from_be_bytes(plaintext[4..6].try_into().map_err(|_| {
-            KonclaveCryptographicError::SecretStorageFailure {
-                operation: "device identity decoding",
+        let (profile_schema_floor, length_offset) = if &plaintext[..4] == DEVICE_IDENTITY_V1_MAGIC {
+            (0, 4)
+        } else if &plaintext[..4] == DEVICE_IDENTITY_V2_MAGIC {
+            if plaintext.len()
+                < DEVICE_IDENTITY_V2_MAGIC.len() + size_of::<u32>() + size_of::<u16>()
+            {
+                return Err(KonclaveCryptographicError::SecretStorageFailure {
+                    operation: "device identity decoding",
+                });
             }
-        })?) as usize;
-        if plaintext.len() != 6 + length {
+            (
+                u32::from_be_bytes(plaintext[4..8].try_into().map_err(|_| {
+                    KonclaveCryptographicError::SecretStorageFailure {
+                        operation: "device identity decoding",
+                    }
+                })?),
+                8,
+            )
+        } else {
+            return Err(KonclaveCryptographicError::SecretStorageFailure {
+                operation: "device identity decoding",
+            });
+        };
+        let secret_offset = length_offset + size_of::<u16>();
+        let length =
+            u16::from_be_bytes(plaintext[length_offset..secret_offset].try_into().map_err(
+                |_| KonclaveCryptographicError::SecretStorageFailure {
+                    operation: "device identity decoding",
+                },
+            )?) as usize;
+        if plaintext.len() != secret_offset + length {
             return Err(KonclaveCryptographicError::SecretStorageFailure {
                 operation: "device identity decoding",
             });
         }
         let provider = configured_provider();
         let cipher_suite = cipher_suite(&provider)?;
-        let secret_key = SignatureSecretKey::new(plaintext[6..].to_vec());
+        let secret_key = SignatureSecretKey::new(plaintext[secret_offset..].to_vec());
         let public_key = cipher_suite
             .signature_key_derive_public(&secret_key)
             .map_err(|_| provider_failure("device root public key derivation"))?;
         let public_key = Ed25519PublicKey::from_slice(public_key.as_bytes())?;
         let device_id = derive_device_id_with_suite(&cipher_suite, public_key)?;
-        Ok(Self {
-            provider,
-            secret_key,
-            public_key,
-            device_id,
-        })
+        Ok((
+            Self {
+                provider,
+                secret_key,
+                public_key,
+                device_id,
+            },
+            profile_schema_floor,
+        ))
     }
 
     /// Generates and signs a distinct MLS signing identity for one conversation.
@@ -1053,6 +1131,30 @@ mod tests {
                 .as_bytes()
                 .len(),
             NotificationId::LENGTH
+        );
+    }
+
+    #[test]
+    fn device_identity_profile_schema_floor_is_authenticated_and_backward_compatible() {
+        let identity = DeviceIdentity::generate().unwrap();
+        let legacy = identity.seal(&sealer(), b"profile-a").unwrap();
+        let (legacy_reopened, legacy_floor) =
+            DeviceIdentity::open_with_profile_schema_floor(&sealer(), b"profile-a", &legacy)
+                .unwrap();
+        assert_eq!(legacy_reopened.device_id(), identity.device_id());
+        assert_eq!(legacy_floor, 0);
+
+        let current = identity
+            .seal_with_profile_schema_floor(&sealer(), b"profile-a", 17)
+            .unwrap();
+        let (current_reopened, current_floor) =
+            DeviceIdentity::open_with_profile_schema_floor(&sealer(), b"profile-a", &current)
+                .unwrap();
+        assert_eq!(current_reopened.device_id(), identity.device_id());
+        assert_eq!(current_floor, 17);
+        assert!(
+            DeviceIdentity::open_with_profile_schema_floor(&sealer(), b"profile-b", &current)
+                .is_err()
         );
     }
 

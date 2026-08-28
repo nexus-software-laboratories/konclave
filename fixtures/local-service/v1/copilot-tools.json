@@ -1,5 +1,65 @@
 [
   {
+    "name": "accept_collaboration_policy",
+    "description": "Locally activate one exact received proposal and report acceptance.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "proposal_id",
+        "policy_digest"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_binding_changed": {
+          "type": "boolean"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "policy_digest",
+        "message_id",
+        "cursor",
+        "local_binding_changed"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "accept_welcome",
     "description": "Accept an encrypted Welcome for a durable pending join.",
     "inputSchema": {
@@ -814,6 +874,72 @@
     }
   },
   {
+    "name": "propose_collaboration_policy",
+    "description": "Propose and locally activate one exact canonical collaboration-policy bundle.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "canonical_bundle": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        },
+        "replaces_policy_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "proposal_id",
+        "canonical_bundle"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_binding_changed": {
+          "type": "boolean"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "policy_digest",
+        "message_id",
+        "cursor",
+        "local_binding_changed"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "read_messages",
     "description": "Read a bounded cursor-ordered page of sealed local message history.",
     "inputSchema": {
@@ -1088,6 +1214,66 @@
     }
   },
   {
+    "name": "reject_collaboration_policy",
+    "description": "Reject one exact received proposal without changing local authority.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "proposal_id",
+        "policy_digest"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_binding_changed": {
+          "type": "boolean"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "policy_digest",
+        "message_id",
+        "cursor",
+        "local_binding_changed"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "remove_member",
     "description": "Submit an encrypted Commit removing one conversation device.",
     "inputSchema": {
@@ -1131,6 +1317,66 @@
         "conversation_id",
         "operation_id",
         "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "revoke_collaboration_policy",
+    "description": "Remove matching local authority and report revocation using a caller-stable 16-byte message_id.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message_id",
+        "policy_digest"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_binding_changed": {
+          "type": "boolean"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "policy_digest",
+        "message_id",
+        "cursor",
+        "local_binding_changed"
       ],
       "type": "object"
     }

@@ -1000,6 +1000,10 @@ fn response_from_result(
 fn operation_error_code(code: &str) -> LocalServiceErrorCode {
     match code {
         "invalid_request"
+        | "invalid_collaboration_policy_bundle"
+        | "invalid_collaboration_policy_digest"
+        | "invalid_collaboration_policy_proposal_id"
+        | "collaboration_policy_proposal_not_found"
         | "invalid_conversation_id"
         | "invalid_pairing_id"
         | "invalid_message_id"
@@ -1019,6 +1023,7 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         "local_service_not_authorized" => LocalServiceErrorCode::NotAuthorized,
         "busy" => LocalServiceErrorCode::Busy,
         "deadline_exceeded" => LocalServiceErrorCode::DeadlineExceeded,
+        "collaboration_policy_conflict" => LocalServiceErrorCode::Conflict,
         _ => LocalServiceErrorCode::Internal,
     }
 }
@@ -1030,6 +1035,10 @@ fn is_tool_operation(operation: &str) -> bool {
             | "create_conversation"
             | "list_conversations"
             | "send_message"
+            | "propose_collaboration_policy"
+            | "accept_collaboration_policy"
+            | "reject_collaboration_policy"
+            | "revoke_collaboration_policy"
             | "read_messages"
             | "sync_messages"
             | "watch_messages"
@@ -1716,9 +1725,10 @@ mod delivery_contract_tests {
         CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
         DeviceId, MessageId, NotificationId, ProtocolVersion,
     };
+    use KonclaveLocalServiceTransport::LocalServiceErrorCode;
     use serde_json::json;
 
-    use super::delivery_event_result;
+    use super::{delivery_event_result, is_tool_operation, operation_error_code};
     use crate::persistence::{ClaimedRemoteEvent, RemoteEvent, RemoteEventPayload};
 
     #[test]
@@ -1768,6 +1778,30 @@ mod delivery_contract_tests {
                 "kind": "collaboration_policy_revocation",
                 "policyDigest": "02".repeat(32)
             })
+        );
+    }
+
+    #[test]
+    fn policy_operations_use_stable_local_service_capabilities_and_errors() {
+        for operation in [
+            "propose_collaboration_policy",
+            "accept_collaboration_policy",
+            "reject_collaboration_policy",
+            "revoke_collaboration_policy",
+        ] {
+            assert!(is_tool_operation(operation));
+        }
+        assert_eq!(
+            operation_error_code("invalid_collaboration_policy_bundle"),
+            LocalServiceErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            operation_error_code("collaboration_policy_proposal_not_found"),
+            LocalServiceErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            operation_error_code("collaboration_policy_conflict"),
+            LocalServiceErrorCode::Conflict
         );
     }
 

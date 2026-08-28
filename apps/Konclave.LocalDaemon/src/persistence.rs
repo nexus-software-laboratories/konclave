@@ -10,12 +10,12 @@ use KonclaveCryptographicCore::{
     derive_collaboration_policy_digest, verify_device_credential_binding,
 };
 use KonclaveDomainCore::{
-    AdapterConsumerId, AdapterLeaseId, ApplicationMessage, CollaborationPolicyBundle,
-    CollaborationPolicyDigest, ConversationId, ConversationRole, ConversationState, DeliveryClass,
-    DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation, InvitationId,
-    JoinProof, MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_MEMBERS, MembershipChange,
-    MembershipOperationId, MessageId, NotificationId, RelayEnvelope, RoutingId,
-    StoredRelayEnvelope,
+    AdapterConsumerId, AdapterLeaseId, ApplicationContent, ApplicationMessage,
+    CollaborationPolicyBundle, CollaborationPolicyDigest, ConversationId, ConversationRole,
+    ConversationState, DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
+    EnvelopeId, Invitation, InvitationId, JoinProof, MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+    MAX_MEMBERS, MembershipChange, MembershipOperationId, MessageId, NotificationId, RelayEnvelope,
+    RoutingId, StoredRelayEnvelope,
 };
 use KonclaveLocalServiceTransport::MAX_RPC_FRAME_BYTES;
 use KonclaveProtocolContracts::v1::{
@@ -35,12 +35,15 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod collaboration_policy_exchange;
+mod collaboration_policy_operation;
+pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
+pub(crate) use collaboration_policy_operation::CollaborationPolicyActivationOperation;
 #[path = "enrollment_persistence.rs"]
 pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 16;
+const PROFILE_SCHEMA_VERSION: u32 = 17;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -303,10 +306,12 @@ impl LockedProfile {
             sealer: Arc::new(sealer),
             locked_profile: self,
         };
+        store.initialize_collaboration_policy_operation_schema(source_version)?;
         store.active_conversation_id()?;
         store.verify_collaboration_policies()?;
         store.backfill_collaboration_policy_exchange_records()?;
         store.verify_collaboration_policy_exchange_records()?;
+        store.verify_collaboration_policy_operations()?;
         store.verify_remote_event_journal()?;
         store.verify_local_request_outcomes()?;
         store.invalidate_remote_event_leases()?;
@@ -2763,17 +2768,26 @@ impl ProfileStore {
             "SELECT sealed_device_identity FROM daemon_profile WHERE singleton_id = 1",
         )?;
         if let Some(blob) = existing {
-            return DeviceIdentity::open(
+            let (identity, profile_schema_floor) = DeviceIdentity::open_with_profile_schema_floor(
                 &self.sealer,
                 self.locked_profile.profile_id.as_bytes(),
                 &blob,
             )
-            .map_err(|_| ProfileStoreError::Cryptographic);
+            .map_err(|_| ProfileStoreError::Cryptographic)?;
+            return if profile_schema_floor == PROFILE_SCHEMA_VERSION {
+                Ok(identity)
+            } else {
+                Err(ProfileStoreError::CorruptData)
+            };
         }
 
         let identity = DeviceIdentity::generate().map_err(|_| ProfileStoreError::Cryptographic)?;
         let blob = identity
-            .seal(&self.sealer, self.locked_profile.profile_id.as_bytes())
+            .seal_with_profile_schema_floor(
+                &self.sealer,
+                self.locked_profile.profile_id.as_bytes(),
+                PROFILE_SCHEMA_VERSION,
+            )
             .map_err(|_| ProfileStoreError::Cryptographic)?;
         let changed = self
             .lock()?
@@ -3864,10 +3878,64 @@ impl ProfileStore {
         message_id: MessageId,
         envelope_id: EnvelopeId,
     ) -> Result<OutboundReservation, ProfileStoreError> {
+        self.reserve_outbound_application_with_policy(
+            conversation_id,
+            message_id,
+            envelope_id,
+            None,
+        )
+    }
+
+    /// Reserves an outbound identifier already authenticated by a policy operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, conflicting, malformed, capacity, or storage error.
+    pub(crate) fn reserve_outbound_collaboration_policy_application(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        envelope_id: EnvelopeId,
+        content: &ApplicationContent,
+        reply_to: Option<MessageId>,
+    ) -> Result<OutboundReservation, ProfileStoreError> {
+        self.reserve_outbound_application_with_policy(
+            conversation_id,
+            message_id,
+            envelope_id,
+            Some((content, reply_to)),
+        )
+    }
+
+    fn reserve_outbound_application_with_policy(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        envelope_id: EnvelopeId,
+        policy_operation: Option<(&ApplicationContent, Option<MessageId>)>,
+    ) -> Result<OutboundReservation, ProfileStoreError> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
+        match policy_operation {
+            Some((content, reply_to)) => self.verify_outbound_collaboration_policy_operation(
+                &transaction,
+                conversation_id,
+                message_id,
+                content,
+                reply_to,
+            )?,
+            None => {
+                if self.collaboration_policy_operation_reserves_message_id(
+                    &transaction,
+                    conversation_id,
+                    message_id,
+                )? {
+                    return Err(ProfileStoreError::DuplicateOperation);
+                }
+            }
+        }
         let existing = {
             let mut statement = transaction
                 .prepare(
@@ -6797,6 +6865,15 @@ impl ProfileStore {
         epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), ProfileStoreError> {
+        if direction == MessageDirection::Inbound
+            && self.collaboration_policy_operation_reserves_message_id(
+                connection,
+                conversation_id,
+                message.message_id(),
+            )?
+        {
+            return Err(ProfileStoreError::DuplicateOperation);
+        }
         let plaintext =
             encode_history_message_record(direction, envelope_id, sender, epoch, message)?;
         let blob = self.seal_operation_record(
@@ -8650,6 +8727,12 @@ pub(crate) enum ProfileStoreError {
     PairingCapacityExceeded,
     #[error("local collaboration-policy storage reached its limit")]
     CollaborationPolicyCapacityExceeded,
+    #[error("collaboration-policy proposal is unavailable")]
+    CollaborationPolicyProposalNotFound,
+    #[error("collaboration-policy proposal identity is conflicted")]
+    CollaborationPolicyProposalConflict,
+    #[error("collaboration-policy replacement does not match local authority")]
+    CollaborationPolicyReplacementMismatch,
     #[error("another local adapter consumer owns the profile")]
     AdapterConsumerActive,
     #[error("local adapter lease is missing, expired, or stale")]
@@ -8685,8 +8768,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION => return Ok(()),
-        15 => return collaboration_policy_exchange::initialize_schema(connection),
+        PROFILE_SCHEMA_VERSION | 16 => return Ok(()),
+        15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
         12 => return initialize_local_request_outcome_schema(connection),
@@ -8980,6 +9063,12 @@ fn initialize_collaboration_policy_schema(
              COMMIT;",
         )
         .map_err(|_| ProfileStoreError::Storage)?;
+    initialize_collaboration_policy_exchange_schema(connection)
+}
+
+fn initialize_collaboration_policy_exchange_schema(
+    connection: &Connection,
+) -> Result<(), ProfileStoreError> {
     collaboration_policy_exchange::initialize_schema(connection)
 }
 
@@ -11502,6 +11591,38 @@ mod tests {
             .unwrap();
     }
 
+    fn downgrade_device_identity_to_legacy(connection: &Connection) {
+        let (profile_id, sealed_identity): (String, Option<Vec<u8>>) = connection
+            .query_row(
+                "SELECT profile_id, sealed_device_identity
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let Some(sealed_identity) = sealed_identity else {
+            return;
+        };
+        let sealed_identity = SealedBlob::from_bytes(sealed_identity).unwrap();
+        let identity = DeviceIdentity::open_with_profile_schema_floor(
+            &sealer(),
+            profile_id.as_bytes(),
+            &sealed_identity,
+        )
+        .unwrap()
+        .0;
+        let legacy_identity = identity.seal(&sealer(), profile_id.as_bytes()).unwrap();
+        connection
+            .execute(
+                "UPDATE daemon_profile
+                 SET sealed_device_identity = ?1
+                 WHERE singleton_id = 1",
+                params![legacy_identity.as_bytes()],
+            )
+            .unwrap();
+    }
+
     fn downgrade_v5_to_v4(connection: &Connection) {
         downgrade_v6_to_v5(connection);
         connection
@@ -11613,9 +11734,12 @@ mod tests {
     }
 
     fn downgrade_v10_to_v9(connection: &Connection) {
+        downgrade_device_identity_to_legacy(connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -13893,7 +14017,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -13923,7 +14049,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -13970,7 +14098,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -13996,7 +14126,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -14043,7 +14175,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -14069,7 +14203,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  DROP TABLE daemon_collaboration_policy_binding;
                  DROP TABLE daemon_collaboration_policy_bundle;
@@ -15362,6 +15498,291 @@ mod tests {
     }
 
     #[test]
+    fn policy_operation_retry_cannot_resurrect_revoked_authority() {
+        let fixture = conversation_fixture("policy-operation-retry");
+        let canonical_bundle =
+            collaboration_policy_bytes("contract-alignment", "Align this contract.");
+        let bundle = decode_collaboration_policy_bundle(&canonical_bundle).unwrap();
+        let digest = derive_collaboration_policy_digest(&bundle).unwrap();
+        let first_message_id = MessageId::from_bytes([41; MessageId::LENGTH]);
+        let first_proposal_id = CollaborationPolicyProposalId::from_bytes([42; 16]);
+        let activation = |message_id, proposal_id, activated_at_unix_milliseconds| {
+            CollaborationPolicyActivationOperation {
+                conversation_id: fixture.conversation_id,
+                message_id,
+                proposal_id,
+                source_proposal_message_id: None,
+                policy_digest: digest,
+                replaces_policy_digest: None,
+                canonical_bundle: &canonical_bundle,
+                activated_at_unix_milliseconds,
+                is_acceptance: false,
+            }
+        };
+        assert!(
+            fixture
+                .store
+                .apply_collaboration_policy_activation_operation(activation(
+                    first_message_id,
+                    first_proposal_id,
+                    100,
+                ))
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .store
+                .apply_collaboration_policy_revocation_operation(
+                    fixture.conversation_id,
+                    MessageId::from_bytes([43; MessageId::LENGTH]),
+                    digest,
+                )
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .store
+                .apply_collaboration_policy_activation_operation(activation(
+                    first_message_id,
+                    first_proposal_id,
+                    100,
+                ))
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .store
+                .active_collaboration_policy(fixture.conversation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(
+            fixture
+                .store
+                .apply_collaboration_policy_activation_operation(activation(
+                    MessageId::from_bytes([44; MessageId::LENGTH]),
+                    CollaborationPolicyProposalId::from_bytes([45; 16]),
+                    101,
+                ))
+                .unwrap()
+        );
+        assert_eq!(
+            fixture
+                .store
+                .active_collaboration_policy(fixture.conversation_id)
+                .unwrap()
+                .unwrap()
+                .digest(),
+            digest
+        );
+    }
+
+    #[test]
+    fn deleted_policy_operation_record_fails_startup() {
+        let fixture = conversation_fixture("policy-operation-delete");
+        fixture
+            .store
+            .apply_collaboration_policy_rejection_operation(
+                fixture.conversation_id,
+                MessageId::from_bytes([41; MessageId::LENGTH]),
+                CollaborationPolicyProposalId::from_bytes([42; 16]),
+                MessageId::from_bytes([44; MessageId::LENGTH]),
+                CollaborationPolicyDigest::from_bytes([43; CollaborationPolicyDigest::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM daemon_collaboration_policy_operation", [])
+            .unwrap();
+
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn erased_policy_operation_journal_cannot_rebootstrap() {
+        let fixture = conversation_fixture("policy-operation-erasure");
+        fixture
+            .store
+            .apply_collaboration_policy_rejection_operation(
+                fixture.conversation_id,
+                MessageId::from_bytes([41; MessageId::LENGTH]),
+                CollaborationPolicyProposalId::from_bytes([42; 16]),
+                MessageId::from_bytes([43; MessageId::LENGTH]),
+                CollaborationPolicyDigest::from_bytes([44; CollaborationPolicyDigest::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DELETE FROM daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
+                 CREATE TABLE daemon_collaboration_policy_operation_state (
+                    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                    sealed_state BLOB
+                 );
+                 INSERT INTO daemon_collaboration_policy_operation_state (
+                    singleton_id,
+                    sealed_state
+                 ) VALUES (1, NULL);",
+            )
+            .unwrap();
+
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn authenticated_schema_floor_rejects_policy_operation_journal_downgrade() {
+        let fixture = conversation_fixture("policy-operation-downgrade");
+        fixture
+            .store
+            .apply_collaboration_policy_rejection_operation(
+                fixture.conversation_id,
+                MessageId::from_bytes([41; MessageId::LENGTH]),
+                CollaborationPolicyProposalId::from_bytes([42; 16]),
+                MessageId::from_bytes([43; MessageId::LENGTH]),
+                CollaborationPolicyDigest::from_bytes([44; CollaborationPolicyDigest::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn policy_operation_source_message_tampering_fails_startup() {
+        let fixture = conversation_fixture("policy-operation-source-tamper");
+        fixture
+            .store
+            .apply_collaboration_policy_rejection_operation(
+                fixture.conversation_id,
+                MessageId::from_bytes([41; MessageId::LENGTH]),
+                CollaborationPolicyProposalId::from_bytes([42; 16]),
+                MessageId::from_bytes([43; MessageId::LENGTH]),
+                CollaborationPolicyDigest::from_bytes([44; CollaborationPolicyDigest::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_collaboration_policy_operation
+                 SET source_proposal_message_id = ?1",
+                params![
+                    MessageId::from_bytes([45; MessageId::LENGTH])
+                        .as_bytes()
+                        .as_slice()
+                ],
+            )
+            .unwrap();
+
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn policy_operation_message_reservation_blocks_other_local_and_remote_content() {
+        let fixture = conversation_fixture("policy-message-reserve");
+        let message_id = MessageId::from_bytes([41; MessageId::LENGTH]);
+        fixture
+            .store
+            .apply_collaboration_policy_rejection_operation(
+                fixture.conversation_id,
+                message_id,
+                CollaborationPolicyProposalId::from_bytes([42; 16]),
+                MessageId::from_bytes([43; MessageId::LENGTH]),
+                CollaborationPolicyDigest::from_bytes([44; CollaborationPolicyDigest::LENGTH]),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .reserve_outbound_application(
+                    fixture.conversation_id,
+                    message_id,
+                    EnvelopeId::from_bytes([45; EnvelopeId::LENGTH]),
+                )
+                .err(),
+            Some(ProfileStoreError::DuplicateOperation)
+        );
+
+        let envelope =
+            StoredRelayEnvelope::new(relay_envelope(fixture.routing_id, 46, &[46]), 1).unwrap();
+        fixture.store.record_inbox_envelope(&envelope).unwrap();
+        let remote_message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            message_id,
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::text("conflicting remote content").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .save_inbox_message(
+                    fixture.conversation_id,
+                    1,
+                    DeviceId::from_bytes([47; DeviceId::LENGTH]),
+                    0,
+                    &remote_message,
+                )
+                .err(),
+            Some(ProfileStoreError::DuplicateOperation)
+        );
+    }
+
+    #[test]
     fn collaboration_policy_exchange_is_indexed_atomically_without_activation() {
         let fixture = conversation_fixture("policy-exchange-index");
         let sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
@@ -15408,6 +15829,17 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let stored_proposal = fixture
+            .store
+            .collaboration_policy_proposal(fixture.conversation_id, proposal_id)
+            .unwrap();
+        assert_eq!(stored_proposal.policy_digest, digest);
+        assert_eq!(
+            stored_proposal.replaces_policy_digest,
+            Some(CollaborationPolicyDigest::from_bytes([46; 32]))
+        );
+        assert_eq!(stored_proposal.proposer, sender);
+        assert_eq!(stored_proposal.relay_cursor, 1);
         stage_policy_exchange_message(
             &fixture,
             2,
@@ -15493,6 +15925,43 @@ mod tests {
             .unwrap()
             .open_store(sealer())
             .unwrap();
+    }
+
+    #[test]
+    fn conflicting_policy_proposal_identity_cannot_be_selected() {
+        let fixture = conversation_fixture("policy-proposal-conflict");
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([45; 16]);
+        for (cursor, identifier) in [(1, 1), (2, 2)] {
+            let canonical_bundle = collaboration_policy_bytes(
+                &format!("contract-{identifier}"),
+                &format!("Align contract {identifier}."),
+            );
+            let bundle = decode_collaboration_policy_bundle(&canonical_bundle).unwrap();
+            let digest = derive_collaboration_policy_digest(&bundle).unwrap();
+            stage_policy_exchange_message(
+                &fixture,
+                cursor,
+                identifier,
+                DeviceId::from_bytes([44; DeviceId::LENGTH]),
+                cursor,
+                ApplicationContent::collaboration_policy_proposal(
+                    CollaborationPolicyProposal::new(proposal_id, digest, canonical_bundle, None)
+                        .unwrap(),
+                ),
+            );
+            fixture
+                .store
+                .complete_inbox(fixture.conversation_id, cursor)
+                .unwrap();
+        }
+
+        assert_eq!(
+            fixture
+                .store
+                .collaboration_policy_proposal(fixture.conversation_id, proposal_id)
+                .err(),
+            Some(ProfileStoreError::CollaborationPolicyProposalConflict)
+        );
     }
 
     #[test]
@@ -15656,9 +16125,12 @@ mod tests {
         let root = fixture.root;
         drop(fixture.store);
         let connection = Connection::open(&database_path).unwrap();
+        downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_exchange_state;
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
                  PRAGMA user_version = 15;",
             )
@@ -15720,6 +16192,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(backfilled_records, 1);
+    }
+
+    #[test]
+    fn schema_sixteen_adds_the_collaboration_policy_operation_journal() {
+        let fixture = conversation_fixture("policy-operation-migration");
+        let profile_id = fixture.profile_id.clone();
+        let device_id = fixture.device_id;
+        let database_path = fixture.store.locked_profile.profile_database_path();
+        let root = fixture.root;
+        drop(fixture.store);
+        let connection = Connection::open(&database_path).unwrap();
+        downgrade_device_identity_to_legacy(&connection);
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_collaboration_policy_operation_state;
+                 DROP TABLE daemon_collaboration_policy_operation;
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let connection = store.lock().unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let operation_table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'daemon_collaboration_policy_operation'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let sealed_state_length: i64 = connection
+            .query_row(
+                "SELECT length(sealed_state)
+                 FROM daemon_collaboration_policy_operation_state
+                 WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert!(operation_table_exists);
+        assert!(sealed_state_length > 0);
+        drop(connection);
+        assert_eq!(
+            store.load_or_create_device().unwrap().device_id(),
+            device_id
+        );
     }
 
     #[test]

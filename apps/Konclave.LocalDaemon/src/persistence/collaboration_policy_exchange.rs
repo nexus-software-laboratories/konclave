@@ -25,6 +25,8 @@ const EXCHANGE_STATE_VERSION: u8 = 1;
 const EXCHANGE_STATE_BYTES: usize = 10;
 const MAX_SEALED_EXCHANGE_RECORD_BYTES: usize = EXCHANGE_RECORD_BYTES + 64;
 const MAX_SEALED_EXCHANGE_STATE_BYTES: usize = EXCHANGE_STATE_BYTES + 64;
+const MAX_PROPOSAL_ASSERTIONS_PER_ID: usize =
+    MAX_COLLABORATION_POLICY_EXCHANGE_RECORDS_PER_CONVERSATION;
 
 struct IndexedExchangeMetadata {
     relay_cursor: i64,
@@ -35,6 +37,16 @@ struct IndexedExchangeMetadata {
     policy_digest: Option<Vec<u8>>,
     response_outcome: Option<i64>,
     sealed_record_length: i64,
+}
+
+pub(crate) struct StoredCollaborationPolicyProposal {
+    pub(crate) proposal_id: CollaborationPolicyProposalId,
+    pub(crate) policy_digest: CollaborationPolicyDigest,
+    pub(crate) replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    pub(crate) canonical_bundle: Vec<u8>,
+    pub(crate) proposer: KonclaveDomainCore::DeviceId,
+    pub(crate) message_id: MessageId,
+    pub(crate) relay_cursor: u64,
 }
 
 pub(super) fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
@@ -571,28 +583,102 @@ impl ProfileStore {
                 )
                 .map_err(|_| ProfileStoreError::Storage)?;
             statement
-                .query_map([], |row| {
-                    Ok(ExchangeMetadata {
-                        conversation_id: row.get(0)?,
-                        message_id: row.get(1)?,
-                        relay_cursor: row.get(2)?,
-                        kind: row.get(3)?,
-                        proposal_id_storage_type: row.get(4)?,
-                        proposal_id_length: row.get(5)?,
-                        proposal_id: row.get(6)?,
-                        policy_digest: row.get(7)?,
-                        response_outcome: row.get(8)?,
-                        sealed_record_length: row.get(9)?,
-                    })
-                })
+                .query_map([], exchange_metadata_from_row)
                 .map_err(|_| ProfileStoreError::Storage)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| ProfileStoreError::Storage)?
         };
         for metadata in metadata {
-            self.verify_collaboration_policy_exchange_record(metadata)?;
+            self.load_verified_collaboration_policy_exchange_record(metadata)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn collaboration_policy_proposal(
+        &self,
+        conversation_id: ConversationId,
+        proposal_id: CollaborationPolicyProposalId,
+    ) -> Result<StoredCollaborationPolicyProposal, ProfileStoreError> {
+        self.conversation_routing_id(conversation_id)?;
+        let metadata = {
+            let connection = self.lock()?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT
+                        CASE WHEN length(conversation_id) = 32 THEN conversation_id END,
+                        CASE WHEN length(message_id) = 16 THEN message_id END,
+                        relay_cursor,
+                        kind,
+                        typeof(proposal_id),
+                        length(proposal_id),
+                        CASE
+                            WHEN typeof(proposal_id) = 'blob'
+                                AND length(proposal_id) = 16
+                            THEN proposal_id
+                        END,
+                        CASE WHEN length(policy_digest) = 32 THEN policy_digest END,
+                        response_outcome,
+                        length(sealed_record)
+                     FROM daemon_collaboration_policy_exchange
+                     WHERE conversation_id = ?1
+                       AND kind = 1
+                       AND proposal_id = ?2
+                     ORDER BY relay_cursor
+                     LIMIT ?3",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(
+                    params![
+                        conversation_id.as_bytes().as_slice(),
+                        proposal_id.as_bytes().as_slice(),
+                        i64::try_from(MAX_PROPOSAL_ASSERTIONS_PER_ID + 1)
+                            .map_err(|_| ProfileStoreError::SequenceExhausted)?
+                    ],
+                    exchange_metadata_from_row,
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        if metadata.is_empty() {
+            return Err(ProfileStoreError::CollaborationPolicyProposalNotFound);
+        }
+        if metadata.len() > MAX_PROPOSAL_ASSERTIONS_PER_ID {
+            return Err(ProfileStoreError::CollaborationPolicyProposalConflict);
+        }
+
+        let mut selected: Option<StoredCollaborationPolicyProposal> = None;
+        for metadata in metadata {
+            let history = self.load_verified_collaboration_policy_exchange_record(metadata)?;
+            let ApplicationContent::CollaborationPolicyProposal(proposal) =
+                history.message.content()
+            else {
+                return Err(ProfileStoreError::CorruptData);
+            };
+            let candidate = StoredCollaborationPolicyProposal {
+                proposal_id: proposal.proposal_id(),
+                policy_digest: proposal.policy_digest(),
+                replaces_policy_digest: proposal.replaces_policy_digest(),
+                canonical_bundle: proposal.canonical_bundle().to_vec(),
+                proposer: history.sender,
+                message_id: history.message.message_id(),
+                relay_cursor: history.cursor.ok_or(ProfileStoreError::CorruptData)?,
+            };
+            if let Some(existing) = &selected {
+                if existing.proposal_id != candidate.proposal_id
+                    || existing.policy_digest != candidate.policy_digest
+                    || existing.replaces_policy_digest != candidate.replaces_policy_digest
+                    || existing.canonical_bundle != candidate.canonical_bundle
+                    || existing.proposer != candidate.proposer
+                {
+                    return Err(ProfileStoreError::CollaborationPolicyProposalConflict);
+                }
+            } else {
+                selected = Some(candidate);
+            }
+        }
+        selected.ok_or(ProfileStoreError::CollaborationPolicyProposalNotFound)
     }
 
     fn collaboration_policy_exchange_record_exists(
@@ -732,10 +818,10 @@ impl ProfileStore {
         )
     }
 
-    fn verify_collaboration_policy_exchange_record(
+    fn load_verified_collaboration_policy_exchange_record(
         &self,
         metadata: ExchangeMetadata,
-    ) -> Result<(), ProfileStoreError> {
+    ) -> Result<super::HistoryRecord, ProfileStoreError> {
         let conversation_id = ConversationId::from_slice(
             &metadata
                 .conversation_id
@@ -824,7 +910,7 @@ impl ProfileStore {
         {
             return Err(ProfileStoreError::CorruptData);
         }
-        Ok(())
+        Ok(history)
     }
 }
 
@@ -839,6 +925,21 @@ struct ExchangeMetadata {
     policy_digest: Option<Vec<u8>>,
     response_outcome: Option<i64>,
     sealed_record_length: i64,
+}
+
+fn exchange_metadata_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeMetadata> {
+    Ok(ExchangeMetadata {
+        conversation_id: row.get(0)?,
+        message_id: row.get(1)?,
+        relay_cursor: row.get(2)?,
+        kind: row.get(3)?,
+        proposal_id_storage_type: row.get(4)?,
+        proposal_id_length: row.get(5)?,
+        proposal_id: row.get(6)?,
+        policy_digest: row.get(7)?,
+        response_outcome: row.get(8)?,
+        sealed_record_length: row.get(9)?,
+    })
 }
 
 fn decode_optional_proposal_id(
