@@ -16,6 +16,9 @@ use KonclaveSecretStorage::{
     open_owner_protected_file, NativeLocalServiceIdentityStore, SecretStorageError,
 };
 
+#[cfg(any(windows, test))]
+use crate::encoding::encode_hex;
+
 const ACCOUNT_ISSUER_KEY_FILE: &str = "account-issuer.key";
 const SERVICE_DIRECTORY: &str = "service";
 
@@ -267,17 +270,6 @@ fn absolute_path(path: PathBuf) -> anyhow::Result<PathBuf> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
-}
-
-#[cfg(any(windows, test))]
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 #[cfg(test)]

@@ -1,0 +1,38 @@
+{
+  "apiVersion": "konclave.dev/v1",
+  "kind": "CollaborationPolicy",
+  "metadata": {
+    "name": "contract-alignment"
+  },
+  "spec": {
+    "guidance": "Collaborate on the API contract, validate locally appropriate changes, and report decisions and blockers.",
+    "statements": [
+      {
+        "id": "conversation-reply",
+        "effect": "allow",
+        "action": "conversation.reply"
+      },
+      {
+        "id": "validation-run",
+        "effect": "allow",
+        "action": "validation.run",
+        "resource": "workspace.current"
+      },
+      {
+        "id": "workspace-modify",
+        "effect": "require_local_approval",
+        "action": "workspace.modify",
+        "resource": "workspace.current"
+      }
+    ],
+    "requiredHarnessClaims": [
+      "harness.session-identity"
+    ],
+    "limits": {
+      "durationMilliseconds": null,
+      "turns": null,
+      "tokens": null,
+      "concurrentRequests": 1
+    }
+  }
+}

@@ -20,6 +20,8 @@ pub enum Command {
     RelayBootstrap(RelayBootstrapArgs),
     /// Check installation, custody, profile, and relay health
     Doctor(DoctorArgs),
+    /// Create, validate, inspect, compile, diff, and list collaboration policies
+    Policy(PolicyArgs),
 }
 
 #[derive(Args)]
@@ -81,4 +83,103 @@ pub struct DoctorArgs {
     /// Installation root containing bin/ and share/konclave/
     #[arg(long)]
     pub install_root: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub command: PolicyCommand,
+}
+
+#[derive(Subcommand)]
+pub enum PolicyCommand {
+    /// Create a new strict-JSON policy source without overwriting a file
+    Create(PolicyCreateArgs),
+    /// Validate and identify one explicit policy source
+    Validate(PolicySourceArgs),
+    /// Show a bounded summary of one explicit policy source
+    Inspect(PolicySourceArgs),
+    /// Compile one explicit source into immutable canonical bundle bytes
+    Compile(PolicyCompileArgs),
+    /// Compare the canonical identities of two explicit sources
+    Diff(PolicyDiffArgs),
+    /// List names from one explicit descriptor-backed file catalog
+    List(PolicyCatalogListArgs),
+    /// Compile every entry in one explicit descriptor-backed file catalog
+    ValidateCatalog(PolicyCatalogArgs),
+}
+
+#[derive(Args)]
+pub struct PolicyCreateArgs {
+    /// Canonical policy name
+    #[arg(long)]
+    pub name: String,
+    /// New JSON source file to create
+    #[arg(long)]
+    pub output: PathBuf,
+}
+
+#[derive(Args)]
+pub struct PolicySourceArgs {
+    /// Explicit JSON policy source file
+    #[arg(long)]
+    pub source: PathBuf,
+    #[command(flatten)]
+    pub defaults: PolicyLimitDefaults,
+}
+
+#[derive(Args)]
+pub struct PolicyCompileArgs {
+    /// Explicit JSON policy source file
+    #[arg(long)]
+    pub source: PathBuf,
+    /// New canonical bundle file to create
+    #[arg(long)]
+    pub output: PathBuf,
+    #[command(flatten)]
+    pub defaults: PolicyLimitDefaults,
+}
+
+#[derive(Args)]
+pub struct PolicyDiffArgs {
+    /// First explicit JSON policy source
+    #[arg(long)]
+    pub left: PathBuf,
+    /// Second explicit JSON policy source
+    #[arg(long)]
+    pub right: PathBuf,
+    #[command(flatten)]
+    pub defaults: PolicyLimitDefaults,
+}
+
+#[derive(Args)]
+pub struct PolicyCatalogArgs {
+    /// Explicit JSON catalog descriptor
+    #[arg(long)]
+    pub catalog: PathBuf,
+    #[command(flatten)]
+    pub defaults: PolicyLimitDefaults,
+}
+
+#[derive(Args)]
+pub struct PolicyCatalogListArgs {
+    /// Explicit JSON catalog descriptor
+    #[arg(long)]
+    pub catalog: PathBuf,
+}
+
+#[derive(Args, Clone, Copy, Default)]
+pub struct PolicyLimitDefaults {
+    /// Default finite duration in milliseconds; omit for unlimited
+    #[arg(long)]
+    pub default_duration_milliseconds: Option<u64>,
+    /// Default finite turn count; omit for unlimited
+    #[arg(long)]
+    pub default_turns: Option<u64>,
+    /// Default finite token count; omit for unlimited
+    #[arg(long)]
+    pub default_tokens: Option<u64>,
+    /// Default finite concurrent-request count; omit for unlimited
+    #[arg(long)]
+    pub default_concurrent_requests: Option<u32>,
 }

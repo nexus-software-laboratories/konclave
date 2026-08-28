@@ -119,7 +119,11 @@ function Assert-ReleaseLayout {
             'share/konclave/plugin/extensions/Konclave.Extension/client.mjs',
             'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs',
             'share/konclave/plugin/extensions/Konclave.Extension/generic.mjs',
-            'share/konclave/plugin/skills/konclave-generic/SKILL.md'
+            'share/konclave/plugin/skills/konclave-generic/SKILL.md',
+            'share/konclave/policy/collaboration-policy-source-v1.schema.json',
+            'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
+            'share/konclave/policy/examples/contract-alignment.json',
+            'share/konclave/policy/examples/catalog.json'
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf)) {
                 throw "Client package is missing $relative."
@@ -179,6 +183,49 @@ function Assert-ReleaseLayout {
 }
 
 $projectRootPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
+foreach ($policyDocument in @(
+    @{
+        Example = 'policy/examples/contract-alignment.json'
+        Schema = 'policy/collaboration-policy-source-v1.schema.json'
+    },
+    @{
+        Example = 'policy/examples/catalog.json'
+        Schema = 'policy/collaboration-policy-catalog-v1.schema.json'
+    }
+)) {
+    $examplePath = Join-Path $projectRootPath $policyDocument.Example
+    $schemaPath = Join-Path $projectRootPath $policyDocument.Schema
+    if (-not (
+        (Get-Content -LiteralPath $examplePath -Raw -Encoding UTF8) |
+            Test-Json -SchemaFile $schemaPath
+    )) {
+        throw "Policy example does not satisfy its schema: $($policyDocument.Example)"
+    }
+}
+$policySourceSchema = Join-Path (
+    $projectRootPath
+) 'policy/collaboration-policy-source-v1.schema.json'
+$policyBoundarySource = Get-Content -LiteralPath (
+    Join-Path $projectRootPath 'policy/test-fixtures/source-boundaries.json'
+) -Raw -Encoding UTF8
+if (-not ($policyBoundarySource | Test-Json -SchemaFile $policySourceSchema)) {
+    throw 'Accepted policy boundary fixture does not satisfy the source schema.'
+}
+$policyOverflowSource = Get-Content -LiteralPath (
+    Join-Path $projectRootPath 'policy/test-fixtures/source-overflow.json'
+) -Raw -Encoding UTF8
+$policyOverflowAccepted = $false
+try {
+    $policyOverflowAccepted = $policyOverflowSource |
+        Test-Json -SchemaFile $policySourceSchema -ErrorAction Stop
+}
+catch {
+    # Rejection is the expected result for this deliberately overflowing fixture.
+    $policyOverflowAccepted = $false
+}
+if ($policyOverflowAccepted) {
+    throw 'Overflowing policy boundary fixture unexpectedly satisfies the source schema.'
+}
 $outputPath = Resolve-ReleasePath $OutputDirectory $projectRootPath
 $manifest = Read-ReleaseArtifactContract $projectRootPath
 $firstRoot = Join-Path (

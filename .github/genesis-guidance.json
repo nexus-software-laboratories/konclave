@@ -215,6 +215,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "policy/README.md",
+        "title": "Author collaboration policies",
+        "section": "Guides",
+        "order": 5,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/distribution/installation.md",
         "title": "Install an unsigned prerelease",
         "section": "Guides",

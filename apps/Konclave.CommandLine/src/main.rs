@@ -1,8 +1,10 @@
 mod cli;
 mod doctor;
+mod encoding;
 mod init;
 mod installation;
 mod local_service_installation;
+mod policy;
 mod relay_bootstrap;
 
 use std::process::ExitCode;
@@ -28,6 +30,7 @@ async fn run() -> anyhow::Result<()> {
         Command::Init(args) => init::run(args)?,
         Command::RelayBootstrap(args) => relay_bootstrap::run(args)?,
         Command::Doctor(args) => doctor::run(args).await?,
+        Command::Policy(args) => policy::run(args)?,
     }
     Ok(())
 }
