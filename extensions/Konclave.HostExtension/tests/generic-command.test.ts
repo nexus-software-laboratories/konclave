@@ -27,6 +27,19 @@ describe('generic harness command', () => {
     expect(
       parseGenericCommandArguments(['--profile', 'generic-test', '--operation', 'read_messages']),
     ).toEqual({ profile: 'generic-test', operation: 'read_messages' });
+    for (const operation of [
+      'get_collaboration_policy_status',
+      'inspect_collaboration_policy_proposal',
+      'propose_collaboration_policy_source',
+      'resume_collaboration_policy_proposal',
+      'accept_collaboration_policy',
+      'reject_collaboration_policy',
+      'revoke_collaboration_policy',
+    ]) {
+      expect(
+        parseGenericCommandArguments(['--profile', 'generic-test', '--operation', operation]),
+      ).toEqual({ profile: 'generic-test', operation });
+    }
     expect(
       parseGenericCommandArguments([
         '--operation',
@@ -46,6 +59,8 @@ describe('generic harness command', () => {
       [],
       ['--profile', 'generic-test'],
       ['--operation', 'unknown', '--profile', 'generic-test'],
+      ['--operation', 'collaboration.turn.authorize', '--profile', 'generic-test'],
+      ['--operation', 'collaboration.action.evaluate', '--profile', 'generic-test'],
       ['--profile', 'first', '--profile', 'second', '--operation', 'get_identity'],
       ['--profile', 'generic-test', '--operation', 'get_identity', '--request-id', 'invalid'],
       ['--other', 'value'],
