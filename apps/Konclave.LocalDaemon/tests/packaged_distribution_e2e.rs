@@ -354,7 +354,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             .unwrap();
     let issuer_identity = LocalServiceIdentity::from_signing_seed(&issuer_seed).unwrap();
 
-    let service = SharedServiceProcess::start(&paths.service, &config_path);
+    let service = SharedServiceProcess::start_with_inherited_stderr(&paths.service, &config_path);
     let generic_output = Command::new("node")
         .arg(&installed_generic)
         .args([
@@ -611,7 +611,8 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
 
     drop((first, second));
     service.shutdown().await;
-    let restarted = SharedServiceProcess::start(&paths.second_service, &config_path);
+    let restarted =
+        SharedServiceProcess::start_with_inherited_stderr(&paths.second_service, &config_path);
     let first_session = LocalServiceIdentity::generate().unwrap();
     let second_session = LocalServiceIdentity::generate().unwrap();
     let issuer_key_id = issuer.issuer_key_id();

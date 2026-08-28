@@ -38,12 +38,20 @@ pub struct SessionConnectionRequest<'a> {
 
 impl SharedServiceProcess {
     pub fn start(binary: &Path, config: &Path) -> Self {
+        Self::start_with_stderr(binary, config, Stdio::null())
+    }
+
+    pub fn start_with_inherited_stderr(binary: &Path, config: &Path) -> Self {
+        Self::start_with_stderr(binary, config, Stdio::inherit())
+    }
+
+    fn start_with_stderr(binary: &Path, config: &Path, stderr: Stdio) -> Self {
         let child = Command::new(binary)
             .arg("--config")
             .arg(config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
@@ -64,7 +72,7 @@ impl SharedServiceProcess {
             .await
             .expect("shared service shutdown exceeded the test deadline")
             .unwrap();
-        assert!(status.success());
+        assert!(status.success(), "shared service exited with {status}");
         self.child = None;
     }
 }
