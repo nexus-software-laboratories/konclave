@@ -324,6 +324,13 @@ register the namespaced actions, resources, and evidence they can enforce. Unkno
 unsupported required claims deny or reduce the effective policy. Generic integrations
 cannot claim paved tool, permission, resource, or lifecycle controls.
 
+The packaged generic client may inspect and administer exact policy proposals,
+bindings, and revocations through the normal closed tool operations. Its operation
+allowlist excludes the paved `collaboration.turn.authorize` and
+`collaboration.action.evaluate` service methods. A generic harness therefore gains no
+autonomous execution authority from an active binding and must keep peer guidance
+advisory unless it independently implements and proves an enforcement boundary.
+
 Peer content remains quoted inside the untrusted collaborator boundary. A locally
 active binding supplies the separate trusted instruction to evaluate that content and
 act only within the effective policy.

@@ -2616,6 +2616,23 @@ mod collaboration_policy_tests {
         )
         .unwrap();
         assert_eq!(generic["outcome"], "denied");
+        let generic_action: serde_json::Value = serde_json::from_slice(
+            &issue_collaboration_action_evaluation(
+                &mut authorizations,
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Generic),
+                    consumer(),
+                    &action_payload,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(generic_action["decision"], "deny");
+        assert_eq!(generic_action["reason"], "copilot_delivery_not_proven");
+        assert!(authorizations.is_empty());
 
         let detached: serde_json::Value = serde_json::from_slice(
             &authorize_collaboration_turn(

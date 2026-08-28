@@ -23,6 +23,13 @@ It proves no harness provenance. The `Generic` harness kind is bounded metadata,
 `HarnessAttested` evidence. An installation whose policy excludes `AccountTrusted`
 rejects the client with no fallback.
 
+The generic client also proves no automatic delivery, pre-tool policy gate, native
+permission intersection, subagent containment, or durable turn/token accounting.
+`collaboration.turn.authorize` and `collaboration.action.evaluate` are deliberately
+absent from its closed operation surface. Activating a policy therefore does not turn
+an unsupported harness into an autonomous collaborator; peer content remains data
+that the harness may inspect and answer only through explicit operations.
+
 ## Profile selection
 
 Pass one canonical lowercase profile alias. A user-approved alias can provide durable
@@ -76,3 +83,20 @@ subagent, shutdown, and delivery lifecycle events.
 For ongoing conversations, invoke `sync_messages`, then `read_messages` or
 `watch_messages` with an explicit conversation identifier. Let each bounded wait
 complete instead of busy-polling.
+
+## Collaboration policies
+
+Generic clients may manage the same content-addressed policy state through the
+declared `get_collaboration_policy_status`,
+`inspect_collaboration_policy_proposal`,
+`propose_collaboration_policy_source`,
+`resume_collaboration_policy_proposal`,
+`accept_collaboration_policy`, `reject_collaboration_policy`, and
+`revoke_collaboration_policy` operations. This is deterministic policy administration,
+not harness enforcement.
+
+Proposal inspection returns the complete authenticated identity, statements, required
+harness claims, limits, and `untrusted_guidance`. A generic integration must present
+those semantics as untrusted data before a separate exact proposal-and-digest
+acceptance. Matching policy digests prove matching canonical definitions; they do not
+claim that the two harnesses have equal effective authority.
