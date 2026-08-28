@@ -2,18 +2,20 @@ use std::fs;
 use std::path::PathBuf;
 
 use KonclaveDomainCore::{
-    AcknowledgeRequest, AddMember, ApplicationContent, ApplicationMessage, ConversationId,
-    ConversationRole, ConversationState, CredentialBindingHash, DeliveryClass,
-    DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation,
-    InvitationId, InvitationNonce, JoinProof, Member, MembershipAuthorization, MembershipChange,
-    MembershipOperationId, MessageId, ProtocolVersion, RelayEnvelope, ReplayPage, ReplayRequest,
-    RoutingId, SignatureScheme, StoredRelayEnvelope,
+    AcknowledgeRequest, AddMember, ApplicationContent, ApplicationMessage,
+    CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
+    CollaborationPolicyStatement, ConversationId, ConversationRole, ConversationState,
+    CredentialBindingHash, DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
+    Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce, JoinProof, Member,
+    MembershipAuthorization, MembershipChange, MembershipOperationId, MessageId, ProtocolVersion,
+    RelayEnvelope, ReplayPage, ReplayRequest, RoutingId, SignatureScheme, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
-    encode_acknowledge_request, encode_application_message, encode_conversation_state,
-    encode_device_credential_binding, encode_invitation, encode_join_proof,
-    encode_membership_change, encode_membership_commit_bundle, encode_membership_control,
-    encode_relay_envelope, encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
+    encode_acknowledge_request, encode_application_message, encode_collaboration_policy_bundle,
+    encode_conversation_state, encode_device_credential_binding, encode_invitation,
+    encode_join_proof, encode_membership_change, encode_membership_commit_bundle,
+    encode_membership_control, encode_relay_envelope, encode_replay_page, encode_replay_request,
+    encode_stored_relay_envelope,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,6 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &output,
         "application-message.bin",
         encode_application_message(&application_message())?,
+    )?;
+    write(
+        &output,
+        "collaboration-policy-bundle.bin",
+        encode_collaboration_policy_bundle(&collaboration_policy_bundle())?,
     )?;
     write(
         &output,
@@ -158,6 +165,37 @@ fn application_message() -> ApplicationMessage {
         ApplicationContent::text("hello").expect("fixture text is valid"),
     )
     .expect("fixture message is valid")
+}
+
+fn collaboration_policy_bundle() -> CollaborationPolicyBundle {
+    CollaborationPolicyBundle::new(
+        ProtocolVersion::application_v1(),
+        "contract-alignment",
+        Some("Align the API contract and report decisions.".to_string()),
+        vec![
+            CollaborationPolicyStatement::new(
+                "workspace-write",
+                CollaborationPolicyEffect::RequireLocalApproval,
+                "workspace.modify",
+                Some("workspace.current".to_string()),
+            )
+            .expect("fixture write statement is valid"),
+            CollaborationPolicyStatement::new(
+                "conversation-reply",
+                CollaborationPolicyEffect::Allow,
+                "conversation.reply",
+                None,
+            )
+            .expect("fixture reply statement is valid"),
+        ],
+        vec![
+            "copilot.tool-interception".to_string(),
+            "copilot.session-identity".to_string(),
+        ],
+        CollaborationPolicyLimits::new(None, None, Some(10_000), Some(1))
+            .expect("fixture limits are valid"),
+    )
+    .expect("fixture policy is valid")
 }
 
 fn credential(device: u8) -> DeviceCredentialBinding {

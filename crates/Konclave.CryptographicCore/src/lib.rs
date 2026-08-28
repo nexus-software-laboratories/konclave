@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(non_snake_case)]
 
+mod collaboration_policy;
 mod error;
 mod hmac;
 mod identity;
@@ -8,6 +9,7 @@ mod local_service;
 mod mls;
 mod pairing;
 
+pub use collaboration_policy::derive_collaboration_policy_digest;
 pub use error::KonclaveCryptographicError;
 pub use hmac::{HMAC_SHA256_TAG_LENGTH, HmacSha256Key, fill_random};
 pub use identity::{

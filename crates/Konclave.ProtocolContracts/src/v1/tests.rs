@@ -1,8 +1,9 @@
 use prost::Message;
 
 use KonclaveDomainCore::{
-    KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES, MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS,
-    MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_SIZE, ProtocolVersion,
+    KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES, MAX_COLLABORATION_POLICY_STATEMENTS,
+    MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES,
+    MAX_REPLAY_PAGE_SIZE, ProtocolVersion,
 };
 use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
@@ -10,25 +11,28 @@ use KonclaveRelayAuthentication::{
 };
 
 use super::{
-    decode_acknowledge_request, decode_application_message, decode_conversation_state,
-    decode_device_credential_binding, decode_invitation, decode_join_proof,
-    decode_membership_change, decode_membership_commit_bundle, decode_membership_control,
-    decode_pairing_control, decode_pairing_envelope, decode_pairing_invitation,
-    decode_pairing_offer, decode_pairing_welcome, decode_relay_enrollment_request,
-    decode_relay_enrollment_response, decode_relay_envelope, decode_replay_page,
-    decode_replay_request, decode_stored_relay_envelope, encode_acknowledge_request,
-    encode_application_message, encode_conversation_state, encode_device_credential_binding,
-    encode_invitation, encode_join_proof, encode_membership_change,
-    encode_membership_commit_bundle, encode_membership_control, encode_pairing_control,
-    encode_pairing_envelope, encode_pairing_invitation, encode_pairing_offer,
-    encode_pairing_welcome, encode_relay_enrollment_request, encode_relay_enrollment_response,
-    encode_relay_envelope, encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
+    decode_acknowledge_request, decode_application_message, decode_collaboration_policy_bundle,
+    decode_conversation_state, decode_device_credential_binding, decode_invitation,
+    decode_join_proof, decode_membership_change, decode_membership_commit_bundle,
+    decode_membership_control, decode_pairing_control, decode_pairing_envelope,
+    decode_pairing_invitation, decode_pairing_offer, decode_pairing_welcome,
+    decode_relay_enrollment_request, decode_relay_enrollment_response, decode_relay_envelope,
+    decode_replay_page, decode_replay_request, decode_stored_relay_envelope,
+    encode_acknowledge_request, encode_application_message, encode_collaboration_policy_bundle,
+    encode_conversation_state, encode_device_credential_binding, encode_invitation,
+    encode_join_proof, encode_membership_change, encode_membership_commit_bundle,
+    encode_membership_control, encode_pairing_control, encode_pairing_envelope,
+    encode_pairing_invitation, encode_pairing_offer, encode_pairing_welcome,
+    encode_relay_enrollment_request, encode_relay_enrollment_response, encode_relay_envelope,
+    encode_replay_page, encode_replay_request, encode_stored_relay_envelope,
 };
 use crate::KonclaveProtocolError;
 use crate::wire::v1 as wire;
 
 const APPLICATION_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/application-message.bin");
+const COLLABORATION_POLICY_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-bundle.bin");
 const CREDENTIAL_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/device-credential-binding.bin");
 const INVITATION_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/protocol/v1/invitation.bin");
@@ -122,6 +126,14 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         APPLICATION_FIXTURE
     );
     assert_eq!(
+        encode_collaboration_policy_bundle(
+            &decode_collaboration_policy_bundle(COLLABORATION_POLICY_FIXTURE)
+                .expect("fixture should decode")
+        )
+        .expect("fixture should encode"),
+        COLLABORATION_POLICY_FIXTURE
+    );
+    assert_eq!(
         encode_device_credential_binding(
             &decode_device_credential_binding(CREDENTIAL_FIXTURE).expect("fixture should decode")
         )
@@ -207,6 +219,81 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         .expect("fixture should encode"),
         ACKNOWLEDGE_FIXTURE
     );
+}
+
+#[test]
+fn collaboration_policy_contract_rejects_noncanonical_and_unbounded_input() {
+    let unsorted = wire::CollaborationPolicyBundle {
+        version: Some(wire::ProtocolVersion { major: 1, minor: 0 }),
+        name: "contract-alignment".to_string(),
+        guidance: None,
+        statements: vec![
+            wire::CollaborationPolicyStatement {
+                statement_id: "z-last".to_string(),
+                effect: wire::CollaborationPolicyEffect::Allow as i32,
+                action: "conversation.reply".to_string(),
+                resource: None,
+            },
+            wire::CollaborationPolicyStatement {
+                statement_id: "a-first".to_string(),
+                effect: wire::CollaborationPolicyEffect::Deny as i32,
+                action: "workspace.modify".to_string(),
+                resource: Some("workspace.current".to_string()),
+            },
+        ],
+        required_harness_claims: vec![],
+        limits: Some(wire::CollaborationPolicyLimits::default()),
+    }
+    .encode_to_vec();
+    assert_eq!(
+        decode_collaboration_policy_bundle(&unsorted).err(),
+        Some(KonclaveProtocolError::NonCanonicalEncoding {
+            contract: "CollaborationPolicyBundle"
+        })
+    );
+
+    let unknown_effect = wire::CollaborationPolicyBundle {
+        version: Some(wire::ProtocolVersion { major: 1, minor: 0 }),
+        name: "contract-alignment".to_string(),
+        guidance: None,
+        statements: vec![wire::CollaborationPolicyStatement {
+            statement_id: "reply".to_string(),
+            effect: 99,
+            action: "conversation.reply".to_string(),
+            resource: None,
+        }],
+        required_harness_claims: vec![],
+        limits: Some(wire::CollaborationPolicyLimits::default()),
+    }
+    .encode_to_vec();
+    assert!(matches!(
+        decode_collaboration_policy_bundle(&unknown_effect),
+        Err(KonclaveProtocolError::UnsupportedEnum {
+            field: "collaboration_policy_effect",
+            value: 99
+        })
+    ));
+
+    let oversized_count = wire::CollaborationPolicyBundle {
+        version: Some(wire::ProtocolVersion { major: 1, minor: 0 }),
+        name: "contract-alignment".to_string(),
+        guidance: None,
+        statements: (0..=MAX_COLLABORATION_POLICY_STATEMENTS)
+            .map(|_| wire::CollaborationPolicyStatement::default())
+            .collect(),
+        required_harness_claims: vec![],
+        limits: Some(wire::CollaborationPolicyLimits::default()),
+    }
+    .encode_to_vec();
+    assert!(matches!(
+        decode_collaboration_policy_bundle(&oversized_count),
+        Err(KonclaveProtocolError::Domain(
+            KonclaveDomainError::OutOfRange {
+                field: "collaboration_policy_statements",
+                ..
+            }
+        ))
+    ));
 }
 
 #[test]

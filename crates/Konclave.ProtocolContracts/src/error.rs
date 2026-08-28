@@ -33,6 +33,10 @@ pub enum KonclaveProtocolError {
     #[error("required oneof {field} is missing")]
     MissingVariant { field: &'static str },
 
+    /// A content-addressed contract does not use its canonical encoding.
+    #[error("{contract} is not canonically encoded")]
+    NonCanonicalEncoding { contract: &'static str },
+
     /// A v1 DTO contains a different protocol major version.
     #[error("{contract} requires protocol major version 1 (actual: {actual})")]
     UnsupportedMajor { contract: &'static str, actual: u32 },
@@ -56,6 +60,7 @@ impl KonclaveProtocolError {
             Self::MissingField { .. } => "missing_field",
             Self::UnsupportedEnum { .. } => "unsupported_enum",
             Self::MissingVariant { .. } => "missing_variant",
+            Self::NonCanonicalEncoding { .. } => "non_canonical_encoding",
             Self::UnsupportedMajor { .. } => "unsupported_major",
             Self::Domain(error) => error.code(),
             Self::RelayAuthentication(error) => error.code(),

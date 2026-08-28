@@ -140,6 +140,12 @@ define_fixed_bytes!(
     "credential_binding_hash"
 );
 define_fixed_bytes!(
+    /// SHA-256 digest of one canonical collaboration-policy bundle.
+    CollaborationPolicyDigest,
+    32,
+    "collaboration_policy_digest"
+);
+define_fixed_bytes!(
     /// Public Ed25519 verification key.
     Ed25519PublicKey,
     32,

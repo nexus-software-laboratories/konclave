@@ -14,6 +14,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0008: Host logical agent profiles in one per-user local service](../adr/adr-0008-shared-local-service.md)
 - [ADR 0009: Authorize local sessions through evidence-bound exact-profile grants](../adr/adr-0009-evidence-bound-session-grants.md)
 - [ADR 0010: Automate two-command pairing only under AccountTrusted capability policy](../adr/adr-0010-account-trusted-two-command-pairing.md)
+- [ADR 0011: Exchange content-addressed collaboration policies with local activation](../adr/adr-0011-content-addressed-collaboration-policies.md)
 
 ## Superseded records
 

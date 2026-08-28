@@ -4,6 +4,10 @@ import { describe, expect, it } from 'vitest';
 
 import { decodeApplicationMessage, encodeApplicationMessage } from '../src/application.js';
 import {
+  decodeCollaborationPolicyBundle,
+  encodeCollaborationPolicyBundle,
+} from '../src/collaboration-policy.js';
+import {
   decodeDeviceCredentialBinding,
   decodeInvitation,
   decodeJoinProof,
@@ -36,6 +40,7 @@ import {
 import {
   acknowledgment,
   applicationMessage,
+  collaborationPolicyBundle,
   conversationState,
   credential,
   invitation,
@@ -62,6 +67,12 @@ const cases: ReadonlyArray<{
     expected: applicationMessage({ replyToLength: 16 }),
     name: 'application-message.bin',
     roundTrip: (bytes) => encodeApplicationMessage(decodeApplicationMessage(bytes)),
+  },
+  {
+    decode: decodeCollaborationPolicyBundle,
+    expected: collaborationPolicyBundle(),
+    name: 'collaboration-policy-bundle.bin',
+    roundTrip: (bytes) => encodeCollaborationPolicyBundle(decodeCollaborationPolicyBundle(bytes)),
   },
   {
     decode: decodeDeviceCredentialBinding,
