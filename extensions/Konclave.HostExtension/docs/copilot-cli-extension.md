@@ -180,7 +180,9 @@ turn instead of running it without the policy gate.
 The Copilot pre-tool hook remains active only until that synthetic turn returns to
 idle. The initial paved control maps only Konclave's `send_message` tool to
 `conversation.reply`, verifies the exact conversation and message arguments, and
-requires a one-use daemon authorization. Consuming that authorization routes into
+accepts the SDK's bounded JSON object or serialized-object representation only when
+it contains the exact send field allowlist. It then requires a one-use daemon
+authorization. Consuming that authorization routes into
 the sender-counter and outbox reservation transaction, which verifies the exact
 active digest, delivery consumer, and bounded expiry before preparing the send.
 Every workspace, shell, web, MCP, and subagent tool denies. Those tools execute

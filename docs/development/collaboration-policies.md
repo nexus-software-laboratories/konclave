@@ -354,6 +354,9 @@ the exact conversation and message arguments, active policy digest, delivery con
 and the earliest policy, lease, or proof expiry. The daemon consumes it into the same
 SQLite reservation that verifies the digest, live consumer lease, and expiry before
 allocating a sender counter or preparing the send.
+The SDK may represent pre-tool arguments as a JSON object or a serialized JSON object;
+the extension accepts only a bounded form with the exact `send_message` field allowlist
+before evaluating or modifying it.
 Workspace, shell, web, MCP, and subagent tools deny because their effects occur
 outside that atomic boundary. Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.

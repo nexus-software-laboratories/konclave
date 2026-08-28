@@ -187,6 +187,7 @@ interface SmokePolicyGate {
   activate(authorization: SmokeTurnAuthorization): void;
   observePrompt(prompt: string): void;
   clear(): void;
+  readonly lastDecision: string | null;
 }
 
 interface SmokeDeliveryChannel {
@@ -409,6 +410,7 @@ export function createSmokePolicySource(values: {
 }): string {
   const guidance = [
     "For this local acceptance only, call send_message exactly once when a delivered message matches one of these cases.",
+    "Copy the matching JSON object exactly as the tool arguments; do not add, remove, or rewrite fields.",
     `For text ${JSON.stringify(values.firstText)}, use ${JSON.stringify({
       conversation_id: values.conversationId,
       message_id: values.replyMessageId,
@@ -624,6 +626,7 @@ async function invokeAuthorizedDelivery(
   gate: SmokePolicyGate,
   channel: SmokeDeliveryChannel,
   expectedText: string,
+  expectedArguments: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<{
   readonly result: JsonRecord;
@@ -644,12 +647,17 @@ async function invokeAuthorizedDelivery(
       "send_message",
       thinClient.frameDelivery([event], authorization),
       timeoutMs,
+      false,
+      expectedArguments,
     );
     await settleDelivery(channel, event, true);
     return { result, claimAttempts: claimed.attempts };
   } catch (error) {
     await settleDelivery(channel, event, false);
-    throw error;
+    throw new Error(
+      `Policy-aware send failed after gate outcome ${gate.lastDecision ?? "unobserved"}.`,
+      { cause: error },
+    );
   } finally {
     gate.clear();
   }
@@ -869,6 +877,18 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
       const replyMessageId = stableMessageId(runId, "b-to-a");
       const followUpText = `CONFIRMED:${firstText}`;
       const followUpMessageId = stableMessageId(runId, "a-to-b-follow-up");
+      const replyArguments = {
+        conversation_id: conversationId,
+        message_id: replyMessageId,
+        reply_to_message_id: firstMessageId,
+        text: replyText,
+      };
+      const followUpArguments = {
+        conversation_id: conversationId,
+        message_id: followUpMessageId,
+        reply_to_message_id: replyMessageId,
+        text: followUpText,
+      };
       const policySource = createSmokePolicySource({
         conversationId,
         firstText,
@@ -927,6 +947,7 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         gateB,
         deliveryB,
         firstText,
+        replyArguments,
         options.timeoutMs,
       );
       const replySent = replyDelivery.result;
@@ -951,6 +972,7 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         gateA,
         deliveryA,
         replyText,
+        followUpArguments,
         options.timeoutMs,
       );
       const followUpSent = followUpDelivery.result;
