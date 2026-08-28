@@ -157,7 +157,7 @@ impl ProfileStore {
                     self.locked_profile.profile_id.as_bytes(),
                     blob,
                 )
-                .map_err(|_| ProfileStoreError::Cryptographic)
+                .map_err(|_| ProfileStoreError::CorruptData)
             })
             .transpose()?;
         let current_version: u32 = self
