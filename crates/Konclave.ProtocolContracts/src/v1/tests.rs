@@ -1,9 +1,12 @@
 use prost::Message;
 
 use KonclaveDomainCore::{
-    KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES, MAX_COLLABORATION_POLICY_STATEMENTS,
-    MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES,
-    MAX_REPLAY_PAGE_SIZE, ProtocolVersion,
+    ApplicationContent, ApplicationMessage, CollaborationPolicyDigest, CollaborationPolicyProposal,
+    CollaborationPolicyProposalId, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
+    CollaborationPolicyRevocation, KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES,
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_COLLABORATION_POLICY_STATEMENTS, MAX_MEMBERS,
+    MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES,
+    MAX_REPLAY_PAGE_SIZE, MessageId, ProtocolVersion,
 };
 use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
@@ -33,6 +36,12 @@ const APPLICATION_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/application-message.bin");
 const COLLABORATION_POLICY_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-bundle.bin");
+const COLLABORATION_POLICY_PROPOSAL_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-proposal-message.bin");
+const COLLABORATION_POLICY_RESPONSE_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-response-message.bin");
+const COLLABORATION_POLICY_REVOCATION_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-revocation-message.bin");
 const CREDENTIAL_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/device-credential-binding.bin");
 const INVITATION_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/protocol/v1/invitation.bin");
@@ -133,6 +142,19 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         .expect("fixture should encode"),
         COLLABORATION_POLICY_FIXTURE
     );
+    for fixture in [
+        COLLABORATION_POLICY_PROPOSAL_FIXTURE,
+        COLLABORATION_POLICY_RESPONSE_FIXTURE,
+        COLLABORATION_POLICY_REVOCATION_FIXTURE,
+    ] {
+        assert_eq!(
+            encode_application_message(
+                &decode_application_message(fixture).expect("fixture should decode")
+            )
+            .expect("fixture should encode"),
+            fixture
+        );
+    }
     assert_eq!(
         encode_device_credential_binding(
             &decode_device_credential_binding(CREDENTIAL_FIXTURE).expect("fixture should decode")
@@ -394,6 +416,139 @@ fn application_decode_rejects_top_level_field_count_amplification() {
             }
         ))
     ));
+}
+
+#[test]
+fn collaboration_policy_exchange_application_content_round_trips() {
+    let digest = CollaborationPolicyDigest::from_bytes([
+        0xf8, 0x18, 0x9b, 0x64, 0x71, 0x27, 0xaa, 0x9f, 0xf9, 0xd0, 0x3f, 0x5c, 0x2d, 0x04, 0x8b,
+        0xcd, 0x8e, 0xb8, 0x60, 0x06, 0x20, 0xbc, 0x17, 0x96, 0xc4, 0xc6, 0x68, 0xfa, 0x59, 0x90,
+        0xeb, 0x2e,
+    ]);
+    let proposal_id = CollaborationPolicyProposalId::from_bytes([41; 16]);
+    let replacement = CollaborationPolicyDigest::from_bytes([42; 32]);
+    let values = [
+        ApplicationContent::collaboration_policy_proposal(
+            CollaborationPolicyProposal::new(
+                proposal_id,
+                digest,
+                COLLABORATION_POLICY_FIXTURE.to_vec(),
+                Some(replacement),
+            )
+            .unwrap(),
+        ),
+        ApplicationContent::CollaborationPolicyResponse(CollaborationPolicyResponse::new(
+            proposal_id,
+            digest,
+            CollaborationPolicyResponseOutcome::Accepted,
+        )),
+        ApplicationContent::CollaborationPolicyRevocation(CollaborationPolicyRevocation::new(
+            digest,
+        )),
+    ];
+
+    for (index, content) in values.into_iter().enumerate() {
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([index as u8 + 50; 16]),
+            index as u64 + 1,
+            1_700_000_000_000,
+            None,
+            content,
+        )
+        .unwrap();
+        let encoded = encode_application_message(&message).unwrap();
+        let decoded = decode_application_message(&encoded).unwrap();
+        assert_eq!(encode_application_message(&decoded).unwrap(), encoded);
+    }
+}
+
+#[test]
+fn collaboration_policy_exchange_rejects_malformed_wire_values() {
+    let decode_proposal = |proposal| {
+        let mut application = wire::ApplicationMessage::decode(APPLICATION_FIXTURE)
+            .expect("fixture wire should decode");
+        application.content =
+            Some(wire::application_message::Content::CollaborationPolicyProposal(proposal));
+        decode_application_message(&application.encode_to_vec())
+    };
+    let valid_proposal = wire::CollaborationPolicyProposal {
+        proposal_id: Some(wire::CollaborationPolicyProposalId {
+            value: vec![1; CollaborationPolicyProposalId::LENGTH].into(),
+        }),
+        policy_digest: Some(wire::CollaborationPolicyDigest {
+            value: vec![2; CollaborationPolicyDigest::LENGTH].into(),
+        }),
+        canonical_bundle: vec![3].into(),
+        replaces_policy_digest: None,
+    };
+
+    let mut malformed = valid_proposal.clone();
+    malformed.proposal_id = Some(wire::CollaborationPolicyProposalId {
+        value: vec![1; CollaborationPolicyProposalId::LENGTH - 1].into(),
+    });
+    assert!(decode_proposal(malformed).is_err());
+
+    let mut malformed = valid_proposal.clone();
+    malformed.policy_digest = Some(wire::CollaborationPolicyDigest {
+        value: vec![2; CollaborationPolicyDigest::LENGTH - 1].into(),
+    });
+    assert!(decode_proposal(malformed).is_err());
+
+    let mut malformed = valid_proposal.clone();
+    malformed.replaces_policy_digest = Some(wire::CollaborationPolicyDigest {
+        value: vec![2; CollaborationPolicyDigest::LENGTH - 1].into(),
+    });
+    assert!(decode_proposal(malformed).is_err());
+
+    let mut empty = valid_proposal.clone();
+    empty.canonical_bundle = Vec::new().into();
+    assert!(decode_proposal(empty).is_err());
+
+    let mut oversized = valid_proposal;
+    oversized.canonical_bundle = vec![3; MAX_COLLABORATION_POLICY_BUNDLE_BYTES + 1].into();
+    assert!(matches!(
+        decode_proposal(oversized),
+        Err(KonclaveProtocolError::Domain(
+            KonclaveDomainError::OutOfRange {
+                field: "collaboration_policy_bundle",
+                ..
+            }
+        ))
+    ));
+
+    let mut application =
+        wire::ApplicationMessage::decode(APPLICATION_FIXTURE).expect("fixture wire should decode");
+    application.content = Some(
+        wire::application_message::Content::CollaborationPolicyResponse(
+            wire::CollaborationPolicyResponse {
+                proposal_id: Some(wire::CollaborationPolicyProposalId {
+                    value: vec![1; CollaborationPolicyProposalId::LENGTH].into(),
+                }),
+                policy_digest: Some(wire::CollaborationPolicyDigest {
+                    value: vec![2; CollaborationPolicyDigest::LENGTH].into(),
+                }),
+                outcome: 99,
+            },
+        ),
+    );
+    assert_eq!(
+        decode_application_message(&application.encode_to_vec()).err(),
+        Some(KonclaveProtocolError::UnsupportedEnum {
+            field: "collaboration_policy_response_outcome",
+            value: 99
+        })
+    );
+
+    for malformed in [&[0x58, 0x00][..], &[0x5a, 0x02, 0x00][..]] {
+        assert!(matches!(
+            decode_application_message(malformed),
+            Err(KonclaveProtocolError::Decode {
+                contract: "ApplicationMessage",
+                ..
+            })
+        ));
+    }
 }
 
 #[test]

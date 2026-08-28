@@ -895,9 +895,7 @@ fn sent_membership(accepted: AcceptedMembership) -> SentMembership {
 }
 
 fn application_content_equal(left: &ApplicationContent, right: &ApplicationContent) -> bool {
-    match (left, right) {
-        (ApplicationContent::Text(left), ApplicationContent::Text(right)) => left == right,
-    }
+    left == right
 }
 
 /// Stable application-service failures.

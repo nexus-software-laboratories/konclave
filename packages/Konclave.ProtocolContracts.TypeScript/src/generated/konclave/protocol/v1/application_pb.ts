@@ -4,6 +4,8 @@
 
 import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { CollaborationPolicyProposal, CollaborationPolicyResponse, CollaborationPolicyRevocation } from "./collaboration_policy_pb.js";
+import { file_konclave_protocol_v1_collaboration_policy } from "./collaboration_policy_pb.js";
 import type { MessageId, ProtocolVersion } from "./common_pb.js";
 import { file_konclave_protocol_v1_common } from "./common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
@@ -12,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/application.proto.
  */
 export const file_konclave_protocol_v1_application: GenFile = /*@__PURE__*/
-  fileDesc("CiZrb25jbGF2ZS9wcm90b2NvbC92MS9hcHBsaWNhdGlvbi5wcm90bxIUa29uY2xhdmUucHJvdG9jb2wudjEiGwoLVGV4dENvbnRlbnQSDAoEYm9keRgBIAEoCSKtAgoSQXBwbGljYXRpb25NZXNzYWdlEjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SMwoKbWVzc2FnZV9pZBgCIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLk1lc3NhZ2VJZBIWCg5zZW5kZXJfY291bnRlchgDIAEoBBIhChlzZW50X2F0X3VuaXhfbWlsbGlzZWNvbmRzGAQgASgEEjEKCHJlcGx5X3RvGAUgASgLMh8ua29uY2xhdmUucHJvdG9jb2wudjEuTWVzc2FnZUlkEjEKBHRleHQYCiABKAsyIS5rb25jbGF2ZS5wcm90b2NvbC52MS5UZXh0Q29udGVudEgAQgkKB2NvbnRlbnRiBnByb3RvMw", [file_konclave_protocol_v1_common]);
+  fileDesc("CiZrb25jbGF2ZS9wcm90b2NvbC92MS9hcHBsaWNhdGlvbi5wcm90bxIUa29uY2xhdmUucHJvdG9jb2wudjEiGwoLVGV4dENvbnRlbnQSDAoEYm9keRgBIAEoCSLFBAoSQXBwbGljYXRpb25NZXNzYWdlEjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SMwoKbWVzc2FnZV9pZBgCIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLk1lc3NhZ2VJZBIWCg5zZW5kZXJfY291bnRlchgDIAEoBBIhChlzZW50X2F0X3VuaXhfbWlsbGlzZWNvbmRzGAQgASgEEjEKCHJlcGx5X3RvGAUgASgLMh8ua29uY2xhdmUucHJvdG9jb2wudjEuTWVzc2FnZUlkEjEKBHRleHQYCiABKAsyIS5rb25jbGF2ZS5wcm90b2NvbC52MS5UZXh0Q29udGVudEgAEloKHWNvbGxhYm9yYXRpb25fcG9saWN5X3Byb3Bvc2FsGAsgASgLMjEua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVByb3Bvc2FsSAASWgodY29sbGFib3JhdGlvbl9wb2xpY3lfcmVzcG9uc2UYDCABKAsyMS5rb25jbGF2ZS5wcm90b2NvbC52MS5Db2xsYWJvcmF0aW9uUG9saWN5UmVzcG9uc2VIABJeCh9jb2xsYWJvcmF0aW9uX3BvbGljeV9yZXZvY2F0aW9uGA0gASgLMjMua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVJldm9jYXRpb25IAEIJCgdjb250ZW50YgZwcm90bzM", [file_konclave_protocol_v1_collaboration_policy, file_konclave_protocol_v1_common]);
 
 /**
  * Carries bounded UTF-8 chat content.
@@ -76,6 +78,24 @@ export type ApplicationMessage = Message<"konclave.protocol.v1.ApplicationMessag
      */
     value: TextContent;
     case: "text";
+  } | {
+    /**
+     * @generated from field: konclave.protocol.v1.CollaborationPolicyProposal collaboration_policy_proposal = 11;
+     */
+    value: CollaborationPolicyProposal;
+    case: "collaborationPolicyProposal";
+  } | {
+    /**
+     * @generated from field: konclave.protocol.v1.CollaborationPolicyResponse collaboration_policy_response = 12;
+     */
+    value: CollaborationPolicyResponse;
+    case: "collaborationPolicyResponse";
+  } | {
+    /**
+     * @generated from field: konclave.protocol.v1.CollaborationPolicyRevocation collaboration_policy_revocation = 13;
+     */
+    value: CollaborationPolicyRevocation;
+    case: "collaborationPolicyRevocation";
   } | { case: undefined; value?: undefined };
 };
 

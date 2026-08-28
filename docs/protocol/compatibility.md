@@ -133,6 +133,11 @@ Application data encrypted by MLS includes:
 - optional reply/reference identifiers;
 - sender timestamp as display metadata, never authorization or ordering authority.
 
+Protocol-v1 content kinds include UTF-8 text plus collaboration-policy proposal,
+response, and revocation messages. The policy exchange messages are additive
+application content variants; endpoints that participate in a policy exchange must
+negotiate support before sending them to members that need to interpret them.
+
 The entire application message is covered by MLS authentication. Sender identity is
 derived from the authenticated MLS leaf and validated device credential. Application
 bytes MUST NOT override attribution, authorization, counters, or replay state with a
@@ -152,8 +157,22 @@ Decoders reject alternate encodings, noncanonical collection ordering, duplicate
 identifiers, unknown effects, missing limits, unsupported major versions, and values
 outside their bounds.
 
-The bundle contract does not itself grant local authority. Conversation proposal and
-local-binding protocols are separate versioned layers.
+The bundle contract does not itself grant local authority. A proposal carries one
+16-byte proposal identifier, the claimed 32-byte digest, the complete bounded
+canonical bundle, and an optional digest it intends to replace. A response is
+`accepted` or `rejected` and binds both the proposal identifier and digest. A
+revocation binds the withdrawn digest.
+
+Receivers validate fixed-width values, bounds, required fields, and response outcomes.
+They then decode the proposed bundle canonically and require its derived digest to
+match the claim. Receipt and validation are not activation: proposal state and local
+binding changes belong to the endpoint service layer and require local authorization.
+
+The closed binary adapter protocol v1 retains its original event-kind set. A daemon
+using that legacy path projects policy exchange content into a bounded,
+non-authorizing text notice so an older decoder can acknowledge it. The shared local
+service uses typed JSON policy metadata and never sends bundle content or guidance
+through automatic delivery.
 
 ## Bounds
 

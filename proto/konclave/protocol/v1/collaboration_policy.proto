@@ -4,6 +4,18 @@ package konclave.protocol.v1;
 
 import "konclave/protocol/v1/common.proto";
 
+// Identifies one immutable canonical collaboration-policy bundle.
+message CollaborationPolicyDigest {
+  // Exactly 32 SHA-256 bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Identifies one collaboration-policy proposal exchange.
+message CollaborationPolicyProposalId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
 // Defines one evaluator primitive without hardcoding named collaboration modes.
 enum CollaborationPolicyEffect {
   COLLABORATION_POLICY_EFFECT_UNSPECIFIED = 0;
@@ -36,4 +48,31 @@ message CollaborationPolicyBundle {
   repeated CollaborationPolicyStatement statements = 4;
   repeated string required_harness_claims = 5;
   CollaborationPolicyLimits limits = 6;
+}
+
+// Proposes one complete canonical policy bundle without activating it remotely.
+message CollaborationPolicyProposal {
+  CollaborationPolicyProposalId proposal_id = 1;
+  CollaborationPolicyDigest policy_digest = 2;
+  bytes canonical_bundle = 3;
+  CollaborationPolicyDigest replaces_policy_digest = 4;
+}
+
+// Defines the terminal local response to one proposal.
+enum CollaborationPolicyResponseOutcome {
+  COLLABORATION_POLICY_RESPONSE_OUTCOME_UNSPECIFIED = 0;
+  COLLABORATION_POLICY_RESPONSE_OUTCOME_ACCEPTED = 1;
+  COLLABORATION_POLICY_RESPONSE_OUTCOME_REJECTED = 2;
+}
+
+// Acknowledges one exact proposal and base digest.
+message CollaborationPolicyResponse {
+  CollaborationPolicyProposalId proposal_id = 1;
+  CollaborationPolicyDigest policy_digest = 2;
+  CollaborationPolicyResponseOutcome outcome = 3;
+}
+
+// Announces removal of one endpoint's local policy binding.
+message CollaborationPolicyRevocation {
+  CollaborationPolicyDigest policy_digest = 1;
 }

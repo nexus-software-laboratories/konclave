@@ -49,6 +49,10 @@ pub enum KonclaveCryptographicError {
     #[error("protocol contract encoding failed")]
     ProtocolContractFailure,
 
+    /// A collaboration-policy proposal does not match its claimed content digest.
+    #[error("collaboration policy digest does not match the proposed bundle")]
+    InvalidCollaborationPolicyDigest,
+
     /// Sealed secret storage rejected a cryptographic state operation.
     #[error("sealed secret storage failed during {operation}")]
     SecretStorageFailure { operation: &'static str },
@@ -154,6 +158,7 @@ impl KonclaveCryptographicError {
             Self::MlsFailure { .. } => "mls_failure",
             Self::ApplicationMessageAlreadyProcessed => "application_message_already_processed",
             Self::ProtocolContractFailure => "protocol_contract_failure",
+            Self::InvalidCollaborationPolicyDigest => "invalid_collaboration_policy_digest",
             Self::SecretStorageFailure { .. } => "secret_storage_failure",
             Self::MlsMessageTooLarge { .. } => "mls_message_too_large",
             Self::UnexpectedMlsMessage { .. } => "unexpected_mls_message",

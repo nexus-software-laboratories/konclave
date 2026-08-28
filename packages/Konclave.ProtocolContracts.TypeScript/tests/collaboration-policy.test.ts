@@ -1,20 +1,35 @@
 import { create, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
+import { decodeApplicationMessage } from '../src/application.js';
 import {
   decodeCollaborationPolicyBundle,
   deriveCollaborationPolicyDigest,
   encodeCollaborationPolicyBundle,
+  validateCollaborationPolicyProposal,
+  validateCollaborationPolicyResponse,
+  validateCollaborationPolicyRevocation,
+  verifyCollaborationPolicyProposal,
 } from '../src/collaboration-policy.js';
 import { ProtocolValidationError } from '../src/error.js';
+import { ApplicationMessageSchema } from '../src/generated/konclave/protocol/v1/application_pb.js';
 import {
   CollaborationPolicyBundleSchema,
+  CollaborationPolicyDigestSchema,
   CollaborationPolicyEffect,
   CollaborationPolicyLimitsSchema,
+  CollaborationPolicyProposalIdSchema,
+  CollaborationPolicyProposalSchema,
+  CollaborationPolicyResponseOutcome,
+  CollaborationPolicyResponseSchema,
+  CollaborationPolicyRevocationSchema,
   CollaborationPolicyStatementSchema,
 } from '../src/generated/konclave/protocol/v1/collaboration_policy_pb.js';
-import { ProtocolVersionSchema } from '../src/generated/konclave/protocol/v1/common_pb.js';
-import { collaborationPolicyBundle } from './messages.js';
+import {
+  MessageIdSchema,
+  ProtocolVersionSchema,
+} from '../src/generated/konclave/protocol/v1/common_pb.js';
+import { bytes, collaborationPolicyBundle, collaborationPolicyDigest } from './messages.js';
 
 function first<T>(values: readonly T[], label: string): T {
   const value = values[0];
@@ -189,5 +204,116 @@ describe('collaboration policy contract', () => {
     expect(effectIndex).toBeGreaterThan(0);
     bytes[effectIndex + 1] = 99;
     expect(() => decodeCollaborationPolicyBundle(bytes)).toThrow(ProtocolValidationError);
+  });
+
+  it('verifies canonical proposal bytes against the claimed digest', () => {
+    const canonicalBundle = encodeCollaborationPolicyBundle(collaborationPolicyBundle());
+    const proposal = create(CollaborationPolicyProposalSchema, {
+      proposalId: create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 1) }),
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+      canonicalBundle,
+      replacesPolicyDigest: create(CollaborationPolicyDigestSchema, { value: bytes(32, 2) }),
+    });
+
+    const verifiedBundle = verifyCollaborationPolicyProposal(proposal);
+    expect(verifiedBundle).toEqual(collaborationPolicyBundle());
+    expect(proposal.replacesPolicyDigest?.value).toEqual(bytes(32, 2));
+
+    proposal.policyDigest = create(CollaborationPolicyDigestSchema, { value: bytes(32, 3) });
+    expect(() => verifyCollaborationPolicyProposal(proposal)).toThrowError(
+      expect.objectContaining({ code: 'invalid_collaboration_policy_digest' }),
+    );
+
+    proposal.policyDigest = create(CollaborationPolicyDigestSchema, {
+      value: collaborationPolicyDigest(),
+    });
+    proposal.canonicalBundle = Uint8Array.from([...canonicalBundle, 0x38, 0x01]);
+    expect(() => verifyCollaborationPolicyProposal(proposal)).toThrowError(
+      expect.objectContaining({ code: 'non_canonical_encoding' }),
+    );
+  });
+
+  it('validates every policy exchange envelope', () => {
+    const canonicalBundle = encodeCollaborationPolicyBundle(collaborationPolicyBundle());
+    const proposal = create(CollaborationPolicyProposalSchema, {
+      proposalId: create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 1) }),
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+      canonicalBundle,
+    });
+    expect(() => validateCollaborationPolicyProposal(proposal)).not.toThrow();
+
+    proposal.proposalId = create(CollaborationPolicyProposalIdSchema, { value: bytes(15, 1) });
+    expect(() => validateCollaborationPolicyProposal(proposal)).toThrow(ProtocolValidationError);
+    proposal.proposalId = create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 1) });
+    proposal.policyDigest = create(CollaborationPolicyDigestSchema, { value: bytes(31, 1) });
+    expect(() => validateCollaborationPolicyProposal(proposal)).toThrow(ProtocolValidationError);
+    proposal.policyDigest = create(CollaborationPolicyDigestSchema, {
+      value: collaborationPolicyDigest(),
+    });
+    proposal.canonicalBundle = new Uint8Array();
+    expect(() => validateCollaborationPolicyProposal(proposal)).toThrow(ProtocolValidationError);
+    proposal.canonicalBundle = bytes(65_537, 1);
+    expect(() => validateCollaborationPolicyProposal(proposal)).toThrow(ProtocolValidationError);
+    proposal.canonicalBundle = canonicalBundle;
+    proposal.replacesPolicyDigest = create(CollaborationPolicyDigestSchema, {
+      value: bytes(31, 1),
+    });
+    expect(() => validateCollaborationPolicyProposal(proposal)).toThrow(ProtocolValidationError);
+
+    const response = create(CollaborationPolicyResponseSchema, {
+      proposalId: create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 1) }),
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+      outcome: CollaborationPolicyResponseOutcome.REJECTED,
+    });
+    expect(() => validateCollaborationPolicyResponse(response)).not.toThrow();
+    Object.defineProperty(response, 'outcome', { value: 99 });
+    expect(() => validateCollaborationPolicyResponse(response)).toThrow(ProtocolValidationError);
+
+    const revocation = create(CollaborationPolicyRevocationSchema, {
+      policyDigest: create(CollaborationPolicyDigestSchema, {
+        value: collaborationPolicyDigest(),
+      }),
+    });
+    expect(() => validateCollaborationPolicyRevocation(revocation)).not.toThrow();
+    revocation.policyDigest = undefined;
+    expect(() => validateCollaborationPolicyRevocation(revocation)).toThrow(
+      ProtocolValidationError,
+    );
+  });
+
+  it('rejects an oversized nested bundle before application decoding', () => {
+    const proposal = create(CollaborationPolicyProposalSchema, {
+      proposalId: create(CollaborationPolicyProposalIdSchema, { value: bytes(16, 1) }),
+      policyDigest: create(CollaborationPolicyDigestSchema, { value: bytes(32, 2) }),
+      canonicalBundle: bytes(65_537, 3),
+    });
+    const application = create(ApplicationMessageSchema, {
+      version: create(ProtocolVersionSchema, { major: 1, minor: 0 }),
+      messageId: create(MessageIdSchema, { value: bytes(16, 4) }),
+      senderCounter: 1n,
+      sentAtUnixMilliseconds: 1n,
+      content: { case: 'collaborationPolicyProposal', value: proposal },
+    });
+
+    expect(() =>
+      decodeApplicationMessage(toBinary(ApplicationMessageSchema, application)),
+    ).toThrowError(expect.objectContaining({ code: 'out_of_range' }));
+  });
+
+  it('rejects malformed nested proposal framing before application decoding', () => {
+    const wrongWireType = Uint8Array.from([0x58, 0x00]);
+    const truncatedProposal = Uint8Array.from([0x5a, 0x02, 0x00]);
+
+    for (const malformed of [wrongWireType, truncatedProposal]) {
+      expect(() => decodeApplicationMessage(malformed)).toThrowError(
+        expect.objectContaining({ code: 'malformed' }),
+      );
+    }
   });
 });

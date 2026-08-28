@@ -1,6 +1,8 @@
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{KonclaveDomainError, ProtocolVersion};
+use crate::{
+    CollaborationPolicyDigest, CollaborationPolicyProposalId, KonclaveDomainError, ProtocolVersion,
+};
 
 /// Current collaboration-policy bundle major version.
 pub const COLLABORATION_POLICY_BUNDLE_MAJOR: u32 = 1;
@@ -24,6 +26,152 @@ pub const MAX_COLLABORATION_POLICY_RESOURCE_BYTES: usize = 256;
 pub const MAX_COLLABORATION_POLICY_HARNESS_CLAIMS: usize = 64;
 /// Maximum UTF-8 bytes in one namespaced harness claim.
 pub const MAX_COLLABORATION_POLICY_HARNESS_CLAIM_BYTES: usize = 256;
+
+/// One peer-proposed immutable collaboration-policy bundle.
+#[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct CollaborationPolicyProposal {
+    #[zeroize(skip)]
+    proposal_id: CollaborationPolicyProposalId,
+    #[zeroize(skip)]
+    policy_digest: CollaborationPolicyDigest,
+    canonical_bundle: Vec<u8>,
+    #[zeroize(skip)]
+    replaces_policy_digest: Option<CollaborationPolicyDigest>,
+}
+
+impl CollaborationPolicyProposal {
+    /// Creates one bounded proposal.
+    ///
+    /// Content identity must still be verified cryptographically before the proposal
+    /// can be stored or bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when canonical bundle bytes are empty or exceed the
+    /// policy bundle bound.
+    pub fn new(
+        proposal_id: CollaborationPolicyProposalId,
+        policy_digest: CollaborationPolicyDigest,
+        canonical_bundle: Vec<u8>,
+        replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    ) -> Result<Self, KonclaveDomainError> {
+        if canonical_bundle.is_empty()
+            || canonical_bundle.len() > MAX_COLLABORATION_POLICY_BUNDLE_BYTES
+        {
+            return Err(KonclaveDomainError::OutOfRange {
+                field: "collaboration_policy_bundle",
+                minimum: 1,
+                maximum: MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+                actual: canonical_bundle.len(),
+            });
+        }
+        Ok(Self {
+            proposal_id,
+            policy_digest,
+            canonical_bundle,
+            replaces_policy_digest,
+        })
+    }
+
+    /// Returns the proposal identifier.
+    #[must_use]
+    pub const fn proposal_id(&self) -> CollaborationPolicyProposalId {
+        self.proposal_id
+    }
+
+    /// Returns the claimed canonical bundle digest.
+    #[must_use]
+    pub const fn policy_digest(&self) -> CollaborationPolicyDigest {
+        self.policy_digest
+    }
+
+    /// Returns the proposed canonical policy bytes.
+    #[must_use]
+    pub fn canonical_bundle(&self) -> &[u8] {
+        &self.canonical_bundle
+    }
+
+    /// Returns the prior digest this proposal explicitly replaces, when present.
+    #[must_use]
+    pub const fn replaces_policy_digest(&self) -> Option<CollaborationPolicyDigest> {
+        self.replaces_policy_digest
+    }
+}
+
+/// Terminal response to one collaboration-policy proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollaborationPolicyResponseOutcome {
+    /// The responding endpoint accepted the exact proposed base digest.
+    Accepted,
+    /// The responding endpoint declined the proposal.
+    Rejected,
+}
+
+/// Authenticated acknowledgement of one collaboration-policy proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Zeroize)]
+pub struct CollaborationPolicyResponse {
+    #[zeroize(skip)]
+    proposal_id: CollaborationPolicyProposalId,
+    #[zeroize(skip)]
+    policy_digest: CollaborationPolicyDigest,
+    #[zeroize(skip)]
+    outcome: CollaborationPolicyResponseOutcome,
+}
+
+impl CollaborationPolicyResponse {
+    /// Creates a response bound to one proposal and base digest.
+    #[must_use]
+    pub const fn new(
+        proposal_id: CollaborationPolicyProposalId,
+        policy_digest: CollaborationPolicyDigest,
+        outcome: CollaborationPolicyResponseOutcome,
+    ) -> Self {
+        Self {
+            proposal_id,
+            policy_digest,
+            outcome,
+        }
+    }
+
+    /// Returns the proposal identifier.
+    #[must_use]
+    pub const fn proposal_id(self) -> CollaborationPolicyProposalId {
+        self.proposal_id
+    }
+
+    /// Returns the exact base digest being acknowledged.
+    #[must_use]
+    pub const fn policy_digest(self) -> CollaborationPolicyDigest {
+        self.policy_digest
+    }
+
+    /// Returns the local acceptance outcome.
+    #[must_use]
+    pub const fn outcome(self) -> CollaborationPolicyResponseOutcome {
+        self.outcome
+    }
+}
+
+/// Notification that one endpoint removed its local policy binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Zeroize)]
+pub struct CollaborationPolicyRevocation {
+    #[zeroize(skip)]
+    policy_digest: CollaborationPolicyDigest,
+}
+
+impl CollaborationPolicyRevocation {
+    /// Creates a revocation notice for one previously accepted base digest.
+    #[must_use]
+    pub const fn new(policy_digest: CollaborationPolicyDigest) -> Self {
+        Self { policy_digest }
+    }
+
+    /// Returns the revoked base digest.
+    #[must_use]
+    pub const fn policy_digest(self) -> CollaborationPolicyDigest {
+        self.policy_digest
+    }
+}
 
 /// Validates one canonical collaboration-policy display name.
 ///
@@ -503,5 +651,71 @@ mod tests {
                 field: "collaboration_policy_concurrent_requests"
             })
         );
+    }
+
+    #[test]
+    fn proposal_requires_one_bounded_bundle_and_preserves_replacement() {
+        let replacement = CollaborationPolicyDigest::from_bytes([4; 32]);
+        let proposal = CollaborationPolicyProposal::new(
+            CollaborationPolicyProposalId::from_bytes([1; 16]),
+            CollaborationPolicyDigest::from_bytes([2; 32]),
+            vec![3; MAX_COLLABORATION_POLICY_BUNDLE_BYTES],
+            Some(replacement),
+        )
+        .unwrap();
+        assert_eq!(
+            proposal.canonical_bundle().len(),
+            MAX_COLLABORATION_POLICY_BUNDLE_BYTES
+        );
+        assert_eq!(proposal.replaces_policy_digest(), Some(replacement));
+
+        assert!(matches!(
+            CollaborationPolicyProposal::new(
+                CollaborationPolicyProposalId::from_bytes([1; 16]),
+                CollaborationPolicyDigest::from_bytes([2; 32]),
+                vec![],
+                None,
+            ),
+            Err(KonclaveDomainError::OutOfRange {
+                field: "collaboration_policy_bundle",
+                minimum: 1,
+                maximum: MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            CollaborationPolicyProposal::new(
+                CollaborationPolicyProposalId::from_bytes([1; 16]),
+                CollaborationPolicyDigest::from_bytes([2; 32]),
+                vec![3; MAX_COLLABORATION_POLICY_BUNDLE_BYTES + 1],
+                None,
+            ),
+            Err(KonclaveDomainError::OutOfRange {
+                field: "collaboration_policy_bundle",
+                minimum: 1,
+                maximum: MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+                actual,
+            }) if actual == MAX_COLLABORATION_POLICY_BUNDLE_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn response_and_revocation_preserve_exact_exchange_identity() {
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([6; 16]);
+        let digest = CollaborationPolicyDigest::from_bytes([7; 32]);
+        let response = CollaborationPolicyResponse::new(
+            proposal_id,
+            digest,
+            CollaborationPolicyResponseOutcome::Accepted,
+        );
+        let revocation = CollaborationPolicyRevocation::new(digest);
+
+        assert_eq!(response.proposal_id(), proposal_id);
+        assert_eq!(response.policy_digest(), digest);
+        assert_eq!(
+            response.outcome(),
+            CollaborationPolicyResponseOutcome::Accepted
+        );
+        assert_eq!(revocation.policy_digest(), digest);
     }
 }

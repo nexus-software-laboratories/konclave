@@ -12,7 +12,49 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/collaboration_policy.proto.
  */
 export const file_konclave_protocol_v1_collaboration_policy: GenFile = /*@__PURE__*/
-  fileDesc("Ci9rb25jbGF2ZS9wcm90b2NvbC92MS9jb2xsYWJvcmF0aW9uX3BvbGljeS5wcm90bxIUa29uY2xhdmUucHJvdG9jb2wudjEiqQEKHENvbGxhYm9yYXRpb25Qb2xpY3lTdGF0ZW1lbnQSFAoMc3RhdGVtZW50X2lkGAEgASgJEj8KBmVmZmVjdBgCIAEoDjIvLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lFZmZlY3QSDgoGYWN0aW9uGAMgASgJEhUKCHJlc291cmNlGAQgASgJSACIAQFCCwoJX3Jlc291cmNlItEBChlDb2xsYWJvcmF0aW9uUG9saWN5TGltaXRzEiIKFWR1cmF0aW9uX21pbGxpc2Vjb25kcxgBIAEoBEgAiAEBEhIKBXR1cm5zGAIgASgESAGIAQESEwoGdG9rZW5zGAMgASgESAKIAQESIAoTY29uY3VycmVudF9yZXF1ZXN0cxgEIAEoDUgDiAEBQhgKFl9kdXJhdGlvbl9taWxsaXNlY29uZHNCCAoGX3R1cm5zQgkKB190b2tlbnNCFgoUX2NvbmN1cnJlbnRfcmVxdWVzdHMirwIKGUNvbGxhYm9yYXRpb25Qb2xpY3lCdW5kbGUSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhIMCgRuYW1lGAIgASgJEhUKCGd1aWRhbmNlGAMgASgJSACIAQESRgoKc3RhdGVtZW50cxgEIAMoCzIyLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lTdGF0ZW1lbnQSHwoXcmVxdWlyZWRfaGFybmVzc19jbGFpbXMYBSADKAkSPwoGbGltaXRzGAYgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeUxpbWl0c0ILCglfZ3VpZGFuY2UqzQEKGUNvbGxhYm9yYXRpb25Qb2xpY3lFZmZlY3QSKwonQ09MTEFCT1JBVElPTl9QT0xJQ1lfRUZGRUNUX1VOU1BFQ0lGSUVEEAASJQohQ09MTEFCT1JBVElPTl9QT0xJQ1lfRUZGRUNUX0FMTE9XEAESJAogQ09MTEFCT1JBVElPTl9QT0xJQ1lfRUZGRUNUX0RFTlkQAhI2CjJDT0xMQUJPUkFUSU9OX1BPTElDWV9FRkZFQ1RfUkVRVUlSRV9MT0NBTF9BUFBST1ZBTBADYgZwcm90bzM", [file_konclave_protocol_v1_common]);
+  fileDesc("Ci9rb25jbGF2ZS9wcm90b2NvbC92MS9jb2xsYWJvcmF0aW9uX3BvbGljeS5wcm90bxIUa29uY2xhdmUucHJvdG9jb2wudjEiKgoZQ29sbGFib3JhdGlvblBvbGljeURpZ2VzdBINCgV2YWx1ZRgBIAEoDCIuCh1Db2xsYWJvcmF0aW9uUG9saWN5UHJvcG9zYWxJZBINCgV2YWx1ZRgBIAEoDCKpAQocQ29sbGFib3JhdGlvblBvbGljeVN0YXRlbWVudBIUCgxzdGF0ZW1lbnRfaWQYASABKAkSPwoGZWZmZWN0GAIgASgOMi8ua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeUVmZmVjdBIOCgZhY3Rpb24YAyABKAkSFQoIcmVzb3VyY2UYBCABKAlIAIgBAUILCglfcmVzb3VyY2Ui0QEKGUNvbGxhYm9yYXRpb25Qb2xpY3lMaW1pdHMSIgoVZHVyYXRpb25fbWlsbGlzZWNvbmRzGAEgASgESACIAQESEgoFdHVybnMYAiABKARIAYgBARITCgZ0b2tlbnMYAyABKARIAogBARIgChNjb25jdXJyZW50X3JlcXVlc3RzGAQgASgNSAOIAQFCGAoWX2R1cmF0aW9uX21pbGxpc2Vjb25kc0IICgZfdHVybnNCCQoHX3Rva2Vuc0IWChRfY29uY3VycmVudF9yZXF1ZXN0cyKvAgoZQ29sbGFib3JhdGlvblBvbGljeUJ1bmRsZRI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEgwKBG5hbWUYAiABKAkSFQoIZ3VpZGFuY2UYAyABKAlIAIgBARJGCgpzdGF0ZW1lbnRzGAQgAygLMjIua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVN0YXRlbWVudBIfChdyZXF1aXJlZF9oYXJuZXNzX2NsYWltcxgFIAMoCRI/CgZsaW1pdHMYBiABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5Db2xsYWJvcmF0aW9uUG9saWN5TGltaXRzQgsKCV9ndWlkYW5jZSKaAgobQ29sbGFib3JhdGlvblBvbGljeVByb3Bvc2FsEkgKC3Byb3Bvc2FsX2lkGAEgASgLMjMua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVByb3Bvc2FsSWQSRgoNcG9saWN5X2RpZ2VzdBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lEaWdlc3QSGAoQY2Fub25pY2FsX2J1bmRsZRgDIAEoDBJPChZyZXBsYWNlc19wb2xpY3lfZGlnZXN0GAQgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeURpZ2VzdCL6AQobQ29sbGFib3JhdGlvblBvbGljeVJlc3BvbnNlEkgKC3Byb3Bvc2FsX2lkGAEgASgLMjMua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVByb3Bvc2FsSWQSRgoNcG9saWN5X2RpZ2VzdBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lEaWdlc3QSSQoHb3V0Y29tZRgDIAEoDjI4LmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lSZXNwb25zZU91dGNvbWUiZwodQ29sbGFib3JhdGlvblBvbGljeVJldm9jYXRpb24SRgoNcG9saWN5X2RpZ2VzdBgBIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lEaWdlc3QqzQEKGUNvbGxhYm9yYXRpb25Qb2xpY3lFZmZlY3QSKwonQ09MTEFCT1JBVElPTl9QT0xJQ1lfRUZGRUNUX1VOU1BFQ0lGSUVEEAASJQohQ09MTEFCT1JBVElPTl9QT0xJQ1lfRUZGRUNUX0FMTE9XEAESJAogQ09MTEFCT1JBVElPTl9QT0xJQ1lfRUZGRUNUX0RFTlkQAhI2CjJDT0xMQUJPUkFUSU9OX1BPTElDWV9FRkZFQ1RfUkVRVUlSRV9MT0NBTF9BUFBST1ZBTBADKsMBCiJDb2xsYWJvcmF0aW9uUG9saWN5UmVzcG9uc2VPdXRjb21lEjUKMUNPTExBQk9SQVRJT05fUE9MSUNZX1JFU1BPTlNFX09VVENPTUVfVU5TUEVDSUZJRUQQABIyCi5DT0xMQUJPUkFUSU9OX1BPTElDWV9SRVNQT05TRV9PVVRDT01FX0FDQ0VQVEVEEAESMgouQ09MTEFCT1JBVElPTl9QT0xJQ1lfUkVTUE9OU0VfT1VUQ09NRV9SRUpFQ1RFRBACYgZwcm90bzM", [file_konclave_protocol_v1_common]);
+
+/**
+ * Identifies one immutable canonical collaboration-policy bundle.
+ *
+ * @generated from message konclave.protocol.v1.CollaborationPolicyDigest
+ */
+export type CollaborationPolicyDigest = Message<"konclave.protocol.v1.CollaborationPolicyDigest"> & {
+  /**
+   * Exactly 32 SHA-256 bytes in protocol v1.
+   *
+   * @generated from field: bytes value = 1;
+   */
+  value: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.CollaborationPolicyDigest.
+ * Use `create(CollaborationPolicyDigestSchema)` to create a new message.
+ */
+export const CollaborationPolicyDigestSchema: GenMessage<CollaborationPolicyDigest> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 0);
+
+/**
+ * Identifies one collaboration-policy proposal exchange.
+ *
+ * @generated from message konclave.protocol.v1.CollaborationPolicyProposalId
+ */
+export type CollaborationPolicyProposalId = Message<"konclave.protocol.v1.CollaborationPolicyProposalId"> & {
+  /**
+   * Exactly 16 bytes in protocol v1.
+   *
+   * @generated from field: bytes value = 1;
+   */
+  value: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.CollaborationPolicyProposalId.
+ * Use `create(CollaborationPolicyProposalIdSchema)` to create a new message.
+ */
+export const CollaborationPolicyProposalIdSchema: GenMessage<CollaborationPolicyProposalId> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 1);
 
 /**
  * Applies one decision primitive to a namespaced action and optional resource.
@@ -46,7 +88,7 @@ export type CollaborationPolicyStatement = Message<"konclave.protocol.v1.Collabo
  * Use `create(CollaborationPolicyStatementSchema)` to create a new message.
  */
 export const CollaborationPolicyStatementSchema: GenMessage<CollaborationPolicyStatement> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_collaboration_policy, 0);
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 2);
 
 /**
  * Carries fully resolved semantic limits. Absent fields mean explicitly unlimited.
@@ -80,7 +122,7 @@ export type CollaborationPolicyLimits = Message<"konclave.protocol.v1.Collaborat
  * Use `create(CollaborationPolicyLimitsSchema)` to create a new message.
  */
 export const CollaborationPolicyLimitsSchema: GenMessage<CollaborationPolicyLimits> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_collaboration_policy, 1);
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 3);
 
 /**
  * Canonical source-independent collaboration policy.
@@ -124,7 +166,89 @@ export type CollaborationPolicyBundle = Message<"konclave.protocol.v1.Collaborat
  * Use `create(CollaborationPolicyBundleSchema)` to create a new message.
  */
 export const CollaborationPolicyBundleSchema: GenMessage<CollaborationPolicyBundle> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_collaboration_policy, 2);
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 4);
+
+/**
+ * Proposes one complete canonical policy bundle without activating it remotely.
+ *
+ * @generated from message konclave.protocol.v1.CollaborationPolicyProposal
+ */
+export type CollaborationPolicyProposal = Message<"konclave.protocol.v1.CollaborationPolicyProposal"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyProposalId proposal_id = 1;
+   */
+  proposalId?: CollaborationPolicyProposalId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyDigest policy_digest = 2;
+   */
+  policyDigest?: CollaborationPolicyDigest | undefined;
+
+  /**
+   * @generated from field: bytes canonical_bundle = 3;
+   */
+  canonicalBundle: Uint8Array;
+
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyDigest replaces_policy_digest = 4;
+   */
+  replacesPolicyDigest?: CollaborationPolicyDigest | undefined;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.CollaborationPolicyProposal.
+ * Use `create(CollaborationPolicyProposalSchema)` to create a new message.
+ */
+export const CollaborationPolicyProposalSchema: GenMessage<CollaborationPolicyProposal> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 5);
+
+/**
+ * Acknowledges one exact proposal and base digest.
+ *
+ * @generated from message konclave.protocol.v1.CollaborationPolicyResponse
+ */
+export type CollaborationPolicyResponse = Message<"konclave.protocol.v1.CollaborationPolicyResponse"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyProposalId proposal_id = 1;
+   */
+  proposalId?: CollaborationPolicyProposalId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyDigest policy_digest = 2;
+   */
+  policyDigest?: CollaborationPolicyDigest | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyResponseOutcome outcome = 3;
+   */
+  outcome: CollaborationPolicyResponseOutcome;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.CollaborationPolicyResponse.
+ * Use `create(CollaborationPolicyResponseSchema)` to create a new message.
+ */
+export const CollaborationPolicyResponseSchema: GenMessage<CollaborationPolicyResponse> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 6);
+
+/**
+ * Announces removal of one endpoint's local policy binding.
+ *
+ * @generated from message konclave.protocol.v1.CollaborationPolicyRevocation
+ */
+export type CollaborationPolicyRevocation = Message<"konclave.protocol.v1.CollaborationPolicyRevocation"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.CollaborationPolicyDigest policy_digest = 1;
+   */
+  policyDigest?: CollaborationPolicyDigest | undefined;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.CollaborationPolicyRevocation.
+ * Use `create(CollaborationPolicyRevocationSchema)` to create a new message.
+ */
+export const CollaborationPolicyRevocationSchema: GenMessage<CollaborationPolicyRevocation> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_collaboration_policy, 7);
 
 /**
  * Defines one evaluator primitive without hardcoding named collaboration modes.
@@ -158,4 +282,32 @@ export enum CollaborationPolicyEffect {
  */
 export const CollaborationPolicyEffectSchema: GenEnum<CollaborationPolicyEffect> = /*@__PURE__*/
   enumDesc(file_konclave_protocol_v1_collaboration_policy, 0);
+
+/**
+ * Defines the terminal local response to one proposal.
+ *
+ * @generated from enum konclave.protocol.v1.CollaborationPolicyResponseOutcome
+ */
+export enum CollaborationPolicyResponseOutcome {
+  /**
+   * @generated from enum value: COLLABORATION_POLICY_RESPONSE_OUTCOME_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: COLLABORATION_POLICY_RESPONSE_OUTCOME_ACCEPTED = 1;
+   */
+  ACCEPTED = 1,
+
+  /**
+   * @generated from enum value: COLLABORATION_POLICY_RESPONSE_OUTCOME_REJECTED = 2;
+   */
+  REJECTED = 2,
+}
+
+/**
+ * Describes the enum konclave.protocol.v1.CollaborationPolicyResponseOutcome.
+ */
+export const CollaborationPolicyResponseOutcomeSchema: GenEnum<CollaborationPolicyResponseOutcome> = /*@__PURE__*/
+  enumDesc(file_konclave_protocol_v1_collaboration_policy, 1);
 

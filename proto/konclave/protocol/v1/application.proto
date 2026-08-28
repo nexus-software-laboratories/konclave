@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package konclave.protocol.v1;
 
+import "konclave/protocol/v1/collaboration_policy.proto";
 import "konclave/protocol/v1/common.proto";
 
 // Carries bounded UTF-8 chat content.
@@ -21,5 +22,8 @@ message ApplicationMessage {
 
   oneof content {
     TextContent text = 10;
+    CollaborationPolicyProposal collaboration_policy_proposal = 11;
+    CollaborationPolicyResponse collaboration_policy_response = 12;
+    CollaborationPolicyRevocation collaboration_policy_revocation = 13;
   }
 }

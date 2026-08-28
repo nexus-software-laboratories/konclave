@@ -116,14 +116,58 @@ It survives restart, replacement is atomic, and deletion immediately removes loc
 authority. Schema migration creates no bundle or binding, and no client or agent
 activation operation is exposed in this persistence-only slice.
 
-A future peer proposal carries a digest and, when needed, the complete bounded bundle;
-receiving it does not activate it. Only a locally authorized operation may call the
-binding boundary added here.
+Protocol-v1 application content now carries three typed exchange messages:
+
+- a proposal identifier, claimed policy digest, complete canonical bundle, and
+  optional digest that the proposal is intended to replace;
+- an accepted or rejected response bound to the exact proposal identifier and policy
+  digest; and
+- a revocation notice bound to the policy digest being withdrawn.
+
+Proposal identifiers are 16 bytes and policy digests are 32 bytes. The embedded
+bundle is required and retains the core 64 KiB bound. Unknown response outcomes,
+malformed identifiers, malformed digests, empty or oversized bundles, and missing
+required fields fail closed in Rust and TypeScript.
+
+Proposal verification decodes the embedded bundle through the canonical bundle
+contract, derives its domain-separated digest, and requires an exact match with the
+claimed digest. This prevents a sender from substituting alternate policy bytes under
+an agreed identity. The optional replacement digest is authenticated application
+content, but it does not itself mutate a binding.
+
+Receiving a proposal, accepted response, or revocation never activates, replaces, or
+deletes local authority at this layer. These messages establish an authenticated
+exchange vocabulary only. A subsequent service state machine must durably track
+pending proposals and call the local binding boundary only after an authorized local
+decision. An accepted response authenticates which member reported acceptance of
+which proposal and digest; it is not independent proof of that endpoint's effective
+harness controls.
 
 Participants acknowledge the same base digest independently. Each endpoint then
 intersects that bundle with local user authority, harness-proven controls, and local
 restrictions. The public effective projection may be stricter on either endpoint,
 while the accepted base definition remains byte-identical.
+
+Rust-generated immutable fixtures cover every exchange content kind, and both Rust
+and TypeScript readers decode and re-encode those application messages byte for byte.
+The local daemon verifies proposed bundle identity before outbound encryption or
+inbound persistence. The shared local-service delivery surface exposes only typed
+proposal identifiers, digests, replacement intent, outcomes, and revocations; it does
+not expose the canonical bundle or model guidance through automatic delivery.
+Copilot renders that metadata inside the existing untrusted collaborator fence and
+explicitly states that proposal receipt activated no local authority.
+
+The closed binary adapter protocol v1 is not extended with new event discriminants.
+For compatibility, its text-only application event projects policy exchanges into a
+bounded daemon-authored notice that claims no activation and contains no peer bundle
+content. This lets an older adapter acknowledge the event instead of repeatedly
+rejecting an unknown event kind and blocking its delivery queue.
+
+Manual message-history results use a `content_type` discriminator. Text retains its
+existing `text` field, while policy entries expose only the proposal identifier,
+digests, replacement intent, response outcome, or revocation digest. The Copilot
+history command validates and renders each variant instead of rejecting a page that
+contains non-text application content.
 
 ## Harness boundary
 

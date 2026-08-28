@@ -31,6 +31,23 @@ function describePayload(payload: DeliveredPayload): string {
   switch (payload.kind) {
     case 'application-text':
       return `message: ${neutralizeMarkers(payload.text)}`;
+    case 'collaboration-policy-proposal': {
+      const replacement =
+        payload.replacesPolicyDigest === undefined
+          ? ''
+          : ` replacing ${shortId(payload.replacesPolicyDigest)}`;
+      return (
+        `policy proposal: ${shortId(payload.proposalId)} identifies ` +
+        `${shortId(payload.policyDigest)}${replacement}; no local authority was activated`
+      );
+    }
+    case 'collaboration-policy-response':
+      return (
+        `policy response: the remote endpoint reported proposal ${shortId(payload.proposalId)} ` +
+        `for ${shortId(payload.policyDigest)} as ${payload.outcome}`
+      );
+    case 'collaboration-policy-revocation':
+      return `policy revocation: the remote endpoint withdrew ${shortId(payload.policyDigest)}`;
     case 'member-added':
       return `membership: device ${shortId(payload.device)} was added as ${payload.role}`;
     case 'member-removed':

@@ -1,5 +1,9 @@
-use KonclaveDomainCore::{CollaborationPolicyBundle, CollaborationPolicyDigest};
-use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
+use KonclaveDomainCore::{
+    CollaborationPolicyBundle, CollaborationPolicyDigest, CollaborationPolicyProposal,
+};
+use KonclaveProtocolContracts::v1::{
+    decode_collaboration_policy_bundle, encode_collaboration_policy_bundle,
+};
 use aws_lc_rs::digest::{Context, SHA256};
 
 use crate::KonclaveCryptographicError;
@@ -26,11 +30,51 @@ pub fn derive_collaboration_policy_digest(
     )?)
 }
 
+/// A proposal whose canonical bundle decodes and matches its claimed digest.
+pub struct VerifiedCollaborationPolicyProposal<'a> {
+    proposal: &'a CollaborationPolicyProposal,
+    bundle: CollaborationPolicyBundle,
+}
+
+impl VerifiedCollaborationPolicyProposal<'_> {
+    /// Returns the authenticated proposal metadata and canonical bytes.
+    #[must_use]
+    pub const fn proposal(&self) -> &CollaborationPolicyProposal {
+        self.proposal
+    }
+
+    /// Returns the decoded canonical policy bundle.
+    #[must_use]
+    pub const fn bundle(&self) -> &CollaborationPolicyBundle {
+        &self.bundle
+    }
+}
+
+/// Verifies that a proposal carries one canonical bundle matching its claimed digest.
+///
+/// # Errors
+///
+/// Returns [`KonclaveCryptographicError::ProtocolContractFailure`] when the
+/// embedded bundle is malformed or noncanonical, and
+/// [`KonclaveCryptographicError::InvalidCollaborationPolicyDigest`] when its
+/// derived digest differs from the proposal.
+pub fn verify_collaboration_policy_proposal(
+    proposal: &CollaborationPolicyProposal,
+) -> Result<VerifiedCollaborationPolicyProposal<'_>, KonclaveCryptographicError> {
+    let bundle = decode_collaboration_policy_bundle(proposal.canonical_bundle())
+        .map_err(|_| KonclaveCryptographicError::ProtocolContractFailure)?;
+    let actual_digest = derive_collaboration_policy_digest(&bundle)?;
+    if actual_digest != proposal.policy_digest() {
+        return Err(KonclaveCryptographicError::InvalidCollaborationPolicyDigest);
+    }
+    Ok(VerifiedCollaborationPolicyProposal { proposal, bundle })
+}
+
 #[cfg(test)]
 mod tests {
     use KonclaveDomainCore::{
-        CollaborationPolicyEffect, CollaborationPolicyLimits, CollaborationPolicyStatement,
-        ProtocolVersion,
+        CollaborationPolicyEffect, CollaborationPolicyLimits, CollaborationPolicyProposal,
+        CollaborationPolicyProposalId, CollaborationPolicyStatement, ProtocolVersion,
     };
 
     use super::*;
@@ -92,6 +136,56 @@ mod tests {
                 0x8b, 0xcd, 0x8e, 0xb8, 0x60, 0x06, 0x20, 0xbc, 0x17, 0x96, 0xc4, 0xc6, 0x68, 0xfa,
                 0x59, 0x90, 0xeb, 0x2e,
             ]
+        );
+    }
+
+    #[test]
+    fn proposal_verification_requires_canonical_matching_bundle() {
+        let expected_bundle = bundle(
+            "contract-alignment",
+            "Align the API contract and report decisions.",
+        );
+        let canonical = encode_collaboration_policy_bundle(&expected_bundle).unwrap();
+        let digest = derive_collaboration_policy_digest(&expected_bundle).unwrap();
+        let proposal = CollaborationPolicyProposal::new(
+            CollaborationPolicyProposalId::from_bytes([1; 16]),
+            digest,
+            canonical.clone(),
+            Some(CollaborationPolicyDigest::from_bytes([2; 32])),
+        )
+        .unwrap();
+
+        let verified = verify_collaboration_policy_proposal(&proposal).unwrap();
+        assert_eq!(verified.bundle().name(), "contract-alignment");
+        assert_eq!(
+            verified.proposal().replaces_policy_digest(),
+            Some(CollaborationPolicyDigest::from_bytes([2; 32]))
+        );
+
+        let mismatched = CollaborationPolicyProposal::new(
+            CollaborationPolicyProposalId::from_bytes([3; 16]),
+            CollaborationPolicyDigest::from_bytes([4; 32]),
+            canonical.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_collaboration_policy_proposal(&mismatched).err(),
+            Some(KonclaveCryptographicError::InvalidCollaborationPolicyDigest)
+        );
+
+        let mut noncanonical = canonical;
+        noncanonical.extend_from_slice(&[0x98, 0x06, 0x01]);
+        let malformed = CollaborationPolicyProposal::new(
+            CollaborationPolicyProposalId::from_bytes([5; 16]),
+            digest,
+            noncanonical,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_collaboration_policy_proposal(&malformed).err(),
+            Some(KonclaveCryptographicError::ProtocolContractFailure)
         );
     }
 }

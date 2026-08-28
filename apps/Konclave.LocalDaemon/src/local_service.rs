@@ -3,9 +3,10 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use KonclaveAdapterTransport::{DeliveredEvent, DeliveredPayload, DeliveredRole};
 use KonclaveCryptographicCore::LocalServiceIdentity;
-use KonclaveDomainCore::AdapterConsumerId;
+use KonclaveDomainCore::{
+    AdapterConsumerId, ApplicationContent, CollaborationPolicyResponseOutcome, ConversationRole,
+};
 use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     HarnessKind, InMemorySessionAuthorizationRegistry, LocalServiceEndpoint, LocalServiceErrorCode,
@@ -23,6 +24,7 @@ use zeroize::Zeroizing;
 
 use crate::adapter::{DeliveryAttachment, SystemUnixClock, UnixClock};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
+use crate::persistence::{ClaimedRemoteEvent, RemoteEventPayload};
 use crate::profile_runtime::ProfileServices;
 use crate::profile_supervisor::{ProfileSupervisor, ProfileSupervisorConfig};
 use crate::runtime::ProfileSource;
@@ -1170,13 +1172,42 @@ struct DeliveryEventResult {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 enum DeliveryPayloadResult {
-    ApplicationText { text: String },
-    MemberAdded { device: String, role: &'static str },
-    MemberRemoved { device: String },
-    MemberRoleChanged { device: String, role: &'static str },
-    LocalAccessRemoved { device: String },
+    ApplicationText {
+        text: String,
+    },
+    CollaborationPolicyProposal {
+        proposal_id: String,
+        policy_digest: String,
+        replaces_policy_digest: Option<String>,
+    },
+    CollaborationPolicyResponse {
+        proposal_id: String,
+        policy_digest: String,
+        outcome: &'static str,
+    },
+    CollaborationPolicyRevocation {
+        policy_digest: String,
+    },
+    MemberAdded {
+        device: String,
+        role: &'static str,
+    },
+    MemberRemoved {
+        device: String,
+    },
+    MemberRoleChanged {
+        device: String,
+        role: &'static str,
+    },
+    LocalAccessRemoved {
+        device: String,
+    },
 }
 
 async fn delivery_claim(
@@ -1249,44 +1280,81 @@ async fn delivery_finish(
     Ok(b"{}".to_vec())
 }
 
-fn delivery_event_result(event: DeliveredEvent) -> DeliveryEventResult {
+fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
+    let event = claimed.event;
     DeliveryEventResult {
-        notification_id: crate::mcp::encode_hex(&event.notification_id),
-        lease_generation: event.lease_generation,
+        notification_id: crate::mcp::encode_hex(event.notification_id.as_bytes()),
+        lease_generation: claimed.lease_generation,
         sequence: event.sequence,
-        conversation: crate::mcp::encode_hex(&event.conversation),
-        sender: crate::mcp::encode_hex(&event.sender),
+        conversation: crate::mcp::encode_hex(event.conversation_id.as_bytes()),
+        sender: crate::mcp::encode_hex(event.sender.as_bytes()),
         relay_cursor: event.relay_cursor,
         payload: match event.payload {
-            DeliveredPayload::ApplicationText(text) => {
-                DeliveryPayloadResult::ApplicationText { text }
-            }
-            DeliveredPayload::MemberAdded { device, role } => DeliveryPayloadResult::MemberAdded {
-                device: crate::mcp::encode_hex(&device),
-                role: delivery_role(role),
+            RemoteEventPayload::ApplicationMessage(message) => match message.content() {
+                ApplicationContent::Text(text) => {
+                    DeliveryPayloadResult::ApplicationText { text: text.clone() }
+                }
+                ApplicationContent::CollaborationPolicyProposal(proposal) => {
+                    DeliveryPayloadResult::CollaborationPolicyProposal {
+                        proposal_id: crate::mcp::encode_hex(proposal.proposal_id().as_bytes()),
+                        policy_digest: crate::mcp::encode_hex(proposal.policy_digest().as_bytes()),
+                        replaces_policy_digest: proposal
+                            .replaces_policy_digest()
+                            .map(|digest| crate::mcp::encode_hex(digest.as_bytes())),
+                    }
+                }
+                ApplicationContent::CollaborationPolicyResponse(response) => {
+                    DeliveryPayloadResult::CollaborationPolicyResponse {
+                        proposal_id: crate::mcp::encode_hex(response.proposal_id().as_bytes()),
+                        policy_digest: crate::mcp::encode_hex(response.policy_digest().as_bytes()),
+                        outcome: policy_response_outcome(response.outcome()),
+                    }
+                }
+                ApplicationContent::CollaborationPolicyRevocation(revocation) => {
+                    DeliveryPayloadResult::CollaborationPolicyRevocation {
+                        policy_digest: crate::mcp::encode_hex(
+                            revocation.policy_digest().as_bytes(),
+                        ),
+                    }
+                }
             },
-            DeliveredPayload::MemberRemoved { device } => DeliveryPayloadResult::MemberRemoved {
-                device: crate::mcp::encode_hex(&device),
-            },
-            DeliveredPayload::MemberRoleChanged { device, role } => {
-                DeliveryPayloadResult::MemberRoleChanged {
-                    device: crate::mcp::encode_hex(&device),
+            RemoteEventPayload::MemberAdded { device_id, role } => {
+                DeliveryPayloadResult::MemberAdded {
+                    device: crate::mcp::encode_hex(device_id.as_bytes()),
                     role: delivery_role(role),
                 }
             }
-            DeliveredPayload::LocalAccessRemoved { device } => {
+            RemoteEventPayload::MemberRemoved { device_id } => {
+                DeliveryPayloadResult::MemberRemoved {
+                    device: crate::mcp::encode_hex(device_id.as_bytes()),
+                }
+            }
+            RemoteEventPayload::MemberRoleChanged { device_id, role } => {
+                DeliveryPayloadResult::MemberRoleChanged {
+                    device: crate::mcp::encode_hex(device_id.as_bytes()),
+                    role: delivery_role(role),
+                }
+            }
+            RemoteEventPayload::LocalAccessRemoved { device_id } => {
                 DeliveryPayloadResult::LocalAccessRemoved {
-                    device: crate::mcp::encode_hex(&device),
+                    device: crate::mcp::encode_hex(device_id.as_bytes()),
                 }
             }
         },
     }
 }
 
-const fn delivery_role(role: DeliveredRole) -> &'static str {
+const fn delivery_role(role: ConversationRole) -> &'static str {
     match role {
-        DeliveredRole::Administrator => "administrator",
-        DeliveredRole::Member => "member",
+        ConversationRole::Administrator => "administrator",
+        ConversationRole::Member => "member",
+    }
+}
+
+const fn policy_response_outcome(outcome: CollaborationPolicyResponseOutcome) -> &'static str {
+    match outcome {
+        CollaborationPolicyResponseOutcome::Accepted => "accepted",
+        CollaborationPolicyResponseOutcome::Rejected => "rejected",
     }
 }
 
@@ -1638,6 +1706,93 @@ impl RequestCompletion {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod delivery_contract_tests {
+    use KonclaveDomainCore::{
+        ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
+        CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
+        CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
+        DeviceId, MessageId, NotificationId, ProtocolVersion,
+    };
+    use serde_json::json;
+
+    use super::delivery_event_result;
+    use crate::persistence::{ClaimedRemoteEvent, RemoteEvent, RemoteEventPayload};
+
+    #[test]
+    fn policy_delivery_fields_use_the_shared_camel_case_contract() {
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([1; 16]);
+        let digest = CollaborationPolicyDigest::from_bytes([2; 32]);
+        let proposal = serde_json::to_value(delivery_event_result(claimed(
+            ApplicationContent::collaboration_policy_proposal(
+                CollaborationPolicyProposal::new(proposal_id, digest, vec![3], None).unwrap(),
+            ),
+        )))
+        .unwrap();
+        assert_eq!(
+            proposal["payload"],
+            json!({
+                "kind": "collaboration_policy_proposal",
+                "proposalId": "01".repeat(16),
+                "policyDigest": "02".repeat(32),
+                "replacesPolicyDigest": null
+            })
+        );
+        assert!(proposal["payload"].get("canonicalBundle").is_none());
+
+        for (outcome, expected) in [
+            (CollaborationPolicyResponseOutcome::Accepted, "accepted"),
+            (CollaborationPolicyResponseOutcome::Rejected, "rejected"),
+        ] {
+            let response =
+                serde_json::to_value(delivery_event_result(claimed(
+                    ApplicationContent::CollaborationPolicyResponse(
+                        CollaborationPolicyResponse::new(proposal_id, digest, outcome),
+                    ),
+                )))
+                .unwrap();
+            assert_eq!(response["payload"]["outcome"], expected);
+        }
+
+        let revocation = serde_json::to_value(delivery_event_result(claimed(
+            ApplicationContent::CollaborationPolicyRevocation(CollaborationPolicyRevocation::new(
+                digest,
+            )),
+        )))
+        .unwrap();
+        assert_eq!(
+            revocation["payload"],
+            json!({
+                "kind": "collaboration_policy_revocation",
+                "policyDigest": "02".repeat(32)
+            })
+        );
+    }
+
+    fn claimed(content: ApplicationContent) -> ClaimedRemoteEvent {
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([4; 16]),
+            1,
+            1_700_000_000_000,
+            None,
+            content,
+        )
+        .unwrap();
+        ClaimedRemoteEvent {
+            event: RemoteEvent {
+                sequence: 5,
+                notification_id: NotificationId::from_bytes([6; 16]),
+                conversation_id: ConversationId::from_bytes([7; 32]),
+                relay_cursor: 8,
+                sender: DeviceId::from_bytes([9; 32]),
+                payload: RemoteEventPayload::ApplicationMessage(message),
+            },
+            lease_generation: 10,
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

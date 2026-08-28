@@ -6,6 +6,7 @@ import {
   type AdapterResponse,
   type DeliveredEvent,
   type DeliveredPayload,
+  type DeliveredPolicyResponseOutcome,
   type DeliveredRole,
 } from '../adapter/session.js';
 import type { LocalServiceClient } from './client.js';
@@ -48,6 +49,13 @@ function role(value: unknown): DeliveredRole {
   return value;
 }
 
+function policyResponseOutcome(value: unknown): DeliveredPolicyResponseOutcome {
+  if (value !== 'accepted' && value !== 'rejected') {
+    throw new Error('the local service delivery response is malformed');
+  }
+  return value;
+}
+
 function payload(value: unknown): DeliveredPayload {
   if (!isRecord(value)) {
     throw new Error('the local service delivery response is malformed');
@@ -60,6 +68,28 @@ function payload(value: unknown): DeliveredPayload {
       }
       return { kind: 'application-text', text: message };
     }
+    case 'collaboration_policy_proposal':
+      return {
+        kind: 'collaboration-policy-proposal',
+        proposalId: Buffer.from(hex(value.proposalId, hex16), 'hex'),
+        policyDigest: Buffer.from(hex(value.policyDigest, hex32), 'hex'),
+        replacesPolicyDigest:
+          value.replacesPolicyDigest === null
+            ? undefined
+            : Buffer.from(hex(value.replacesPolicyDigest, hex32), 'hex'),
+      };
+    case 'collaboration_policy_response':
+      return {
+        kind: 'collaboration-policy-response',
+        proposalId: Buffer.from(hex(value.proposalId, hex16), 'hex'),
+        policyDigest: Buffer.from(hex(value.policyDigest, hex32), 'hex'),
+        outcome: policyResponseOutcome(value.outcome),
+      };
+    case 'collaboration_policy_revocation':
+      return {
+        kind: 'collaboration-policy-revocation',
+        policyDigest: Buffer.from(hex(value.policyDigest, hex32), 'hex'),
+      };
     case 'member_added':
       return {
         kind: 'member-added',

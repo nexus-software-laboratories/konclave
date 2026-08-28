@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
+    CollaborationPolicyProposal, CollaborationPolicyResponse, CollaborationPolicyRevocation,
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
     MessageId, PairingContextHash, PairingId, PairingMessageId, PairingNonce, RoutingId,
@@ -1275,9 +1276,12 @@ impl MembershipAuthorization {
 }
 
 /// Validated application content.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum ApplicationContent {
     Text(String),
+    CollaborationPolicyProposal(Box<CollaborationPolicyProposal>),
+    CollaborationPolicyResponse(CollaborationPolicyResponse),
+    CollaborationPolicyRevocation(CollaborationPolicyRevocation),
 }
 
 impl ApplicationContent {
@@ -1300,6 +1304,13 @@ impl ApplicationContent {
             });
         }
         Ok(Self::Text(body))
+    }
+
+    /// Wraps one validated collaboration-policy proposal without inflating every
+    /// application message by the size of the uncommon proposal representation.
+    #[must_use]
+    pub fn collaboration_policy_proposal(proposal: CollaborationPolicyProposal) -> Self {
+        Self::CollaborationPolicyProposal(Box::new(proposal))
     }
 }
 
