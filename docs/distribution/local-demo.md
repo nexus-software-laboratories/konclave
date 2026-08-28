@@ -143,12 +143,16 @@ authentication, loads the packaged shared-client commands and SDK tools, declare
 MCP server, and runs both `connect` command handlers concurrently against full-length
 `session-*` profiles. The harness observes the ephemeral capability before the first
 handler resolves, transfers it without printing it, requires both handlers to return
-the same conversation, sends through the implicit-conversation command, and verifies
-an exact message plus reply through the one recorded service PID.
+the same conversation, exchanges and independently activates one exact policy digest,
+and sends a deterministic contract request. Two actual model turns then receive the
+normal fenced delivery prompt, activate the packaged pre-tool gate, and produce an
+exact reply plus follow-up through one-use daemon authorizations and the one recorded
+service PID.
 
-The final JSON report contains session, pairing, conversation, message, phase, tool,
-duration, and token evidence. It never includes the capability, prompts, model
-responses, tool arguments, credentials, or user content.
+The final JSON report contains session, pairing, conversation, policy digest,
+proposal, autonomous-turn, message-identifier, phase, tool, duration, and token evidence. It
+never includes the capability, policy guidance, prompts, model responses, tool
+arguments, credentials, or user-provided content.
 
 This is deliberately a local development smoke. Both the PowerShell entry point and
 the TypeScript runner refuse recognized CI environments. No repository workflow

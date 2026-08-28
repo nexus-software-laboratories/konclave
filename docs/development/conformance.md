@@ -121,6 +121,11 @@ crash or excessive-allocation case becomes a permanent regression input.
 - keep `fixtures/local-service/v1/copilot-tools.json` byte-semantically aligned with
   the Rust router and consume that generated input schema from the Copilot SDK
   adapter;
+- prove fresh interactive and delivery handshakes correlate policy authority only
+  through the same authenticated session public key, then reject another session key;
+- exchange and activate one exact policy digest across packaged clients, restart the
+  shared service, and complete two proof-authorized reply actions without bypassing
+  native permission or delivery-lease checks;
 - prove tools expose no raw identity key, MLS secret, or storage wrapping key;
 - test cancellation, backpressure, bounded watches, reconnect, and daemon restart;
 - verify CLI and Copilot adapters produce the same domain outcomes through the public

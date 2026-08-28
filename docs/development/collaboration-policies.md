@@ -341,6 +341,9 @@ local authority from positive targets in the locally activated bundle, supplies 
 the claims and exact controls the Copilot adapter proves, and evaluates duration plus
 one active collaboration request. The profile's single live delivery consumer and
 the extension's one-outstanding-turn gate enforce concurrency conservatively at one.
+Interactive and delivery connections retain fresh handshake instance identifiers;
+the daemon correlates their consumer authority only when both prove the same
+authenticated session public key.
 
 During that turn, Copilot's pre-tool hook maps only Konclave's `send_message` tool to
 `conversation.reply`. A successful evaluation issues a one-use authorization bound to

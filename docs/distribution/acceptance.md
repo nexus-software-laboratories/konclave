@@ -18,6 +18,9 @@ The job proves:
   thin plugin contains no daemon;
 - two shared-service clients pair through one capability and exchange exact messages
   in both directions;
+- both clients exchange and independently activate one exact collaboration-policy
+  digest, retain it across service restart, and complete two proof-authorized replies
+  through separate interactive and delivery connections;
 - an untrusted relay certificate is rejected before the same endpoint succeeds with
   its temporary CA explicitly trusted;
 - disconnecting one client, sending while it is offline, and reconnecting replays the
@@ -52,6 +55,12 @@ CI simulates the Copilot host contract around the packaged thin client: register
 SDK tools, authenticated profile attachment, delivery settlement, idle injection
 safety, and no process launch. Existing plugin tests exercise session callbacks,
 slash commands, reconnect, and safety framing.
+
+The packaged shared-service scenario now verifies the daemon-owned collaboration
+boundary without cloud inference. Each logical client opens fresh interactive and
+delivery handshakes under one authenticated session key, claims the live delivery
+lease, authorizes the turn, obtains a one-use exact-argument send capability, and
+preserves the reply chain across two autonomous-policy actions after service restart.
 
 The CI-safe `shared_service_process` test additionally attaches 20 logical clients
 with 40 authenticated interactive/delivery lanes and 20 delivery leases to one PID,

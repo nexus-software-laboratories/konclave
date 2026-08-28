@@ -148,10 +148,8 @@ export class SmokeParticipant {
     try {
       await this.session.sendAndWait({ prompt }, timeoutMs);
     } catch (error) {
-      const reason =
-        error instanceof Error ? error.message : "unknown session failure";
       throw new Error(
-        `Session ${this.sessionId} failed while calling ${expectedTool}: ${reason}`,
+        `Session ${this.sessionId} failed while calling ${expectedTool}.`,
         { cause: error },
       );
     }

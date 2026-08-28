@@ -23,7 +23,7 @@ pub use identity::{
 };
 pub use local_service::{
     LOCAL_SERVICE_SIGNING_SEED_LENGTH, LocalServiceIdentity, LocalServiceSigningSeed,
-    verify_local_service_signature,
+    derive_local_service_session_consumer_id, verify_local_service_signature,
 };
 pub use mls::{
     AppliedMembershipCommit, DecryptedApplicationMessage, MlsApplicationMessage, MlsCommit,

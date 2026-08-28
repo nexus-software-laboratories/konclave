@@ -187,6 +187,9 @@ Every workspace, shell, web, MCP, and subagent tool denies. Those tools execute
 outside the daemon and cannot be advertised as enforced until they have an atomic
 authorization boundary. Policy approval also denies in this initial path because the
 SDK's hook `ask` result can replace rather than compose with native permissions.
+Interactive and delivery lanes keep fresh per-connection handshake identifiers. The
+daemon recognizes them as one policy-enforcement consumer only because both prove the
+same memory-only session public key.
 
 The initial paved integration proves `harness.session-identity`,
 `harness.pre-tool-policy-gate`, `harness.native-permission-intersection`, and
@@ -201,8 +204,9 @@ supported.
 
 - `extensions/Konclave.Extension/extension.mjs` is the bundled entry loaded by
   Copilot CLI.
-- `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client
-  and command bundle used by local smoke and future harness adapters.
+- `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client,
+  command, policy-gate, delivery-parser, and safety-framing bundle used by the local
+  smoke and future harness adapters.
 - `plugin.json` is the distribution manifest.
 - `skills/copilot-cli-extension-maintainer/SKILL.md` is the contributor skill.
 - `skills/konclave-generic/SKILL.md` is packaged for manual installation by
