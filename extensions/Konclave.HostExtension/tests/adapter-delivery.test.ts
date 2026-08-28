@@ -168,7 +168,9 @@ describe('untrusted content framing', () => {
 
     expect(framed).toContain('policy proposal');
     expect(framed).toContain('no local authority was activated');
-    expect(framed).toContain('replacing 0c0c0c0c0c0c0c0c');
+    expect(framed).toContain(`replacing ${'0c'.repeat(32)}`);
+    expect(framed).toContain(`/konclave policy accept ${'08'.repeat(16)} ${'09'.repeat(32)}`);
+    expect(framed).toContain(`conversation ${'02'.repeat(32)}`);
     expect(framed).toContain('remote endpoint reported proposal');
     expect(framed).toContain('as accepted');
     expect(framed).toContain('remote endpoint withdrew');

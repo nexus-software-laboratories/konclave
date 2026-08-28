@@ -733,6 +733,139 @@
     }
   },
   {
+    "name": "get_collaboration_policy_status",
+    "description": "Show the active local policy metadata for one conversation without returning guidance or canonical source content.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ActiveCollaborationPolicyResult": {
+          "properties": {
+            "activated_at_unix_milliseconds": {
+              "type": "string"
+            },
+            "limits": {
+              "$ref": "#/$defs/CollaborationPolicyLimitsResult"
+            },
+            "name": {
+              "type": "string"
+            },
+            "policy_digest": {
+              "type": "string"
+            },
+            "required_harness_claims": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "statements": {
+              "items": {
+                "$ref": "#/$defs/CollaborationPolicyStatementResult"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "policy_digest",
+            "name",
+            "activated_at_unix_milliseconds",
+            "statements",
+            "required_harness_claims",
+            "limits"
+          ],
+          "type": "object"
+        },
+        "CollaborationPolicyLimitsResult": {
+          "properties": {
+            "concurrent_requests": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "duration_milliseconds": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tokens": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turns": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CollaborationPolicyStatementResult": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "effect": {
+              "type": "string"
+            },
+            "resource": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "statement_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "statement_id",
+            "effect",
+            "action"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "active_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActiveCollaborationPolicyResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "get_identity",
     "description": "Return this profile's public device identifier.",
     "inputSchema": {
@@ -899,6 +1032,72 @@
         "conversation_id",
         "proposal_id",
         "canonical_bundle"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_binding_changed": {
+          "type": "boolean"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "policy_digest",
+        "message_id",
+        "cursor",
+        "local_binding_changed"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "propose_collaboration_policy_source",
+    "description": "Compile one strict JSON policy source, then propose and locally activate its exact canonical bundle.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        },
+        "replaces_policy_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "proposal_id",
+        "source"
       ],
       "type": "object"
     },
@@ -1317,6 +1516,62 @@
         "conversation_id",
         "operation_id",
         "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "resume_collaboration_policy_proposal",
+    "description": "Resume the exact durable policy proposal identified by a prior locally committed proposal_id without resending mutable source bytes.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "proposal_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_binding_changed": {
+          "type": "boolean"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id",
+        "policy_digest",
+        "message_id",
+        "cursor",
+        "local_binding_changed"
       ],
       "type": "object"
     }

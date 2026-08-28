@@ -26,6 +26,7 @@ required-features = ["rust-service-windows-service"]
 
 [dependencies]
 KonclaveClientLibrary = { path = "../../crates/Konclave.ClientLibrary" }
+KonclaveCollaborationPolicies = { path = "../../crates/Konclave.CollaborationPolicies" }
 KonclaveAdapterTransport = { path = "../../crates/Konclave.AdapterTransport" }
 KonclaveCryptographicCore = { path = "../../crates/Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }

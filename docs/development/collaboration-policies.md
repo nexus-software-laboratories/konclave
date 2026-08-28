@@ -193,6 +193,22 @@ pre-existing history or outbox record prevents the authority mutation, inbound
 content cannot claim an identifier after it is reserved, and outbound preparation
 must reproduce the sealed operation's exact policy content and reply target.
 
+The paved Copilot command surface exposes these operations under `/konclave policy`.
+It can compile and propose one explicitly selected strict-JSON source, replace an
+active digest, accept or reject an exact received proposal, revoke a digest, and show
+bounded active metadata. Source paths are confined to the current workspace and file
+content is bounded before the authenticated local request. Generated operation
+identifiers are printed before submission. Proposal recovery uses only the stable
+proposal identifier and reconstructs the exact canonical bundle from the sealed
+terminal operation plus content-addressed bundle store; it never rereads a mutable
+source path. Editing a source requires a new proposal identifier. Status represents
+`u64` activation and limit values as canonical decimal strings across the Rust and
+JavaScript boundary.
+
+Policy proposal notifications include complete identifiers and a local review command
+inside the existing untrusted-content fence. Receiving that notification still
+cannot activate authority; the operator must invoke the deterministic accept command.
+
 Revocation accepts a caller-stable 16-byte message identifier. A retry reuses it and
 returns the historical revocation result; reactivating and later revoking the same
 digest uses a new identifier so peers receive the later revocation as a distinct

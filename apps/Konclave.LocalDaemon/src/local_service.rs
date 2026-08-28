@@ -1001,6 +1001,7 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
     match code {
         "invalid_request"
         | "invalid_collaboration_policy_bundle"
+        | "invalid_collaboration_policy_source"
         | "invalid_collaboration_policy_digest"
         | "invalid_collaboration_policy_proposal_id"
         | "collaboration_policy_proposal_not_found"
@@ -1036,6 +1037,9 @@ fn is_tool_operation(operation: &str) -> bool {
             | "list_conversations"
             | "send_message"
             | "propose_collaboration_policy"
+            | "propose_collaboration_policy_source"
+            | "resume_collaboration_policy_proposal"
+            | "get_collaboration_policy_status"
             | "accept_collaboration_policy"
             | "reject_collaboration_policy"
             | "revoke_collaboration_policy"
@@ -1785,6 +1789,9 @@ mod delivery_contract_tests {
     fn policy_operations_use_stable_local_service_capabilities_and_errors() {
         for operation in [
             "propose_collaboration_policy",
+            "propose_collaboration_policy_source",
+            "resume_collaboration_policy_proposal",
+            "get_collaboration_policy_status",
             "accept_collaboration_policy",
             "reject_collaboration_policy",
             "revoke_collaboration_policy",
@@ -1793,6 +1800,10 @@ mod delivery_contract_tests {
         }
         assert_eq!(
             operation_error_code("invalid_collaboration_policy_bundle"),
+            LocalServiceErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            operation_error_code("invalid_collaboration_policy_source"),
             LocalServiceErrorCode::InvalidRequest
         );
         assert_eq!(

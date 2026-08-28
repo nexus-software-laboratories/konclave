@@ -1,4 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { BigIntStats } from 'node:fs';
+import { open, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { TextDecoder } from 'node:util';
 
 import type { CommandContext, CommandDefinition } from '@github/copilot-sdk';
 
@@ -28,6 +32,12 @@ export interface CommandDependencies {
   readonly output: CommandOutput;
   readonly nowUnixMilliseconds?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly readPolicySource?: (path: string) => Promise<string>;
+}
+
+export interface PolicySourceReadOptions {
+  readonly workspace?: string;
+  readonly afterInitialIdentity?: () => Promise<void>;
 }
 
 export interface RegisteredCommand extends CommandDefinition {
@@ -41,7 +51,11 @@ const maxCapabilityBytes = 8 * 1024;
 const maxMessageBytes = 8 * 1024;
 const maxDisplayedMessageCharacters = 2_048;
 const maxDisplayedMessages = 10;
+const maxDisplayedPolicyStatements = 20;
+const maxPolicySourceBytes = 128 * 1024;
+const maxPolicySourcePathBytes = 4_096;
 const commandMessageRequestDomain = 'konclave:command-message-request:1\0';
+const commandPolicyRequestDomain = 'konclave:command-policy-request:1\0';
 const connectPollMilliseconds = 500;
 const maxConnectIterations = 640;
 const maxConnectWaitMilliseconds = 5 * 60 * 1_000;
@@ -51,6 +65,7 @@ const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
 const policyProposalIdCharacters = 32;
 const policyDigestCharacters = 64;
+const uint64Maximum = 18_446_744_073_709_551_615n;
 
 type ConversationRole = 'administrator' | 'member';
 type PairingLocalRole = 'joiner' | 'inviter';
@@ -111,6 +126,41 @@ interface ConversationSelection {
   readonly activeConversationId: string | undefined;
 }
 
+interface CollaborationPolicyOperationSummary {
+  readonly conversationId: string;
+  readonly proposalId: string | undefined;
+  readonly policyDigest: string;
+  readonly messageId: string;
+  readonly cursor: number;
+  readonly localBindingChanged: boolean;
+}
+
+type CollaborationPolicyEffect = 'allow' | 'deny' | 'require_local_approval';
+
+interface ActiveCollaborationPolicySummary {
+  readonly policyDigest: string;
+  readonly name: string;
+  readonly activatedAtUnixMilliseconds: string;
+  readonly statements: readonly {
+    readonly statementId: string;
+    readonly effect: CollaborationPolicyEffect;
+    readonly action: string;
+    readonly resource: string | undefined;
+  }[];
+  readonly requiredHarnessClaims: readonly string[];
+  readonly limits: {
+    readonly durationMilliseconds: string | undefined;
+    readonly turns: string | undefined;
+    readonly tokens: string | undefined;
+    readonly concurrentRequests: number | undefined;
+  };
+}
+
+interface CollaborationPolicyStatusSummary {
+  readonly conversationId: string;
+  readonly activePolicy: ActiveCollaborationPolicySummary | undefined;
+}
+
 interface ParsedCommand {
   readonly subcommand: string;
   readonly argumentsText: string;
@@ -137,6 +187,17 @@ export function parseCommandArguments(raw: string): string[] {
   return parts;
 }
 
+const policyHelpLines = [
+  '  /konclave policy status                             Show active policy metadata.',
+  '  /konclave policy propose [proposal-id] -- <source>  Compile and propose a policy.',
+  '  /konclave policy replace <digest> [proposal-id] -- <source>',
+  '                                                       Replace the active policy.',
+  '  /konclave policy resume <proposal-id>                Resume a committed proposal.',
+  '  /konclave policy accept <proposal-id> <digest>      Accept an exact proposal.',
+  '  /konclave policy reject <proposal-id> <digest>      Reject an exact proposal.',
+  '  /konclave policy revoke <digest> [message-id]       Revoke the active policy.',
+];
+
 const helpLines = [
   'Konclave commands (deterministic; no model inference):',
   '  /konclave help                                      Show this list.',
@@ -162,6 +223,7 @@ const helpLines = [
   '  /konclave use <conversation>                        Select the implicit send target.',
   '  /konclave mute <conversation>                       Mute automatic delivery.',
   '  /konclave unmute <conversation>                     Resume automatic delivery.',
+  ...policyHelpLines,
 ];
 
 /** Redacts anything that is not a bounded identifier before it is rendered. */
@@ -458,6 +520,188 @@ function parseSentMessage(value: unknown): {
   };
 }
 
+function parseCollaborationPolicyOperation(value: unknown): CollaborationPolicyOperationSummary {
+  if (
+    !isRecord(value) ||
+    typeof value.local_binding_changed !== 'boolean' ||
+    typeof value.cursor !== 'number' ||
+    !Number.isSafeInteger(value.cursor) ||
+    value.cursor < 1
+  ) {
+    throw new Error('the local service policy-operation response is malformed');
+  }
+  return {
+    conversationId: requireHexIdentifier(
+      requiredString(
+        value,
+        'conversation_id',
+        'the local service policy conversation is malformed',
+      ),
+      conversationIdCharacters,
+      'conversation identifier',
+    ),
+    proposalId: optionalIdentifier(
+      value,
+      'proposal_id',
+      policyProposalIdCharacters,
+      'proposal identifier',
+    ),
+    policyDigest: requireHexIdentifier(
+      requiredString(value, 'policy_digest', 'the local service policy digest is malformed'),
+      policyDigestCharacters,
+      'policy digest',
+    ),
+    messageId: requireHexIdentifier(
+      requiredString(value, 'message_id', 'the local service policy message is malformed'),
+      messageIdCharacters,
+      'message identifier',
+    ),
+    cursor: value.cursor,
+    localBindingChanged: value.local_binding_changed,
+  };
+}
+
+function parseCollaborationPolicyStatus(value: unknown): CollaborationPolicyStatusSummary {
+  if (!isRecord(value)) {
+    throw new Error('the local service policy-status response is malformed');
+  }
+  const conversationId = requireHexIdentifier(
+    requiredString(value, 'conversation_id', 'the local service policy conversation is malformed'),
+    conversationIdCharacters,
+    'conversation identifier',
+  );
+  if (value.active_policy === null || value.active_policy === undefined) {
+    return { conversationId, activePolicy: undefined };
+  }
+  if (!isRecord(value.active_policy)) {
+    throw new Error('the local service active-policy response is malformed');
+  }
+  const active = value.active_policy;
+  if (
+    !Array.isArray(active.statements) ||
+    active.statements.length > 256 ||
+    !Array.isArray(active.required_harness_claims) ||
+    active.required_harness_claims.length > 64 ||
+    !isRecord(active.limits)
+  ) {
+    throw new Error('the local service active-policy response is malformed');
+  }
+  const statements = active.statements.map((statement) => {
+    if (
+      !isRecord(statement) ||
+      !['allow', 'deny', 'require_local_approval'].includes(String(statement.effect))
+    ) {
+      throw new Error('the local service policy statement is malformed');
+    }
+    const resource =
+      statement.resource === null || statement.resource === undefined
+        ? undefined
+        : requiredString(statement, 'resource', 'the local service policy resource is malformed');
+    return {
+      statementId: requiredString(
+        statement,
+        'statement_id',
+        'the local service policy statement identifier is malformed',
+      ),
+      effect: statement.effect as CollaborationPolicyEffect,
+      action: requiredString(statement, 'action', 'the local service policy action is malformed'),
+      resource,
+    };
+  });
+  if (!active.required_harness_claims.every((claim) => typeof claim === 'string')) {
+    throw new Error('the local service policy harness claims are malformed');
+  }
+  return {
+    conversationId,
+    activePolicy: {
+      policyDigest: requireHexIdentifier(
+        requiredString(
+          active,
+          'policy_digest',
+          'the local service active-policy digest is malformed',
+        ),
+        policyDigestCharacters,
+        'policy digest',
+      ),
+      name: requiredString(active, 'name', 'the local service policy name is malformed'),
+      activatedAtUnixMilliseconds: requiredDecimalU64(
+        active,
+        'activated_at_unix_milliseconds',
+        'the local service policy activation time is malformed',
+      ),
+      statements,
+      requiredHarnessClaims: active.required_harness_claims,
+      limits: {
+        durationMilliseconds: optionalPositiveDecimalU64(
+          active.limits,
+          'duration_milliseconds',
+          'the local service policy duration limit is malformed',
+        ),
+        turns: optionalPositiveDecimalU64(
+          active.limits,
+          'turns',
+          'the local service policy turn limit is malformed',
+        ),
+        tokens: optionalPositiveDecimalU64(
+          active.limits,
+          'tokens',
+          'the local service policy token limit is malformed',
+        ),
+        concurrentRequests: optionalPositiveSafeInteger(
+          active.limits,
+          'concurrent_requests',
+          'the local service policy concurrency limit is malformed',
+        ),
+      },
+    },
+  };
+}
+
+function requiredDecimalU64(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  error: string,
+): string {
+  const value = record[key];
+  if (
+    typeof value !== 'string' ||
+    value.length > 20 ||
+    !/^(0|[1-9][0-9]*)$/u.test(value) ||
+    BigInt(value) > uint64Maximum
+  ) {
+    throw new Error(error);
+  }
+  return value;
+}
+
+function optionalPositiveDecimalU64(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  error: string,
+): string | undefined {
+  const value = record[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  const parsed = requiredDecimalU64(record, key, error);
+  if (parsed === '0') {
+    throw new Error(error);
+  }
+  return parsed;
+}
+
+function optionalPositiveSafeInteger(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  error: string,
+): number | undefined {
+  const value = optionalNonnegativeSafeInteger(record, key, error);
+  if (value === 0) {
+    throw new Error(error);
+  }
+  return value;
+}
+
 function parseMessageList(value: unknown): {
   readonly messages: readonly MessageSummary[];
   readonly hasMore: boolean;
@@ -592,6 +836,143 @@ function messageRequestId(messageId: string): Buffer {
     .update(Buffer.from(messageId, 'hex'))
     .digest()
     .subarray(0, 16);
+}
+
+function policyRequestId(operation: string, conversationId: string, identifier: string): Buffer {
+  return createHash('sha256')
+    .update(commandPolicyRequestDomain)
+    .update(operation)
+    .update('\0')
+    .update(Buffer.from(conversationId, 'hex'))
+    .update(Buffer.from(identifier, 'hex'))
+    .digest()
+    .subarray(0, 16);
+}
+
+function parsePolicySourceArguments(
+  raw: string,
+  minimumIdentifiers: number,
+  maximumIdentifiers: number,
+  usage: string,
+): { readonly identifiers: readonly string[]; readonly sourcePath: string } {
+  const separator = /(?:^|\s+)--\s+/u.exec(raw);
+  if (!separator) {
+    throw new Error(`usage: ${usage}`);
+  }
+  const identifiers = parseCommandArguments(raw.slice(0, separator.index));
+  requireArgumentCount(identifiers, minimumIdentifiers, maximumIdentifiers, usage);
+  const sourcePath = raw.slice(separator.index + separator[0].length).trim();
+  const sourcePathBytes = Buffer.byteLength(sourcePath, 'utf8');
+  if (
+    sourcePathBytes === 0 ||
+    sourcePathBytes > maxPolicySourcePathBytes ||
+    /[\p{Cc}\p{Cf}]/u.test(sourcePath)
+  ) {
+    throw new Error(`policy source path must contain 1-${maxPolicySourcePathBytes} UTF-8 bytes`);
+  }
+  return { identifiers, sourcePath };
+}
+
+/**
+ * Reads one physical UTF-8 policy source confined beneath an explicit workspace.
+ *
+ * @throws When the path is absolute, escapes through traversal or links, is not a
+ * regular file, exceeds the source bound, or is not valid UTF-8.
+ */
+export async function readBoundedPolicySource(
+  sourcePath: string,
+  options: PolicySourceReadOptions = {},
+): Promise<string> {
+  if (isAbsolute(sourcePath)) {
+    throw new Error('policy source path must be relative to the current workspace');
+  }
+  const root = await realpath(options.workspace ?? process.cwd());
+  const requestedPath = resolve(root, sourcePath);
+  const candidate = await confinedRealPath(root, requestedPath);
+  const initialMetadata = await stat(candidate, { bigint: true });
+  requirePolicySourceMetadata(initialMetadata);
+  await options.afterInitialIdentity?.();
+  const handle = await open(candidate, 'r');
+  try {
+    const openedMetadata = await handle.stat({ bigint: true });
+    requirePolicySourceMetadata(openedMetadata);
+    requireSamePolicySource(initialMetadata, openedMetadata);
+    const bytes = Buffer.allocUnsafe(maxPolicySourceBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const read = await handle.read(bytes, length, bytes.length - length, length);
+      if (read.bytesRead === 0) {
+        break;
+      }
+      length += read.bytesRead;
+    }
+    if (length > maxPolicySourceBytes) {
+      throw new Error(`policy source exceeds ${maxPolicySourceBytes} bytes`);
+    }
+    const completedMetadata = await handle.stat({ bigint: true });
+    requireSamePolicySource(openedMetadata, completedMetadata);
+    const finalCandidate = await confinedRealPath(root, requestedPath);
+    if (finalCandidate !== candidate) {
+      throw new Error('policy source changed while it was being read');
+    }
+    const finalMetadata = await stat(finalCandidate, { bigint: true });
+    requireSamePolicySource(completedMetadata, finalMetadata);
+    try {
+      return requireBoundedPolicySource(
+        new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)),
+      );
+    } catch {
+      throw new Error('policy source must be valid UTF-8');
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function confinedRealPath(root: string, requestedPath: string): Promise<string> {
+  const candidate = await realpath(requestedPath);
+  const relativePath = relative(root, candidate);
+  if (
+    relativePath.length === 0 ||
+    relativePath === '..' ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error('policy source path resolves outside the current workspace');
+  }
+  return candidate;
+}
+
+function requirePolicySourceMetadata(metadata: BigIntStats): void {
+  if (!metadata.isFile()) {
+    throw new Error('policy source must be a regular file');
+  }
+  if (metadata.size > BigInt(maxPolicySourceBytes)) {
+    throw new Error(`policy source exceeds ${maxPolicySourceBytes} bytes`);
+  }
+}
+
+function requireSamePolicySource(expected: BigIntStats, actual: BigIntStats): void {
+  if (
+    expected.dev !== actual.dev ||
+    expected.ino !== actual.ino ||
+    expected.size !== actual.size ||
+    expected.mtimeNs !== actual.mtimeNs ||
+    expected.ctimeNs !== actual.ctimeNs
+  ) {
+    throw new Error('policy source changed while it was being read');
+  }
+}
+
+function requireBoundedPolicySource(source: string): string {
+  if (Buffer.byteLength(source, 'utf8') > maxPolicySourceBytes) {
+    throw new Error(`policy source exceeds ${maxPolicySourceBytes} bytes`);
+  }
+  return source;
+}
+
+function formatPolicyLimit(value: string | number | undefined): string {
+  return value === undefined ? 'unlimited' : String(value);
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {
@@ -803,6 +1184,59 @@ async function renderPairing(output: CommandOutput, status: PairingStatus): Prom
   }
 }
 
+async function renderCollaborationPolicyOperation(
+  output: CommandOutput,
+  operation: CollaborationPolicyOperationSummary,
+): Promise<void> {
+  await output.write(`conversation: ${operation.conversationId}`);
+  if (operation.proposalId) {
+    await output.write(`proposal id: ${operation.proposalId}`);
+  }
+  await output.write(`policy digest: ${operation.policyDigest}`);
+  await output.write(`message id: ${operation.messageId}`);
+  await output.write(`relay cursor: ${operation.cursor}`);
+  await output.write(
+    `local binding changed: ${operation.localBindingChanged ? 'yes' : 'no (idempotent retry)'}`,
+  );
+}
+
+async function renderCollaborationPolicyStatus(
+  output: CommandOutput,
+  status: CollaborationPolicyStatusSummary,
+): Promise<void> {
+  await output.write(`conversation: ${status.conversationId}`);
+  const active = status.activePolicy;
+  if (!active) {
+    await output.write('policy: inactive');
+    return;
+  }
+  await output.write(`policy: ${bounded(active.name, 128)}`);
+  await output.write(`policy digest: ${active.policyDigest}`);
+  await output.write(`activated at: ${active.activatedAtUnixMilliseconds}`);
+  await output.write(
+    `required harness claims: ${
+      active.requiredHarnessClaims.length === 0
+        ? 'none'
+        : active.requiredHarnessClaims.map((claim) => bounded(claim, 256)).join(', ')
+    }`,
+  );
+  await output.write(
+    `limits: duration ${formatPolicyLimit(active.limits.durationMilliseconds)}, turns ${formatPolicyLimit(active.limits.turns)}, tokens ${formatPolicyLimit(active.limits.tokens)}, concurrent requests ${formatPolicyLimit(active.limits.concurrentRequests)}`,
+  );
+  for (const statement of active.statements.slice(0, maxDisplayedPolicyStatements)) {
+    await output.write(
+      `statement ${bounded(statement.statementId, 128)}: ${statement.effect} ${bounded(statement.action, 256)}${
+        statement.resource ? ` ${bounded(statement.resource, 256)}` : ''
+      }`,
+    );
+  }
+  if (active.statements.length > maxDisplayedPolicyStatements) {
+    await output.write(
+      `${active.statements.length - maxDisplayedPolicyStatements} additional statements omitted`,
+    );
+  }
+}
+
 function identity(value: unknown): string {
   if (!isRecord(value)) {
     throw new Error('the local service identity response is malformed');
@@ -865,7 +1299,203 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
   const { client, output } = dependencies;
   const nowUnixMilliseconds = dependencies.nowUnixMilliseconds ?? Date.now;
   const sleep = dependencies.sleep ?? defaultSleep;
+  const readPolicySource = dependencies.readPolicySource ?? readBoundedPolicySource;
   let activeConversationId: string | undefined;
+
+  const runPolicy = async (raw: string): Promise<void> => {
+    const parsed = parseCommand(raw);
+    if (parsed.subcommand === 'help') {
+      requireNoArguments(parsed.argumentsText, 'policy help');
+      for (const line of policyHelpLines) {
+        await output.write(line);
+      }
+      return;
+    }
+    const conversationId = await requireSingleConversation(client, activeConversationId);
+    activeConversationId = conversationId;
+
+    switch (parsed.subcommand) {
+      case 'status': {
+        requireNoArguments(parsed.argumentsText, 'policy status');
+        const status = parseCollaborationPolicyStatus(
+          await client.request('get_collaboration_policy_status', {
+            conversation_id: conversationId,
+          }),
+        );
+        if (status.conversationId !== conversationId) {
+          throw new Error('the local service policy status targets a different conversation');
+        }
+        await renderCollaborationPolicyStatus(output, status);
+        return;
+      }
+      case 'propose':
+      case 'replace': {
+        const replacing = parsed.subcommand === 'replace';
+        const usage = replacing
+          ? '/konclave policy replace <digest> [proposal-id] -- <relative-source>'
+          : '/konclave policy propose [proposal-id] -- <relative-source>';
+        const sourceArguments = parsePolicySourceArguments(
+          parsed.argumentsText,
+          replacing ? 1 : 0,
+          replacing ? 2 : 1,
+          usage,
+        );
+        const replacesPolicyDigest = replacing
+          ? requireHexIdentifier(
+              sourceArguments.identifiers[0],
+              policyDigestCharacters,
+              'policy digest',
+            )
+          : undefined;
+        const suppliedProposalId = sourceArguments.identifiers[replacing ? 1 : 0];
+        const proposalId = suppliedProposalId
+          ? requireHexIdentifier(
+              suppliedProposalId,
+              policyProposalIdCharacters,
+              'proposal identifier',
+            )
+          : randomBytes(16).toString('hex');
+        const source = requireBoundedPolicySource(
+          await readPolicySource(sourceArguments.sourcePath),
+        );
+        await output.write(`proposal id: ${proposalId}`);
+        await output.write(
+          `recovery after ambiguous failure: /konclave policy resume ${proposalId}; validation failure or edit requires a new proposal id`,
+        );
+        const payload: Record<string, unknown> = {
+          conversation_id: conversationId,
+          proposal_id: proposalId,
+          source,
+        };
+        if (replacesPolicyDigest) {
+          payload.replaces_policy_digest = replacesPolicyDigest;
+        }
+        const operation = parseCollaborationPolicyOperation(
+          await client.request('propose_collaboration_policy_source', payload, {
+            requestId: policyRequestId('propose', conversationId, proposalId),
+          }),
+        );
+        if (operation.conversationId !== conversationId || operation.proposalId !== proposalId) {
+          throw new Error('the local service policy proposal identity does not match the request');
+        }
+        await renderCollaborationPolicyOperation(output, operation);
+        return;
+      }
+      case 'resume': {
+        const parts = parseCommandArguments(parsed.argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave policy resume <proposal-id>');
+        const proposalId = requireHexIdentifier(
+          parts[0],
+          policyProposalIdCharacters,
+          'proposal identifier',
+        );
+        const operation = parseCollaborationPolicyOperation(
+          await client.request(
+            'resume_collaboration_policy_proposal',
+            {
+              conversation_id: conversationId,
+              proposal_id: proposalId,
+            },
+            {
+              requestId: policyRequestId('resume', conversationId, proposalId),
+            },
+          ),
+        );
+        if (operation.conversationId !== conversationId || operation.proposalId !== proposalId) {
+          throw new Error('the resumed policy proposal identity does not match the request');
+        }
+        await renderCollaborationPolicyOperation(output, operation);
+        return;
+      }
+      case 'accept':
+      case 'reject': {
+        const parts = parseCommandArguments(parsed.argumentsText);
+        requireArgumentCount(
+          parts,
+          2,
+          2,
+          `/konclave policy ${parsed.subcommand} <proposal-id> <digest>`,
+        );
+        const proposalId = requireHexIdentifier(
+          parts[0],
+          policyProposalIdCharacters,
+          'proposal identifier',
+        );
+        const policyDigest = requireHexIdentifier(
+          parts[1],
+          policyDigestCharacters,
+          'policy digest',
+        );
+        const operationName =
+          parsed.subcommand === 'accept'
+            ? 'accept_collaboration_policy'
+            : 'reject_collaboration_policy';
+        const operation = parseCollaborationPolicyOperation(
+          await client.request(
+            operationName,
+            {
+              conversation_id: conversationId,
+              proposal_id: proposalId,
+              policy_digest: policyDigest,
+            },
+            {
+              requestId: policyRequestId(parsed.subcommand, conversationId, proposalId),
+            },
+          ),
+        );
+        if (
+          operation.conversationId !== conversationId ||
+          operation.proposalId !== proposalId ||
+          operation.policyDigest !== policyDigest
+        ) {
+          throw new Error('the local service policy response identity does not match the request');
+        }
+        await renderCollaborationPolicyOperation(output, operation);
+        return;
+      }
+      case 'revoke': {
+        const parts = parseCommandArguments(parsed.argumentsText);
+        requireArgumentCount(parts, 1, 2, '/konclave policy revoke <digest> [message-id]');
+        const policyDigest = requireHexIdentifier(
+          parts[0],
+          policyDigestCharacters,
+          'policy digest',
+        );
+        const messageId = parts[1]
+          ? requireHexIdentifier(parts[1], messageIdCharacters, 'message identifier')
+          : randomBytes(16).toString('hex');
+        await output.write(`message id: ${messageId}`);
+        await output.write(`retry: /konclave policy revoke ${policyDigest} ${messageId}`);
+        const operation = parseCollaborationPolicyOperation(
+          await client.request(
+            'revoke_collaboration_policy',
+            {
+              conversation_id: conversationId,
+              message_id: messageId,
+              policy_digest: policyDigest,
+            },
+            {
+              requestId: policyRequestId('revoke', conversationId, messageId),
+            },
+          ),
+        );
+        if (
+          operation.conversationId !== conversationId ||
+          operation.proposalId !== undefined ||
+          operation.policyDigest !== policyDigest ||
+          operation.messageId !== messageId
+        ) {
+          throw new Error(
+            'the local service policy revocation identity does not match the request',
+          );
+        }
+        await renderCollaborationPolicyOperation(output, operation);
+        return;
+      }
+      default:
+        throw new Error(`unknown policy subcommand: ${bounded(parsed.subcommand, 24)}`);
+    }
+  };
 
   const run = async (args: string): Promise<void> => {
     const { subcommand, argumentsText } = parseCommand(args);
@@ -1318,6 +1948,9 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         );
         return;
       }
+      case 'policy':
+        await runPolicy(argumentsText);
+        return;
       default:
         throw new Error(`unknown subcommand: ${bounded(subcommand, 24)}`);
     }
