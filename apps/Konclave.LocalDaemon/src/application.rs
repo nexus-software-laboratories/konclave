@@ -15,7 +15,8 @@ use KonclaveDomainCore::{
     ReplayRequest, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
-    decode_collaboration_policy_bundle, decode_join_proof, encode_join_proof,
+    decode_collaboration_policy_bundle, decode_join_proof, encode_collaboration_policy_bundle,
+    encode_join_proof,
 };
 use thiserror::Error;
 use tokio::sync::watch;
@@ -52,6 +53,14 @@ pub(crate) struct ProposeCollaborationPolicyRequest {
     pub(crate) proposal_id: CollaborationPolicyProposalId,
     pub(crate) canonical_bundle: Vec<u8>,
     pub(crate) replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    pub(crate) sent_at_unix_milliseconds: u64,
+    pub(crate) now_unix_seconds: u64,
+    pub(crate) expires_at_unix_seconds: u64,
+}
+
+pub(crate) struct ResumeCollaborationPolicyProposalRequest {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) proposal_id: CollaborationPolicyProposalId,
     pub(crate) sent_at_unix_milliseconds: u64,
     pub(crate) now_unix_seconds: u64,
     pub(crate) expires_at_unix_seconds: u64,
@@ -322,6 +331,59 @@ where
             message_id: sent.message.message_id(),
             cursor: sent.cursor,
             local_binding_changed,
+        })
+    }
+
+    pub(crate) async fn resume_collaboration_policy_proposal(
+        &self,
+        request: ResumeCollaborationPolicyProposalRequest,
+    ) -> Result<SentCollaborationPolicyExchange, ApplicationServiceError> {
+        let local_device = self.conversations.device_id()?;
+        let message_id = derive_collaboration_policy_proposal_message_id(
+            request.conversation_id,
+            local_device,
+            request.proposal_id,
+        );
+        let store = self.conversations.store();
+        let (operation, canonical_bundle) = tokio::task::spawn_blocking(move || {
+            let operation = store.collaboration_policy_proposal_operation(
+                request.conversation_id,
+                message_id,
+                request.proposal_id,
+            )?;
+            let bundle = store
+                .collaboration_policy_bundle(operation.policy_digest)?
+                .ok_or(ProfileStoreError::CorruptData)?;
+            let canonical_bundle = encode_collaboration_policy_bundle(&bundle)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            Ok::<_, ProfileStoreError>((operation, canonical_bundle))
+        })
+        .await
+        .map_err(|_| ApplicationServiceError::Task)??;
+        let proposal = CollaborationPolicyProposal::new(
+            request.proposal_id,
+            operation.policy_digest,
+            canonical_bundle,
+            operation.replaces_policy_digest,
+        )
+        .map_err(|_| ApplicationServiceError::Protocol)?;
+        let sent = self
+            .send_policy_operation(policy_send_request(
+                request.conversation_id,
+                message_id,
+                ApplicationContent::collaboration_policy_proposal(proposal),
+                None,
+                request.sent_at_unix_milliseconds,
+                request.now_unix_seconds,
+                request.expires_at_unix_seconds,
+            ))
+            .await?;
+        Ok(SentCollaborationPolicyExchange {
+            proposal_id: Some(request.proposal_id),
+            policy_digest: operation.policy_digest,
+            message_id: sent.message.message_id(),
+            cursor: sent.cursor,
+            local_binding_changed: operation.binding_changed,
         })
     }
 
@@ -1762,6 +1824,25 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let resumed = service
+            .resume_collaboration_policy_proposal(ResumeCollaborationPolicyProposalRequest {
+                conversation_id: conversation.conversation_id,
+                proposal_id: second_id,
+                sent_at_unix_milliseconds: 1_700_000_000_000,
+                now_unix_seconds: 1_700_000_000,
+                expires_at_unix_seconds: 1_900_000_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed.cursor, second.cursor);
+        assert!(resumed.local_binding_changed);
+        assert!(
+            coordinator
+                .store()
+                .active_collaboration_policy(conversation.conversation_id)
+                .unwrap()
+                .is_none()
+        );
 
         let third_id = CollaborationPolicyProposalId::from_bytes([14; 16]);
         service
@@ -1792,6 +1873,64 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn policy_proposal_resume_reconstructs_a_committed_pre_outbox_operation() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = coordinator(root.path(), "policy-proposal-resume");
+        let conversation = coordinator.create().unwrap();
+        let canonical_bundle =
+            collaboration_policy_bytes("resume-policy", "Use the committed policy.");
+        let digest = derive_collaboration_policy_digest(
+            &decode_collaboration_policy_bundle(&canonical_bundle).unwrap(),
+        )
+        .unwrap();
+        let proposal_id = CollaborationPolicyProposalId::from_bytes([18; 16]);
+        let message_id = derive_collaboration_policy_proposal_message_id(
+            conversation.conversation_id,
+            coordinator.device_id().unwrap(),
+            proposal_id,
+        );
+        coordinator
+            .store()
+            .apply_collaboration_policy_activation_operation(
+                CollaborationPolicyActivationOperation {
+                    conversation_id: conversation.conversation_id,
+                    message_id,
+                    proposal_id,
+                    source_proposal_message_id: None,
+                    policy_digest: digest,
+                    replaces_policy_digest: None,
+                    canonical_bundle: &canonical_bundle,
+                    activated_at_unix_milliseconds: 1_700_000_000_000,
+                    is_acceptance: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            coordinator
+                .outbound_application(conversation.conversation_id, message_id)
+                .unwrap()
+                .is_none()
+        );
+        let service = ApplicationService::new(coordinator, RecordingRelay::new(false));
+
+        let resumed = service
+            .resume_collaboration_policy_proposal(ResumeCollaborationPolicyProposalRequest {
+                conversation_id: conversation.conversation_id,
+                proposal_id,
+                sent_at_unix_milliseconds: 1_700_000_000_001,
+                now_unix_seconds: 1_700_000_000,
+                expires_at_unix_seconds: 1_900_000_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed.proposal_id, Some(proposal_id));
+        assert_eq!(resumed.policy_digest, digest);
+        assert_eq!(resumed.message_id, message_id);
+        assert_eq!(resumed.cursor, 1);
+        assert!(resumed.local_binding_changed);
     }
 
     #[tokio::test]

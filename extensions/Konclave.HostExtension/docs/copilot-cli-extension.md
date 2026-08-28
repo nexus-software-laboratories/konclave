@@ -78,6 +78,13 @@ not persist those sensitive values as command output.
 /konclave messages <conversation> [after-cursor]
 /konclave mute <conversation>
 /konclave unmute <conversation>
+/konclave policy status
+/konclave policy propose [proposal-id] -- <relative-source>
+/konclave policy replace <digest> [proposal-id] -- <relative-source>
+/konclave policy resume <proposal-id>
+/konclave policy accept <proposal-id> <digest>
+/konclave policy reject <proposal-id> <digest>
+/konclave policy revoke <digest> [message-id]
 ```
 
 Arguments and rendered output are bounded. High-level commands orchestrate only the
@@ -105,6 +112,23 @@ retry preserves both message and request idempotency. `send` may omit the conver
 identifier only when the profile owns exactly one conversation. `messages` syncs one bounded
 relay page, reads at most ten records after the requested cursor, and displays an
 explicit resume cursor.
+
+Policy commands use the profile's active conversation. `propose` and `replace` read
+one explicitly selected UTF-8 regular source beneath the current workspace, enforce
+the source-size bound before transport, and send the source over the authenticated
+local-service channel for Rust compilation into the canonical bundle. Absolute
+paths, traversal, non-files, invalid UTF-8, and oversized content fail before a
+policy operation. A generated proposal identifier is displayed with a source-independent
+`resume` command before submission; resume reconstructs the exact canonical bundle
+from the daemon's terminal journal, so editing the source requires a new proposal
+identifier. Revocation displays an exact retry command. `accept` and `reject` require
+the complete proposal identifier and digest; `status` returns bounded active metadata
+but not guidance or canonical source content. JSON `u64` values are returned as
+canonical decimal strings so JavaScript never truncates a valid policy limit.
+
+Automatic policy-proposal delivery now shows complete identifiers plus the exact
+local review command. It remains inside the untrusted collaborator fence and does not
+activate policy or instruct the model to accept it.
 
 Ephemeral SDK logs remain visible to the terminal and in-memory session consumers;
 they are not a confidentiality boundary. Pairing capabilities are protected by their

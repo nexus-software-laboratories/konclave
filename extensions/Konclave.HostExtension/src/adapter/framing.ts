@@ -27,7 +27,7 @@ function shortId(value: Buffer): string {
   return value.subarray(0, 8).toString('hex');
 }
 
-function describePayload(payload: DeliveredPayload): string {
+function describePayload(payload: DeliveredPayload, conversation: Buffer): string {
   switch (payload.kind) {
     case 'application-text':
       return `message: ${neutralizeMarkers(payload.text)}`;
@@ -35,19 +35,21 @@ function describePayload(payload: DeliveredPayload): string {
       const replacement =
         payload.replacesPolicyDigest === undefined
           ? ''
-          : ` replacing ${shortId(payload.replacesPolicyDigest)}`;
+          : ` replacing ${payload.replacesPolicyDigest.toString('hex')}`;
       return (
-        `policy proposal: ${shortId(payload.proposalId)} identifies ` +
-        `${shortId(payload.policyDigest)}${replacement}; no local authority was activated`
+        `policy proposal: ${payload.proposalId.toString('hex')} identifies ` +
+        `${payload.policyDigest.toString('hex')}${replacement}; no local authority was activated\n` +
+        `local review: /konclave use ${conversation.toString('hex')}, then ` +
+        `/konclave policy accept ${payload.proposalId.toString('hex')} ${payload.policyDigest.toString('hex')}`
       );
     }
     case 'collaboration-policy-response':
       return (
-        `policy response: the remote endpoint reported proposal ${shortId(payload.proposalId)} ` +
-        `for ${shortId(payload.policyDigest)} as ${payload.outcome}`
+        `policy response: the remote endpoint reported proposal ${payload.proposalId.toString('hex')} ` +
+        `for ${payload.policyDigest.toString('hex')} as ${payload.outcome}`
       );
     case 'collaboration-policy-revocation':
-      return `policy revocation: the remote endpoint withdrew ${shortId(payload.policyDigest)}`;
+      return `policy revocation: the remote endpoint withdrew ${payload.policyDigest.toString('hex')}`;
     case 'member-added':
       return `membership: device ${shortId(payload.device)} was added as ${payload.role}`;
     case 'member-removed':
@@ -70,11 +72,11 @@ export function frameDelivery(events: readonly DeliveredEvent[]): string {
   const quoted = events
     .map((event) => {
       const header = [
-        `conversation ${shortId(event.conversation)}`,
+        `conversation ${event.conversation.toString('hex')}`,
         `sender ${shortId(event.sender)}`,
         `notification ${event.notificationId.toString('hex')}`,
       ].join(' | ');
-      return `[${header}]\n${describePayload(event.payload)}`;
+      return `[${header}]\n${describePayload(event.payload, event.conversation)}`;
     })
     .join('\n\n');
 

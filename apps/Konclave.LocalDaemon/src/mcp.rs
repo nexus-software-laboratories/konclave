@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use KonclaveClientLibrary::RelayClient;
+use KonclaveCollaborationPolicies::compile_collaboration_policy_source;
 use KonclaveCryptographicCore::MlsWelcome;
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
-    CollaborationPolicyProposalId, CollaborationPolicyResponseOutcome, ConversationId,
-    ConversationRole, DeviceId, Ed25519PublicKey, EnvelopeId,
+    ApplicationContent, ApplicationMessage, CollaborationPolicyDigest, CollaborationPolicyEffect,
+    CollaborationPolicyLimits, CollaborationPolicyProposalId, CollaborationPolicyResponseOutcome,
+    ConversationId, ConversationRole, DeviceId, Ed25519PublicKey, EnvelopeId,
     MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MessageId, PairingId,
     RoutingId,
 };
@@ -23,12 +24,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::time::timeout;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::application::{
     ApplicationService, ApplicationServiceError, ProposeCollaborationPolicyRequest,
-    RespondCollaborationPolicyRequest, RevokeCollaborationPolicyRequest, SendApplicationRequest,
-    SentCollaborationPolicyExchange, SentMembership,
+    RespondCollaborationPolicyRequest, ResumeCollaborationPolicyProposalRequest,
+    RevokeCollaborationPolicyRequest, SendApplicationRequest, SentCollaborationPolicyExchange,
+    SentMembership,
 };
 use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
@@ -37,7 +39,9 @@ use crate::conversation::{
 use crate::health::DeliveryHealth;
 use crate::pairing_service::{MAX_AUTHORIZATION_WINDOW_SECONDS, PairingService, PairingStatus};
 use crate::persistence::pairing::{PairingPhase, PairingRole};
-use crate::persistence::{MessageDirection, ProfileStoreError, StoredHistoryMessage};
+use crate::persistence::{
+    ActiveCollaborationPolicy, MessageDirection, ProfileStoreError, StoredHistoryMessage,
+};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
@@ -75,6 +79,20 @@ struct ProposeCollaborationPolicyToolRequest {
     proposal_id: String,
     canonical_bundle: String,
     replaces_policy_digest: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ProposeCollaborationPolicySourceToolRequest {
+    conversation_id: String,
+    proposal_id: String,
+    source: String,
+    replaces_policy_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ResumeCollaborationPolicyProposalToolRequest {
+    conversation_id: String,
+    proposal_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -240,6 +258,38 @@ struct CollaborationPolicyOperationResult {
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CollaborationPolicyStatusResult {
+    conversation_id: String,
+    active_policy: Option<ActiveCollaborationPolicyResult>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ActiveCollaborationPolicyResult {
+    policy_digest: String,
+    name: String,
+    activated_at_unix_milliseconds: String,
+    statements: Vec<CollaborationPolicyStatementResult>,
+    required_harness_claims: Vec<String>,
+    limits: CollaborationPolicyLimitsResult,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CollaborationPolicyStatementResult {
+    statement_id: String,
+    effect: &'static str,
+    action: String,
+    resource: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CollaborationPolicyLimitsResult {
+    duration_milliseconds: Option<String>,
+    turns: Option<String>,
+    tokens: Option<String>,
+    concurrent_requests: Option<u32>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct MessageResult {
     conversation_id: String,
     message_id: String,
@@ -398,6 +448,18 @@ impl StdioServer {
             }
             "propose_collaboration_policy" => Self::encode_json(
                 self.propose_collaboration_policy(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "propose_collaboration_policy_source" => Self::encode_json(
+                self.propose_collaboration_policy_source(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "resume_collaboration_policy_proposal" => Self::encode_json(
+                self.resume_collaboration_policy_proposal(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "get_collaboration_policy_status" => Self::encode_json(
+                self.get_collaboration_policy_status(Self::parse_parameters(payload)?)
                     .await?,
             ),
             "accept_collaboration_policy" => Self::encode_json(
@@ -955,7 +1017,6 @@ impl StdioServer {
         Parameters(request): Parameters<ProposeCollaborationPolicyToolRequest>,
     ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
         self.authorize("propose_collaboration_policy")?;
-        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let proposal_id = parse_collaboration_policy_proposal_id(&request.proposal_id)?;
         let canonical_bundle = decode_hex_bytes(
@@ -968,6 +1029,78 @@ impl StdioServer {
             .as_deref()
             .map(parse_collaboration_policy_digest)
             .transpose()?;
+        self.propose_collaboration_policy_bytes(
+            conversation_id,
+            proposal_id,
+            canonical_bundle,
+            replaces_policy_digest,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "propose_collaboration_policy_source",
+        description = "Compile one strict JSON policy source, then propose and locally activate its exact canonical bundle."
+    )]
+    async fn propose_collaboration_policy_source(
+        &self,
+        Parameters(request): Parameters<ProposeCollaborationPolicySourceToolRequest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        self.authorize("propose_collaboration_policy_source")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let proposal_id = parse_collaboration_policy_proposal_id(&request.proposal_id)?;
+        let canonical_bundle = compile_collaboration_policy_tool_source(request.source)?;
+        let replaces_policy_digest = request
+            .replaces_policy_digest
+            .as_deref()
+            .map(parse_collaboration_policy_digest)
+            .transpose()?;
+        self.propose_collaboration_policy_bytes(
+            conversation_id,
+            proposal_id,
+            canonical_bundle,
+            replaces_policy_digest,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "resume_collaboration_policy_proposal",
+        description = "Resume the exact durable policy proposal identified by a prior locally committed proposal_id without resending mutable source bytes."
+    )]
+    async fn resume_collaboration_policy_proposal(
+        &self,
+        Parameters(request): Parameters<ResumeCollaborationPolicyProposalToolRequest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        self.authorize("resume_collaboration_policy_proposal")?;
+        let applications = self.application_service()?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let proposal_id = parse_collaboration_policy_proposal_id(&request.proposal_id)?;
+        let (sent_at, now, expires_at) = message_times()?;
+        let sent = applications
+            .resume_collaboration_policy_proposal(ResumeCollaborationPolicyProposalRequest {
+                conversation_id,
+                proposal_id,
+                sent_at_unix_milliseconds: sent_at,
+                now_unix_seconds: now,
+                expires_at_unix_seconds: expires_at,
+            })
+            .await
+            .map_err(collaboration_policy_operation_error)?;
+        Ok(Json(collaboration_policy_operation_result(
+            conversation_id,
+            sent,
+        )))
+    }
+
+    async fn propose_collaboration_policy_bytes(
+        &self,
+        conversation_id: ConversationId,
+        proposal_id: CollaborationPolicyProposalId,
+        canonical_bundle: Vec<u8>,
+        replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    ) -> Result<Json<CollaborationPolicyOperationResult>, String> {
+        let applications = self.application_service()?;
         let (sent_at, now, expires_at) = message_times()?;
         let sent = applications
             .propose_collaboration_policy(ProposeCollaborationPolicyRequest {
@@ -985,6 +1118,28 @@ impl StdioServer {
             conversation_id,
             sent,
         )))
+    }
+
+    #[tool(
+        name = "get_collaboration_policy_status",
+        description = "Show the active local policy metadata for one conversation without returning guidance or canonical source content."
+    )]
+    async fn get_collaboration_policy_status(
+        &self,
+        Parameters(request): Parameters<ConversationRequest>,
+    ) -> Result<Json<CollaborationPolicyStatusResult>, String> {
+        self.authorize("get_collaboration_policy_status")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let active_policy = self
+            .conversations
+            .store()
+            .active_collaboration_policy(conversation_id)
+            .map_err(tool_error)?
+            .map(active_collaboration_policy_result);
+        Ok(Json(CollaborationPolicyStatusResult {
+            conversation_id: encode_hex(conversation_id.as_bytes()),
+            active_policy,
+        }))
     }
 
     #[tool(
@@ -1300,6 +1455,48 @@ fn collaboration_policy_operation_result(
     }
 }
 
+fn compile_collaboration_policy_tool_source(source: String) -> Result<Vec<u8>, String> {
+    let source = Zeroizing::new(source.into_bytes());
+    compile_collaboration_policy_source(&source, CollaborationPolicyLimits::default())
+        .map(|compiled| compiled.canonical_bytes().to_vec())
+        .map_err(|_| "invalid_collaboration_policy_source".to_string())
+}
+
+fn active_collaboration_policy_result(
+    active: ActiveCollaborationPolicy,
+) -> ActiveCollaborationPolicyResult {
+    let limits = active.bundle().limits();
+    ActiveCollaborationPolicyResult {
+        policy_digest: encode_hex(active.digest().as_bytes()),
+        name: active.bundle().name().to_string(),
+        activated_at_unix_milliseconds: active.activated_at_unix_milliseconds().to_string(),
+        statements: active
+            .bundle()
+            .statements()
+            .iter()
+            .map(|statement| CollaborationPolicyStatementResult {
+                statement_id: statement.statement_id().to_string(),
+                effect: match statement.effect() {
+                    CollaborationPolicyEffect::Allow => "allow",
+                    CollaborationPolicyEffect::Deny => "deny",
+                    CollaborationPolicyEffect::RequireLocalApproval => "require_local_approval",
+                },
+                action: statement.action().to_string(),
+                resource: statement.resource().map(str::to_string),
+            })
+            .collect(),
+        required_harness_claims: active.bundle().required_harness_claims().to_vec(),
+        limits: CollaborationPolicyLimitsResult {
+            duration_milliseconds: limits
+                .duration_milliseconds()
+                .map(|value| value.to_string()),
+            turns: limits.turns().map(|value| value.to_string()),
+            tokens: limits.tokens().map(|value| value.to_string()),
+            concurrent_requests: limits.concurrent_requests(),
+        },
+    }
+}
+
 fn collaboration_policy_operation_error(error: ApplicationServiceError) -> String {
     match error {
         ApplicationServiceError::PolicyStorage(
@@ -1333,8 +1530,13 @@ impl ServerHandler for StdioServer {
 #[must_use]
 pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook {
     Arc::new(move |context| match context.method {
-        "initialize" | "get_identity" | "list_conversations" | "read_messages"
-        | "delivery_status" | "get_pairing_status" => Ok(()),
+        "initialize"
+        | "get_identity"
+        | "list_conversations"
+        | "read_messages"
+        | "delivery_status"
+        | "get_pairing_status"
+        | "get_collaboration_policy_status" => Ok(()),
         "create_conversation"
         | "create_pairing_capability"
         | "redeem_pairing_capability"
@@ -1350,6 +1552,8 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "change_member_role"
         | "send_message"
         | "propose_collaboration_policy"
+        | "propose_collaboration_policy_source"
+        | "resume_collaboration_policy_proposal"
         | "accept_collaboration_policy"
         | "reject_collaboration_policy"
         | "revoke_collaboration_policy"
@@ -1772,9 +1976,9 @@ mod tests {
 
     use super::{
         AuthorizationContext, AuthorizationHook, DeliveryHealth, StdioServer,
-        collaboration_policy_operation_error, ensure_stdout_safe_diagnostics,
-        local_stdio_authorization, pairing_status_result, parse_collaboration_policy_digest,
-        parse_collaboration_policy_proposal_id,
+        collaboration_policy_operation_error, compile_collaboration_policy_tool_source,
+        ensure_stdout_safe_diagnostics, local_stdio_authorization, pairing_status_result,
+        parse_collaboration_policy_digest, parse_collaboration_policy_proposal_id,
     };
     use crate::conversation::ProcessedApplication;
     use crate::conversation::tests::open_coordinator;
@@ -1901,6 +2105,8 @@ mod tests {
         .unwrap();
         for method in [
             "propose_collaboration_policy",
+            "propose_collaboration_policy_source",
+            "resume_collaboration_policy_proposal",
             "accept_collaboration_policy",
             "reject_collaboration_policy",
             "revoke_collaboration_policy",
@@ -1908,6 +2114,10 @@ mod tests {
             writable(AuthorizationContext { method }).unwrap();
         }
         assert!(writable(AuthorizationContext { method: "unknown" }).is_err());
+        read_only(AuthorizationContext {
+            method: "get_collaboration_policy_status",
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1960,6 +2170,33 @@ mod tests {
             ),),
             "collaboration_policy_conflict"
         );
+        let source = r#"{
+            "apiVersion": "konclave.dev/v1",
+            "kind": "CollaborationPolicy",
+            "metadata": { "name": "tool-source" },
+            "spec": {
+                "guidance": null,
+                "statements": [],
+                "requiredHarnessClaims": [],
+                "limits": {
+                    "durationMilliseconds": null,
+                    "turns": null,
+                    "tokens": null,
+                    "concurrentRequests": null
+                }
+            }
+        }"#;
+        assert!(
+            !compile_collaboration_policy_tool_source(source.to_string())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            compile_collaboration_policy_tool_source(
+                r#"{"apiVersion":"konclave.dev/v1","unknown":true}"#.to_string()
+            ),
+            Err("invalid_collaboration_policy_source".to_string())
+        );
     }
 
     #[test]
@@ -1984,6 +2221,87 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.direction, "outbound");
+    }
+
+    #[tokio::test]
+    async fn active_policy_status_projects_bounded_metadata_without_guidance() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "policy-status");
+        let conversation = coordinator.create().unwrap();
+        let source = r#"{
+            "apiVersion": "konclave.dev/v1",
+            "kind": "CollaborationPolicy",
+            "metadata": { "name": "status-policy" },
+            "spec": {
+                "guidance": "private model guidance",
+                "statements": [{
+                    "id": "reply",
+                    "effect": "allow",
+                    "action": "conversation.reply"
+                }],
+                "requiredHarnessClaims": ["harness.session-identity"],
+                "limits": {
+                    "durationMilliseconds": 18446744073709551615,
+                    "turns": 18446744073709551615,
+                    "tokens": 18446744073709551615,
+                    "concurrentRequests": 1
+                }
+            }
+        }"#;
+        let canonical = compile_collaboration_policy_tool_source(source.to_string()).unwrap();
+        let digest = coordinator
+            .store()
+            .store_collaboration_policy_bundle(&canonical)
+            .unwrap();
+        coordinator
+            .store()
+            .activate_collaboration_policy(conversation.conversation_id, digest, 123)
+            .unwrap();
+        let server = StdioServer::new(
+            coordinator,
+            None,
+            None,
+            DeliveryHealth::default(),
+            local_stdio_authorization(true),
+        );
+        let payload = serde_json::to_vec(&json!({
+            "conversation_id": super::encode_hex(conversation.conversation_id.as_bytes())
+        }))
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(
+            &server
+                .dispatch_json("get_collaboration_policy_status", &payload)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["active_policy"]["policy_digest"],
+            super::encode_hex(digest.as_bytes())
+        );
+        assert_eq!(result["active_policy"]["name"], "status-policy");
+        assert_eq!(
+            result["active_policy"]["statements"][0]["statement_id"],
+            "reply"
+        );
+        assert_eq!(
+            result["active_policy"]["limits"]["duration_milliseconds"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            result["active_policy"]["limits"]["turns"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            result["active_policy"]["limits"]["tokens"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            result["active_policy"]["activated_at_unix_milliseconds"],
+            "123"
+        );
+        assert!(result["active_policy"].get("guidance").is_none());
     }
 
     #[test]

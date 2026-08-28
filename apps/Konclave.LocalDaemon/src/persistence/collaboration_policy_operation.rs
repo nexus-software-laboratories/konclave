@@ -40,6 +40,12 @@ pub(crate) struct CollaborationPolicyResponseOperation {
     pub(crate) binding_changed: bool,
 }
 
+pub(crate) struct CollaborationPolicyProposalOperation {
+    pub(crate) policy_digest: CollaborationPolicyDigest,
+    pub(crate) replaces_policy_digest: Option<CollaborationPolicyDigest>,
+    pub(crate) binding_changed: bool,
+}
+
 fn initialize_schema(
     connection: &Connection,
     sealed_initial_state: &SealedBlob,
@@ -289,6 +295,31 @@ impl ProfileStore {
                 .ok_or(ProfileStoreError::CorruptData)?,
             binding_changed: stored.binding_changed,
         }))
+    }
+
+    pub(crate) fn collaboration_policy_proposal_operation(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        proposal_id: CollaborationPolicyProposalId,
+    ) -> Result<CollaborationPolicyProposalOperation, ProfileStoreError> {
+        self.conversation_routing_id(conversation_id)?;
+        let connection = self.lock()?;
+        let metadata = load_operation_metadata(&connection, conversation_id, message_id)?
+            .ok_or(ProfileStoreError::CollaborationPolicyProposalNotFound)?;
+        let stored = decode_operation_metadata(metadata)?;
+        self.verify_collaboration_policy_operation_seal(&connection, &stored)?;
+        if stored.kind != OPERATION_KIND_PROPOSAL
+            || stored.proposal_id != Some(proposal_id)
+            || stored.source_proposal_message_id.is_some()
+        {
+            return Err(ProfileStoreError::CollaborationPolicyProposalConflict);
+        }
+        Ok(CollaborationPolicyProposalOperation {
+            policy_digest: stored.policy_digest,
+            replaces_policy_digest: stored.replaces_policy_digest,
+            binding_changed: stored.binding_changed,
+        })
     }
 
     pub(super) fn collaboration_policy_operation_reserves_message_id(

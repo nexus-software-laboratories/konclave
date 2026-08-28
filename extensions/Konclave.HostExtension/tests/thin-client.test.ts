@@ -477,6 +477,157 @@ describe('deterministic commands', () => {
     ).toHaveLength(2);
   });
 
+  it('manages collaboration policies through deterministic nested commands', async () => {
+    const proposalId = '55'.repeat(16);
+    const replacementProposalId = '56'.repeat(16);
+    const policyDigest = '66'.repeat(32);
+    const messageId = '77'.repeat(16);
+    const source = '{"apiVersion":"konclave.dev/v1"}';
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      const record =
+        typeof payload === 'object' && payload !== null ? (payload as Record<string, unknown>) : {};
+      switch (operation) {
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: conversationId,
+          };
+        case 'get_collaboration_policy_status':
+          return {
+            conversation_id: conversationId,
+            active_policy: {
+              policy_digest: policyDigest,
+              name: 'contract-alignment',
+              activated_at_unix_milliseconds: '18446744073709551615',
+              statements: [
+                {
+                  statement_id: 'conversation-reply',
+                  effect: 'allow',
+                  action: 'conversation.reply',
+                  resource: null,
+                },
+              ],
+              required_harness_claims: ['harness.session-identity'],
+              limits: {
+                duration_milliseconds: '18446744073709551615',
+                turns: '18446744073709551615',
+                tokens: '18446744073709551615',
+                concurrent_requests: 1,
+              },
+            },
+          };
+        case 'propose_collaboration_policy_source':
+        case 'resume_collaboration_policy_proposal':
+        case 'accept_collaboration_policy':
+        case 'reject_collaboration_policy':
+          return {
+            conversation_id: conversationId,
+            proposal_id: record.proposal_id,
+            policy_digest: policyDigest,
+            message_id: messageId,
+            cursor: 1,
+            local_binding_changed: true,
+          };
+        case 'revoke_collaboration_policy':
+          return {
+            conversation_id: conversationId,
+            proposal_id: null,
+            policy_digest: policyDigest,
+            message_id: record.message_id,
+            cursor: 2,
+            local_binding_changed: true,
+          };
+        default:
+          throw new Error(`unexpected operation: ${operation}`);
+      }
+    });
+    const readPolicySource = vi.fn().mockResolvedValue(source);
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      readPolicySource,
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    for (const args of [
+      'policy help',
+      'policy status',
+      `policy propose ${proposalId} -- policy examples/contract.json`,
+      `policy resume ${proposalId}`,
+      `policy replace ${policyDigest} ${replacementProposalId} -- policy examples/replacement.json`,
+      `policy accept ${proposalId} ${policyDigest}`,
+      `policy reject ${replacementProposalId} ${policyDigest}`,
+      `policy revoke ${policyDigest} ${messageId}`,
+    ]) {
+      await command?.handler(commandContext(args));
+    }
+
+    expect(readPolicySource).toHaveBeenNthCalledWith(1, 'policy examples/contract.json');
+    expect(readPolicySource).toHaveBeenNthCalledWith(2, 'policy examples/replacement.json');
+    expect(request).toHaveBeenCalledWith(
+      'resume_collaboration_policy_proposal',
+      {
+        conversation_id: conversationId,
+        proposal_id: proposalId,
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(request).toHaveBeenCalledWith(
+      'propose_collaboration_policy_source',
+      {
+        conversation_id: conversationId,
+        proposal_id: proposalId,
+        source,
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(request).toHaveBeenCalledWith(
+      'propose_collaboration_policy_source',
+      {
+        conversation_id: conversationId,
+        proposal_id: replacementProposalId,
+        source,
+        replaces_policy_digest: policyDigest,
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(request).toHaveBeenCalledWith(
+      'accept_collaboration_policy',
+      {
+        conversation_id: conversationId,
+        proposal_id: proposalId,
+        policy_digest: policyDigest,
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(request).toHaveBeenCalledWith(
+      'reject_collaboration_policy',
+      {
+        conversation_id: conversationId,
+        proposal_id: replacementProposalId,
+        policy_digest: policyDigest,
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(request).toHaveBeenCalledWith(
+      'revoke_collaboration_policy',
+      {
+        conversation_id: conversationId,
+        message_id: messageId,
+        policy_digest: policyDigest,
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(lines.join('\n')).toContain('policy: contract-alignment');
+    expect(lines.join('\n')).toContain('18446744073709551615');
+    expect(lines.join('\n')).toContain('statement conversation-reply: allow conversation.reply');
+    expect(lines.join('\n')).toContain('local binding changed: yes');
+  });
+
   it('creates a bounded ephemeral pairing capability', async () => {
     const request = vi.fn(async (operation: string) => {
       if (operation !== 'create_pairing_capability') {
