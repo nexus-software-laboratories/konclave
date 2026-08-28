@@ -15,6 +15,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0008: Shared per-user local service](adr/adr-0008-shared-local-service.md)
 - [ADR 0009: Evidence-bound exact-profile session grants](adr/adr-0009-evidence-bound-session-grants.md)
 - [ADR 0010: AccountTrusted two-command pairing](adr/adr-0010-account-trusted-two-command-pairing.md)
+- [ADR 0011: Content-addressed collaboration policies](adr/adr-0011-content-addressed-collaboration-policies.md)
 
 ## Protocol
 
@@ -41,6 +42,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Adapter channel authentication](development/adapter-channel-authentication.md)
 - [Shared local service transport](development/local-service-transport.md)
 - [Copilot delivery safety](development/copilot-delivery-safety.md)
+- [Collaboration policy contracts](development/collaboration-policies.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 

@@ -6,6 +6,13 @@ import {
   type ApplicationMessage,
 } from '../src/generated/konclave/protocol/v1/application_pb.js';
 import {
+  CollaborationPolicyBundleSchema,
+  CollaborationPolicyEffect,
+  CollaborationPolicyLimitsSchema,
+  CollaborationPolicyStatementSchema,
+  type CollaborationPolicyBundle,
+} from '../src/generated/konclave/protocol/v1/collaboration_policy_pb.js';
+import {
   ConversationIdSchema,
   ConversationRole,
   DeviceIdSchema,
@@ -135,6 +142,39 @@ export function applicationMessage(options?: {
               body: options?.body ?? 'hello',
             }),
           },
+  });
+}
+
+export function collaborationPolicyBundle(options?: {
+  guidance?: string;
+  name?: string;
+  reverseClaims?: boolean;
+  reverseStatements?: boolean;
+}): CollaborationPolicyBundle {
+  const statements = [
+    create(CollaborationPolicyStatementSchema, {
+      statementId: 'conversation-reply',
+      effect: CollaborationPolicyEffect.ALLOW,
+      action: 'conversation.reply',
+    }),
+    create(CollaborationPolicyStatementSchema, {
+      statementId: 'workspace-write',
+      effect: CollaborationPolicyEffect.REQUIRE_LOCAL_APPROVAL,
+      action: 'workspace.modify',
+      resource: 'workspace.current',
+    }),
+  ];
+  const claims = ['copilot.session-identity', 'copilot.tool-interception'];
+  return create(CollaborationPolicyBundleSchema, {
+    version: create(ProtocolVersionSchema, { major: 1, minor: 0 }),
+    name: options?.name ?? 'contract-alignment',
+    guidance: options?.guidance ?? 'Align the API contract and report decisions.',
+    statements: options?.reverseStatements === true ? statements.reverse() : statements,
+    requiredHarnessClaims: options?.reverseClaims === true ? claims.reverse() : claims,
+    limits: create(CollaborationPolicyLimitsSchema, {
+      tokens: 10_000n,
+      concurrentRequests: 1,
+    }),
   });
 }
 

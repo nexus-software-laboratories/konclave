@@ -41,6 +41,10 @@ pub enum KonclaveDomainError {
         actual: usize,
     },
 
+    /// A text identifier is not in its canonical lowercase ASCII form.
+    #[error("{field} is not canonical lowercase ASCII")]
+    NonCanonicalText { field: &'static str },
+
     /// A collection repeats an identifier whose uniqueness is part of the contract.
     #[error("{field} contains a duplicate identifier")]
     DuplicateIdentifier { field: &'static str },
@@ -117,6 +121,7 @@ impl KonclaveDomainError {
                 "out_of_range"
             }
             Self::EmptyText { .. } => "empty_value",
+            Self::NonCanonicalText { .. } => "non_canonical_value",
             Self::DuplicateIdentifier { .. } => "duplicate_identifier",
             Self::MismatchedInvitedDevice => "mismatched_invited_device",
             Self::MismatchedInvitedConversation => "mismatched_invited_conversation",

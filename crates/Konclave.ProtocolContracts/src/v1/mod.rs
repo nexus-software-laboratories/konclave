@@ -1,6 +1,7 @@
 //! Validated encoders and decoders for the `konclave.protocol.v1` wire package.
 
 mod application;
+mod collaboration_policy;
 mod common;
 mod enrollment;
 mod identity;
@@ -12,6 +13,9 @@ mod relay;
 mod tests;
 
 pub use application::{decode_application_message, encode_application_message};
+pub use collaboration_policy::{
+    decode_collaboration_policy_bundle, encode_collaboration_policy_bundle,
+};
 pub use enrollment::{
     decode_relay_enrollment_request, decode_relay_enrollment_response,
     encode_relay_enrollment_request, encode_relay_enrollment_response,

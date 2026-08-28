@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Defines one evaluator primitive without hardcoding named collaboration modes.
+enum CollaborationPolicyEffect {
+  COLLABORATION_POLICY_EFFECT_UNSPECIFIED = 0;
+  COLLABORATION_POLICY_EFFECT_ALLOW = 1;
+  COLLABORATION_POLICY_EFFECT_DENY = 2;
+  COLLABORATION_POLICY_EFFECT_REQUIRE_LOCAL_APPROVAL = 3;
+}
+
+// Applies one decision primitive to a namespaced action and optional resource.
+message CollaborationPolicyStatement {
+  string statement_id = 1;
+  CollaborationPolicyEffect effect = 2;
+  string action = 3;
+  optional string resource = 4;
+}
+
+// Carries fully resolved semantic limits. Absent fields mean explicitly unlimited.
+message CollaborationPolicyLimits {
+  optional uint64 duration_milliseconds = 1;
+  optional uint64 turns = 2;
+  optional uint64 tokens = 3;
+  optional uint32 concurrent_requests = 4;
+}
+
+// Canonical source-independent collaboration policy.
+message CollaborationPolicyBundle {
+  ProtocolVersion version = 1;
+  string name = 2;
+  optional string guidance = 3;
+  repeated CollaborationPolicyStatement statements = 4;
+  repeated string required_harness_claims = 5;
+  CollaborationPolicyLimits limits = 6;
+}

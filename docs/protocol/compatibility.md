@@ -11,6 +11,7 @@ Konclave tracks these versions independently:
 
 - transport endpoint version;
 - local-service authorization protocol version;
+- collaboration-policy bundle version;
 - relay envelope version;
 - Konclave application protocol version;
 - MLS protocol version;
@@ -137,12 +138,31 @@ derived from the authenticated MLS leaf and validated device credential. Applica
 bytes MUST NOT override attribution, authorization, counters, or replay state with a
 self-asserted sender identifier.
 
+### Collaboration-policy bundle
+
+The protocol-v1 `CollaborationPolicyBundle` is a source-independent, content-addressed
+contract. It contains a canonical name, optional guidance, ordered action statements,
+ordered required harness claims, and fully resolved optional semantic limits. It does
+not contain source paths, mutable includes, executable code, or unresolved provider
+references.
+
+Policy names are display metadata. Bundle identity is the domain-separated SHA-256
+digest defined in [Collaboration policy contracts](../development/collaboration-policies.md).
+Decoders reject alternate encodings, noncanonical collection ordering, duplicate
+identifiers, unknown effects, missing limits, unsupported major versions, and values
+outside their bounds.
+
+The bundle contract does not itself grant local authority. Conversation proposal and
+local-binding protocols are separate versioned layers.
+
 ## Bounds
 
 Parsing enforces limits before allocation or decompression. Initial hard limits are:
 
 - 1 MiB encoded relay envelope, with up to 1,023 KiB of opaque payload;
 - 256 KiB encoded application message, with up to 255 KiB of UTF-8 text;
+- 64 KiB encoded collaboration-policy bundle, with at most 256 statements and 64
+  required harness claims;
 - 16 MiB encoded replay page and 100 envelopes per page;
 - 1 KiB encoded replay requests and acknowledgments;
 - 4,096 top-level fields in any decoded Protobuf message;

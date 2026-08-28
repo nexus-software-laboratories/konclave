@@ -82,6 +82,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0011-content-addressed-collaboration-policies.md",
+        "title": "ADR 0011: Content-addressed collaboration policies",
+        "section": "Architecture",
+        "order": 110,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -184,6 +191,13 @@
         "title": "Copilot delivery safety",
         "section": "Development",
         "order": 33,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/collaboration-policies.md",
+        "title": "Collaboration policy contracts",
+        "section": "Development",
+        "order": 34,
         "owner": "project:konclave"
       },
       {

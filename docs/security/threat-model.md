@@ -20,6 +20,7 @@ evidence that implementations honor both.
 - message authenticity, ordering, acknowledgment, and replay state;
 - local daemon control and decrypted history.
 - remote-event ordering, acknowledgment, mute, and suppression state.
+- canonical collaboration-policy bundle content and digest identity.
 
 ## Components and trust boundaries
 
@@ -167,6 +168,8 @@ Konclave considers:
 - malformed, oversized, or adversarial protocol input;
 - model output attempting to misuse daemon tools;
 - a group member attempting prompt injection, wake-up abuse, or agent-to-agent loops;
+- an input attempting to ambiguously encode or substitute a collaboration-policy
+  bundle;
 - a crashed or malicious adapter attempting to lose, duplicate, reorder, or
   acknowledge another consumer's notifications;
 - compromise of one endpoint's active keys and memory.
@@ -222,6 +225,11 @@ gains system, developer, permission, or tool authority. Automatic delivery is
 explicitly enabled per conversation, bounded by wake budgets, and limited to one
 outstanding synthetic turn.
 
+The current collaboration-policy bundle contract grants no authority. Its canonical
+bytes and domain-separated digest prevent ambiguous bundle identity, but local
+activation, peer proposal, and harness enforcement are not implemented yet. Peer text
+therefore retains the existing explicit-send behavior.
+
 ### Version integrity
 
 Peers negotiate supported Konclave and MLS versions. Unsupported versions and empty
@@ -261,6 +269,7 @@ the mutually supported maximum.
 | Adapter crash before harness delivery | Pending or expired claim is reclaimed without advancing adapter acknowledgment |
 | Adapter crash after harness delivery | At-least-once redelivery carries the same stable notification identifier; exactly-once is not claimed |
 | Peer prompt injection | Typed safety envelope, peer content quoted as untrusted data, no inherited authority, no automatic tool execution, and explicit send operations |
+| Collaboration-policy bundle ambiguity | Canonical bounded encoding, duplicate rejection, exact re-encoding checks, and a domain-separated content digest |
 | Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |
 | Agent-to-agent feedback loop | Authenticated sender classification, local-echo suppression, stable notification identifiers, and no send side effect from receipt alone |
 | Adapter backlog exhaustion | Hard count/byte bounds, terminal suppression while muted, replay backpressure before enabled events would be dropped, and visible degraded state |

@@ -1,4 +1,5 @@
 export * from './application.js';
+export * from './collaboration-policy.js';
 export * from './enrollment.js';
 export * from './error.js';
 export * from './identity.js';
@@ -21,6 +22,7 @@ export {
 } from './common.js';
 
 export * from './generated/konclave/protocol/v1/application_pb.js';
+export * from './generated/konclave/protocol/v1/collaboration_policy_pb.js';
 export * from './generated/konclave/protocol/v1/common_pb.js';
 export * from './generated/konclave/protocol/v1/enrollment_pb.js';
 export * from './generated/konclave/protocol/v1/identity_pb.js';
