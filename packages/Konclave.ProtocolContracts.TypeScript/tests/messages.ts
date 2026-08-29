@@ -275,6 +275,7 @@ export function credential(options?: {
   deviceIdLength?: number;
   major?: number;
   signatureLength?: number;
+  applicationCapabilities?: bigint;
 }): DeviceCredentialBinding {
   return create(DeviceCredentialBindingSchema, {
     version: create(ProtocolVersionSchema, {
@@ -291,6 +292,9 @@ export function credential(options?: {
     deviceRootPublicKey: bytes(32, 2),
     conversationSignaturePublicKey: bytes(32, 3),
     deviceBindingSignature: bytes(options?.signatureLength ?? 64, 4),
+    applicationCapabilities: options?.applicationCapabilities ?? 0n,
+    applicationCapabilitiesSignature:
+      options?.applicationCapabilities === undefined ? new Uint8Array() : bytes(64, 5),
   });
 }
 

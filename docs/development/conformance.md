@@ -132,6 +132,13 @@ crash or excessive-allocation case becomes a permanent regression input.
 - prove claim recovery is bounded, idle no-response completion is terminal and
   idempotent, and one response transition shares the sender-counter/outbox
   transaction;
+- prove root-signed device capability advertisement preserves legacy credential
+  fixtures, rejects capability substitution, and prevents directed requests to a
+  local or absent target or a conversation with any legacy incapable remote member
+  before sender-counter allocation;
+- prove delivery heartbeats renew one active handling claim without changing its
+  attempt or lease generation, and Copilot acknowledges only after terminal turn
+  completion;
 - verify schema-18 migration, authenticated downgrade refusal, sealed handling-record
   and row-count tampering detection, hard capacity, and absence of response plaintext
   from ordinary SQLite columns;

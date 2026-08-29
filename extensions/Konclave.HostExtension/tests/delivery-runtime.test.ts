@@ -36,6 +36,7 @@ describe('delivery runtime loop', () => {
       get outstanding() {
         return false;
       },
+      activeTurn: null,
     };
   }
 
@@ -202,6 +203,7 @@ describe('delivery runtime loop', () => {
         async flush() {},
         pending: 0,
         outstanding: false,
+        activeTurn: null,
       },
       diagnostics: { error: (message) => errors.push(message) },
       sleep: async () => {},
@@ -210,6 +212,135 @@ describe('delivery runtime loop', () => {
 
     await runtime.completed;
     expect(errors.join(' ')).toContain('could not queue');
+  });
+
+  it('heartbeats instead of claiming more work while a turn is outstanding', async () => {
+    const requests: string[] = [];
+    let outstanding = true;
+    let now = 20_000;
+    const target = {
+      enqueue() {},
+      async markIdle() {},
+      markActive() {},
+      async flush() {},
+      get pending() {
+        return 0;
+      },
+      get outstanding() {
+        return outstanding;
+      },
+      activeTurn: null,
+    };
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request(request) {
+          requests.push(request.kind);
+          if (request.kind === 'heartbeat') {
+            return { kind: 'accepted' };
+          }
+          runtime.stop();
+          return { kind: 'batch', events: [] };
+        },
+        close() {},
+      },
+      coordinator: target,
+      diagnostics: { error: () => {} },
+      clock: { now: () => now },
+      sleep: async () => {
+        outstanding = false;
+        now += 250;
+      },
+    });
+
+    await runtime.completed;
+    expect(requests).toEqual(['heartbeat', 'wait-and-claim']);
+  });
+
+  it('backs off after an unexpected heartbeat response', async () => {
+    const errors: string[] = [];
+    const requests: string[] = [];
+    const sleeps: number[] = [];
+    let outstanding = true;
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request(request) {
+          requests.push(request.kind);
+          if (request.kind === 'heartbeat') {
+            outstanding = false;
+            return { kind: 'batch', events: [] };
+          }
+          runtime.stop();
+          return { kind: 'batch', events: [] };
+        },
+        close() {},
+      },
+      coordinator: {
+        enqueue() {},
+        async markIdle() {},
+        markActive() {},
+        async flush() {},
+        pending: 0,
+        get outstanding() {
+          return outstanding;
+        },
+        activeTurn: null,
+      },
+      diagnostics: { error: (message) => errors.push(message) },
+      clock: { now: () => 20_000 },
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      },
+    });
+
+    await runtime.completed;
+    expect(requests).toEqual(['heartbeat', 'wait-and-claim']);
+    expect(errors.join(' ')).toContain('unexpected response');
+    expect(sleeps).toHaveLength(1);
+  });
+
+  it('backs off and retries when a heartbeat fails', async () => {
+    const errors: string[] = [];
+    const requests: string[] = [];
+    const sleeps: number[] = [];
+    let outstanding = true;
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request(request) {
+          requests.push(request.kind);
+          if (request.kind === 'heartbeat') {
+            outstanding = false;
+            throw new Error('heartbeat connection closed');
+          }
+          runtime.stop();
+          return { kind: 'batch', events: [] };
+        },
+        close() {},
+      },
+      coordinator: {
+        enqueue() {},
+        async markIdle() {},
+        markActive() {},
+        async flush() {},
+        pending: 0,
+        get outstanding() {
+          return outstanding;
+        },
+        activeTurn: null,
+      },
+      diagnostics: { error: (message) => errors.push(message) },
+      clock: { now: () => 20_000 },
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      },
+    });
+
+    await runtime.completed;
+    expect(requests).toEqual(['heartbeat', 'wait-and-claim']);
+    expect(errors.join(' ')).toContain('heartbeat connection closed');
+    expect(sleeps).toHaveLength(1);
   });
 
   it('backs off exponentially per profile, caps, and resets after a valid batch', async () => {

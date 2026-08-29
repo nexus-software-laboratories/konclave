@@ -562,6 +562,36 @@ impl ConversationCoordinator {
         self.store.active_conversation_id().map_err(Into::into)
     }
 
+    /// Resolves an explicit target or the only remote member in a two-device conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile, state, or target-required error.
+    pub(crate) fn directed_request_target(
+        &self,
+        conversation_id: ConversationId,
+        requested: Option<DeviceId>,
+    ) -> Result<DeviceId, ConversationCoordinatorError> {
+        let conversation = self.store.load_conversation(conversation_id)?;
+        if let Some(target) = requested {
+            return Ok(target);
+        }
+        let local_device = self.device_id()?;
+        let mut remote = conversation
+            .state
+            .members()
+            .iter()
+            .map(|member| member.device_id())
+            .filter(|device_id| *device_id != local_device);
+        let target = remote
+            .next()
+            .ok_or(ConversationCoordinatorError::DirectedRequestTargetRequired)?;
+        if remote.next().is_some() {
+            return Err(ConversationCoordinatorError::DirectedRequestTargetRequired);
+        }
+        Ok(target)
+    }
+
     /// Selects one existing conversation for implicit profile operations.
     ///
     /// # Errors
@@ -1065,6 +1095,24 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        if let ApplicationContent::DirectedRequest(directed_request) = &request.content {
+            let conversation = self.store.load_conversation(request.conversation_id)?;
+            let target = directed_request.target_device_id();
+            let local_device = self.device_id()?;
+            if !directed_request_recipients_support(
+                &conversation.state,
+                local_device,
+                target,
+                |device_id| {
+                    conversation.bindings.iter().any(|binding| {
+                        binding.binding().device_id() == device_id
+                            && binding.binding().supports_directed_requests()
+                    })
+                },
+            ) {
+                return Err(ConversationCoordinatorError::DirectedRequestUnsupported);
+            }
+        }
         let envelope_id = self
             .device
             .lock()
@@ -2184,6 +2232,10 @@ pub(crate) enum ConversationCoordinatorError {
     StateMismatch,
     #[error("application protocol construction failed")]
     Protocol,
+    #[error("directed request target or another remote conversation member is not capable")]
+    DirectedRequestUnsupported,
+    #[error("directed request target is required for this conversation")]
+    DirectedRequestTargetRequired,
     #[error("conversation operation is not authorized")]
     Unauthorized,
 }
@@ -2200,6 +2252,22 @@ fn initial_conversation_state(
         vec![],
     )
     .map_err(|_| ConversationCoordinatorError::StateMismatch)
+}
+
+fn directed_request_recipients_support(
+    state: &ConversationState,
+    local_device: DeviceId,
+    target: DeviceId,
+    mut supports_directed_requests: impl FnMut(DeviceId) -> bool,
+) -> bool {
+    target != local_device
+        && state.member(target).is_some()
+        && state
+            .members()
+            .iter()
+            .map(|member| member.device_id())
+            .filter(|device_id| *device_id != local_device)
+            .all(&mut supports_directed_requests)
 }
 
 fn decrypt_application(
@@ -3185,6 +3253,96 @@ pub(crate) mod tests {
             received.message.message_id()
         );
         assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+    }
+
+    #[test]
+    fn directed_requests_require_a_current_remote_member_target() {
+        let (_root, alice, bob, conversation_id, _) = paired_coordinators();
+        let alice_device_id = alice.device_id().unwrap();
+        let bob_device_id = bob.device_id().unwrap();
+        let directed = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::directed_request(bob_device_id, "confirm the contract")
+                    .unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        assert!(matches!(
+            directed.message.content(),
+            ApplicationContent::DirectedRequest(request)
+                if request.target_device_id() == bob_device_id
+        ));
+        for target in [
+            alice_device_id,
+            DeviceId::from_bytes([99; DeviceId::LENGTH]),
+        ] {
+            assert_eq!(
+                alice
+                    .prepare_application(
+                        conversation_id,
+                        ApplicationContent::directed_request(target, "must not send").unwrap(),
+                        None,
+                        1_700_000_000_001,
+                        1_900_000_000,
+                    )
+                    .err(),
+                Some(ConversationCoordinatorError::DirectedRequestUnsupported)
+            );
+        }
+    }
+
+    #[test]
+    fn directed_requests_require_every_remote_recipient_to_support_the_content_kind() {
+        let local_device = DeviceId::from_bytes([1; DeviceId::LENGTH]);
+        let target = DeviceId::from_bytes([2; DeviceId::LENGTH]);
+        let observer = DeviceId::from_bytes([3; DeviceId::LENGTH]);
+        let state = ConversationState::new(
+            ProtocolVersion::application_v1(),
+            ConversationId::from_bytes([4; ConversationId::LENGTH]),
+            2,
+            vec![
+                Member::new(local_device, ConversationRole::Administrator, 0),
+                Member::new(target, ConversationRole::Member, 1),
+                Member::new(observer, ConversationRole::Member, 2),
+            ],
+            vec![],
+        )
+        .unwrap();
+
+        assert!(!directed_request_recipients_support(
+            &state,
+            local_device,
+            target,
+            |device_id| device_id == target,
+        ));
+        assert!(directed_request_recipients_support(
+            &state,
+            local_device,
+            target,
+            |device_id| device_id == target || device_id == observer,
+        ));
+    }
+
+    #[test]
+    fn directed_request_target_resolves_only_one_remote_member() {
+        let root = tempfile::tempdir().unwrap();
+        let solo = open_coordinator(root.path(), "request-target-solo");
+        let created = solo.create().unwrap();
+        assert_eq!(
+            solo.directed_request_target(created.conversation_id, None),
+            Err(ConversationCoordinatorError::DirectedRequestTargetRequired)
+        );
+
+        let (_root, alice, bob, conversation_id, _) = paired_coordinators();
+        assert_eq!(
+            alice
+                .directed_request_target(conversation_id, None)
+                .unwrap(),
+            bob.device_id().unwrap()
+        );
     }
 
     #[test]

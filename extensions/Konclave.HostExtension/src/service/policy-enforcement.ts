@@ -1,10 +1,19 @@
+import { randomBytes } from 'node:crypto';
+
 import type { SessionHooks } from '@github/copilot-sdk';
 
-import type { CollaborationTurnAuthorization, DeliveredEvent } from '../adapter/session.js';
+import type {
+  CollaborationTurnAuthorization,
+  CollaborationTurnDecision,
+  DeliveredEvent,
+  DeliveredPayload,
+} from '../adapter/session.js';
 import type { LocalServiceClient } from './client.js';
 import { collaborationOperations } from './operations.js';
 
 const hex16 = /^[0-9a-f]{32}$/u;
+const hex32 = /^[0-9a-f]{64}$/u;
+const maxPolicyNameBytes = 128;
 const maxToolArgumentsBytes = 128 * 1024;
 const maxMessageTextBytes = 64 * 1024;
 const sendArgumentKeys = new Set([
@@ -18,10 +27,12 @@ const sendArgumentKeys = new Set([
 type ActiveCollaborationTurn =
   | {
       readonly kind: 'authorized';
-      readonly conversation: string;
-      readonly policyDigest: string;
+      readonly authorization: CollaborationTurnAuthorization;
     }
-  | { readonly kind: 'blocked' };
+  | {
+      readonly kind: 'blocked';
+      readonly authorization: CollaborationTurnAuthorization | null;
+    };
 
 interface ToolAction {
   readonly action: string;
@@ -29,9 +40,17 @@ interface ToolAction {
   readonly conversationBound: boolean;
 }
 
+type DirectedRequestEvent = Omit<DeliveredEvent, 'payload'> & {
+  readonly payload: Extract<DeliveredPayload, { readonly kind: 'directed-request' }>;
+};
+
 export interface CopilotPolicyGate {
   readonly hooks: SessionHooks;
-  authorizeTurn(events: readonly DeliveredEvent[]): Promise<CollaborationTurnAuthorization | null>;
+  authorizeTurn(events: readonly DeliveredEvent[]): Promise<CollaborationTurnDecision | null>;
+  completeTurn(
+    authorization: CollaborationTurnAuthorization,
+  ): Promise<'completed-response' | 'completed-no-response'>;
+  canCompleteTurn(authorization: CollaborationTurnAuthorization): boolean;
   activate(authorization: CollaborationTurnAuthorization): void;
   observePrompt(prompt: string): void;
   clear(): void;
@@ -49,6 +68,77 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function isDirectedRequestEvent(event: DeliveredEvent): event is DirectedRequestEvent {
+  return event.payload.kind === 'directed-request';
+}
+
+function boundedString(value: unknown, maximum: number, label: string): string {
+  if (
+    typeof value !== 'string' ||
+    Buffer.byteLength(value, 'utf8') === 0 ||
+    Buffer.byteLength(value, 'utf8') > maximum
+  ) {
+    throw new Error(`the local service ${label} is malformed`);
+  }
+  return value;
+}
+
+function parseTurnAuthorization(
+  value: unknown,
+  event: DirectedRequestEvent,
+): CollaborationTurnDecision | null {
+  if (!isRecord(value)) {
+    throw new Error('the local service collaboration authorization is malformed');
+  }
+  if (
+    value.outcome === 'inactive' ||
+    value.outcome === 'denied' ||
+    value.outcome === 'approval_required'
+  ) {
+    if (
+      value.outcome === 'denied' &&
+      (value.reason === 'directed_request_claimed' ||
+        value.reason === 'directed_request_claim_inactive')
+    ) {
+      return { kind: 'deferred' };
+    }
+    return null;
+  }
+  const requestMessageId = event.payload.messageId.toString('hex');
+  if (
+    value.outcome !== 'authorized' ||
+    typeof value.policyDigest !== 'string' ||
+    !hex32.test(value.policyDigest) ||
+    value.requestMessageId !== requestMessageId ||
+    !Number.isSafeInteger(value.attempt) ||
+    (value.attempt as number) < 1 ||
+    (value.attempt as number) > 16
+  ) {
+    throw new Error('the local service collaboration authorization is malformed');
+  }
+  return {
+    conversation: event.conversation.toString('hex'),
+    policyDigest: value.policyDigest,
+    policyName: boundedString(value.policyName, maxPolicyNameBytes, 'policy name'),
+    requestMessageId,
+    attempt: value.attempt as number,
+    turnToken: randomBytes(16).toString('hex'),
+  };
+}
+
+function parseTurnCompletion(value: unknown): 'completed-response' | 'completed-no-response' {
+  if (!isRecord(value) || typeof value.changed !== 'boolean') {
+    throw new Error('the local service collaboration completion is malformed');
+  }
+  if (value.outcome === 'completed_response' && !value.changed) {
+    return 'completed-response';
+  }
+  if (value.outcome === 'completed_no_response') {
+    return 'completed-no-response';
+  }
+  throw new Error('the local service collaboration completion is malformed');
 }
 
 function parseActionDecision(value: unknown): {
@@ -141,9 +231,22 @@ function targetsAuthorizedConversation(
   return typeof toolArgs.conversation_id === 'string' && toolArgs.conversation_id === conversation;
 }
 
+function isSameTurn(
+  left: CollaborationTurnAuthorization,
+  right: CollaborationTurnAuthorization,
+): boolean {
+  return (
+    left.conversation === right.conversation &&
+    left.policyDigest === right.policyDigest &&
+    left.requestMessageId === right.requestMessageId &&
+    left.attempt === right.attempt
+  );
+}
+
 export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPolicyGate {
   let active: ActiveCollaborationTurn | null = null;
   let pending: CollaborationTurnAuthorization | null = null;
+  let delayed: CollaborationTurnAuthorization | null = null;
   let lastDecision: string | null = null;
   const deny = (reason: string, message: string) => {
     lastDecision = reason;
@@ -178,11 +281,12 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
           if (!action) {
             return deny('tool_unmapped', 'The active Konclave policy does not map this tool.');
           }
+          const authorization = turn.authorization;
           const toolArguments = toolArgumentRecord(input.toolArgs);
           if (!toolArguments) {
             return deny('tool_arguments_malformed', 'Konclave tool arguments are malformed.');
           }
-          if (!targetsAuthorizedConversation(action, toolArguments, turn.conversation)) {
+          if (!targetsAuthorizedConversation(action, toolArguments, authorization.conversation)) {
             return deny(
               'conversation_mismatch',
               'The active Konclave turn is bound to a different conversation.',
@@ -199,23 +303,24 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
               (toolArguments.reply_to_message_id !== undefined &&
                 toolArguments.reply_to_message_id !== null &&
                 (typeof toolArguments.reply_to_message_id !== 'string' ||
-                  !hex16.test(toolArguments.reply_to_message_id))) ||
+                  !hex16.test(toolArguments.reply_to_message_id) ||
+                  toolArguments.reply_to_message_id !== authorization.requestMessageId)) ||
               (toolArguments.collaboration_authorization !== undefined &&
-                toolArguments.collaboration_authorization !== null &&
-                (typeof toolArguments.collaboration_authorization !== 'string' ||
-                  Buffer.byteLength(toolArguments.collaboration_authorization, 'utf8') > 64)))
+                toolArguments.collaboration_authorization !== null))
           ) {
             return deny('send_arguments_malformed', 'Konclave send arguments are malformed.');
           }
           const result = parseActionDecision(
             await client.request(collaborationOperations.evaluateAction, {
-              conversationId: turn.conversation,
-              policyDigest: turn.policyDigest,
+              conversationId: authorization.conversation,
+              policyDigest: authorization.policyDigest,
               action: action.action,
               resource: action.resource ?? null,
               messageId: toolArguments?.message_id,
-              replyToMessageId: toolArguments?.reply_to_message_id ?? null,
+              replyToMessageId: authorization.requestMessageId,
               text: toolArguments?.text,
+              requestMessageId: authorization.requestMessageId,
+              attempt: authorization.attempt,
             }),
           );
           if (result.decision === 'deny') {
@@ -237,6 +342,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
           return {
             modifiedArgs: {
               ...toolArguments,
+              reply_to_message_id: authorization.requestMessageId,
               collaboration_authorization: result.authorization,
             },
             additionalContext:
@@ -249,36 +355,74 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
     },
     authorizeTurn(events) {
       const first = events[0];
-      if (!first) {
+      if (!first || events.length !== 1 || !isDirectedRequestEvent(first)) {
         return Promise.resolve(null);
       }
-      const conversation = first.conversation.toString('hex');
-      if (events.some((event) => event.conversation.toString('hex') !== conversation)) {
-        return Promise.reject(new Error('a collaboration turn cannot mix conversations'));
+      return client
+        .request(collaborationOperations.authorizeTurn, {
+          conversationId: first.conversation.toString('hex'),
+          requestMessageId: first.payload.messageId.toString('hex'),
+          notificationId: first.notificationId.toString('hex'),
+          leaseGeneration: first.leaseGeneration,
+        })
+        .then((value) => parseTurnAuthorization(value, first));
+    },
+    async completeTurn(authorization) {
+      return parseTurnCompletion(
+        await client.request(collaborationOperations.completeTurn, {
+          conversationId: authorization.conversation,
+          policyDigest: authorization.policyDigest,
+          requestMessageId: authorization.requestMessageId,
+          attempt: authorization.attempt,
+        }),
+      );
+    },
+    canCompleteTurn(authorization) {
+      if (!active) {
+        return false;
       }
-      return Promise.resolve(null);
+      return active.authorization !== null && isSameTurn(active.authorization, authorization);
     },
     activate(authorization) {
       active = null;
       pending = authorization;
+      delayed = null;
       lastDecision = null;
     },
     observePrompt(prompt) {
+      if (active) {
+        if (
+          active.kind !== 'authorized' ||
+          !authorizationTokenInTrustedHeader(prompt, active.authorization.turnToken)
+        ) {
+          active = { kind: 'blocked', authorization: active.authorization };
+        }
+        return;
+      }
       const authorization = pending;
       pending = null;
       if (authorization && authorizationTokenInTrustedHeader(prompt, authorization.turnToken)) {
+        delayed = null;
         active = {
           kind: 'authorized',
-          conversation: authorization.conversation,
-          policyDigest: authorization.policyDigest,
+          authorization,
         };
+      } else if (authorization) {
+        delayed = authorization;
+        active = null;
+      } else if (delayed && authorizationTokenInTrustedHeader(prompt, delayed.turnToken)) {
+        active = { kind: 'blocked', authorization: delayed };
+        delayed = null;
       } else {
-        active = authorizationTokenInTrustedHeader(prompt) ? { kind: 'blocked' } : null;
+        active = authorizationTokenInTrustedHeader(prompt)
+          ? { kind: 'blocked', authorization: null }
+          : null;
       }
     },
     clear() {
       active = null;
       pending = null;
+      delayed = null;
       lastDecision = null;
     },
     get active() {

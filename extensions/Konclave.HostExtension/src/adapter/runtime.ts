@@ -1,4 +1,10 @@
-import { createDeliveryCoordinator, type DeliveryCoordinator } from './delivery.js';
+import { performance } from 'node:perf_hooks';
+
+import {
+  createDeliveryCoordinator,
+  type DeliveryClock,
+  type DeliveryCoordinator,
+} from './delivery.js';
 import {
   maxClaimBatch,
   type AdapterChannel,
@@ -13,6 +19,8 @@ import {
  * profile holds a request open.
  */
 const claimWaitMilliseconds = 20_000;
+const backpressurePollMilliseconds = 250;
+const heartbeatMilliseconds = 20_000;
 
 /** Largest batch requested in one wait. */
 /** Default backoff after a rejected claim, so a broken channel cannot spin. */
@@ -24,6 +32,7 @@ export interface DeliveryRuntimeOptions {
   readonly coordinator: DeliveryCoordinator;
   readonly diagnostics: { error(message: string): void };
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly clock?: DeliveryClock;
   readonly retryMilliseconds?: number;
 }
 
@@ -37,9 +46,10 @@ export interface DeliveryRuntime {
 /**
  * Claims remote events and hands them to the delivery coordinator.
  *
- * The loop owns claiming only. Deciding when a claimed event may reach the session,
- * and whether it was accepted, belongs to the coordinator, so a change to wake policy
- * cannot accidentally alter claim or acknowledgment behaviour.
+ * The loop owns claiming and claim heartbeats. While the coordinator retains work,
+ * it renews existing leases instead of claiming an unbounded queue. Deciding when a
+ * claimed event may reach the session, and whether it was accepted, belongs to the
+ * coordinator.
  */
 export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryRuntime {
   const sleep =
@@ -49,8 +59,10 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
         setTimeout(resolve, milliseconds).unref?.();
       }));
   const retryMilliseconds = options.retryMilliseconds ?? defaultClaimRetryMilliseconds;
+  const clock = options.clock ?? { now: () => performance.now() };
   let running = true;
   let consecutiveFailures = 0;
+  let lastHeartbeatAt = clock.now() - heartbeatMilliseconds;
 
   const retryDelay = (): number => {
     const exponent = Math.min(Math.max(0, consecutiveFailures - 1), 10);
@@ -62,6 +74,47 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
 
   const completed = (async () => {
     while (running) {
+      if (options.coordinator.outstanding || options.coordinator.pending > 0) {
+        await options.coordinator.flush();
+        if (!options.coordinator.outstanding && options.coordinator.pending === 0) {
+          continue;
+        }
+        const now = clock.now();
+        if (now - lastHeartbeatAt >= heartbeatMilliseconds) {
+          try {
+            const heartbeat = await options.channel.request({
+              kind: 'heartbeat',
+              turn: options.coordinator.activeTurn ?? undefined,
+            });
+            if (heartbeat.kind === 'failure') {
+              options.diagnostics.error(`Konclave rejected a heartbeat: ${heartbeat.code}`);
+              consecutiveFailures += 1;
+              await sleep(retryDelay());
+              continue;
+            }
+            if (heartbeat.kind !== 'accepted') {
+              options.diagnostics.error(
+                'Konclave answered a delivery heartbeat with an unexpected response.',
+              );
+              consecutiveFailures += 1;
+              await sleep(retryDelay());
+              continue;
+            }
+            lastHeartbeatAt = now;
+            consecutiveFailures = 0;
+          } catch (error) {
+            if (!running) {
+              return;
+            }
+            options.diagnostics.error(`Konclave heartbeat failed: ${describeError(error)}`);
+            consecutiveFailures += 1;
+            await sleep(retryDelay());
+            continue;
+          }
+        }
+        await sleep(backpressurePollMilliseconds);
+        continue;
+      }
       let response: AdapterResponse;
       try {
         response = await options.channel.request({

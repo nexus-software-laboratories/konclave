@@ -101,6 +101,9 @@ pub enum SignatureScheme {
     Ed25519,
 }
 
+/// Root-signed capability bit for receiving and interpreting `DirectedRequest`.
+pub const APPLICATION_CAPABILITY_DIRECTED_REQUEST: u64 = 1;
+
 /// Public binding between a device root and a conversation-scoped MLS signature key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceCredentialBinding {
@@ -111,10 +114,12 @@ pub struct DeviceCredentialBinding {
     device_root_public_key: Ed25519PublicKey,
     conversation_signature_public_key: Ed25519PublicKey,
     device_binding_signature: Ed25519Signature,
+    application_capabilities: u64,
+    application_capabilities_signature: Option<Ed25519Signature>,
 }
 
 impl DeviceCredentialBinding {
-    /// Creates a validated public credential binding.
+    /// Creates a validated public credential binding with no additive capabilities.
     #[must_use]
     pub const fn new(
         version: ProtocolVersion,
@@ -133,7 +138,59 @@ impl DeviceCredentialBinding {
             device_root_public_key,
             conversation_signature_public_key,
             device_binding_signature,
+            application_capabilities: 0,
+            application_capabilities_signature: None,
         }
+    }
+
+    /// Creates a public credential binding with a complete capability assertion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an out-of-range error when capabilities and their signature are not
+    /// both present or both absent.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the signed credential fields remain explicit and atomic"
+    )]
+    pub fn new_with_capabilities(
+        version: ProtocolVersion,
+        device_id: DeviceId,
+        conversation_id: ConversationId,
+        signature_scheme: SignatureScheme,
+        device_root_public_key: Ed25519PublicKey,
+        conversation_signature_public_key: Ed25519PublicKey,
+        device_binding_signature: Ed25519Signature,
+        application_capabilities: u64,
+        application_capabilities_signature: Option<Ed25519Signature>,
+    ) -> Result<Self, KonclaveDomainError> {
+        if (application_capabilities == 0) != application_capabilities_signature.is_none() {
+            return Err(KonclaveDomainError::OutOfRange {
+                field: "application_capabilities_signature",
+                minimum: if application_capabilities == 0 {
+                    0
+                } else {
+                    Ed25519Signature::LENGTH
+                },
+                maximum: if application_capabilities == 0 {
+                    0
+                } else {
+                    Ed25519Signature::LENGTH
+                },
+                actual: application_capabilities_signature.map_or(0, |_| Ed25519Signature::LENGTH),
+            });
+        }
+        Ok(Self {
+            version,
+            device_id,
+            conversation_id,
+            signature_scheme,
+            device_root_public_key,
+            conversation_signature_public_key,
+            device_binding_signature,
+            application_capabilities,
+            application_capabilities_signature,
+        })
     }
 
     /// Returns the protocol version.
@@ -176,6 +233,24 @@ impl DeviceCredentialBinding {
     #[must_use]
     pub const fn device_binding_signature(&self) -> Ed25519Signature {
         self.device_binding_signature
+    }
+
+    /// Returns the root-signed application capability bits.
+    #[must_use]
+    pub const fn application_capabilities(&self) -> u64 {
+        self.application_capabilities
+    }
+
+    /// Returns whether this device can receive the directed-request content kind.
+    #[must_use]
+    pub const fn supports_directed_requests(&self) -> bool {
+        self.application_capabilities & APPLICATION_CAPABILITY_DIRECTED_REQUEST != 0
+    }
+
+    /// Returns the optional device-root signature over the capability assertion.
+    #[must_use]
+    pub const fn application_capabilities_signature(&self) -> Option<Ed25519Signature> {
+        self.application_capabilities_signature
     }
 }
 

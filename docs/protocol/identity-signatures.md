@@ -21,7 +21,7 @@ The public key is the raw 32-byte Ed25519 verification key.
 
 ## Conversation credential binding
 
-The device root signs this exact byte sequence:
+The base device credential retains this exact byte sequence for every binding:
 
 ```text
 "konclave-device-credential-binding-v1\0" ||
@@ -34,10 +34,27 @@ device_root_public_key[32] ||
 conversation_signature_public_key[32]
 ```
 
+Bindings with any application capability carry a second device-root signature over:
+
+```text
+"konclave-device-credential-capabilities-v1\0" ||
+credential_binding_signature_input ||
+application_capabilities_u64
+```
+
+Bit `0` advertises support for the `DirectedRequest` content kind. Unknown bits remain
+covered by the capability signature even when a reader does not interpret them.
+Adding or substituting a capability invalidates that signature. A prior reader may
+ignore both additive fields and still verify the unchanged base credential; stripping
+them safely removes capability proof rather than granting support.
+Because a directed request is an MLS group application message, every remote current
+member must advertise this bit before a sender can emit that content kind, even though
+only the exact target may handle it autonomously.
+
 `signature_scheme_u8` is `1` for Ed25519. The resulting signature is the 64-byte
 `device_binding_signature`.
 
-Membership authorization identifies the exact binding with:
+Membership authorization identifies the backward-compatible base binding with:
 
 ```text
 SHA-256(
@@ -49,7 +66,9 @@ SHA-256(
 
 Validation derives `DeviceId` from the included root key, verifies the device-root
 signature, requires the conversation identifier to match the MLS group, and requires
-the MLS leaf signature key to equal the bound conversation key.
+the MLS leaf signature key to equal the bound conversation key. When capabilities are
+nonzero, validation also requires and verifies the separate 64-byte
+`application_capabilities_signature`.
 
 ## Invitation
 

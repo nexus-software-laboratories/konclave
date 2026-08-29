@@ -1803,6 +1803,70 @@
     }
   },
   {
+    "name": "send_directed_request",
+    "description": "Encrypt, journal, and submit one request to an exact capable target device. Omit target_device_id only for one remote member; its response is terminal.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "reply_to_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message_id",
+        "text"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "sender_counter": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "message_id",
+        "sender_counter",
+        "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "send_message",
     "description": "Encrypt, journal, and submit one text message using a caller-stable 16-byte message_id.",
     "inputSchema": {

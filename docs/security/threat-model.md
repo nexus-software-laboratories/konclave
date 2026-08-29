@@ -249,11 +249,12 @@ revocation operations use a sealed terminal journal and atomically mutate local
 bindings before their outbound notification can be submitted. Deterministic
 effective-policy evaluation is implemented as a pure domain boundary. The paved
 daemon surface authorizes only exact directed requests and gates their one correlated
-response through the active digest while preserving native permissions. The current
-Copilot adapter withholds directed requests until it adopts that durable claim and
-completion protocol. Finite turn and token policies deny the autonomous path until
-durable accounting exists. Unsupported and generic harnesses retain explicit-send
-behavior.
+response through the active digest while preserving native permissions. The Copilot
+adapter claims one exact request before enqueue, binds its pre-tool hook to the
+request and attempt, renews the lease while the turn runs, and acknowledges only
+after a terminal response or no-response result. Finite turn and token policies deny
+the autonomous path until durable accounting exists. Unsupported and generic
+harnesses retain explicit-send behavior.
 
 Shared-local-service automatic delivery exposes only typed policy-exchange
 identifiers, digests, replacement intent, and response state for exchange
@@ -287,9 +288,9 @@ the mutually supported maximum.
 | Pairing expiry after membership commit | Separate completion deadline; recover the exact Welcome or issue a durable compensating MLS removal |
 | Remote pairing credential escalation | Never embed a wildcard or durable relay credential; require pre-provisioned access or an exact-route short-lived principal |
 | Enrollment authority theft or abuse | Separate enrollment/data-plane derivation domains, authenticate before body processing, fixed server grants, rate/concurrency/principal caps, verifier-only configuration, rotation, and revocation |
-| Credential substitution | Device-root binding validation and optional out-of-band fingerprint comparison |
+| Credential or capability substitution | Device-root binding validation covers identity and the conversation key; a separate root signature authenticates nonzero capability bits, while a missing assertion means no capability; optional out-of-band fingerprint comparison authenticates the intended device |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |
-| Protocol downgrade | Signed capability negotiation and fail-closed version selection |
+| Protocol downgrade | Signed capability negotiation across every remote recipient of a group application message and fail-closed version selection |
 | Oversized or malformed input | Pre-allocation bounds, deterministic parsing, property tests, fuzzing, and regression fixtures |
 | Offline database theft | Sealed secret blobs; no plaintext-key fallback |
 | Secret disclosure through diagnostics | No `Debug`, serialization, logs, telemetry, panic text, or snapshots containing keys/plaintext |

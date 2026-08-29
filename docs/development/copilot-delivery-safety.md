@@ -3,8 +3,8 @@
 The current adapter does not turn ordinary text, responses, membership changes, or
 policy exchange into a Copilot model turn. It retains the canonical event in message
 history, emits one concise body-free local diagnostic, and acknowledges the
-notification. A directed request is also withheld until the adapter adopts the
-daemon's durable claim, correlated-action, and completion protocol.
+notification. One exact directed request targeting this device may enter a model turn
+only after the daemon durably claims it under the active local policy.
 
 ## Peer content is data
 
@@ -12,7 +12,7 @@ The daemon derives the conversation and sender from authenticated MLS state. Pee
 text cannot override either value and never supplies policy, permission, or tool
 authority.
 
-When directed-request integration is enabled, its synthetic turn must state the
+The directed-request synthetic turn states the
 conversation, authenticated sender, stable notification identifier, exact request
 identifier, and local authorization outside the quoted region. The request body
 remains inside an explicit untrusted boundary and is data to evaluate, never local
@@ -31,17 +31,24 @@ turn can reserve at most one ordinary-text response correlated to the request.
 ## Injection timing
 
 Events are queued while the session is active and settled only once it is idle.
-Terminal events never enter the model. The directed-request integration must preserve
-the existing one-outstanding-turn gate and use the SDK's explicit `enqueue` mode so a
-peer turn waits behind foreground work rather than interrupting it.
+Terminal events never enter the model. The directed-request integration preserves the
+one-outstanding-turn gate and uses the SDK's explicit `enqueue` mode so a peer turn
+waits behind foreground work rather than interrupting it.
+An idle observation cannot complete a newly enqueued request until the session has
+observed the exact token-bearing synthetic prompt. If foreground user work wins the
+race, the later collaboration prompt enters a deny-all gate and completes with no
+response rather than leaking authority into either turn.
 
 ## Delivery is at least once
 
 A terminal event is acknowledged only after the adapter emits its local diagnostic.
-A future directed request is acknowledged only after the exact handling attempt
-reaches `completed-response` or `completed-no-response`. Failure before that boundary
-releases or expires the claim, so the stable notification remains reclaimable. A
-crash before acknowledgment may redeliver the same notification identifier.
+A directed request is acknowledged only after the exact handling attempt reaches
+`completed-response` or `completed-no-response`. The delivery long-poll renews the
+event and handling lease while the model turn remains active. While the coordinator
+retains a turn or queued work, the runtime sends heartbeat-only operations instead of
+claiming an unbounded local queue. Failure before durable completion releases or
+expires the event, so the stable notification remains reclaimable. A crash before
+acknowledgment may redeliver the same notification identifier.
 
 ## Tool cancellation reflects durable outcomes
 
@@ -91,7 +98,7 @@ ordinary readable history, so nothing is lost; it simply never woke a session.
 ## Bursts and wake budgets
 
 A terminal burst becomes one bounded local notification batch without starting a
-model turn or consuming its wake budget. A future directed-request turn never mixes
+model turn or consuming its wake budget. A directed-request turn never mixes
 conversations or request identities, so per-conversation limits remain meaningful.
 
 Wakes are capped overall and per conversation within a rolling window. Reaching a

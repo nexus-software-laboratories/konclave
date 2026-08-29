@@ -76,6 +76,15 @@ struct SendMessageRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SendDirectedRequestRequest {
+    conversation_id: String,
+    message_id: String,
+    target_device_id: Option<String>,
+    text: String,
+    reply_to_message_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ProposeCollaborationPolicyToolRequest {
     conversation_id: String,
     proposal_id: String,
@@ -482,6 +491,10 @@ impl StdioServer {
             "send_message" => {
                 Self::encode_json(self.send_message(Self::parse_parameters(payload)?).await?)
             }
+            "send_directed_request" => Self::encode_json(
+                self.send_directed_request(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             "propose_collaboration_policy" => Self::encode_json(
                 self.propose_collaboration_policy(Self::parse_parameters(payload)?)
                     .await?,
@@ -1023,6 +1036,37 @@ impl StdioServer {
         self.send_message_request(request, None).await
     }
 
+    #[tool(
+        name = "send_directed_request",
+        description = "Encrypt, journal, and submit one request to an exact capable target device. Omit target_device_id only for one remote member; its response is terminal."
+    )]
+    async fn send_directed_request(
+        &self,
+        Parameters(request): Parameters<SendDirectedRequestRequest>,
+    ) -> Result<Json<SentMessageResult>, String> {
+        self.authorize("send_directed_request")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let message_id = parse_message_id(&request.message_id)?;
+        let requested_target = request
+            .target_device_id
+            .as_deref()
+            .map(parse_device_id)
+            .transpose()?;
+        let target_device_id = self
+            .conversations
+            .directed_request_target(conversation_id, requested_target)
+            .map_err(send_message_error_from_conversation)?;
+        let reply_to = request
+            .reply_to_message_id
+            .as_deref()
+            .map(parse_message_id)
+            .transpose()?;
+        let content = ApplicationContent::directed_request(target_device_id, request.text)
+            .map_err(|_| "invalid_text".to_string())?;
+        self.send_application_content(conversation_id, message_id, content, reply_to, None)
+            .await
+    }
+
     pub(crate) async fn dispatch_authorized_send_json(
         &self,
         payload: &[u8],
@@ -1045,7 +1089,6 @@ impl StdioServer {
         request: SendMessageRequest,
         collaboration_action_authorization: Option<CollaborationActionAuthorization>,
     ) -> Result<Json<SentMessageResult>, String> {
-        let applications = self.application_service()?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
         let message_id = parse_message_id(&request.message_id)?;
         let reply_to = request
@@ -1055,6 +1098,25 @@ impl StdioServer {
             .transpose()?;
         let content =
             ApplicationContent::text(request.text).map_err(|_| "invalid_text".to_string())?;
+        self.send_application_content(
+            conversation_id,
+            message_id,
+            content,
+            reply_to,
+            collaboration_action_authorization,
+        )
+        .await
+    }
+
+    async fn send_application_content(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        content: ApplicationContent,
+        reply_to: Option<MessageId>,
+        collaboration_action_authorization: Option<CollaborationActionAuthorization>,
+    ) -> Result<Json<SentMessageResult>, String> {
+        let applications = self.application_service()?;
         let (sent_at, now, expires_at) = message_times()?;
         let sent = applications
             .send(SendApplicationRequest {
@@ -1678,6 +1740,7 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "remove_member"
         | "change_member_role"
         | "send_message"
+        | "send_directed_request"
         | "propose_collaboration_policy"
         | "propose_collaboration_policy_source"
         | "resume_collaboration_policy_proposal"
@@ -2057,6 +2120,24 @@ fn send_message_error(error: ApplicationServiceError) -> String {
             ProfileStoreError::CollaborationPolicyReplacementMismatch
             | ProfileStoreError::InvalidAdapterLease,
         )) => "collaboration_policy_conflict".to_string(),
+        ApplicationServiceError::Conversation(
+            ConversationCoordinatorError::DirectedRequestUnsupported,
+        ) => "directed_request_unsupported".to_string(),
+        error => tool_error(error),
+    }
+}
+
+fn send_message_error_from_conversation(error: ConversationCoordinatorError) -> String {
+    match error {
+        ConversationCoordinatorError::DirectedRequestUnsupported => {
+            "directed_request_unsupported".to_string()
+        }
+        ConversationCoordinatorError::DirectedRequestTargetRequired => {
+            "directed_request_target_required".to_string()
+        }
+        ConversationCoordinatorError::Profile(ProfileStoreError::ConversationNotFound) => {
+            "invalid_conversation_id".to_string()
+        }
         error => tool_error(error),
     }
 }

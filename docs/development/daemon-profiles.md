@@ -135,6 +135,11 @@ its matching outbox/history state and finishes an exact unsealed response reserv
 before abandoning unrelated counter gaps. A separately sealed row count detects
 deletion or insertion, and the authenticated device-identity schema floor prevents
 recreating an erased journal by lowering `user_version`.
+The delivery consumer heartbeat extends its still-live remote-event leases and, when
+the adapter supplies the exact active request identity, that one handling claim. It
+never changes the request attempt or lease generation. A queued or deferred request
+therefore cannot keep an abandoned handling claim alive, while a healthy long model
+turn remains authoritative without permitting concurrent redelivery.
 
 Remote application and membership completion create one context-bound event before
 advancing the relay cursor. Local echoes do not create events. Muted conversations

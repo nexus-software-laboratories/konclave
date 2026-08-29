@@ -78,6 +78,60 @@ function queuedDeliveryClient(): LocalServiceClient {
   };
 }
 
+function queuedDirectedRequestClient(): LocalServiceClient {
+  let rejectClaim: ((error: Error) => void) | undefined;
+  let claims = 0;
+  const close = vi.fn(() => rejectClaim?.(new Error('closed')));
+  return {
+    profile: 'session-0123456789abcdef01234567',
+    connected: true,
+    retire: vi.fn(async () => close()),
+    close,
+    request: vi.fn(async (operation) => {
+      if (operation === 'delivery.claim') {
+        claims += 1;
+        if (claims === 1) {
+          return {
+            events: [
+              {
+                notificationId: '01'.repeat(16),
+                leaseGeneration: 1,
+                sequence: 1,
+                conversation: '02'.repeat(32),
+                sender: '03'.repeat(32),
+                relayCursor: 1,
+                payload: {
+                  kind: 'directed_request',
+                  messageId: '04'.repeat(16),
+                  targetDeviceId: '05'.repeat(32),
+                  text: 'confirm the contract',
+                },
+              },
+            ],
+          };
+        }
+        return new Promise<never>((_resolve, reject) => {
+          rejectClaim = reject;
+        });
+      }
+      if (operation === 'collaboration.turn.authorize') {
+        return {
+          outcome: 'authorized',
+          reason: null,
+          policyDigest: '06'.repeat(32),
+          policyName: 'request-reply',
+          requestMessageId: '04'.repeat(16),
+          attempt: 1,
+        };
+      }
+      if (operation === 'collaboration.turn.complete') {
+        return { outcome: 'completed_no_response', changed: true };
+      }
+      return {};
+    }),
+  };
+}
+
 function requestCount(client: LocalServiceClient, operation: string): number {
   return vi.mocked(client.request).mock.calls.filter(([name]) => name === operation).length;
 }
@@ -437,6 +491,55 @@ describe('bootExtension', () => {
     await Promise.resolve();
     expect(connect).toHaveBeenCalledTimes(1);
     expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles an authorized directed request only after the model turn becomes idle', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock();
+    const client = queuedDirectedRequestClient();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockResolvedValue(sessionMock.session),
+      processController,
+      connect: vi.fn().mockResolvedValue(client),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sessionMock.emit('session.idle', { data: {}, timestamp: '2026-08-16T00:00:00.000Z' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+    const prompt = sessionMock.send.mock.calls[0]?.[0];
+    expect(prompt).toMatchObject({ mode: 'enqueue' });
+    expect(prompt).toHaveProperty('prompt', expect.stringContaining('confirm the contract'));
+    expect(requestCount(client, 'collaboration.turn.authorize')).toBe(1);
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(0);
+
+    sessionMock.emit('user.message', {
+      data: { content: typeof prompt === 'object' ? prompt.prompt : '' },
+    });
+    sessionMock.emit('assistant.turn_start', {});
+    sessionMock.emit('session.idle', {
+      data: {},
+      timestamp: '2026-08-16T00:00:01.000Z',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestCount(client, 'collaboration.turn.complete')).toBe(1);
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(1);
+    expect(client.request).toHaveBeenCalledWith('collaboration.turn.complete', {
+      conversationId: '02'.repeat(32),
+      policyDigest: '06'.repeat(32),
+      requestMessageId: '04'.repeat(16),
+      attempt: 1,
+    });
+    controller?.dispose();
   });
 
   it('settles a terminal update when a resumed session stays idle after startup', async () => {

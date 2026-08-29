@@ -102,6 +102,18 @@ with:
 /konclave send -- <message text>
 ```
 
+To request one automatic terminal response in a two-member conversation, use:
+
+```text
+/konclave request <conversation-id> -- <request text>
+```
+
+For a group conversation, obtain the intended peer's full identifier with
+`/konclave identity` in that session and include it after the conversation ID.
+Only newly established membership whose root-signed credential advertises directed
+requests is eligible. An older conversation remains usable for ordinary messages but
+must be paired again before it can carry this request kind.
+
 That selection is stored in the session's durable profile, so implicit send continues
 to target the same conversation after the Copilot session is restarted or resumed.
 Profiles upgraded from an earlier candidate deliberately do not guess among existing
@@ -136,11 +148,11 @@ non-atomic boundary.
 
 ## Automated two-session smoke
 
-The complete local agent scenario is temporarily disabled while the packaged Copilot
-adapter adopts the daemon's durable directed-request handling protocol.
-`Invoke-KonclaveCopilotSmoke.ps1` retains the hard CI refusal and then exits before
-starting a Copilot session. This prevents the superseded ordinary-text autonomy path
-from consuming credits or hanging while the follow-up integration is incomplete.
+The complete local agent scenario remains temporarily disabled until its prompts and
+assertions are rewritten around `send_directed_request`, one correlated response, and
+terminal silence. `Invoke-KonclaveCopilotSmoke.ps1` retains the hard CI refusal and
+then exits before starting a Copilot session. This prevents the superseded
+ordinary-text autonomy path from consuming credits or hanging during the transition.
 
 When re-enabled, the runner must continue to keep capabilities, policy annotations,
 prompts, model responses, tool arguments, credentials, and user-provided content out

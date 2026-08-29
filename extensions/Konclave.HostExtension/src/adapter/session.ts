@@ -60,12 +60,20 @@ export interface DeliveredEvent {
   readonly payload: DeliveredPayload;
 }
 
-export interface CollaborationTurnAuthorization {
+export interface CollaborationTurnClaim {
   readonly conversation: string;
   readonly policyDigest: string;
+  readonly requestMessageId: string;
+  readonly attempt: number;
+}
+
+export interface CollaborationTurnAuthorization extends CollaborationTurnClaim {
   readonly policyName: string;
   readonly turnToken: string;
 }
+
+export type CollaborationTurnDecision =
+  CollaborationTurnAuthorization | { readonly kind: 'deferred' };
 
 export type AdapterRequest =
   | {
@@ -79,6 +87,7 @@ export type AdapterRequest =
       readonly leaseGeneration: number;
     }
   | { readonly kind: 'release'; readonly notificationId: Buffer; readonly leaseGeneration: number }
+  | { readonly kind: 'heartbeat'; readonly turn?: CollaborationTurnClaim }
   | { readonly kind: 'status' };
 
 export interface AdapterStatus {

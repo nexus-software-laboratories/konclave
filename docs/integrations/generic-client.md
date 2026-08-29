@@ -29,7 +29,10 @@ permission intersection, subagent containment, or durable turn/token accounting.
 `collaboration.action.evaluate` are deliberately absent from its closed operation
 surface. Activating a policy therefore does not turn an unsupported harness into an
 autonomous collaborator; peer content remains data that the harness may inspect and
-answer only through explicit operations.
+answer only through explicit operations. `send_directed_request` is available as an
+explicit operation when the resolved target's root-signed credential advertises
+support; an omitted target resolves only in a two-member conversation. It does not
+give the generic harness an automatic response lifecycle.
 
 ## Profile selection
 

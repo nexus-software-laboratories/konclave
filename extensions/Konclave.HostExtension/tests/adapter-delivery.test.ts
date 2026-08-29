@@ -10,6 +10,7 @@ import type {
   AdapterChannel,
   AdapterRequest,
   AdapterResponse,
+  CollaborationTurnAuthorization,
   DeliveredEvent,
 } from '../src/adapter/session.js';
 
@@ -24,6 +25,39 @@ function event(
     sender: overrides.sender ?? Buffer.alloc(32, 3),
     relayCursor: overrides.relayCursor ?? 1,
     payload: overrides.payload ?? { kind: 'application-text', text: overrides.text ?? 'hello' },
+  };
+}
+
+function requestEvent(
+  overrides: Partial<DeliveredEvent> & {
+    text?: string;
+    conversation?: Buffer;
+    messageId?: Buffer;
+  } = {},
+): DeliveredEvent {
+  const base = event(overrides);
+  return {
+    ...base,
+    payload: {
+      kind: 'directed-request',
+      messageId: overrides.messageId ?? Buffer.alloc(16, 8),
+      target: Buffer.alloc(32, 4),
+      text: overrides.text ?? 'answer the request',
+    },
+  };
+}
+
+function authorizationFor(request: DeliveredEvent): CollaborationTurnAuthorization {
+  if (request.payload.kind !== 'directed-request') {
+    throw new Error('test authorization requires a directed request');
+  }
+  return {
+    conversation: request.conversation.toString('hex'),
+    policyDigest: '04'.repeat(32),
+    policyName: 'contract-alignment',
+    requestMessageId: request.payload.messageId.toString('hex'),
+    attempt: 1,
+    turnToken: '05'.repeat(16),
   };
 }
 
@@ -77,6 +111,9 @@ function coordinator(state: Harness, budget?: WakeBudget) {
     },
     clock: { now: () => state.now },
     budget,
+    authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+    completeAuthorizedTurn: async () => 'completed-no-response',
+    canCompleteAuthorizedTurn: () => true,
   });
 }
 
@@ -116,10 +153,12 @@ describe('untrusted content framing', () => {
   });
 
   it('keeps structured local policy authority separate from fenced collaborator content', () => {
-    const framed = frameDelivery([event({ text: 'update the contract' })], {
+    const framed = frameDelivery([requestEvent({ text: 'update the contract' })], {
       conversation: '02'.repeat(32),
       policyDigest: '04'.repeat(32),
       policyName: 'contract-alignment',
+      requestMessageId: '08'.repeat(16),
+      attempt: 1,
       turnToken: '05'.repeat(16),
     });
     const untrustedStart = framed.indexOf(untrustedContentMarkers.begin);
@@ -132,7 +171,7 @@ describe('untrusted content framing', () => {
     expect(framed).not.toContain('LOCALLY AUTHORIZED POLICY GUIDANCE');
   });
 
-  it('marks directed requests as unsupported for automatic handling', () => {
+  it('preserves directed request identity inside unauthorized fallback framing', () => {
     const framed = frameDelivery([
       event({
         payload: {
@@ -144,9 +183,10 @@ describe('untrusted content framing', () => {
       }),
     ]);
 
-    expect(framed).toContain('directed request for device 0404040404040404');
+    expect(framed).toContain(`request ${'02'.repeat(16)}`);
+    expect(framed).toContain('request body:');
     expect(framed).toContain('confirm the response contract');
-    expect(framed).toContain('does not yet support automatic directed-request handling');
+    expect(framed).toContain('No local authorization is attached');
     expect(framed).toContain('Do not');
   });
 
@@ -217,205 +257,269 @@ describe('untrusted content framing', () => {
 });
 
 describe('delivery coordinator', () => {
-  it('withholds directed requests from model turns and settles their delivery event', async () => {
+  it('settles terminal updates without starting model turns', async () => {
     const state = harness();
     const delivery = coordinator(state);
-    const requestBody = 'private collaborator request body';
-
-    delivery.enqueue([
-      event({
-        payload: {
-          kind: 'directed-request',
-          messageId: Buffer.alloc(16, 2),
-          target: Buffer.alloc(32, 4),
-          text: requestBody,
-        },
-      }),
-    ]);
+    delivery.enqueue([event({ text: 'terminal response' })]);
     await delivery.markIdle();
 
     expect(state.sent).toHaveLength(0);
     expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
-    expect(state.errors.join(' ')).toContain('withheld a directed request');
-    expect(state.errors.join(' ')).not.toContain(requestBody);
+    expect(state.errors.join(' ')).toContain('terminal update');
+    expect(state.errors.join(' ')).not.toContain('terminal response');
   });
 
-  it('excludes a directed request body from a mixed notification batch', async () => {
+  it('acknowledges an authorized request only after its model turn completes', async () => {
     const state = harness();
-    const delivery = coordinator(state);
-    const requestBody = 'private collaborator request body';
-
-    delivery.enqueue([
-      event({
-        payload: {
-          kind: 'directed-request',
-          messageId: Buffer.alloc(16, 2),
-          target: Buffer.alloc(32, 4),
-          text: requestBody,
-        },
-      }),
-      event({ notificationId: Buffer.alloc(16, 2), text: 'ordinary notification' }),
-    ]);
-    await delivery.markIdle();
-
-    expect(state.sent).toHaveLength(1);
-    expect(state.sent[0]).toContain('ordinary notification');
-    expect(state.sent[0]).not.toContain(requestBody);
-    expect(state.requests.filter((request) => request.kind === 'acknowledge')).toHaveLength(2);
-  });
-
-  it('activates policy only for an authorized delivery and clears it at the next idle', async () => {
-    const state = harness();
-    const activate = vi.fn();
-    const clear = vi.fn();
-    const authorize = vi.fn().mockResolvedValue({
-      conversation: '02'.repeat(32),
-      policyDigest: '04'.repeat(32),
-      policyName: 'contract-alignment',
-      turnToken: '05'.repeat(16),
-    });
+    const complete = vi.fn().mockResolvedValue('completed-no-response');
     const delivery = createDeliveryCoordinator({
       channel: state.channel,
       session: {
         async send(message) {
           state.sent.push(message.prompt);
-          return 'message-id';
-        },
-      },
-      diagnostics: {
-        error(message) {
-          state.errors.push(message);
-        },
-      },
-      authorizeTurn: authorize,
-      activateAuthorizedTurn: activate,
-      clearAuthorizedTurn: clear,
-    });
-
-    delivery.enqueue([event()]);
-    await delivery.markIdle();
-    expect(authorize).toHaveBeenCalledOnce();
-    expect(activate).toHaveBeenCalledOnce();
-    expect(clear).toHaveBeenCalledOnce();
-    expect(state.sent[0]).toContain('explicitly activated by the local operator');
-
-    delivery.markActive();
-    await delivery.markIdle();
-    expect(clear).toHaveBeenCalledTimes(2);
-  });
-
-  it('holds events while the session is active and delivers once idle', async () => {
-    const state = harness();
-    const delivery = coordinator(state);
-
-    delivery.markActive();
-    delivery.enqueue([event({ text: 'first' })]);
-    expect(state.sent).toHaveLength(0);
-    expect(delivery.pending).toBe(1);
-
-    await delivery.markIdle();
-    expect(state.sent).toHaveLength(1);
-    expect(state.sendModes).toEqual(['enqueue']);
-    expect(delivery.pending).toBe(0);
-  });
-
-  it('coalesces a burst into one synthetic turn', async () => {
-    const state = harness();
-    const delivery = coordinator(state);
-
-    delivery.enqueue([
-      event({ text: 'one', notificationId: Buffer.alloc(16, 1) }),
-      event({ text: 'two', notificationId: Buffer.alloc(16, 2) }),
-      event({ text: 'three', notificationId: Buffer.alloc(16, 3) }),
-    ]);
-    await delivery.markIdle();
-
-    expect(state.sent).toHaveLength(1);
-    expect(state.sent[0]).toContain('3 updates');
-    expect(state.requests.filter((request) => request.kind === 'acknowledge')).toHaveLength(3);
-  });
-
-  it('acknowledges only after the harness accepts the send', async () => {
-    const state = harness();
-    const delivery = coordinator(state);
-
-    delivery.enqueue([event()]);
-    await delivery.markIdle();
-
-    // The send is recorded before any acknowledgment is requested, so an event is
-    // never marked delivered on the strength of a send that had not resolved.
-    expect(state.sent).toHaveLength(1);
-    expect(state.requests).toHaveLength(1);
-    expect(state.requests[0]?.kind).toBe('acknowledge');
-  });
-
-  it('releases the claim when the harness rejects the send', async () => {
-    const state = harness({ failSend: true });
-    const delivery = coordinator(state);
-
-    delivery.enqueue([event()]);
-    await delivery.markIdle();
-
-    expect(state.sent).toHaveLength(0);
-    expect(state.requests[0]?.kind).toBe('release');
-    expect(state.errors.join(' ')).toContain('not accepted');
-  });
-
-  it('allows one outstanding synthetic turn', async () => {
-    const state = harness();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const delivery = createDeliveryCoordinator({
-      channel: state.channel,
-      session: {
-        async send(message) {
-          state.sent.push(message.prompt);
-          state.sendModes.push(message.mode);
-          await gate;
           return 'message-id';
         },
       },
       diagnostics: { error: (message) => state.errors.push(message) },
-      clock: { now: () => state.now },
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => true,
     });
-
-    delivery.enqueue([event({ notificationId: Buffer.alloc(16, 1) })]);
-    const first = delivery.markIdle();
-    expect(delivery.outstanding).toBe(true);
-
-    delivery.enqueue([event({ notificationId: Buffer.alloc(16, 2) })]);
+    const request = requestEvent();
+    delivery.enqueue([request]);
     await delivery.markIdle();
-    expect(state.sent).toHaveLength(1);
 
-    release();
-    await first;
+    expect(state.sent).toHaveLength(1);
+    expect(delivery.outstanding).toBe(true);
+    expect(state.requests).toHaveLength(0);
+    delivery.markActive();
+    await delivery.markIdle();
+    expect(complete).toHaveBeenCalledWith(authorizationFor(request));
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
     expect(delivery.outstanding).toBe(false);
   });
 
-  it('stops waking after the global budget and resumes in the next window', async () => {
+  it('settles a directed request when local policy does not authorize a turn', async () => {
     const state = harness();
-    const budget: WakeBudget = { ...defaultWakeBudget, maxTurnsPerWindow: 2, windowMs: 1_000 };
-    const delivery = coordinator(state, budget);
-
-    for (let index = 0; index < 3; index += 1) {
-      delivery.enqueue([event({ notificationId: Buffer.alloc(16, index + 1) })]);
-      await delivery.markIdle();
-    }
-
-    expect(state.sent).toHaveLength(2);
-    // The third stays claimed rather than being acknowledged undelivered.
-    expect(delivery.pending).toBe(1);
-    expect(state.requests.some((request) => request.kind === 'release')).toBe(false);
-
-    state.now += budget.windowMs;
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: { send: vi.fn() },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: async () => null,
+      completeAuthorizedTurn: async () => 'completed-no-response',
+      canCompleteAuthorizedTurn: () => true,
+    });
+    delivery.enqueue([requestEvent({ text: 'private request body' })]);
     await delivery.markIdle();
-    expect(state.sent).toHaveLength(3);
-    expect(delivery.pending).toBe(0);
+
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+    expect(state.errors.join(' ')).toContain('no automatic turn was authorized');
+    expect(state.errors.join(' ')).not.toContain('private request body');
   });
 
-  it('applies a per-conversation budget without starving another conversation', async () => {
+  it('settles an oversized request without starting a model turn', async () => {
+    const state = harness();
+    const delivery = coordinator(state, {
+      ...defaultWakeBudget,
+      maxCharactersPerTurn: 4,
+    });
+    delivery.enqueue([requestEvent({ text: 'too long' })]);
+    await delivery.markIdle();
+
+    expect(state.sent).toHaveLength(0);
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+    expect(state.errors.join(' ')).toContain('outside the automatic turn budget');
+    expect(state.errors.join(' ')).not.toContain('too long');
+  });
+
+  it('releases a request when authorization is unavailable', async () => {
+    const state = harness();
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: { send: vi.fn() },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: async () => {
+        throw new Error('service unavailable');
+      },
+      completeAuthorizedTurn: async () => 'completed-no-response',
+      canCompleteAuthorizedTurn: () => true,
+    });
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+
+    expect(state.requests).toMatchObject([{ kind: 'release' }]);
+    expect(state.errors.join(' ')).toContain('service unavailable');
+  });
+
+  it('defers a live duplicate claim until a newer delivery generation arrives', async () => {
+    const state = harness();
+    let defer = true;
+    const authorize = vi.fn(async ([request]: readonly DeliveredEvent[]) => {
+      if (defer) {
+        return { kind: 'deferred' as const };
+      }
+      return request ? authorizationFor(request) : null;
+    });
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send(message) {
+          state.sent.push(message.prompt);
+          return 'message-id';
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: authorize,
+      completeAuthorizedTurn: async () => 'completed-no-response',
+      canCompleteAuthorizedTurn: () => true,
+    });
+    const notificationId = Buffer.alloc(16, 9);
+    delivery.enqueue([requestEvent({ notificationId, leaseGeneration: 1 })]);
+    await delivery.markIdle();
+
+    expect(state.requests).toHaveLength(0);
+    expect(delivery.pending).toBe(1);
+    expect(delivery.outstanding).toBe(false);
+    await delivery.flush();
+    expect(authorize).toHaveBeenCalledOnce();
+
+    defer = false;
+    delivery.enqueue([requestEvent({ notificationId, leaseGeneration: 2 })]);
+    await delivery.flush();
+    expect(authorize).toHaveBeenLastCalledWith([expect.objectContaining({ leaseGeneration: 2 })]);
+    expect(state.sent).toHaveLength(1);
+  });
+
+  it('terminalizes a request when the harness rejects its enqueue', async () => {
+    const state = harness({ failSend: true });
+    const complete = vi.fn().mockResolvedValue('completed-no-response');
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send() {
+          throw new Error('session rejected the send');
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => true,
+    });
+
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+
+    expect(complete).toHaveBeenCalledOnce();
+    expect(state.requests[0]?.kind).toBe('acknowledge');
+    expect(state.errors.join(' ')).toContain('not accepted');
+  });
+
+  it('releases a request when durable turn completion fails', async () => {
+    const state = harness();
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send(message) {
+          state.sent.push(message.prompt);
+          return 'message-id';
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: async () => {
+        throw new Error('completion unavailable');
+      },
+      canCompleteAuthorizedTurn: () => true,
+    });
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+    delivery.markActive();
+    await delivery.markIdle();
+
+    expect(state.requests[0]?.kind).toBe('release');
+    expect(state.errors.join(' ')).toContain('completion unavailable');
+  });
+
+  it('allows only one request turn to remain outstanding', async () => {
+    const state = harness();
+    const delivery = coordinator(state);
+    delivery.enqueue([
+      requestEvent({ notificationId: Buffer.alloc(16, 1), messageId: Buffer.alloc(16, 1) }),
+      requestEvent({ notificationId: Buffer.alloc(16, 2), messageId: Buffer.alloc(16, 2) }),
+    ]);
+    await delivery.markIdle();
+
+    expect(state.sent).toHaveLength(1);
+    expect(delivery.outstanding).toBe(true);
+    expect(delivery.pending).toBe(1);
+    await delivery.flush();
+    expect(state.sent).toHaveLength(1);
+    delivery.markActive();
+    await delivery.markIdle();
+    expect(state.sent).toHaveLength(2);
+    expect(delivery.pending).toBe(0);
+    expect(delivery.outstanding).toBe(true);
+    delivery.markActive();
+    await delivery.markIdle();
+    expect(delivery.outstanding).toBe(false);
+  });
+
+  it('does not complete a request on idle before its synthetic prompt starts', async () => {
+    const state = harness();
+    let started = false;
+    const complete = vi.fn().mockResolvedValue('completed-no-response');
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send(message) {
+          state.sent.push(message.prompt);
+          return 'message-id';
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => started,
+    });
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+    await delivery.markIdle();
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(state.requests).toHaveLength(0);
+    expect(delivery.outstanding).toBe(true);
+
+    started = true;
+    delivery.markActive();
+    await delivery.markIdle();
+    expect(complete).toHaveBeenCalledOnce();
+    expect(state.requests[0]?.kind).toBe('acknowledge');
+  });
+
+  it('stops starting turns at the global budget and resumes in the next window', async () => {
+    const state = harness();
+    const budget: WakeBudget = {
+      ...defaultWakeBudget,
+      maxTurnsPerWindow: 1,
+      maxTurnsPerConversationPerWindow: 1,
+      windowMs: 1_000,
+    };
+    const delivery = coordinator(state, budget);
+    delivery.enqueue([
+      requestEvent({ notificationId: Buffer.alloc(16, 1), messageId: Buffer.alloc(16, 1) }),
+      requestEvent({ notificationId: Buffer.alloc(16, 2), messageId: Buffer.alloc(16, 2) }),
+    ]);
+    await delivery.markIdle();
+    delivery.markActive();
+    await delivery.markIdle();
+    expect(state.sent).toHaveLength(1);
+    expect(delivery.pending).toBe(1);
+    state.now += budget.windowMs;
+    await delivery.flush();
+    expect(state.sent).toHaveLength(2);
+  });
+
+  it('does not let a budgeted conversation starve another conversation', async () => {
     const state = harness();
     const budget: WakeBudget = {
       ...defaultWakeBudget,
@@ -423,60 +527,51 @@ describe('delivery coordinator', () => {
       windowMs: 10_000,
     };
     const delivery = coordinator(state, budget);
-
-    const busy = Buffer.alloc(32, 2);
+    const first = Buffer.alloc(32, 2);
     const other = Buffer.alloc(32, 9);
-
-    delivery.enqueue([event({ conversation: busy, notificationId: Buffer.alloc(16, 1) })]);
-    await delivery.markIdle();
-    expect(state.sent).toHaveLength(1);
-
-    delivery.enqueue([event({ conversation: busy, notificationId: Buffer.alloc(16, 2) })]);
-    await delivery.markIdle();
-    expect(state.sent).toHaveLength(1);
-
-    // A different conversation has its own budget, so it is not blocked by the busy
-    // one even though the busy one is queued ahead of it.
-    delivery.enqueue([event({ conversation: other, notificationId: Buffer.alloc(16, 3) })]);
-    await delivery.markIdle();
-    await delivery.markIdle();
-    expect(state.sent).toHaveLength(2);
-  });
-
-  it('never mixes conversations in one synthetic turn', async () => {
-    const state = harness();
-    const delivery = coordinator(state);
-
     delivery.enqueue([
-      event({ conversation: Buffer.alloc(32, 2), text: 'from-first' }),
-      event({ conversation: Buffer.alloc(32, 9), text: 'from-second' }),
+      requestEvent({ conversation: first, notificationId: Buffer.alloc(16, 1) }),
+      requestEvent({ conversation: first, notificationId: Buffer.alloc(16, 2) }),
+      requestEvent({ conversation: other, notificationId: Buffer.alloc(16, 3) }),
     ]);
     await delivery.markIdle();
-
-    expect(state.sent).toHaveLength(1);
-    expect(state.sent[0]).toContain('from-first');
-    expect(state.sent[0]).not.toContain('from-second');
+    delivery.markActive();
+    await delivery.markIdle();
+    expect(state.sent).toHaveLength(2);
+    expect(state.sent[1]).toContain(other.toString('hex'));
     expect(delivery.pending).toBe(1);
   });
 
-  it('splits a batch that exceeds the character budget', async () => {
+  it('keeps only the newest queued lease generation for one notification', async () => {
     const state = harness();
-    const budget: WakeBudget = { ...defaultWakeBudget, maxCharactersPerTurn: 10 };
-    const delivery = coordinator(state, budget);
-
+    const authorize = vi.fn(async ([request]: readonly DeliveredEvent[]) =>
+      request ? authorizationFor(request) : null,
+    );
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send(message) {
+          state.sent.push(message.prompt);
+          return 'message-id';
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: authorize,
+      completeAuthorizedTurn: async () => 'completed-no-response',
+      canCompleteAuthorizedTurn: () => true,
+    });
+    const notificationId = Buffer.alloc(16, 7);
     delivery.enqueue([
-      event({ text: 'aaaaaaaa', notificationId: Buffer.alloc(16, 1) }),
-      event({ text: 'bbbbbbbb', notificationId: Buffer.alloc(16, 2) }),
+      requestEvent({ notificationId, leaseGeneration: 1 }),
+      requestEvent({ notificationId, leaseGeneration: 2 }),
     ]);
     await delivery.markIdle();
-    expect(state.sent).toHaveLength(1);
-    expect(delivery.pending).toBe(1);
 
-    await delivery.markIdle();
-    expect(state.sent).toHaveLength(2);
+    expect(delivery.pending).toBe(0);
+    expect(authorize).toHaveBeenCalledWith([expect.objectContaining({ leaseGeneration: 2 })]);
   });
 
-  it('reports a rejected transition without losing the turn', async () => {
+  it('reports a rejected acknowledgment after durable completion', async () => {
     const state = harness();
     const delivery = createDeliveryCoordinator({
       channel: {
@@ -490,15 +585,17 @@ describe('delivery coordinator', () => {
       session: {
         async send(message) {
           state.sent.push(message.prompt);
-          state.sendModes.push(message.mode);
           return 'message-id';
         },
       },
       diagnostics: { error: (message) => state.errors.push(message) },
-      clock: { now: () => state.now },
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: async () => 'completed-response',
+      canCompleteAuthorizedTurn: () => true,
     });
-
-    delivery.enqueue([event()]);
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+    delivery.markActive();
     await delivery.markIdle();
 
     expect(state.sent).toHaveLength(1);
@@ -509,5 +606,29 @@ describe('delivery coordinator', () => {
     const state = harness();
     const delivery = coordinator(state);
     expect(() => delivery.enqueue(Array.from({ length: 51 }, () => event()))).toThrow();
+  });
+
+  it('refuses cumulative unique deliveries beyond the queue bound', () => {
+    const state = harness();
+    const delivery = coordinator(state);
+    delivery.enqueue(
+      Array.from({ length: 16 }, (_, index) =>
+        requestEvent({ notificationId: Buffer.alloc(16, index + 1) }),
+      ),
+    );
+    expect(() =>
+      delivery.enqueue([requestEvent({ notificationId: Buffer.alloc(16, 17) })]),
+    ).toThrow('queue is outside its bound');
+    expect(delivery.pending).toBe(16);
+  });
+
+  it('rejects a wake budget that could batch multiple requests', () => {
+    const state = harness();
+    expect(() =>
+      coordinator(state, {
+        ...defaultWakeBudget,
+        maxEventsPerTurn: 2,
+      }),
+    ).toThrow('wake budget is invalid');
   });
 });

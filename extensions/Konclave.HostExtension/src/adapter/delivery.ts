@@ -1,6 +1,7 @@
 import { frameDelivery } from './framing.js';
 import {
   type CollaborationTurnAuthorization,
+  type CollaborationTurnDecision,
   maxClaimBatch,
   type AdapterChannel,
   type AdapterResponse,
@@ -10,13 +11,12 @@ import {
 /**
  * Coalescing and wake limits.
  *
- * A synthetic turn costs the user attention and model budget, so bursts become one
- * delivery and the number of wakes is capped independently overall and per
- * conversation. Reaching a budget delays delivery; it never acknowledges undelivered
- * work.
+ * A directed request costs user attention and model budget, so request bodies and
+ * wakes are bounded independently overall and per conversation. Terminal updates do
+ * not consume this budget.
  */
 export interface WakeBudget {
-  /** Largest number of events folded into one synthetic turn. */
+  /** Must remain one for the exact-request turn contract. */
   readonly maxEventsPerTurn: number;
   /** Largest total peer text, in characters, folded into one turn. */
   readonly maxCharactersPerTurn: number;
@@ -29,12 +29,13 @@ export interface WakeBudget {
 }
 
 export const defaultWakeBudget: WakeBudget = {
-  maxEventsPerTurn: 20,
+  maxEventsPerTurn: 1,
   maxCharactersPerTurn: 8_000,
   maxTurnsPerWindow: 12,
   maxTurnsPerConversationPerWindow: 6,
   windowMs: 5 * 60_000,
 };
+const deferredRetryMilliseconds = 20_000;
 
 export interface DeliverySession {
   send(message: { readonly prompt: string; readonly mode: 'enqueue' }): Promise<string>;
@@ -56,7 +57,11 @@ export interface DeliveryCoordinatorOptions {
   readonly budget?: WakeBudget;
   readonly authorizeTurn?: (
     events: readonly DeliveredEvent[],
-  ) => Promise<CollaborationTurnAuthorization | null>;
+  ) => Promise<CollaborationTurnDecision | null>;
+  readonly completeAuthorizedTurn?: (
+    authorization: CollaborationTurnAuthorization,
+  ) => Promise<'completed-response' | 'completed-no-response'>;
+  readonly canCompleteAuthorizedTurn?: (authorization: CollaborationTurnAuthorization) => boolean;
   readonly activateAuthorizedTurn?: (authorization: CollaborationTurnAuthorization) => void;
   readonly clearAuthorizedTurn?: () => void;
 }
@@ -79,11 +84,24 @@ export interface DeliveryCoordinator {
   readonly pending: number;
   /** Whether a synthetic turn is currently outstanding. */
   readonly outstanding: boolean;
+  /** Exact handling claim that may be renewed while its turn is outstanding. */
+  readonly activeTurn: CollaborationTurnAuthorization | null;
 }
 
 interface TurnRecord {
   readonly at: number;
   readonly conversation: string;
+}
+
+interface InFlightTurn {
+  readonly event: DeliveredEvent;
+  readonly authorization: CollaborationTurnAuthorization;
+}
+
+function isDeferredDecision(
+  decision: CollaborationTurnDecision | null,
+): decision is { readonly kind: 'deferred' } {
+  return decision !== null && 'kind' in decision && decision.kind === 'deferred';
 }
 
 /**
@@ -93,20 +111,35 @@ interface TurnRecord {
  * second synthetic turn while one is outstanding would compound that, so at most one
  * turn is in flight at a time.
  *
- * An event is acknowledged only after the harness accepts the send. A failed send
- * releases the claim, so the event stays reclaimable rather than being lost. A crash
- * between acceptance and acknowledgment may redeliver the same stable notification
- * identifier, which the contract permits and the identifier makes recognizable.
+ * A directed request is acknowledged only after its durable handling outcome.
+ * Terminal updates are acknowledged after a body-free local diagnostic. A crash
+ * before acknowledgment may redeliver the same stable notification identifier.
  */
 export function createDeliveryCoordinator(
   options: DeliveryCoordinatorOptions,
 ): DeliveryCoordinator {
   const budget = options.budget ?? defaultWakeBudget;
+  if (
+    budget.maxEventsPerTurn !== 1 ||
+    !Number.isSafeInteger(budget.maxCharactersPerTurn) ||
+    budget.maxCharactersPerTurn < 1 ||
+    !Number.isSafeInteger(budget.maxTurnsPerWindow) ||
+    budget.maxTurnsPerWindow < 1 ||
+    !Number.isSafeInteger(budget.maxTurnsPerConversationPerWindow) ||
+    budget.maxTurnsPerConversationPerWindow < 1 ||
+    budget.maxTurnsPerConversationPerWindow > budget.maxTurnsPerWindow ||
+    !Number.isSafeInteger(budget.windowMs) ||
+    budget.windowMs < 1
+  ) {
+    throw new Error('the directed-request wake budget is invalid');
+  }
   const clock = options.clock ?? { now: () => Date.now() };
   const queue: DeliveredEvent[] = [];
   const turns: TurnRecord[] = [];
+  const deferredUntil = new Map<string, number>();
   let idle = false;
   let outstanding = false;
+  let inFlight: InFlightTurn | null = null;
 
   const withinWindow = (now: number): TurnRecord[] => {
     while (turns.length > 0 && now - (turns[0]?.at ?? 0) >= budget.windowMs) {
@@ -124,42 +157,34 @@ export function createDeliveryCoordinator(
     return forConversation < budget.maxTurnsPerConversationPerWindow;
   };
 
-  /**
-   * Takes the events that fit in one turn for `conversation`.
-   *
-   * Only one conversation is taken, so a turn never mixes conversations and a
-   * per-conversation budget stays meaningful.
-   */
-  const takeBatch = (conversation: string): DeliveredEvent[] => {
+  /** Removes one bounded batch of terminal updates that never enter a model turn. */
+  const takeTerminalBatch = (): DeliveredEvent[] => {
     const taken: DeliveredEvent[] = [];
-    let characters = 0;
-
     for (let index = 0; index < queue.length;) {
       const event = queue[index];
-      if (!event || event.conversation.toString('hex') !== conversation) {
+      if (!event || event.payload.kind === 'directed-request') {
         index += 1;
         continue;
       }
-      if (event.payload.kind === 'directed-request') {
-        index += 1;
-        continue;
-      }
-
-      const cost = event.payload.kind === 'application-text' ? event.payload.text.length : 0;
-      if (taken.length > 0 && characters + cost > budget.maxCharactersPerTurn) {
-        break;
-      }
-
       taken.push(event);
-      characters += cost;
       queue.splice(index, 1);
-
-      if (taken.length >= budget.maxEventsPerTurn) {
+      if (taken.length >= maxClaimBatch) {
         break;
       }
     }
-
     return taken;
+  };
+
+  const takeDirectedRequest = (conversation: string): DeliveredEvent | null => {
+    const index = queue.findIndex(
+      (event) =>
+        event.payload.kind === 'directed-request' &&
+        event.conversation.toString('hex') === conversation,
+    );
+    if (index < 0) {
+      return null;
+    }
+    return queue.splice(index, 1)[0] ?? null;
   };
 
   /**
@@ -172,6 +197,12 @@ export function createDeliveryCoordinator(
   const selectConversation = (now: number): string | null => {
     const seen = new Set<string>();
     for (const event of queue) {
+      if (
+        event.payload.kind === 'directed-request' &&
+        (deferredUntil.get(event.notificationId.toString('hex')) ?? 0) > now
+      ) {
+        continue;
+      }
       const conversation = event.conversation.toString('hex');
       if (seen.has(conversation)) {
         continue;
@@ -199,17 +230,21 @@ export function createDeliveryCoordinator(
     }
   };
 
-  const takeUnsupportedDirectedRequests = (): DeliveredEvent[] => {
-    const unsupported: DeliveredEvent[] = [];
-    for (let index = queue.length - 1; index >= 0; index -= 1) {
-      const event = queue[index];
-      if (event?.payload.kind === 'directed-request') {
-        unsupported.push(event);
-        queue.splice(index, 1);
+  const completeTurn = async (turn: InFlightTurn): Promise<boolean> => {
+    try {
+      if (!options.completeAuthorizedTurn) {
+        throw new Error('the authorized delivery completion boundary is unavailable');
       }
+      await options.completeAuthorizedTurn(turn.authorization);
+      return true;
+    } catch (error) {
+      options.diagnostics.error(
+        `Konclave could not complete an authorized turn: ${describeError(error)}`,
+      );
+      return false;
+    } finally {
+      options.clearAuthorizedTurn?.();
     }
-    unsupported.reverse();
-    return unsupported;
   };
 
   const deliver = async (): Promise<void> => {
@@ -217,13 +252,13 @@ export function createDeliveryCoordinator(
       return;
     }
 
-    const unsupported = takeUnsupportedDirectedRequests();
-    if (unsupported.length > 0) {
+    const terminal = takeTerminalBatch();
+    if (terminal.length > 0) {
       outstanding = true;
       options.diagnostics.error(
-        'Konclave withheld a directed request because automatic handling is not available; inspect message history explicitly.',
+        'Konclave retained a terminal update in message history; no automatic turn was started.',
       );
-      await settle(unsupported, true);
+      await settle(terminal, true);
       outstanding = false;
       return deliver();
     }
@@ -236,49 +271,81 @@ export function createDeliveryCoordinator(
       return;
     }
 
-    const batch = takeBatch(conversation);
-    if (batch.length === 0) {
+    const request = takeDirectedRequest(conversation);
+    if (!request) {
       return;
     }
 
     outstanding = true;
+    if (
+      request.payload.kind !== 'directed-request' ||
+      request.payload.text.length > budget.maxCharactersPerTurn
+    ) {
+      options.diagnostics.error(
+        'Konclave retained a directed request outside the automatic turn budget.',
+      );
+      await settle([request], true);
+      outstanding = false;
+      return deliver();
+    }
     let authorization: CollaborationTurnAuthorization | null = null;
 
     try {
-      if (options.authorizeTurn) {
-        try {
-          authorization = await options.authorizeTurn(batch);
-        } catch (error) {
-          options.diagnostics.error(
-            `Konclave policy authorization failed: ${describeError(error)}`,
-          );
-        }
-        if (!authorization) {
-          options.diagnostics.error(
-            'Konclave retained a terminal update in message history; no automatic turn was started.',
-          );
-          await settle(batch, true);
-          return;
-        }
+      if (!options.authorizeTurn || !options.completeAuthorizedTurn) {
+        throw new Error('the directed-request handling boundary is unavailable');
       }
-      if (authorization) {
-        options.activateAuthorizedTurn?.(authorization);
+      const decision = await options.authorizeTurn([request]);
+      if (isDeferredDecision(decision)) {
+        deferredUntil.set(request.notificationId.toString('hex'), now + deferredRetryMilliseconds);
+        queue.push(request);
+        outstanding = false;
+        return;
       }
+      deferredUntil.delete(request.notificationId.toString('hex'));
+      authorization = decision;
+      if (!authorization) {
+        options.diagnostics.error(
+          'Konclave retained a directed request in message history; no automatic turn was authorized.',
+        );
+        await settle([request], true);
+        outstanding = false;
+        return deliver();
+      }
+      options.activateAuthorizedTurn?.(authorization);
+      inFlight = { event: request, authorization };
       turns.push({ at: now, conversation });
       await options.session.send({
-        prompt: frameDelivery(batch, authorization ?? undefined),
+        prompt: frameDelivery([request], authorization),
         mode: 'enqueue',
       });
-      await settle(batch, true);
     } catch (error) {
-      if (authorization) {
+      let accepted = false;
+      if (authorization && inFlight) {
+        accepted = await completeTurn(inFlight);
+        inFlight = null;
+      } else if (authorization) {
         options.clearAuthorizedTurn?.();
       }
       options.diagnostics.error(`Konclave delivery was not accepted: ${describeError(error)}`);
-      await settle(batch, false);
-    } finally {
+      await settle([request], accepted);
       outstanding = false;
+      return deliver();
     }
+  };
+
+  const finishInFlight = async (): Promise<void> => {
+    const turn = inFlight;
+    if (!turn) {
+      options.clearAuthorizedTurn?.();
+      return;
+    }
+    if (!options.canCompleteAuthorizedTurn?.(turn.authorization)) {
+      return;
+    }
+    const accepted = await completeTurn(turn);
+    inFlight = null;
+    await settle([turn.event], accepted);
+    outstanding = false;
   };
 
   return {
@@ -286,11 +353,37 @@ export function createDeliveryCoordinator(
       if (events.length > maxClaimBatch) {
         throw new Error('adapter request is outside its bound');
       }
-      queue.push(...events);
+      const retained = new Set(queue.map((event) => event.notificationId.toString('hex')));
+      for (const event of events) {
+        retained.add(event.notificationId.toString('hex'));
+      }
+      if (retained.size > maxClaimBatch) {
+        throw new Error('adapter queue is outside its bound');
+      }
+      for (const event of events) {
+        const queued = queue.findIndex((candidate) =>
+          candidate.notificationId.equals(event.notificationId),
+        );
+        if (queued >= 0) {
+          const existing = queue[queued];
+          if (existing && event.leaseGeneration > existing.leaseGeneration) {
+            queue[queued] = event;
+            deferredUntil.delete(event.notificationId.toString('hex'));
+          }
+          continue;
+        }
+        if (
+          inFlight?.event.notificationId.equals(event.notificationId) &&
+          event.leaseGeneration <= inFlight.event.leaseGeneration
+        ) {
+          continue;
+        }
+        queue.push(event);
+      }
     },
     async markIdle() {
-      options.clearAuthorizedTurn?.();
       idle = true;
+      await finishInFlight();
       await deliver();
     },
     markActive() {
@@ -304,6 +397,9 @@ export function createDeliveryCoordinator(
     },
     get outstanding() {
       return outstanding;
+    },
+    get activeTurn() {
+      return inFlight?.authorization ?? null;
     },
   };
 }

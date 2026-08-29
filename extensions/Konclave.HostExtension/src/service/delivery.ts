@@ -220,6 +220,19 @@ export function createLocalServiceDeliveryChannel(client: LocalServiceClient): A
             },
           );
           return { kind: 'accepted' };
+        case 'heartbeat':
+          await client.request(deliveryOperations.heartbeat, {
+            turn:
+              request.turn === undefined
+                ? null
+                : {
+                    conversationId: request.turn.conversation,
+                    policyDigest: request.turn.policyDigest,
+                    requestMessageId: request.turn.requestMessageId,
+                    attempt: request.turn.attempt,
+                  },
+          });
+          return { kind: 'accepted' };
         case 'status': {
           const result = parseServiceStatus(await client.request(serviceOperations.status, {}));
           return {

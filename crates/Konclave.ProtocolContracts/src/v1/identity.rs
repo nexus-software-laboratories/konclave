@@ -1,6 +1,6 @@
 use KonclaveDomainCore::{
-    DeviceCredentialBinding, Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES,
-    MAX_MLS_KEY_PACKAGE_BYTES, PairingOffer, SignatureScheme,
+    DeviceCredentialBinding, Ed25519Signature, Invitation, JoinProof,
+    MAX_APPLICATION_MESSAGE_BYTES, MAX_MLS_KEY_PACKAGE_BYTES, PairingOffer, SignatureScheme,
 };
 
 use crate::KonclaveProtocolError;
@@ -27,6 +27,7 @@ const PAIRING_OFFER_CONTRACT: &str = "PairingOffer";
 pub fn encode_device_credential_binding(
     value: &DeviceCredentialBinding,
 ) -> Result<Vec<u8>, KonclaveProtocolError> {
+    validate_credential_capabilities(value)?;
     encode_bounded(
         &credential_to_wire(value),
         MAX_APPLICATION_MESSAGE_BYTES,
@@ -134,12 +135,39 @@ fn pairing_offer_from_wire(
 ///
 /// Returns a size error when the encoded proof exceeds the v1 application limit.
 pub fn encode_join_proof(value: &JoinProof) -> Result<Vec<u8>, KonclaveProtocolError> {
+    validate_credential_capabilities(value.credential())?;
     let wire = wire::JoinProof {
         invitation: Some(invitation_to_wire(value.invitation())),
         credential: Some(credential_to_wire(value.credential())),
         mls_key_package: prost::bytes::Bytes::copy_from_slice(value.mls_key_package()),
     };
     encode_bounded(&wire, MAX_APPLICATION_MESSAGE_BYTES, JOIN_PROOF_CONTRACT)
+}
+
+fn validate_credential_capabilities(
+    value: &DeviceCredentialBinding,
+) -> Result<(), KonclaveProtocolError> {
+    match (
+        value.application_capabilities(),
+        value.application_capabilities_signature(),
+    ) {
+        (0, None) => Ok(()),
+        (0, Some(_)) => Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+            field: "application_capabilities_signature",
+            minimum: 0,
+            maximum: 0,
+            actual: Ed25519Signature::LENGTH,
+        }
+        .into()),
+        (_, Some(_)) => Ok(()),
+        (_, None) => Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+            field: "application_capabilities_signature",
+            minimum: Ed25519Signature::LENGTH,
+            maximum: Ed25519Signature::LENGTH,
+            actual: 0,
+        }
+        .into()),
+    }
 }
 
 /// Decodes and shape-validates a join proof.
@@ -183,6 +211,10 @@ pub(super) fn credential_to_wire(value: &DeviceCredentialBinding) -> wire::Devic
             value.conversation_signature_public_key(),
         ),
         device_binding_signature: signature_to_bytes(value.device_binding_signature()),
+        application_capabilities: value.application_capabilities(),
+        application_capabilities_signature: value
+            .application_capabilities_signature()
+            .map_or_else(prost::bytes::Bytes::new, signature_to_bytes),
     }
 }
 
@@ -198,7 +230,34 @@ pub(super) fn credential_from_wire(
             });
         }
     };
-    Ok(DeviceCredentialBinding::new(
+    let capability_signature = match (
+        wire.application_capabilities,
+        wire.application_capabilities_signature.is_empty(),
+    ) {
+        (0, true) => None,
+        (0, false) => {
+            return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+                field: "application_capabilities_signature",
+                minimum: 0,
+                maximum: 0,
+                actual: wire.application_capabilities_signature.len(),
+            }
+            .into());
+        }
+        (_, true) => {
+            return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+                field: "application_capabilities_signature",
+                minimum: Ed25519Signature::LENGTH,
+                maximum: Ed25519Signature::LENGTH,
+                actual: 0,
+            }
+            .into());
+        }
+        (_, false) => Some(signature_from_bytes(
+            &wire.application_capabilities_signature,
+        )?),
+    };
+    Ok(DeviceCredentialBinding::new_with_capabilities(
         version_from_wire(wire.version, CREDENTIAL_CONTRACT)?,
         device_id_from_wire(wire.device_id)?,
         super::common::conversation_id_from_wire(wire.conversation_id)?,
@@ -206,7 +265,9 @@ pub(super) fn credential_from_wire(
         public_key_from_bytes(&wire.device_root_public_key)?,
         public_key_from_bytes(&wire.conversation_signature_public_key)?,
         signature_from_bytes(&wire.device_binding_signature)?,
-    ))
+        wire.application_capabilities,
+        capability_signature,
+    )?)
 }
 
 pub(super) fn invitation_to_wire(value: &Invitation) -> wire::Invitation {

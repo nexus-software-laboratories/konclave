@@ -267,6 +267,8 @@ const helpLines = [
   '  /konclave cancel <pairing>                          Cancel an active pairing.',
   '  /konclave send [conversation] [message-id] -- <text>',
   '                                                       Send or retry a message.',
+  '  /konclave request <conversation> [target-device] [message-id] -- <text>',
+  '                                                       Request one response; target groups.',
   '  /konclave reply <conversation> <reply-to> [message-id] -- <text>',
   '                                                       Reply or retry with an explicit ID.',
   '  /konclave messages <conversation> [after-cursor]    Sync and show a bounded message page.',
@@ -2222,6 +2224,67 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.write(`conversation: ${sent.conversationId}`);
           await presentation.write(`relay cursor: ${sent.cursor}`);
         }
+        return;
+      }
+      case 'request': {
+        const usage = '/konclave request <conversation> [target-device] [message-id] -- <text>';
+        const parsed = parseDelimitedMessage(argumentsText, 1, 3, usage);
+        const conversationId = requireHexIdentifier(
+          parsed.identifiers[0],
+          conversationIdCharacters,
+          'conversation identifier',
+        );
+        const targetDeviceId =
+          parsed.identifiers[1]?.length === deviceIdCharacters
+            ? requireHexIdentifier(
+                parsed.identifiers[1],
+                deviceIdCharacters,
+                'target device identifier',
+              )
+            : undefined;
+        const suppliedMessageId = targetDeviceId ? parsed.identifiers[2] : parsed.identifiers[1];
+        if (parsed.identifiers.length === 3 && !targetDeviceId) {
+          throw new Error(usage);
+        }
+        const messageId = suppliedMessageId
+          ? requireHexIdentifier(suppliedMessageId, messageIdCharacters, 'message identifier')
+          : randomBytes(16).toString('hex');
+        if (presentation.mode === 'normal') {
+          await presentation.write(`request ${messageId}: sending; reuse this identifier to retry`);
+        } else {
+          await presentation.write(`request id: ${messageId}`);
+          await presentation.write(
+            `retry: /konclave request ${conversationId}${targetDeviceId ? ` ${targetDeviceId}` : ''} ${messageId} -- <same text>`,
+          );
+        }
+        const payload: Record<string, unknown> = {
+          conversation_id: conversationId,
+          message_id: messageId,
+          text: parsed.text,
+        };
+        if (targetDeviceId) {
+          payload.target_device_id = targetDeviceId;
+        }
+        const sent = parseSentMessage(
+          await client.request('send_directed_request', payload, {
+            requestId: messageRequestId(messageId),
+          }),
+        );
+        if (sent.conversationId !== conversationId || sent.messageId !== messageId) {
+          throw new Error('the local service sent-request identity does not match the request');
+        }
+        const selected = selectedConversation(
+          await client.request('set_active_conversation', {
+            conversation_id: conversationId,
+          }),
+        );
+        if (selected !== conversationId) {
+          throw new Error('the local service selected a different active conversation');
+        }
+        activeConversationId = conversationId;
+        await presentation.write(
+          `requested ${sent.messageId}: conversation ${sent.conversationId}; cursor ${sent.cursor}`,
+        );
         return;
       }
       case 'messages': {

@@ -88,6 +88,12 @@ pub(crate) enum DirectedRequestClaimOutcome {
     CompletedNoResponse,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectedRequestCompletionOutcome {
+    CompletedResponse,
+    CompletedNoResponse { changed: bool },
+}
+
 pub(crate) struct RecoverableDirectedRequestResponse {
     pub(crate) reservation: super::OutboundReservation,
     pub(crate) request_message_id: MessageId,
@@ -487,19 +493,35 @@ impl ProfileStore {
                     return Ok(DirectedRequestClaimOutcome::Busy);
                 }
                 HandlingState::Claimed
-                    if existing.claim.consumer_id == request.consumer_id
-                        && existing.claim.lease_id == request.lease_id =>
-                {
-                    return Ok(DirectedRequestClaimOutcome::Busy);
-                }
-                HandlingState::Claimed
                     if existing.claim.attempt >= MAX_DIRECTED_REQUEST_HANDLING_ATTEMPTS =>
                 {
                     return Ok(DirectedRequestClaimOutcome::AttemptsExhausted);
                 }
-                HandlingState::Claimed => existing.claim.attempt + 1,
+                HandlingState::Claimed => {
+                    if active_directed_request_claim_count(
+                        &transaction,
+                        request.consumer_id,
+                        request.lease_id,
+                        request.now_unix_milliseconds,
+                    )? > 0
+                    {
+                        return Ok(DirectedRequestClaimOutcome::Busy);
+                    }
+                    existing.claim.attempt + 1
+                }
             },
-            None => 1,
+            None => {
+                if active_directed_request_claim_count(
+                    &transaction,
+                    request.consumer_id,
+                    request.lease_id,
+                    request.now_unix_milliseconds,
+                )? > 0
+                {
+                    return Ok(DirectedRequestClaimOutcome::Busy);
+                }
+                1
+            }
         };
         let claim = DirectedRequestClaim {
             conversation_id: request.conversation_id,
@@ -590,10 +612,62 @@ impl ProfileStore {
         Ok(Some(handling.claim))
     }
 
+    pub(super) fn renew_directed_request_claim_in(
+        &self,
+        connection: &Connection,
+        request: ActiveDirectedRequestClaim,
+        lease_id: AdapterLeaseId,
+        expires_at_unix_milliseconds: u64,
+    ) -> Result<(), ProfileStoreError> {
+        let metadata = load_handling_metadata(
+            connection,
+            request.conversation_id,
+            request.request_message_id,
+            request.responder_device_id,
+        )?
+        .ok_or(ProfileStoreError::OperationNotFound)?;
+        let mut handling = self.open_directed_request_handling(connection, metadata)?;
+        if handling.claim.consumer_id != request.consumer_id
+            || handling.claim.lease_id != lease_id
+            || handling.claim.attempt != request.attempt
+            || handling.claim.policy_digest != request.policy_digest
+        {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        if handling.state != HandlingState::Claimed {
+            return Ok(());
+        }
+        if handling.claim.claim_expires_at_unix_milliseconds <= request.now_unix_milliseconds {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        let sequence: i64 = connection
+            .query_row(
+                "SELECT event_sequence
+                 FROM daemon_remote_event
+                 WHERE notification_id = ?1",
+                params![handling.claim.notification_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        let (event, state) =
+            self.load_remote_event_record_in(connection, from_sql_integer(sequence)?)?;
+        if event.notification_id != handling.claim.notification_id
+            || state.status != RemoteEventStatus::Claimed
+            || state.consumer_id != Some(request.consumer_id)
+            || state.lease_id != Some(lease_id)
+            || state.lease_generation != handling.claim.lease_generation
+            || state.lease_expires_at_unix_milliseconds != Some(expires_at_unix_milliseconds)
+        {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        handling.claim.claim_expires_at_unix_milliseconds = expires_at_unix_milliseconds;
+        self.update_directed_request_handling(connection, &handling)
+    }
+
     pub(crate) fn complete_directed_request_without_response(
         &self,
         request: CompleteDirectedRequest,
-    ) -> Result<bool, ProfileStoreError> {
+    ) -> Result<DirectedRequestCompletionOutcome, ProfileStoreError> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -610,10 +684,10 @@ impl ProfileStore {
             return Err(ProfileStoreError::InvalidTransition);
         }
         if existing.state == HandlingState::CompletedNoResponse {
-            return Ok(false);
+            return Ok(DirectedRequestCompletionOutcome::CompletedNoResponse { changed: false });
         }
-        if existing.state != HandlingState::Claimed {
-            return Err(ProfileStoreError::InvalidTransition);
+        if existing.state == HandlingState::CompletedResponse {
+            return Ok(DirectedRequestCompletionOutcome::CompletedResponse);
         }
         let completed = DirectedRequestHandling {
             claim: existing.claim,
@@ -629,7 +703,7 @@ impl ProfileStore {
         transaction
             .commit()
             .map_err(|_| ProfileStoreError::Storage)?;
-        Ok(true)
+        Ok(DirectedRequestCompletionOutcome::CompletedNoResponse { changed: true })
     }
 
     #[allow(
@@ -1671,6 +1745,31 @@ fn directed_request_handling_count(connection: &Connection) -> Result<usize, Pro
         .query_row(
             "SELECT count(*) FROM daemon_directed_request_handling",
             [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ProfileStoreError::Storage)?;
+    usize::try_from(count).map_err(|_| ProfileStoreError::CorruptData)
+}
+
+fn active_directed_request_claim_count(
+    connection: &Connection,
+    consumer_id: AdapterConsumerId,
+    lease_id: AdapterLeaseId,
+    now_unix_milliseconds: u64,
+) -> Result<usize, ProfileStoreError> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*)
+             FROM daemon_directed_request_handling
+             WHERE state = 1
+               AND consumer_id = ?1
+               AND lease_id = ?2
+               AND claim_expires_at_unix_milliseconds > ?3",
+            params![
+                consumer_id.as_bytes().as_slice(),
+                lease_id.as_bytes().as_slice(),
+                to_sql_integer(now_unix_milliseconds)?
+            ],
             |row| row.get(0),
         )
         .map_err(|_| ProfileStoreError::Storage)?;
