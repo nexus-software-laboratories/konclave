@@ -8,7 +8,7 @@ fn write_policy(path: &std::path::Path, name: &str) {
         path,
         format!(
             r#"{{
-  "apiVersion": "konclave.dev/v1",
+  "apiVersion": "konclave.dev/v2",
   "kind": "CollaborationPolicy",
   "metadata": {{ "name": "{name}" }},
   "spec": {{ "limits": {{}} }}
@@ -141,9 +141,9 @@ fn repository_examples_compile_through_the_explicit_catalog() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../policy/examples/catalog.json");
     let catalog = FileCollaborationPolicyCatalog::open(&catalog_path).unwrap();
     let compiled = catalog
-        .compile("contract-alignment", CollaborationPolicyLimits::default())
+        .compile("request-reply", CollaborationPolicyLimits::default())
         .unwrap();
-    assert_eq!(compiled.bundle().name(), "contract-alignment");
+    assert_eq!(compiled.bundle().name(), "request-reply");
     assert_eq!(compiled.bundle().statements().len(), 1);
     assert_eq!(compiled.bundle().required_harness_claims().len(), 3);
 }

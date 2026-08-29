@@ -83,6 +83,7 @@ export interface DeliveryEventRecord {
   readonly relayCursor: number;
   readonly payload:
     | { readonly kind: 'application_text'; readonly text: string }
+    | { readonly kind: 'directed_request'; readonly targetDeviceId: string; readonly text: string }
     | { readonly kind: 'member_added'; readonly device: string; readonly role: string }
     | { readonly kind: 'member_removed'; readonly device: string }
     | { readonly kind: 'member_role_changed'; readonly device: string; readonly role: string }

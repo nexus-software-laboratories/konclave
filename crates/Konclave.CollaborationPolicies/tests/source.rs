@@ -37,6 +37,31 @@ fn source(guidance: &str, limits: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn source_v2(limits: &str) -> Vec<u8> {
+    format!(
+        r#"{{
+  "apiVersion": "konclave.dev/v2",
+  "kind": "CollaborationPolicy",
+  "metadata": {{ "name": "request-reply" }},
+  "spec": {{
+    "statements": [
+      {{
+        "id": "conversation-reply",
+        "effect": "allow",
+        "action": "conversation.reply"
+      }}
+    ],
+    "requiredHarnessClaims": [
+      "copilot.tool-interception",
+      "copilot.session-identity"
+    ],
+    "limits": {limits}
+  }}
+}}"#
+    )
+    .into_bytes()
+}
+
 #[test]
 fn source_compiles_to_canonical_bundle_and_digest() {
     let compiled = compile_collaboration_policy_source(
@@ -70,6 +95,43 @@ fn source_compiles_to_canonical_bundle_and_digest() {
     assert_eq!(compiled.bundle().limits().tokens(), Some(10_000));
     assert_eq!(compiled.digest().as_bytes().len(), 32);
     assert!(!compiled.canonical_bytes().is_empty());
+}
+
+#[test]
+fn v2_source_compiles_without_model_guidance() {
+    let compiled = compile_collaboration_policy_source(
+        &source_v2(r#"{ "concurrentRequests": 1 }"#),
+        CollaborationPolicyLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(compiled.bundle().name(), "request-reply");
+    assert_eq!(compiled.bundle().guidance(), None);
+    assert_eq!(compiled.bundle().statements().len(), 1);
+    assert_eq!(
+        compiled.bundle().required_harness_claims(),
+        ["copilot.session-identity", "copilot.tool-interception"]
+    );
+    assert_eq!(compiled.bundle().limits().concurrent_requests(), Some(1));
+}
+
+#[test]
+fn v2_source_rejects_legacy_guidance_even_when_null() {
+    for guidance in [
+        serde_json::Value::Null,
+        serde_json::json!("reply automatically"),
+    ] {
+        let mut document: serde_json::Value = serde_json::from_slice(&source_v2("{}")).unwrap();
+        document["spec"]["guidance"] = guidance;
+        assert_eq!(
+            compile_collaboration_policy_source(
+                &serde_json::to_vec(&document).unwrap(),
+                CollaborationPolicyLimits::default(),
+            )
+            .err(),
+            Some(CollaborationPolicySourceError::InvalidJson { document: "source" })
+        );
+    }
 }
 
 #[test]
@@ -186,6 +248,10 @@ fn source_and_bundle_files_use_exclusive_creation() {
     let source_path = root.path().join("policy.json");
     create_collaboration_policy_source_file(&source_path, "contract-alignment").unwrap();
     assert!(create_collaboration_policy_source_file(&source_path, "contract-alignment").is_err());
+    let created_bytes = std::fs::read(&source_path).unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&created_bytes).unwrap();
+    assert_eq!(created["apiVersion"], "konclave.dev/v2");
+    assert!(created["spec"].get("guidance").is_none());
 
     let compiled =
         compile_collaboration_policy_file(&source_path, CollaborationPolicyLimits::default())

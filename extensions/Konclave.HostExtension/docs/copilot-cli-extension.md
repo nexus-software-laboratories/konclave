@@ -172,12 +172,19 @@ harness claims, and a positive evaluator result. Inactive, denied,
 approval-required, malformed, or unavailable authorization preserves the original
 notification-only prompt.
 
-An authorized prompt places locally accepted policy identity and optional guidance
-outside the collaborator fence, then keeps every peer message inside the same
-untrusted markers. It authorizes evaluating that data under the local policy; it
-never reclassifies peer text as user or developer authority. The prompt requires any
-collaborator response to use `send_message` for the exact conversation rather than
-merely describing a reply locally.
+An authorized prompt places only locally accepted structured policy identity outside
+the collaborator fence, then keeps every peer message inside the same untrusted
+markers. Legacy bundle guidance is never included in a model turn. The prompt
+authorizes evaluating peer data under the local structured policy; it never
+reclassifies peer text as user or developer authority.
+
+The shared-service and history contracts preserve a directed request's exact target
+and body. Until the durable directed-request claim and one-response reservation are
+implemented, the delivery runtime withholds those events from model turns, reports
+the unsupported state without including the request body, and acknowledges the
+delivery event after the durable message remains available in history. This prevents
+the additive content contract from silently inheriting the older ordinary-text
+behavior.
 
 The gate is prepared before enqueue but becomes active only when the session observes
 the exact synthetic prompt carrying a fresh extension-generated turn token. Any

@@ -488,11 +488,10 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     .expect("packaged reply was not delivered");
 
     let policy_source = r#"{
-  "apiVersion": "konclave.dev/v1",
+  "apiVersion": "konclave.dev/v2",
   "kind": "CollaborationPolicy",
-  "metadata": { "name": "packaged-contract-alignment" },
+  "metadata": { "name": "packaged-request-reply" },
   "spec": {
-    "guidance": "Reply only through the exact packaged contract-alignment action.",
     "statements": [
       {
         "id": "conversation-reply",
@@ -545,10 +544,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
         inspected["policy_digest"].as_str(),
         Some(policy_digest.as_str())
     );
-    assert_eq!(
-        inspected["untrusted_guidance"].as_str(),
-        Some("Reply only through the exact packaged contract-alignment action.")
-    );
+    assert!(inspected["untrusted_guidance"].is_null());
     assert_eq!(inspected["statements"].as_array().unwrap().len(), 1);
     assert_eq!(
         inspected["required_harness_claims"]

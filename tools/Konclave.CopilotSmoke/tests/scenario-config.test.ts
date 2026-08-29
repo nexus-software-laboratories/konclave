@@ -6,7 +6,7 @@ import {
   createSmokePolicySource,
   type SmokeOptions,
 } from "../src/scenario.js";
-import { requireArray, requireRecord, requireString } from "../src/json.js";
+import { requireArray, requireRecord } from "../src/json.js";
 
 describe("shared-client session configuration", () => {
   it("registers only custom Konclave tools and declares no MCP process", () => {
@@ -34,31 +34,18 @@ describe("shared-client session configuration", () => {
     expect(config.availableTools).toBeInstanceOf(Object);
     expect(JSON.stringify(config)).not.toContain("KonclaveLocalDaemon");
     expect(JSON.stringify(config)).not.toContain('"type":"stdio"');
+    expect(JSON.stringify(config)).not.toContain("policy guidance");
   });
 
   it("builds an exact-digest policy source for two autonomous replies", () => {
     const source = requireRecord(
-      JSON.parse(
-        createSmokePolicySource({
-          conversationId: "11".repeat(32),
-          firstText: "request",
-          firstMessageId: "22".repeat(16),
-          replyText: "reply",
-          replyMessageId: "33".repeat(16),
-          followUpText: "follow-up",
-          followUpMessageId: "44".repeat(16),
-        }),
-      ),
+      JSON.parse(createSmokePolicySource()),
       "policy source",
     );
     const spec = requireRecord(source.spec, "policy source spec");
 
-    expect(requireString(spec, "guidance", "policy source spec")).toContain(
-      '"message_id":"33333333333333333333333333333333"',
-    );
-    expect(requireString(spec, "guidance", "policy source spec")).toContain(
-      '"message_id":"44444444444444444444444444444444"',
-    );
+    expect(source.apiVersion).toBe("konclave.dev/v2");
+    expect(spec).not.toHaveProperty("guidance");
     expect(requireArray(spec, "statements", "policy source spec")).toEqual([
       {
         id: "conversation-reply",

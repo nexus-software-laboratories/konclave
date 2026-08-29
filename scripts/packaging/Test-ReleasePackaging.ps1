@@ -121,8 +121,9 @@ function Assert-ReleaseLayout {
             'share/konclave/plugin/extensions/Konclave.Extension/generic.mjs',
             'share/konclave/plugin/skills/konclave-generic/SKILL.md',
             'share/konclave/policy/collaboration-policy-source-v1.schema.json',
+            'share/konclave/policy/collaboration-policy-source-v2.schema.json',
             'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
-            'share/konclave/policy/examples/contract-alignment.json',
+            'share/konclave/policy/examples/request-reply.json',
             'share/konclave/policy/examples/catalog.json'
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf)) {
@@ -185,8 +186,8 @@ function Assert-ReleaseLayout {
 $projectRootPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
 foreach ($policyDocument in @(
     @{
-        Example = 'policy/examples/contract-alignment.json'
-        Schema = 'policy/collaboration-policy-source-v1.schema.json'
+        Example = 'policy/examples/request-reply.json'
+        Schema = 'policy/collaboration-policy-source-v2.schema.json'
     },
     @{
         Example = 'policy/examples/catalog.json'

@@ -443,6 +443,7 @@ function Copy-ClientPayload {
     $policyRoot = Join-Path $DestinationRoot 'share' 'konclave' 'policy'
     foreach ($relative in @(
         'collaboration-policy-source-v1.schema.json',
+        'collaboration-policy-source-v2.schema.json',
         'collaboration-policy-catalog-v1.schema.json'
     )) {
         Copy-ReleaseFile (
@@ -451,7 +452,7 @@ function Copy-ClientPayload {
             Join-Path $policyRoot $relative
         )
     }
-    foreach ($relative in @('contract-alignment.json', 'catalog.json')) {
+    foreach ($relative in @('request-reply.json', 'catalog.json')) {
         Copy-ReleaseFile (
             Join-Path $ProjectRoot 'policy' 'examples' $relative
         ) (

@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "entries": [
     {
-      "name": "contract-alignment",
-      "source": "contract-alignment.json"
+      "name": "request-reply",
+      "source": "request-reply.json"
     }
   ]
 }

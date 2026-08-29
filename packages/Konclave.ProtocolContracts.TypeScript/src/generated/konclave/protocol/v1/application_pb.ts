@@ -6,7 +6,7 @@ import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { CollaborationPolicyProposal, CollaborationPolicyResponse, CollaborationPolicyRevocation } from "./collaboration_policy_pb.js";
 import { file_konclave_protocol_v1_collaboration_policy } from "./collaboration_policy_pb.js";
-import type { MessageId, ProtocolVersion } from "./common_pb.js";
+import type { DeviceId, MessageId, ProtocolVersion } from "./common_pb.js";
 import { file_konclave_protocol_v1_common } from "./common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/application.proto.
  */
 export const file_konclave_protocol_v1_application: GenFile = /*@__PURE__*/
-  fileDesc("CiZrb25jbGF2ZS9wcm90b2NvbC92MS9hcHBsaWNhdGlvbi5wcm90bxIUa29uY2xhdmUucHJvdG9jb2wudjEiGwoLVGV4dENvbnRlbnQSDAoEYm9keRgBIAEoCSLFBAoSQXBwbGljYXRpb25NZXNzYWdlEjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SMwoKbWVzc2FnZV9pZBgCIAEoCzIfLmtvbmNsYXZlLnByb3RvY29sLnYxLk1lc3NhZ2VJZBIWCg5zZW5kZXJfY291bnRlchgDIAEoBBIhChlzZW50X2F0X3VuaXhfbWlsbGlzZWNvbmRzGAQgASgEEjEKCHJlcGx5X3RvGAUgASgLMh8ua29uY2xhdmUucHJvdG9jb2wudjEuTWVzc2FnZUlkEjEKBHRleHQYCiABKAsyIS5rb25jbGF2ZS5wcm90b2NvbC52MS5UZXh0Q29udGVudEgAEloKHWNvbGxhYm9yYXRpb25fcG9saWN5X3Byb3Bvc2FsGAsgASgLMjEua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVByb3Bvc2FsSAASWgodY29sbGFib3JhdGlvbl9wb2xpY3lfcmVzcG9uc2UYDCABKAsyMS5rb25jbGF2ZS5wcm90b2NvbC52MS5Db2xsYWJvcmF0aW9uUG9saWN5UmVzcG9uc2VIABJeCh9jb2xsYWJvcmF0aW9uX3BvbGljeV9yZXZvY2F0aW9uGA0gASgLMjMua29uY2xhdmUucHJvdG9jb2wudjEuQ29sbGFib3JhdGlvblBvbGljeVJldm9jYXRpb25IAEIJCgdjb250ZW50YgZwcm90bzM", [file_konclave_protocol_v1_collaboration_policy, file_konclave_protocol_v1_common]);
+  fileDesc("CiZrb25jbGF2ZS9wcm90b2NvbC92MS9hcHBsaWNhdGlvbi5wcm90bxIUa29uY2xhdmUucHJvdG9jb2wudjEiGwoLVGV4dENvbnRlbnQSDAoEYm9keRgBIAEoCSJgChZEaXJlY3RlZFJlcXVlc3RDb250ZW50EjgKEHRhcmdldF9kZXZpY2VfaWQYASABKAsyHi5rb25jbGF2ZS5wcm90b2NvbC52MS5EZXZpY2VJZBIMCgRib2R5GAIgASgJIo8FChJBcHBsaWNhdGlvbk1lc3NhZ2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhIzCgptZXNzYWdlX2lkGAIgASgLMh8ua29uY2xhdmUucHJvdG9jb2wudjEuTWVzc2FnZUlkEhYKDnNlbmRlcl9jb3VudGVyGAMgASgEEiEKGXNlbnRfYXRfdW5peF9taWxsaXNlY29uZHMYBCABKAQSMQoIcmVwbHlfdG8YBSABKAsyHy5rb25jbGF2ZS5wcm90b2NvbC52MS5NZXNzYWdlSWQSMQoEdGV4dBgKIAEoCzIhLmtvbmNsYXZlLnByb3RvY29sLnYxLlRleHRDb250ZW50SAASWgodY29sbGFib3JhdGlvbl9wb2xpY3lfcHJvcG9zYWwYCyABKAsyMS5rb25jbGF2ZS5wcm90b2NvbC52MS5Db2xsYWJvcmF0aW9uUG9saWN5UHJvcG9zYWxIABJaCh1jb2xsYWJvcmF0aW9uX3BvbGljeV9yZXNwb25zZRgMIAEoCzIxLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbGxhYm9yYXRpb25Qb2xpY3lSZXNwb25zZUgAEl4KH2NvbGxhYm9yYXRpb25fcG9saWN5X3Jldm9jYXRpb24YDSABKAsyMy5rb25jbGF2ZS5wcm90b2NvbC52MS5Db2xsYWJvcmF0aW9uUG9saWN5UmV2b2NhdGlvbkgAEkgKEGRpcmVjdGVkX3JlcXVlc3QYDiABKAsyLC5rb25jbGF2ZS5wcm90b2NvbC52MS5EaXJlY3RlZFJlcXVlc3RDb250ZW50SABCCQoHY29udGVudGIGcHJvdG8z", [file_konclave_protocol_v1_collaboration_policy, file_konclave_protocol_v1_common]);
 
 /**
  * Carries bounded UTF-8 chat content.
@@ -36,6 +36,34 @@ export type TextContent = Message<"konclave.protocol.v1.TextContent"> & {
  */
 export const TextContentSchema: GenMessage<TextContent> = /*@__PURE__*/
   messageDesc(file_konclave_protocol_v1_application, 0);
+
+/**
+ * Carries one request for an explicit response from one conversation member.
+ *
+ * @generated from message konclave.protocol.v1.DirectedRequestContent
+ */
+export type DirectedRequestContent = Message<"konclave.protocol.v1.DirectedRequestContent"> & {
+  /**
+   * The exact member expected to provide the authoritative response.
+   *
+   * @generated from field: konclave.protocol.v1.DeviceId target_device_id = 1;
+   */
+  targetDeviceId?: DeviceId | undefined;
+
+  /**
+   * Bounded to 255 KiB of UTF-8 in protocol v1.
+   *
+   * @generated from field: string body = 2;
+   */
+  body: string;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.DirectedRequestContent.
+ * Use `create(DirectedRequestContentSchema)` to create a new message.
+ */
+export const DirectedRequestContentSchema: GenMessage<DirectedRequestContent> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_application, 1);
 
 /**
  * Carries one application operation encrypted and authenticated by MLS.
@@ -96,6 +124,12 @@ export type ApplicationMessage = Message<"konclave.protocol.v1.ApplicationMessag
      */
     value: CollaborationPolicyRevocation;
     case: "collaborationPolicyRevocation";
+  } | {
+    /**
+     * @generated from field: konclave.protocol.v1.DirectedRequestContent directed_request = 14;
+     */
+    value: DirectedRequestContent;
+    case: "directedRequest";
   } | { case: undefined; value?: undefined };
 };
 
@@ -104,5 +138,5 @@ export type ApplicationMessage = Message<"konclave.protocol.v1.ApplicationMessag
  * Use `create(ApplicationMessageSchema)` to create a new message.
  */
 export const ApplicationMessageSchema: GenMessage<ApplicationMessage> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_application, 1);
+  messageDesc(file_konclave_protocol_v1_application, 2);
 

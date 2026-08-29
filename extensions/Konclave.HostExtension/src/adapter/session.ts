@@ -26,6 +26,7 @@ export type DeliveredPolicyResponseOutcome = 'accepted' | 'rejected';
 
 export type DeliveredPayload =
   | { readonly kind: 'application-text'; readonly text: string }
+  | { readonly kind: 'directed-request'; readonly target: Buffer; readonly text: string }
   | {
       readonly kind: 'collaboration-policy-proposal';
       readonly proposalId: Buffer;
@@ -58,7 +59,6 @@ export interface CollaborationTurnAuthorization {
   readonly conversation: string;
   readonly policyDigest: string;
   readonly policyName: string;
-  readonly guidance?: string;
   readonly turnToken: string;
 }
 

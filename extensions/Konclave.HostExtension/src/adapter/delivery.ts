@@ -140,6 +140,10 @@ export function createDeliveryCoordinator(
         index += 1;
         continue;
       }
+      if (event.payload.kind === 'directed-request') {
+        index += 1;
+        continue;
+      }
 
       const cost = event.payload.kind === 'application-text' ? event.payload.text.length : 0;
       if (taken.length > 0 && characters + cost > budget.maxCharactersPerTurn) {
@@ -195,9 +199,33 @@ export function createDeliveryCoordinator(
     }
   };
 
+  const takeUnsupportedDirectedRequests = (): DeliveredEvent[] => {
+    const unsupported: DeliveredEvent[] = [];
+    for (let index = queue.length - 1; index >= 0; index -= 1) {
+      const event = queue[index];
+      if (event?.payload.kind === 'directed-request') {
+        unsupported.push(event);
+        queue.splice(index, 1);
+      }
+    }
+    unsupported.reverse();
+    return unsupported;
+  };
+
   const deliver = async (): Promise<void> => {
     if (outstanding || !idle || queue.length === 0) {
       return;
+    }
+
+    const unsupported = takeUnsupportedDirectedRequests();
+    if (unsupported.length > 0) {
+      outstanding = true;
+      options.diagnostics.error(
+        'Konclave withheld a directed request because automatic handling is not available; inspect message history explicitly.',
+      );
+      await settle(unsupported, true);
+      outstanding = false;
+      return deliver();
     }
 
     const now = clock.now();

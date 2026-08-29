@@ -1131,7 +1131,6 @@ struct CollaborationTurnAuthorizationResult {
     reason: Option<&'static str>,
     policy_digest: Option<String>,
     policy_name: Option<String>,
-    guidance: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1388,11 +1387,6 @@ fn encode_collaboration_turn_authorization(
         reason,
         policy_digest: active.map(|policy| crate::mcp::encode_hex(policy.digest().as_bytes())),
         policy_name: active.map(|policy| policy.bundle().name().to_string()),
-        guidance: if outcome == "authorized" {
-            active.and_then(|policy| policy.bundle().guidance().map(str::to_string))
-        } else {
-            None
-        },
     })
     .map_err(|_| "response_encoding_failed".to_string())
 }
@@ -1747,6 +1741,10 @@ enum DeliveryPayloadResult {
     ApplicationText {
         text: String,
     },
+    DirectedRequest {
+        target_device_id: String,
+        text: String,
+    },
     CollaborationPolicyProposal {
         proposal_id: String,
         policy_digest: String,
@@ -1859,6 +1857,14 @@ fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
             RemoteEventPayload::ApplicationMessage(message) => match message.content() {
                 ApplicationContent::Text(text) => {
                     DeliveryPayloadResult::ApplicationText { text: text.clone() }
+                }
+                ApplicationContent::DirectedRequest(request) => {
+                    DeliveryPayloadResult::DirectedRequest {
+                        target_device_id: crate::mcp::encode_hex(
+                            request.target_device_id().as_bytes(),
+                        ),
+                        text: request.body().to_owned(),
+                    }
                 }
                 ApplicationContent::CollaborationPolicyProposal(proposal) => {
                     DeliveryPayloadResult::CollaborationPolicyProposal {
@@ -2342,6 +2348,24 @@ mod delivery_contract_tests {
     }
 
     #[test]
+    fn directed_request_delivery_preserves_target_and_body() {
+        let payload = serde_json::to_value(delivery_event_result(claimed(
+            ApplicationContent::directed_request(DeviceId::from_bytes([9; 32]), "please reply")
+                .unwrap(),
+        )))
+        .unwrap();
+
+        assert_eq!(
+            payload["payload"],
+            json!({
+                "kind": "directed_request",
+                "targetDeviceId": "09".repeat(32),
+                "text": "please reply"
+            })
+        );
+    }
+
+    #[test]
     fn policy_operations_use_stable_local_service_capabilities_and_errors() {
         for operation in [
             "propose_collaboration_policy",
@@ -2534,10 +2558,7 @@ mod collaboration_policy_tests {
         )
         .unwrap();
         assert_eq!(authorized["outcome"], "authorized");
-        assert_eq!(
-            authorized["guidance"],
-            "Align the contract and report the result."
-        );
+        assert!(authorized.get("guidance").is_none());
 
         let action_payload = serde_json::to_vec(&json!({
             "conversationId": conversation_id,

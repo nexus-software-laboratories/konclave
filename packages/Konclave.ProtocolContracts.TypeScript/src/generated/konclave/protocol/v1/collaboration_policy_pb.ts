@@ -141,6 +141,8 @@ export type CollaborationPolicyBundle = Message<"konclave.protocol.v1.Collaborat
   name: string;
 
   /**
+   * Legacy untrusted annotation retained only for historical byte and digest compatibility.
+   *
    * @generated from field: optional string guidance = 3;
    */
   guidance?: string | undefined;

@@ -9,8 +9,8 @@ use crate::v1::collaboration_policy::{
     revocation_from_wire, revocation_to_wire,
 };
 use crate::v1::common::{
-    decode_bounded, encode_bounded, message_id_from_wire, message_id_to_wire,
-    require_nested_bytes_field_limit, version_from_wire, version_to_wire,
+    decode_bounded, device_id_from_wire, device_id_to_wire, encode_bounded, message_id_from_wire,
+    message_id_to_wire, require_nested_bytes_field_limit, version_from_wire, version_to_wire,
 };
 use crate::wire::v1 as wire;
 
@@ -28,6 +28,12 @@ pub fn encode_application_message(
     let content = match value.content() {
         ApplicationContent::Text(body) => {
             wire::application_message::Content::Text(wire::TextContent { body: body.clone() })
+        }
+        ApplicationContent::DirectedRequest(request) => {
+            wire::application_message::Content::DirectedRequest(wire::DirectedRequestContent {
+                target_device_id: Some(device_id_to_wire(request.target_device_id())),
+                body: request.body().to_owned(),
+            })
         }
         ApplicationContent::CollaborationPolicyProposal(proposal) => {
             wire::application_message::Content::CollaborationPolicyProposal(proposal_to_wire(
@@ -79,6 +85,12 @@ pub fn decode_application_message(
     let content = match wire.content {
         Some(wire::application_message::Content::Text(text)) => {
             ApplicationContent::text(text.body)?
+        }
+        Some(wire::application_message::Content::DirectedRequest(request)) => {
+            ApplicationContent::directed_request(
+                device_id_from_wire(request.target_device_id)?,
+                request.body,
+            )?
         }
         Some(wire::application_message::Content::CollaborationPolicyProposal(proposal)) => {
             ApplicationContent::collaboration_policy_proposal(proposal_from_wire(proposal)?)

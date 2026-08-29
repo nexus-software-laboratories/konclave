@@ -1,6 +1,6 @@
 # Collaboration policy contracts
 
-ADR 0011 separates editable policy sources, immutable shared bundles, and local
+ADR 0012 separates editable policy sources, immutable shared bundles, and local
 conversation bindings. This page owns the evolving implementation contract; it does
 not make a hosted registry or one authoring syntax part of the core protocol.
 
@@ -10,7 +10,7 @@ The source-independent `CollaborationPolicyBundle` is a bounded protocol-v1 cont
 It contains:
 
 - protocol version and canonical human-readable name;
-- optional model guidance;
+- optional legacy guidance retained only for historical byte and digest compatibility;
 - canonically ordered statements;
 - canonically ordered required harness claims; and
 - fully resolved optional duration, turn, token, and concurrency limits.
@@ -21,7 +21,7 @@ action, and an optional namespaced resource. Effects are `allow`, `deny`, and
 extensible canonical strings rather than product-defined collaboration modes.
 
 The bundle uses a 64 KiB encoded limit, at most 256 statements, and at most 64
-required harness claims. Names, identifiers, guidance, repeated fields, numeric
+required harness claims. Names, identifiers, legacy guidance, repeated fields, numeric
 limits, unknown effects, and top-level Protobuf fields are validated before the
 bundle reaches evaluation or persistence.
 
@@ -59,10 +59,14 @@ between activation overrides, user defaults, provider defaults, and shipped defa
 ## Source and catalog boundary
 
 The implemented source compiler accepts bounded strict JSON with API version
-`konclave.dev/v1` and kind `CollaborationPolicy`. Unknown fields, unsupported effects,
-oversized arrays, malformed canonical identifiers, zero finite limits, and trailing
-content fail closed. Editable sources may order statements and harness claims
-arbitrarily; compilation canonicalizes them before encoding and digesting.
+`konclave.dev/v2` and kind `CollaborationPolicy` for newly authored policy. Version 2
+does not accept a `guidance` field. The compiler continues to read
+`konclave.dev/v1` sources so historical source can reproduce its exact canonical
+bundle and digest, but that legacy guidance remains untrusted annotation. Unknown
+fields, unsupported effects, oversized arrays, malformed canonical identifiers, zero
+finite limits, and trailing content fail closed. Editable sources may order
+statements and harness claims arbitrarily; compilation canonicalizes them before
+encoding and digesting.
 
 Missing source limits inherit from caller-provided defaults. Explicit JSON `null`
 means unlimited, and a positive integer is a finite override. No inherited or
@@ -99,7 +103,7 @@ konclave policy validate-catalog --catalog <catalog.json>
 
 Create and compile use exclusive file creation and never overwrite existing content.
 Inspect and validation output only bounded names, digests, counts, and resolved limits;
-model guidance and complete policy bodies are not printed. The repository includes
+legacy guidance and complete policy bodies are not printed. The repository includes
 schemas and editable examples, but repository presence never activates them.
 
 ## Binding and exchange boundary
@@ -211,9 +215,9 @@ JavaScript boundary.
 
 An authenticated peer proposal can be inspected before acceptance. The paved command
 shows its complete identity, proposer, replacement intent, statements, required
-claims, limits, and guidance. Peer-proposed guidance is explicitly labeled untrusted
-and emitted ephemerally; only the later explicit accept operation can make that exact
-digest the local policy binding.
+claims, limits, and legacy guidance. Peer-proposed legacy guidance is explicitly
+labeled untrusted and emitted ephemerally; it remains behaviorally inert even after
+the structured policy is accepted.
 
 Policy proposal notifications include complete identifiers and a local inspect command
 inside the existing untrusted-content fence. Receiving that notification still
@@ -230,7 +234,7 @@ replacement mismatch fails before the operation reports success. Remote response
 revocation messages remain authenticated information; receiving either never mutates
 the local binding.
 
-Protocol-v1 application content now carries three typed exchange messages:
+Protocol-v1 application content carries three typed policy-exchange messages:
 
 - a proposal identifier, claimed policy digest, complete canonical bundle, and
   optional digest that the proposal is intended to replace;
@@ -320,6 +324,18 @@ digests, replacement intent, response outcome, or revocation digest. The Copilot
 history command validates and renders each variant instead of rejecting a page that
 contains non-text application content.
 
+The same application contract also carries a `DirectedRequest` with one exact target
+device and one bounded body. Its enclosing application message identifier is the
+request identifier. Ordinary text is terminal and never implies another request.
+The sender path remains disabled until authenticated member capability negotiation
+proves the target supports this additive variant. The current shared local-service
+and manual-history contracts preserve the request kind, target, and body. Until
+durable request handling exists, the Copilot delivery runtime withholds it from model
+turns and reports a body-free unsupported diagnostic while retaining the message in
+history. The closed binary adapter protocol projects it into a daemon-authored
+unsupported-content notice without exposing the body, so an older adapter fails
+visibly rather than treating the request as ordinary actionable text.
+
 ## Harness boundary
 
 Model guidance is never treated as proof of enforcement. Paved harness adapters
@@ -335,8 +351,8 @@ autonomous execution authority from an active binding and must keep peer guidanc
 advisory unless it independently implements and proves an enforcement boundary.
 
 Peer content remains quoted inside the untrusted collaborator boundary. A locally
-active binding supplies the separate trusted instruction to evaluate that content and
-act only within the effective policy.
+active binding can authorize only the structured actions its statements, local
+authority, and harness evidence all permit.
 
 The paved Copilot integration evaluates `conversation.reply` before converting an
 idle delivery into an autonomous collaboration turn. The shared service derives
@@ -368,8 +384,8 @@ leaking across an enqueue race into foreground user work. A later token-bearing
 collaboration prompt without its matching pending authorization enters a deny-all
 tool state until idle instead of running outside the gate.
 
-Locally accepted policy guidance is placed outside the peer-content fence as trusted
-configuration, while collaborator text remains quoted as untrusted task input.
+Legacy policy guidance is never placed into a model turn. Collaborator text remains
+quoted as untrusted task input.
 Finite turn and token limits currently deny autonomous execution because the adapter
 does not yet prove durable accounting for them. This is a truthful reduction, not an
 implicit unlimited fallback.

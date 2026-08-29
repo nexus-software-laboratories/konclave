@@ -9,7 +9,6 @@ import { collaborationOperations } from './operations.js';
 const hex32 = /^[0-9a-f]{64}$/u;
 const hex16 = /^[0-9a-f]{32}$/u;
 const maxPolicyNameBytes = 128;
-const maxPolicyGuidanceBytes = 32 * 1024;
 const maxToolArgumentsBytes = 128 * 1024;
 const maxMessageTextBytes = 64 * 1024;
 const sendArgumentKeys = new Set([
@@ -88,15 +87,10 @@ function parseTurnAuthorization(
   ) {
     throw new Error('the local service collaboration authorization is malformed');
   }
-  const guidance =
-    value.guidance === null || value.guidance === undefined
-      ? undefined
-      : boundedString(value.guidance, maxPolicyGuidanceBytes, 'policy guidance');
   return {
     conversation,
     policyDigest: value.policyDigest,
     policyName: boundedString(value.policyName, maxPolicyNameBytes, 'policy name'),
-    guidance,
     turnToken: randomBytes(16).toString('hex'),
   };
 }
@@ -302,7 +296,10 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
       if (!first) {
         return null;
       }
-      if (!events.some((event) => event.payload.kind === 'application-text')) {
+      if (
+        events.some((event) => event.payload.kind === 'directed-request') ||
+        !events.some((event) => event.payload.kind === 'application-text')
+      ) {
         return null;
       }
       const conversation = first.conversation.toString('hex');

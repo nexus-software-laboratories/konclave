@@ -58,6 +58,7 @@ import { ConversationRole } from '../src/generated/konclave/protocol/v1/common_p
 import { RelayEnrollmentOutcome } from '../src/generated/konclave/protocol/v1/enrollment_pb.js';
 import {
   ApplicationMessageSchema,
+  DirectedRequestContentSchema,
   TextContentSchema,
 } from '../src/generated/konclave/protocol/v1/application_pb.js';
 import { DeviceCredentialBindingSchema } from '../src/generated/konclave/protocol/v1/identity_pb.js';
@@ -69,6 +70,7 @@ import {
   bytes,
   conversationState,
   credential,
+  directedRequestMessage,
   enrollmentRequest,
   enrollmentResponse,
   invitation,
@@ -183,6 +185,44 @@ describe('application contracts', () => {
     expectCode(
       () =>
         encodeApplicationMessage(applicationMessage({ body: 'x'.repeat(MAX_TEXT_BODY_BYTES + 1) })),
+      protocolErrorCodes.outOfRange,
+    );
+  });
+
+  it('round trips a request directed to an exact member', () => {
+    const value = directedRequestMessage();
+    expect(decodeApplicationMessage(encodeApplicationMessage(value))).toEqual(value);
+  });
+
+  it('rejects malformed directed requests', () => {
+    expectCode(
+      () => encodeApplicationMessage(directedRequestMessage({ targetDeviceIdLength: 31 })),
+      protocolErrorCodes.invalidLength,
+    );
+    expectCode(
+      () =>
+        encodeApplicationMessage(
+          create(ApplicationMessageSchema, {
+            ...directedRequestMessage(),
+            content: {
+              case: 'directedRequest',
+              value: create(DirectedRequestContentSchema, {
+                body: 'missing target',
+              }),
+            },
+          }),
+        ),
+      protocolErrorCodes.missingField,
+    );
+    expectCode(
+      () => encodeApplicationMessage(directedRequestMessage({ body: '' })),
+      protocolErrorCodes.emptyValue,
+    );
+    expectCode(
+      () =>
+        encodeApplicationMessage(
+          directedRequestMessage({ body: 'x'.repeat(MAX_TEXT_BODY_BYTES + 1) }),
+        ),
       protocolErrorCodes.outOfRange,
     );
   });

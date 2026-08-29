@@ -17,7 +17,8 @@ use crate::CollaborationPolicySourceError;
 use crate::file::{create_new_file, read_bounded_regular_file};
 
 pub const MAX_COLLABORATION_POLICY_SOURCE_BYTES: usize = 128 * 1024;
-const SOURCE_API_VERSION: &str = "konclave.dev/v1";
+const SOURCE_API_VERSION_V1: &str = "konclave.dev/v1";
+const SOURCE_API_VERSION_V2: &str = "konclave.dev/v2";
 const SOURCE_KIND: &str = "CollaborationPolicy";
 
 /// Canonical policy bundle, digest, and bytes produced from one editable source.
@@ -49,6 +50,9 @@ impl CompiledCollaborationPolicy {
 
 /// Compiles one bounded strict-JSON collaboration-policy source.
 ///
+/// Version 2 rejects legacy guidance. Version 1 remains readable so historical
+/// source can reproduce its canonical bytes and digest.
+///
 /// Missing source limits inherit from `defaults`; explicit JSON `null` is unlimited.
 ///
 /// # Errors
@@ -65,12 +69,17 @@ pub fn compile_collaboration_policy_source(
         });
     }
     let source: CollaborationPolicySource = deserialize_strict(bytes, "source")?;
-    if source.api_version != SOURCE_API_VERSION {
-        return Err(CollaborationPolicySourceError::UnsupportedApiVersion);
-    }
     if source.kind != SOURCE_KIND {
         return Err(CollaborationPolicySourceError::UnsupportedKind);
     }
+    let guidance = match source.api_version.as_str() {
+        SOURCE_API_VERSION_V1 => source.spec.guidance.value,
+        SOURCE_API_VERSION_V2 if !source.spec.guidance.present => None,
+        SOURCE_API_VERSION_V2 => {
+            return Err(CollaborationPolicySourceError::InvalidJson { document: "source" });
+        }
+        _ => return Err(CollaborationPolicySourceError::UnsupportedApiVersion),
+    };
     let statements = source
         .spec
         .statements
@@ -102,7 +111,7 @@ pub fn compile_collaboration_policy_source(
     let bundle = CollaborationPolicyBundle::new(
         ProtocolVersion::application_v1(),
         source.metadata.name,
-        source.spec.guidance,
+        guidance,
         statements,
         source.spec.required_harness_claims.into_inner(),
         limits,
@@ -133,8 +142,8 @@ pub fn compile_collaboration_policy_file(
 
 /// Creates one editable strict-JSON policy source without overwriting an existing file.
 ///
-/// The template contains no product-defined collaboration statements and resolves
-/// every optional semantic limit to explicitly unlimited.
+/// The version-2 template contains no guidance or product-defined collaboration
+/// statements and resolves every optional semantic limit to explicitly unlimited.
 ///
 /// # Errors
 ///
@@ -145,13 +154,12 @@ pub fn create_collaboration_policy_source_file(
 ) -> Result<(), CollaborationPolicySourceError> {
     validate_collaboration_policy_name(name)?;
     let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "apiVersion": SOURCE_API_VERSION,
+        "apiVersion": SOURCE_API_VERSION_V2,
         "kind": SOURCE_KIND,
         "metadata": {
             "name": name,
         },
         "spec": {
-            "guidance": null,
             "statements": [],
             "requiredHarnessClaims": [],
             "limits": {
@@ -210,13 +218,29 @@ struct SourceMetadata {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SourceSpec {
-    guidance: Option<String>,
+    #[serde(default)]
+    guidance: SourceGuidance,
     #[serde(default)]
     statements: BoundedVec<SourceStatement, MAX_COLLABORATION_POLICY_STATEMENTS>,
     #[serde(default)]
     required_harness_claims: BoundedVec<String, MAX_COLLABORATION_POLICY_HARNESS_CLAIMS>,
     #[serde(default)]
     limits: SourceLimits,
+}
+
+#[derive(Default)]
+struct SourceGuidance {
+    present: bool,
+    value: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SourceGuidance {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self {
+            present: true,
+            value: Option::<String>::deserialize(deserializer)?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
