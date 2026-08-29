@@ -73,6 +73,11 @@ receives a daemon path or profile root. During this pre-release schema-v2 cut,
 `-Refresh` removes only schema-v1 authorization configuration after stopping the exact
 recorded service; profile and conversation state remain.
 
+Slash-command output defaults to concise normal summaries. Run
+`/konclave output verbose` in one session when diagnosing identifiers, grant capacity,
+delivery state, or pairing phases; `/konclave output normal` restores the default.
+This presentation setting lasts only for the current extension process.
+
 ## Pair two sessions
 
 Open fresh Copilot CLI sessions in two repositories.

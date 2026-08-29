@@ -27,9 +27,42 @@ export interface CommandOutputOptions {
   readonly ephemeral?: boolean;
 }
 
+export type CommandOutputMode = 'normal' | 'verbose';
+
+interface CommandPresentation {
+  readonly mode: CommandOutputMode;
+  setMode(mode: CommandOutputMode): void;
+  write(line: string, options?: CommandOutputOptions): Promise<void>;
+  detail(line: string, options?: CommandOutputOptions): Promise<void>;
+}
+
+function createCommandPresentation(
+  output: CommandOutput,
+  initialMode: CommandOutputMode,
+): CommandPresentation {
+  let mode = initialMode;
+  return {
+    get mode() {
+      return mode;
+    },
+    setMode(value) {
+      mode = value;
+    },
+    async write(line, options) {
+      await output.write(line, options);
+    },
+    async detail(line, options) {
+      if (mode === 'verbose') {
+        await output.write(line, options);
+      }
+    },
+  };
+}
+
 export interface CommandDependencies {
   readonly client: LocalServiceClient;
   readonly output: CommandOutput;
+  readonly outputMode?: CommandOutputMode;
   readonly nowUnixMilliseconds?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly readPolicySource?: (path: string) => Promise<string>;
@@ -216,6 +249,7 @@ const policyHelpLines = [
 const helpLines = [
   'Konclave commands (deterministic; no model inference):',
   '  /konclave help                                      Show this list.',
+  '  /konclave output <normal|verbose>                   Set command detail for this session.',
   '  /konclave status                                    Show profile, delivery, and relay state.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
@@ -1128,7 +1162,7 @@ function remainingPairingRequestMilliseconds(
 async function completeAccountTrustedPairing(
   client: LocalServiceClient,
   initialStatus: PairingStatus,
-  output: CommandOutput,
+  presentation: CommandPresentation,
   commandDeadline: number,
   nowUnixMilliseconds: () => number,
   sleep: (milliseconds: number) => Promise<void>,
@@ -1170,7 +1204,7 @@ async function completeAccountTrustedPairing(
           ),
         );
         if (status.phase !== previousPhase) {
-          await output.write(`connect phase: ${status.phase}`);
+          await presentation.detail(`connect phase: ${status.phase}`);
         }
         continue;
       }
@@ -1193,7 +1227,7 @@ async function completeAccountTrustedPairing(
       }
       status = synced.pairing;
       if (status.phase !== previousPhase) {
-        await output.write(`connect phase: ${status.phase}`);
+        await presentation.detail(`connect phase: ${status.phase}`);
       } else {
         await sleep(connectPollMilliseconds);
       }
@@ -1201,11 +1235,11 @@ async function completeAccountTrustedPairing(
 
     throw new Error(`connect exceeded its progress limit for pairing ${status.pairingId}`);
   } catch (error) {
-    await output.write(`recovery: /konclave pairing ${status.pairingId}`);
+    await presentation.write(`recovery: /konclave pairing ${status.pairingId}`);
     if (status.phase === 'cancelled') {
-      await output.write('next: run /konclave connect to start a new pairing');
+      await presentation.write('next: run /konclave connect to start a new pairing');
     } else {
-      await output.write(`cancel: /konclave cancel ${status.pairingId}`);
+      await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
     }
     throw error;
   }
@@ -1288,112 +1322,142 @@ function displayMessageContent(message: MessageSummary): string {
   }
 }
 
-async function renderPairing(output: CommandOutput, status: PairingStatus): Promise<void> {
-  await output.write(`pairing: ${status.pairingId}`);
-  await output.write(`local role: ${status.localRole}`);
-  await output.write(`phase: ${status.phase}`);
-  await output.write(`joiner device: ${status.joinerDeviceId}`);
-  await output.write(`requested role: ${status.requestedRole}`);
+async function renderPairing(
+  presentation: CommandPresentation,
+  status: PairingStatus,
+): Promise<void> {
+  if (presentation.mode === 'normal') {
+    await presentation.write(
+      `pairing ${status.pairingId}: ${status.phase}${
+        status.conversationId ? `; conversation ${status.conversationId}` : ''
+      }`,
+    );
+    return;
+  }
+  await presentation.write(`pairing: ${status.pairingId}`);
+  await presentation.write(`local role: ${status.localRole}`);
+  await presentation.write(`phase: ${status.phase}`);
+  await presentation.write(`joiner device: ${status.joinerDeviceId}`);
+  await presentation.write(`requested role: ${status.requestedRole}`);
   if (status.inviterDeviceId) {
-    await output.write(`inviter device: ${status.inviterDeviceId}`);
+    await presentation.write(`inviter device: ${status.inviterDeviceId}`);
   }
   if (status.grantedRole) {
-    await output.write(`granted role: ${status.grantedRole}`);
+    await presentation.write(`granted role: ${status.grantedRole}`);
   }
   if (status.conversationId) {
-    await output.write(`conversation: ${status.conversationId}`);
+    await presentation.write(`conversation: ${status.conversationId}`);
   }
 }
 
 async function renderCollaborationPolicyOperation(
-  output: CommandOutput,
+  presentation: CommandPresentation,
   operation: CollaborationPolicyOperationSummary,
 ): Promise<void> {
-  await output.write(`conversation: ${operation.conversationId}`);
-  if (operation.proposalId) {
-    await output.write(`proposal id: ${operation.proposalId}`);
+  if (presentation.mode === 'normal') {
+    await presentation.write(
+      `policy operation complete: ${operation.policyDigest}${
+        operation.proposalId ? `; proposal ${operation.proposalId}` : ''
+      }`,
+    );
+    return;
   }
-  await output.write(`policy digest: ${operation.policyDigest}`);
-  await output.write(`message id: ${operation.messageId}`);
-  await output.write(`relay cursor: ${operation.cursor}`);
-  await output.write(
+  await presentation.write(`conversation: ${operation.conversationId}`);
+  if (operation.proposalId) {
+    await presentation.write(`proposal id: ${operation.proposalId}`);
+  }
+  await presentation.write(`policy digest: ${operation.policyDigest}`);
+  await presentation.write(`message id: ${operation.messageId}`);
+  await presentation.write(`relay cursor: ${operation.cursor}`);
+  await presentation.write(
     `local binding changed: ${operation.localBindingChanged ? 'yes' : 'no (idempotent retry)'}`,
   );
 }
 
 async function renderCollaborationPolicyStatus(
-  output: CommandOutput,
+  presentation: CommandPresentation,
   status: CollaborationPolicyStatusSummary,
 ): Promise<void> {
-  await output.write(`conversation: ${status.conversationId}`);
   const active = status.activePolicy;
-  if (!active) {
-    await output.write('policy: inactive');
+  if (presentation.mode === 'normal') {
+    await presentation.write(
+      active
+        ? `policy ${active.name}: ${active.policyDigest}`
+        : `policy inactive: conversation ${status.conversationId}`,
+    );
     return;
   }
-  await output.write(`policy: ${bounded(active.name, 128)}`);
-  await output.write(`policy digest: ${active.policyDigest}`);
-  await output.write(`activated at: ${active.activatedAtUnixMilliseconds}`);
-  await renderCollaborationPolicyBundle(output, active, false);
+  await presentation.write(`conversation: ${status.conversationId}`);
+  if (!active) {
+    await presentation.write('policy: inactive');
+    return;
+  }
+  await presentation.write(`policy: ${bounded(active.name, 128)}`);
+  await presentation.write(`policy digest: ${active.policyDigest}`);
+  await presentation.write(`activated at: ${active.activatedAtUnixMilliseconds}`);
+  await renderCollaborationPolicyBundle(presentation, active, false);
 }
 
 async function renderCollaborationPolicyProposalInspection(
-  output: CommandOutput,
+  presentation: CommandPresentation,
   proposal: CollaborationPolicyProposalInspectionSummary,
 ): Promise<void> {
-  await output.write(`conversation: ${proposal.conversationId}`);
-  await output.write(`proposal id: ${proposal.proposalId}`);
-  await output.write(`policy digest: ${proposal.policyDigest}`);
+  await presentation.write(`conversation: ${proposal.conversationId}`);
+  await presentation.write(`proposal id: ${proposal.proposalId}`);
+  await presentation.write(`policy digest: ${proposal.policyDigest}`);
   if (proposal.replacesPolicyDigest) {
-    await output.write(`replaces policy digest: ${proposal.replacesPolicyDigest}`);
+    await presentation.write(`replaces policy digest: ${proposal.replacesPolicyDigest}`);
   }
-  await output.write(`proposer device: ${proposal.proposerDeviceId}`);
-  await output.write(`proposal message: ${proposal.messageId}`);
-  await output.write(`relay cursor: ${proposal.relayCursor}`);
-  await output.write(`peer-proposed policy: ${bounded(proposal.name, 128)}`);
-  await output.write('peer-proposed semantics (UNTRUSTED until explicitly accepted):');
-  await renderCollaborationPolicyBundle(output, proposal, true);
+  await presentation.write(`proposer device: ${proposal.proposerDeviceId}`);
+  await presentation.write(`proposal message: ${proposal.messageId}`);
+  await presentation.write(`relay cursor: ${proposal.relayCursor}`);
+  await presentation.write(`peer-proposed policy: ${bounded(proposal.name, 128)}`);
+  await presentation.write('peer-proposed semantics (UNTRUSTED until explicitly accepted):');
+  await renderCollaborationPolicyBundle(presentation, proposal, true);
   if (proposal.guidance) {
-    await output.write('peer-proposed guidance (UNTRUSTED; review as data):');
+    await presentation.write('peer-proposed guidance (UNTRUSTED; review as data):');
     for (const chunk of displayCompleteText(proposal.guidance)) {
-      await output.write(chunk, { ephemeral: true });
+      await presentation.write(chunk, { ephemeral: true });
     }
   }
-  await output.write(
+  await presentation.write(
     `accept only after review: /konclave policy accept ${proposal.proposalId} ${proposal.policyDigest}`,
   );
-  await output.write(
+  await presentation.write(
     `reject: /konclave policy reject ${proposal.proposalId} ${proposal.policyDigest}`,
   );
 }
 
 async function renderCollaborationPolicyBundle(
-  output: CommandOutput,
+  presentation: CommandPresentation,
   bundle: CollaborationPolicyBundleSummary,
   complete: boolean,
 ): Promise<void> {
-  await output.write(
+  if (!complete && presentation.mode === 'normal') {
+    return;
+  }
+  await presentation.write(
     `required harness claims: ${
       bundle.requiredHarnessClaims.length === 0
         ? 'none'
         : bundle.requiredHarnessClaims.map((claim) => bounded(claim, 256)).join(', ')
     }`,
   );
-  await output.write(
+  await presentation.write(
     `limits: duration ${formatPolicyLimit(bundle.limits.durationMilliseconds)}, turns ${formatPolicyLimit(bundle.limits.turns)}, tokens ${formatPolicyLimit(bundle.limits.tokens)}, concurrent requests ${formatPolicyLimit(bundle.limits.concurrentRequests)}`,
   );
   const statements = complete
     ? bundle.statements
     : bundle.statements.slice(0, maxDisplayedPolicyStatements);
   for (const statement of statements) {
-    await output.write(
+    await presentation.write(
       `statement ${bounded(statement.statementId, 128)}: ${statement.effect} ${bounded(statement.action, 256)}${
         statement.resource ? ` ${bounded(statement.resource, 256)}` : ''
       }`,
     );
   }
   if (!complete && bundle.statements.length > maxDisplayedPolicyStatements) {
-    await output.write(
+    await presentation.write(
       `${bundle.statements.length - maxDisplayedPolicyStatements} additional statements omitted`,
     );
   }
@@ -1459,6 +1523,7 @@ function parseConversationArgument(argumentsText: string, usage: string): string
 
 export function createKonclaveCommands(dependencies: CommandDependencies): RegisteredCommand[] {
   const { client, output } = dependencies;
+  const presentation = createCommandPresentation(output, dependencies.outputMode ?? 'normal');
   const nowUnixMilliseconds = dependencies.nowUnixMilliseconds ?? Date.now;
   const sleep = dependencies.sleep ?? defaultSleep;
   const readPolicySource = dependencies.readPolicySource ?? readBoundedPolicySource;
@@ -1487,7 +1552,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (status.conversationId !== conversationId) {
           throw new Error('the local service policy status targets a different conversation');
         }
-        await renderCollaborationPolicyStatus(output, status);
+        await renderCollaborationPolicyStatus(presentation, status);
         return;
       }
       case 'propose':
@@ -1520,10 +1585,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const source = requireBoundedPolicySource(
           await readPolicySource(sourceArguments.sourcePath),
         );
-        await output.write(`proposal id: ${proposalId}`);
-        await output.write(
-          `recovery after ambiguous failure: /konclave policy resume ${proposalId}; validation failure or edit requires a new proposal id`,
-        );
+        if (presentation.mode === 'normal') {
+          await presentation.write(
+            `policy proposal ${proposalId}; resume an ambiguous attempt with /konclave policy resume ${proposalId}`,
+          );
+        } else {
+          await presentation.write(`proposal id: ${proposalId}`);
+          await presentation.write(
+            `recovery after ambiguous failure: /konclave policy resume ${proposalId}; validation failure or edit requires a new proposal id`,
+          );
+        }
         const payload: Record<string, unknown> = {
           conversation_id: conversationId,
           proposal_id: proposalId,
@@ -1540,7 +1611,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (operation.conversationId !== conversationId || operation.proposalId !== proposalId) {
           throw new Error('the local service policy proposal identity does not match the request');
         }
-        await renderCollaborationPolicyOperation(output, operation);
+        await renderCollaborationPolicyOperation(presentation, operation);
         return;
       }
       case 'resume': {
@@ -1566,7 +1637,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (operation.conversationId !== conversationId || operation.proposalId !== proposalId) {
           throw new Error('the resumed policy proposal identity does not match the request');
         }
-        await renderCollaborationPolicyOperation(output, operation);
+        await renderCollaborationPolicyOperation(presentation, operation);
         return;
       }
       case 'inspect': {
@@ -1586,7 +1657,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (proposal.conversationId !== conversationId || proposal.proposalId !== proposalId) {
           throw new Error('the inspected policy proposal identity does not match the request');
         }
-        await renderCollaborationPolicyProposalInspection(output, proposal);
+        await renderCollaborationPolicyProposalInspection(presentation, proposal);
         return;
       }
       case 'accept':
@@ -1632,7 +1703,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         ) {
           throw new Error('the local service policy response identity does not match the request');
         }
-        await renderCollaborationPolicyOperation(output, operation);
+        await renderCollaborationPolicyOperation(presentation, operation);
         return;
       }
       case 'revoke': {
@@ -1646,8 +1717,14 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const messageId = parts[1]
           ? requireHexIdentifier(parts[1], messageIdCharacters, 'message identifier')
           : randomBytes(16).toString('hex');
-        await output.write(`message id: ${messageId}`);
-        await output.write(`retry: /konclave policy revoke ${policyDigest} ${messageId}`);
+        if (presentation.mode === 'normal') {
+          await presentation.write(
+            `policy revocation ${messageId}; reuse this identifier to retry`,
+          );
+        } else {
+          await presentation.write(`message id: ${messageId}`);
+          await presentation.write(`retry: /konclave policy revoke ${policyDigest} ${messageId}`);
+        }
         const operation = parseCollaborationPolicyOperation(
           await client.request(
             'revoke_collaboration_policy',
@@ -1671,7 +1748,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             'the local service policy revocation identity does not match the request',
           );
         }
-        await renderCollaborationPolicyOperation(output, operation);
+        await renderCollaborationPolicyOperation(presentation, operation);
         return;
       }
       default:
@@ -1690,28 +1767,51 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'output': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave output <normal|verbose>');
+        const mode = parts[0];
+        if (mode !== 'normal' && mode !== 'verbose') {
+          throw new Error('output mode must be normal or verbose');
+        }
+        presentation.setMode(mode);
+        await presentation.write(`output: ${mode}`);
+        return;
+      }
       case 'status': {
         requireNoArguments(argumentsText, subcommand);
         const status = parseServiceStatus(await client.request(serviceOperations.status, {}));
-        await output.write(`profile: ${bounded(status.profile)}`);
-        await output.write(`device: ${bounded(status.deviceId)}`);
-        await output.write(`relay configured: ${status.relayConfigured ? 'yes' : 'no'}`);
-        await output.write(
+        if (presentation.mode === 'normal') {
+          await presentation.write(
+            `status: relay ${status.relayConfigured ? 'configured' : 'not configured'}; delivery ${
+              status.deliveryDegraded ? 'degraded' : 'healthy'
+            }; authorization ${bounded(status.authorizationPolicy)}${
+              status.authorizationPolicy === 'AccountTrusted' ? ' (same-account trust)' : ''
+            }; pending ${status.pendingEvents}`,
+          );
+          return;
+        }
+        await presentation.write(`profile: ${bounded(status.profile)}`);
+        await presentation.write(`device: ${bounded(status.deviceId)}`);
+        await presentation.write(`relay configured: ${status.relayConfigured ? 'yes' : 'no'}`);
+        await presentation.write(
           `authorization: ${bounded(status.authorizationPolicy)} (${status.authorizationEvidence.map((item) => bounded(item)).join('+')})`,
         );
-        await output.write(`authorization provider: ${bounded(status.authorizationProvider)}`);
+        await presentation.write(
+          `authorization provider: ${bounded(status.authorizationProvider)}`,
+        );
         if (status.authorizationPolicy === 'AccountTrusted') {
-          await output.write(
+          await presentation.write(
             'authorization boundary: same-account processes are trusted; no same-user isolation',
           );
         }
-        await output.write(
+        await presentation.write(
           `grant: expires ${status.grantExpiresAtUnixMilliseconds}, capabilities ${status.grantCapabilities}`,
         );
-        await output.write(
+        await presentation.write(
           `grant capacity: global ${status.activeGrants}/${status.grantLimit}, issuer ${status.activeGrantsForIssuer}/${status.grantLimitPerIssuer}, profile ${status.activeGrantsForProfile}/${status.grantLimitPerProfile}`,
         );
-        await output.write(
+        await presentation.write(
           `delivery: ${status.deliveryDegraded ? 'degraded' : 'healthy'}, watching ${status.watchedConversations}, pending ${status.pendingEvents}, claimed ${status.claimedEvents}`,
         );
         return;
@@ -1719,22 +1819,40 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       case 'identity': {
         requireNoArguments(argumentsText, subcommand);
         const deviceId = identity(await client.request('get_identity', {}));
-        await output.write(`device: ${bounded(deviceId)}`);
+        await presentation.write(`device: ${bounded(deviceId)}`);
         return;
       }
       case 'conversations': {
         requireNoArguments(argumentsText, subcommand);
         const selection = conversations(await client.request('list_conversations', {}));
         activeConversationId = selection.activeConversationId;
-        if (selection.activeConversationId) {
-          await output.write(`active: ${selection.activeConversationId}`);
-        }
         if (selection.conversationIds.length === 0) {
-          await output.write('no conversations yet');
+          await presentation.write(
+            presentation.mode === 'normal' ? 'conversations: none' : 'no conversations yet',
+          );
           return;
         }
+        if (presentation.mode === 'normal') {
+          if (selection.conversationIds.length === 1) {
+            await presentation.write(
+              `conversation: ${selection.conversationIds[0]}${
+                selection.activeConversationId ? ' (active)' : ''
+              }`,
+            );
+          } else {
+            await presentation.write(
+              `conversations: ${selection.conversationIds.length}; active ${
+                selection.activeConversationId ?? 'none'
+              }; use /konclave output verbose to list all`,
+            );
+          }
+          return;
+        }
+        if (selection.activeConversationId) {
+          await presentation.write(`active: ${selection.activeConversationId}`);
+        }
         for (const conversation of selection.conversationIds.slice(0, 20)) {
-          await output.write(bounded(conversation));
+          await presentation.write(bounded(conversation));
         }
         return;
       }
@@ -1748,19 +1866,25 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
               requested_role: 'member',
             }),
           );
-          await output.write(
+          await presentation.detail(
             'approval policy: AccountTrusted capability possession; no independent identity verification',
           );
-          await output.write(`pairing: ${created.pairing.pairingId}`);
-          await output.write(`recovery: /konclave pairing ${created.pairing.pairingId}`);
-          await output.write(`cancel: /konclave cancel ${created.pairing.pairingId}`);
-          await output.write('capability (ephemeral; paste the next line in the other session):');
-          await output.write(created.capability, { ephemeral: true });
-          await output.write('waiting for the other session to run /konclave connect <capability>');
+          await presentation.detail(`pairing: ${created.pairing.pairingId}`);
+          await presentation.detail(`recovery: /konclave pairing ${created.pairing.pairingId}`);
+          await presentation.detail(`cancel: /konclave cancel ${created.pairing.pairingId}`);
+          await presentation.write(
+            presentation.mode === 'normal'
+              ? `pairing ${created.pairing.pairingId} (same-account trust): paste this capability in the other session`
+              : 'capability (ephemeral; paste the next line in the other session):',
+          );
+          await presentation.write(created.capability, { ephemeral: true });
+          await presentation.detail(
+            'waiting for the other session to run /konclave connect <capability>',
+          );
           status = await completeAccountTrustedPairing(
             client,
             created.pairing,
-            output,
+            presentation,
             commandDeadline,
             nowUnixMilliseconds,
             sleep,
@@ -1773,14 +1897,19 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           if (redeemed.requestedRole !== 'member') {
             throw new Error('connect accepts only member pairing requests');
           }
-          await output.write(
+          await presentation.detail(
             'approval policy: AccountTrusted capability possession; no independent identity verification',
           );
-          await output.write(`pairing: ${redeemed.pairingId}`);
-          await output.write(`recovery: /konclave pairing ${redeemed.pairingId}`);
-          await output.write(`cancel: /konclave cancel ${redeemed.pairingId}`);
+          await presentation.detail(`pairing: ${redeemed.pairingId}`);
+          await presentation.detail(`recovery: /konclave pairing ${redeemed.pairingId}`);
+          await presentation.detail(`cancel: /konclave cancel ${redeemed.pairingId}`);
+          if (presentation.mode === 'normal') {
+            await presentation.write(
+              `pairing ${redeemed.pairingId} (same-account trust): connecting`,
+            );
+          }
           const conversationId = parseConversation(await client.request('create_conversation', {}));
-          await output.write(`conversation: ${conversationId}`);
+          await presentation.detail(`conversation: ${conversationId}`);
           const approved = parsePairingStatus(
             await client.request(
               'authorize_pairing_joiner',
@@ -1801,7 +1930,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           status = await completeAccountTrustedPairing(
             client,
             approved,
-            output,
+            presentation,
             commandDeadline,
             nowUnixMilliseconds,
             sleep,
@@ -1811,9 +1940,11 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           throw new Error('completed pairing is missing its conversation');
         }
         activeConversationId = status.conversationId;
-        await renderPairing(output, status);
-        await output.write(`connected: ${status.conversationId}`);
-        await output.write('next: /konclave send -- <message>');
+        if (presentation.mode === 'verbose') {
+          await renderPairing(presentation, status);
+        }
+        await presentation.write(`connected: ${status.conversationId}`);
+        await presentation.detail('next: /konclave send -- <message>');
         return;
       }
       case 'pair': {
@@ -1825,10 +1956,14 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             requested_role: requestedRole,
           }),
         );
-        await renderPairing(output, created.pairing);
-        await output.write('capability (ephemeral; copy the next line now):');
-        await output.write(created.capability, { ephemeral: true });
-        await output.write('next: run /konclave join <capability> in the other session');
+        await renderPairing(presentation, created.pairing);
+        await presentation.write(
+          presentation.mode === 'normal'
+            ? 'capability:'
+            : 'capability (ephemeral; copy the next line now):',
+        );
+        await presentation.write(created.capability, { ephemeral: true });
+        await presentation.detail('next: run /konclave join <capability> in the other session');
         return;
       }
       case 'join': {
@@ -1836,8 +1971,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const status = parsePairingStatus(
           await client.request('redeem_pairing_capability', { capability }),
         );
-        await renderPairing(output, status);
-        await output.write(
+        await renderPairing(presentation, status);
+        await presentation.write(
           `next: verify the joiner device, run /konclave new, then /konclave approve ${status.pairingId} <conversation>`,
         );
         return;
@@ -1846,11 +1981,11 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         requireNoArguments(argumentsText, subcommand);
         const conversationId = parseConversation(await client.request('create_conversation', {}));
         activeConversationId = conversationId;
-        await output.write(`conversation: ${conversationId}`);
-        await output.write(
+        await presentation.write(`conversation created: ${conversationId}`);
+        await presentation.detail(
           'conversation created durably; it remains if the pending pairing is abandoned',
         );
-        await output.write(
+        await presentation.detail(
           'next: use this conversation when approving an inviter-side pairing or sending a message',
         );
         return;
@@ -1860,7 +1995,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         requireArgumentCount(parts, 1, 1, '/konclave pairing <pairing>');
         const pairingId = requireHexIdentifier(parts[0], pairingIdCharacters, 'pairing identifier');
         await renderPairing(
-          output,
+          presentation,
           parsePairingStatus(await client.request('get_pairing_status', { pairing_id: pairingId })),
         );
         return;
@@ -1944,8 +2079,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             }),
           );
         }
-        await renderPairing(output, approved);
-        await output.write(`next: run /konclave sync ${pairingId} in both sessions`);
+        await renderPairing(presentation, approved);
+        await presentation.write(`next: run /konclave sync ${pairingId} in both sessions`);
         return;
       }
       case 'sync': {
@@ -1955,8 +2090,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const synced = parsePairingSync(
           await client.request('sync_pairing', { pairing_id: pairingId }),
         );
-        await output.write(`processed pairing records: ${synced.processedRecords}`);
-        await renderPairing(output, synced.pairing);
+        await presentation.detail(`processed pairing records: ${synced.processedRecords}`);
+        await renderPairing(presentation, synced.pairing);
         return;
       }
       case 'cancel': {
@@ -1964,7 +2099,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         requireArgumentCount(parts, 1, 1, '/konclave cancel <pairing>');
         const pairingId = requireHexIdentifier(parts[0], pairingIdCharacters, 'pairing identifier');
         await renderPairing(
-          output,
+          presentation,
           parsePairingStatus(await client.request('cancel_pairing', { pairing_id: pairingId })),
         );
         return;
@@ -2029,10 +2164,14 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (replyToMessageId) {
           payload.reply_to_message_id = replyToMessageId;
         }
-        await output.write(`message id: ${messageId}`);
-        await output.write(
-          `retry: /konclave ${subcommand} ${conversationId}${replyToMessageId ? ` ${replyToMessageId}` : ''} ${messageId} -- <same text>`,
-        );
+        if (presentation.mode === 'normal') {
+          await presentation.write(`message ${messageId}: sending; reuse this identifier to retry`);
+        } else {
+          await presentation.write(`message id: ${messageId}`);
+          await presentation.write(
+            `retry: /konclave ${subcommand} ${conversationId}${replyToMessageId ? ` ${replyToMessageId}` : ''} ${messageId} -- <same text>`,
+          );
+        }
         const sent = parseSentMessage(
           await client.request('send_message', payload, {
             requestId: messageRequestId(messageId),
@@ -2052,8 +2191,14 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           }
         }
         activeConversationId = conversationId;
-        await output.write(`conversation: ${sent.conversationId}`);
-        await output.write(`relay cursor: ${sent.cursor}`);
+        if (presentation.mode === 'normal') {
+          await presentation.write(
+            `sent ${sent.messageId}: conversation ${sent.conversationId}; cursor ${sent.cursor}`,
+          );
+        } else {
+          await presentation.write(`conversation: ${sent.conversationId}`);
+          await presentation.write(`relay cursor: ${sent.cursor}`);
+        }
         return;
       }
       case 'messages': {
@@ -2075,26 +2220,34 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             limit: maxDisplayedMessages,
           }),
         );
-        await output.write(
+        await presentation.detail(
           `synced messages: ${synced.messages.length}, more available: ${synced.hasMore ? 'yes' : 'no'}`,
         );
         if (history.messages.length === 0) {
-          await output.write('no messages after the requested cursor');
+          await presentation.write('messages: none after the requested cursor');
           return;
         }
         for (const message of history.messages) {
-          await output.write(
+          await presentation.detail(
             `message ${message.messageId}: ${message.direction}, sender ${message.senderDeviceId}, cursor ${message.cursor}, duplicate ${message.duplicate ? 'yes' : 'no'}`,
           );
-          await output.write(displayMessageContent(message), { ephemeral: true });
+          await presentation.write(displayMessageContent(message), { ephemeral: true });
         }
         const lastCursor = history.messages.at(-1)?.cursor;
         if (lastCursor !== undefined) {
-          await output.write(`resume after cursor: ${lastCursor}`);
-          await output.write(`next: /konclave messages ${conversationId} ${lastCursor}`);
+          if (presentation.mode === 'normal') {
+            await presentation.write(
+              `messages: ${history.messages.length}; resume cursor ${lastCursor}${
+                history.hasMore ? '; more available' : ''
+              }`,
+            );
+          } else {
+            await presentation.write(`resume after cursor: ${lastCursor}`);
+            await presentation.write(`next: /konclave messages ${conversationId} ${lastCursor}`);
+          }
         }
-        if (history.hasMore) {
-          await output.write('more messages are available');
+        if (history.hasMore && presentation.mode === 'verbose') {
+          await presentation.write('more messages are available');
         }
         return;
       }
@@ -2112,7 +2265,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           throw new Error('the local service selected a different active conversation');
         }
         activeConversationId = conversation;
-        await output.write(`active conversation selected: ${conversation}`);
+        await presentation.write(`active conversation selected: ${conversation}`);
         return;
       }
       case 'mute':
@@ -2125,7 +2278,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           conversation_id: conversation,
           enabled: subcommand === 'unmute',
         });
-        await output.write(
+        await presentation.write(
           `automatic delivery ${subcommand === 'unmute' ? 'resumed' : 'muted'} for ${bounded(conversation)}`,
         );
         return;

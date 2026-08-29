@@ -20,8 +20,9 @@ import {
 } from '../src/service/transcript.js';
 import { createKonclaveTools, konclaveTools } from '../src/service/tools.js';
 import {
-  createKonclaveCommands,
+  createKonclaveCommands as createCommands,
   parseCommandArguments,
+  type CommandDependencies,
   type CommandOutputOptions,
 } from '../src/service/commands.js';
 import {
@@ -32,6 +33,10 @@ import {
 import { createLocalServiceDeliveryChannel } from '../src/service/delivery.js';
 import { createExtensionJoinConfig, deriveProfileId } from '../src/runtime.js';
 import { LocalServiceError, type LocalServiceClient } from '../src/service/client.js';
+
+function createKonclaveCommands(dependencies: CommandDependencies) {
+  return createCommands({ ...dependencies, outputMode: 'verbose' });
+}
 
 function stubClient(request = vi.fn().mockResolvedValue({})): LocalServiceClient {
   return {
@@ -350,6 +355,130 @@ describe('deterministic commands', () => {
     expect(parseCommandArguments('')).toEqual([]);
     expect(() => parseCommandArguments('a '.repeat(8))).toThrow();
     expect(() => parseCommandArguments('x'.repeat(129))).toThrow();
+  });
+
+  it('defaults to concise output and toggles verbose details for this command session', async () => {
+    const request = vi.fn().mockResolvedValue(serviceStatus());
+    const lines: string[] = [];
+    const command = createCommands({
+      client: stubClient(request),
+      output: {
+        write(line) {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('status'));
+    expect(lines).toEqual([
+      'status: relay configured; delivery healthy; authorization AccountTrusted (same-account trust); pending 0',
+    ]);
+
+    lines.length = 0;
+    await command?.handler(commandContext('output verbose'));
+    await command?.handler(commandContext('status'));
+    expect(lines[0]).toBe('output: verbose');
+    expect(lines).toContain('profile: session-test');
+    expect(lines).toContain(`device: ${'aa'.repeat(32)}`);
+    expect(lines.join('\n')).toContain('no same-user isolation');
+
+    lines.length = 0;
+    await command?.handler(commandContext('output normal'));
+    await command?.handler(commandContext('status'));
+    expect(lines).toEqual([
+      'output: normal',
+      'status: relay configured; delivery healthy; authorization AccountTrusted (same-account trust); pending 0',
+    ]);
+  });
+
+  it('keeps normal pairing handoff and policy status concise', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'create_pairing_capability') {
+        return {
+          pairing: pairingStatus(),
+          capability: 'pairing_capability-1',
+        };
+      }
+      if (operation === 'list_conversations') {
+        return {
+          conversation_ids: [conversationId],
+          active_conversation_id: conversationId,
+        };
+      }
+      if (operation === 'get_collaboration_policy_status') {
+        return {
+          conversation_id: conversationId,
+          active_policy: null,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createCommands({
+      client: stubClient(request),
+      output: {
+        write(line, options) {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('pair'));
+    await command?.handler(commandContext('policy status'));
+
+    expect(entries).toEqual([
+      {
+        line: `pairing ${pairingId}: joiner_awaiting_invitation`,
+        options: undefined,
+      },
+      { line: 'capability:', options: undefined },
+      { line: 'pairing_capability-1', options: { ephemeral: true } },
+      {
+        line: `policy inactive: conversation ${conversationId}`,
+        options: undefined,
+      },
+    ]);
+  });
+
+  it('keeps normal send output concise while preserving its retry identifier', async () => {
+    const messageId = '88'.repeat(16);
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      if (operation === 'send_message') {
+        return {
+          conversation_id: conversationId,
+          message_id: messageId,
+          sender_counter: 1,
+          cursor: 8,
+        };
+      }
+      if (operation === 'set_active_conversation') {
+        return {
+          active_conversation_id:
+            typeof payload === 'object' && payload !== null && 'conversation_id' in payload
+              ? payload.conversation_id
+              : null,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const lines: string[] = [];
+    const command = createCommands({
+      client: stubClient(request),
+      output: {
+        write(line) {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(
+      commandContext(`send ${conversationId} ${messageId} -- concise message`),
+    );
+
+    expect(lines).toEqual([
+      `message ${messageId}: sending; reuse this identifier to retry`,
+      `sent ${messageId}: conversation ${conversationId}; cursor 8`,
+    ]);
   });
 
   it('renders status from the client without any model turn', async () => {
