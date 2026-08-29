@@ -73,7 +73,17 @@ fn identifiers_are_typed_and_share_the_contract_bound() {
         A2AContextId::parse("context-a").unwrap().as_str(),
         "context-a"
     );
-    assert_eq!(A2ATaskId::parse("task-a").unwrap().as_str(), "task-a");
+    assert_eq!(
+        A2ATaskId::parse("11".repeat(16)).unwrap().as_str(),
+        "11111111111111111111111111111111"
+    );
+    assert_eq!(
+        A2ATaskId::parse("11".repeat(16))
+            .unwrap()
+            .request_message_id()
+            .as_bytes(),
+        &[0x11; 16]
+    );
     assert_eq!(
         A2AMessageId::parse("message-a").unwrap().as_str(),
         "message-a"
@@ -89,7 +99,7 @@ fn identifiers_are_typed_and_share_the_contract_bound() {
         Some(A2ADomainError::PartIndexOutOfRange)
     );
     assert_eq!(
-        A2ATaskId::parse("../task").err(),
+        A2ATaskId::parse("task-a").err(),
         Some(A2ADomainError::InvalidIdentifier { kind: "task" })
     );
 }
@@ -114,6 +124,10 @@ fn send_mapping_is_deterministic_and_route_scoped() {
             0x0c, 0xe3, 0xc7, 0x66, 0xe8, 0x88, 0x5b, 0x47, 0xbf, 0x4a, 0xce, 0xff, 0x19, 0x26,
             0xe8, 0x10,
         ]
+    );
+    assert_eq!(
+        mapping.task_id().request_message_id(),
+        mapping.request_message_id()
     );
     assert_eq!(
         mapping.conversation_id(),
@@ -190,7 +204,7 @@ fn get_task_mapping_remains_agent_and_tenant_scoped() {
     let request = validate_initial_get_task_request(
         GetTaskRequest {
             tenant: "tenant-a".to_string(),
-            id: "task-a".to_string(),
+            id: "11".repeat(16),
             history_length: Some(1),
         },
         Some("tenant-a"),
@@ -198,7 +212,10 @@ fn get_task_mapping_remains_agent_and_tenant_scoped() {
     .unwrap();
     let lookup = map_initial_get_task(&route(), request).unwrap();
     assert_eq!(lookup.agent_id().as_str(), "agent-a");
-    assert_eq!(lookup.task_id().as_str(), "task-a");
+    assert_eq!(
+        lookup.task_id().as_str(),
+        "11111111111111111111111111111111"
+    );
     assert_eq!(lookup.tenant().map(A2ATenantId::as_str), Some("tenant-a"));
     assert_eq!(lookup.history_length(), Some(1));
 }

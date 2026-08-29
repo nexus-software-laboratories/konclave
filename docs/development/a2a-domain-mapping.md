@@ -22,6 +22,9 @@ The domain crate defines distinct opaque types for:
 These types share the canonical A2A identifier bound but do not become Konclave
 profile aliases, conversation identifiers, device identifiers, policy digests, or
 relay routes.
+Gateway-owned task identifiers additionally require exactly 32 lowercase hexadecimal
+characters, matching the mapped 16-byte Konclave request identifier with no alternate
+wire spelling.
 
 ## Deployment-owned routes
 

@@ -64,6 +64,8 @@ layers.
 
 `GetTask` requires one canonical task identifier of at most 128 ASCII bytes, the
 exact configured tenant, and optional history length `0` or `1`.
+The gateway domain layer further requires its own task identifiers to be exactly 32
+lowercase hexadecimal characters, matching the mapped Konclave request identifier.
 
 Protocol Buffer and ProtoJSON request bodies are rejected before decoding when they
 exceed 128 KiB. Generated DTOs may represent the broader A2A schema, but unsupported

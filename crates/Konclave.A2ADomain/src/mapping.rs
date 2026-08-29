@@ -285,7 +285,7 @@ fn derive_task_mapping(
                 kind: "task_mapping",
             })?;
     let request_message_id = MessageId::from_bytes(request_bytes);
-    let task_id = A2ATaskId::parse(encode_hex(&request_bytes))?;
+    let task_id = A2ATaskId::from_request_message_id(request_message_id)?;
     Ok((task_id, request_message_id))
 }
 
@@ -297,14 +297,4 @@ fn append_component(digest: &mut Sha256, value: Option<&str>) -> Result<(), A2AD
     digest.update(length.to_be_bytes());
     digest.update(value);
     Ok(())
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }
