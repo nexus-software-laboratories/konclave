@@ -226,6 +226,7 @@ interface ThinClientModule {
   }): Tool[];
   createKonclaveCommands(options: {
     readonly client: SmokeLocalClient;
+    readonly outputMode?: "normal" | "verbose";
     readonly output: {
       write(
         line: string,
@@ -791,12 +792,14 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         client: observePairingSync(localA, () => {
           pairingSyncRounds += 1;
         }),
+        outputMode: "verbose",
         output: captureA.output,
       })[0];
       const commandB = thinClient.createKonclaveCommands({
         client: observePairingSync(localB, () => {
           pairingSyncRounds += 1;
         }),
+        outputMode: "verbose",
         output: captureB.output,
       })[0];
       if (!commandA || commandA.name !== "konclave" || !commandB) {
