@@ -21,7 +21,7 @@ const MAX_A2A_INTERFACE_URL_BYTES: usize = 2 * 1024;
 const MAX_A2A_HISTORY_LENGTH: i32 = 1;
 
 /// Validated text-only `SendMessage` request accepted by the initial profile.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct InitialSendMessageRequest {
     tenant: Option<String>,
     message_id: String,
@@ -334,10 +334,17 @@ pub fn validate_initial_agent_interface(
     if interface.url.is_empty()
         || interface.url.len() > MAX_A2A_INTERFACE_URL_BYTES
         || !interface.url.is_ascii()
+        || interface
+            .url
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'\\')
     {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
     let parsed = Url::parse(&interface.url).map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
+    if parsed.as_str() != interface.url {
+        return Err(A2AContractError::InvalidInterfaceUrl);
+    }
     if parsed.cannot_be_a_base()
         || parsed.host().is_none()
         || !parsed.username().is_empty()
@@ -355,7 +362,7 @@ pub fn validate_initial_agent_interface(
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
     Ok(InitialA2AValidatedInterface {
-        url: interface.url,
+        url: parsed.to_string(),
         tenant,
     })
 }
@@ -428,9 +435,11 @@ fn validate_text(value: String, field: &'static str) -> Result<String, A2AContra
 fn validate_history_length(value: Option<i32>) -> Result<Option<u32>, A2AContractError> {
     match value {
         None => Ok(None),
-        Some(value) if (0..=MAX_A2A_HISTORY_LENGTH).contains(&value) => {
-            Ok(u32::try_from(value).ok())
-        }
+        Some(value) if (0..=MAX_A2A_HISTORY_LENGTH).contains(&value) => u32::try_from(value)
+            .map(Some)
+            .map_err(|_| A2AContractError::OutOfRange {
+                field: "history_length",
+            }),
         Some(_) => Err(A2AContractError::OutOfRange {
             field: "history_length",
         }),

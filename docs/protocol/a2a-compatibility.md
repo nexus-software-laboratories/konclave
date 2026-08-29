@@ -36,9 +36,11 @@ The initial profile negotiates exactly:
 
 Production interfaces require an absolute HTTPS URL without credentials, query, or
 fragment. Development mode additionally permits HTTP on `localhost`, `127.0.0.0/8`,
-or `::1`. An optional tenant is deployment-owned and each request must match it
-exactly; an A2A caller cannot select another Konclave profile, conversation, device,
-policy, or relay route.
+or `::1`. The wire URL must already equal its canonical parsed serialization and may
+not contain backslashes or control characters, so downstream HTTP stacks cannot
+reinterpret a different authority. An optional tenant is deployment-owned and each
+request must match it exactly; an A2A caller cannot select another Konclave profile,
+conversation, device, policy, or relay route.
 
 ## `SendMessage` validation
 

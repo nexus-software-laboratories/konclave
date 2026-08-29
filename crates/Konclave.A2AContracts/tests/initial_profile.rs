@@ -272,6 +272,24 @@ fn agent_interface_negotiation_requires_http_json_protocol_one() {
             tenant: String::new(),
             protocol_version: A2A_PROTOCOL_VERSION.to_string(),
         },
+        AgentInterface {
+            url: r"https://agent.trusted.example\@attacker.example/a2a/v1".to_string(),
+            protocol_binding: A2A_HTTP_JSON_BINDING.to_string(),
+            tenant: String::new(),
+            protocol_version: A2A_PROTOCOL_VERSION.to_string(),
+        },
+        AgentInterface {
+            url: "https://agent.example.com/\tpath".to_string(),
+            protocol_binding: A2A_HTTP_JSON_BINDING.to_string(),
+            tenant: String::new(),
+            protocol_version: A2A_PROTOCOL_VERSION.to_string(),
+        },
+        AgentInterface {
+            url: "https://agent.example.com:443/a2a/v1".to_string(),
+            protocol_binding: A2A_HTTP_JSON_BINDING.to_string(),
+            tenant: String::new(),
+            protocol_version: A2A_PROTOCOL_VERSION.to_string(),
+        },
     ] {
         assert!(
             validate_initial_agent_interface(interface, InitialA2AInterfaceEnvironment::Production)
