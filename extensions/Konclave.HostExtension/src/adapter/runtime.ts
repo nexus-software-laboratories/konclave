@@ -21,6 +21,7 @@ import {
 const claimWaitMilliseconds = 20_000;
 const backpressurePollMilliseconds = 250;
 const heartbeatMilliseconds = 20_000;
+export const maximumHeartbeatRetryMilliseconds = 5_000;
 
 /** Largest batch requested in one wait. */
 /** Default backoff after a rejected claim, so a broken channel cannot spin. */
@@ -64,12 +65,12 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
   let consecutiveFailures = 0;
   let lastHeartbeatAt = clock.now() - heartbeatMilliseconds;
 
-  const retryDelay = (): number => {
+  const retryDelay = (maximum = maximumClaimRetryMilliseconds): number => {
     const exponent = Math.min(Math.max(0, consecutiveFailures - 1), 10);
-    const raw = Math.min(maximumClaimRetryMilliseconds, retryMilliseconds * 2 ** exponent);
+    const raw = Math.min(maximum, retryMilliseconds * 2 ** exponent);
     const profileSpread =
       [...options.channel.profile].reduce((sum, value) => sum + value.charCodeAt(0), 0) % 401;
-    return Math.min(maximumClaimRetryMilliseconds, Math.round(raw * (0.8 + profileSpread / 1_000)));
+    return Math.min(maximum, Math.round(raw * (0.8 + profileSpread / 1_000)));
   };
 
   const completed = (async () => {
@@ -89,7 +90,7 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
             if (heartbeat.kind === 'failure') {
               options.diagnostics.error(`Konclave rejected a heartbeat: ${heartbeat.code}`);
               consecutiveFailures += 1;
-              await sleep(retryDelay());
+              await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
               continue;
             }
             if (heartbeat.kind !== 'accepted') {
@@ -97,7 +98,7 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
                 'Konclave answered a delivery heartbeat with an unexpected response.',
               );
               consecutiveFailures += 1;
-              await sleep(retryDelay());
+              await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
               continue;
             }
             lastHeartbeatAt = now;
@@ -108,7 +109,7 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
             }
             options.diagnostics.error(`Konclave heartbeat failed: ${describeError(error)}`);
             consecutiveFailures += 1;
-            await sleep(retryDelay());
+            await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
             continue;
           }
         }

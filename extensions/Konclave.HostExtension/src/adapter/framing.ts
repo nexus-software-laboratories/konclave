@@ -111,7 +111,8 @@ export function frameDelivery(
     ? [
         'If the request can be answered, call the Konclave send_message tool once. The policy',
         'hook binds it to this conversation and request. If no response is needed, do not call',
-        'a tool. Do not create another request or perform unrelated work in this turn.',
+        'a tool. Answer only from context already available in this session; do not create',
+        'another request, research externally, or perform unrelated work in this turn.',
       ]
     : containsDirectedRequest
       ? [

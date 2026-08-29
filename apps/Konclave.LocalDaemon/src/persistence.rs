@@ -1403,13 +1403,6 @@ impl ProfileStore {
                 now_unix_milliseconds,
                 expires_at_unix_milliseconds,
             )?;
-            self.renew_claimed_remote_events_in(
-                &transaction,
-                consumer_id,
-                lease_id,
-                now_unix_milliseconds,
-                expires_at_unix_milliseconds,
-            )?;
             self.reclaim_expired_remote_events_in(&transaction, now_unix_milliseconds)?;
             let candidates = {
                 let mut statement = transaction
@@ -16636,23 +16629,27 @@ mod tests {
             .claim_remote_events(consumer_id, lease_id, 1_000, 9_000, 2)
             .unwrap();
         assert_eq!(deliveries.len(), 2);
-        let request = |message_id, notification_id, lease_generation| ClaimDirectedRequest {
-            conversation_id: fixture.conversation_id,
-            request_message_id: message_id,
-            responder_device_id: fixture.device_id,
-            notification_id,
-            consumer_id,
-            lease_id,
-            lease_generation,
-            policy_digest: digest,
-            now_unix_milliseconds: 1_000,
+        let request = |message_id, notification_id, request_lease_id, lease_generation, now| {
+            ClaimDirectedRequest {
+                conversation_id: fixture.conversation_id,
+                request_message_id: message_id,
+                responder_device_id: fixture.device_id,
+                notification_id,
+                consumer_id,
+                lease_id: request_lease_id,
+                lease_generation,
+                policy_digest: digest,
+                now_unix_milliseconds: now,
+            }
         };
         let first_claim = match fixture
             .store
             .claim_directed_request(request(
                 first.message_id(),
                 notifications[0],
+                lease_id,
                 deliveries[0].lease_generation,
+                1_000,
             ))
             .unwrap()
         {
@@ -16665,7 +16662,39 @@ mod tests {
                 .claim_directed_request(request(
                     second.message_id(),
                     notifications[1],
+                    lease_id,
                     deliveries[1].lease_generation,
+                    1_000,
+                ))
+                .unwrap(),
+            DirectedRequestClaimOutcome::Busy
+        );
+        fixture
+            .store
+            .release_adapter_consumer(consumer_id, lease_id)
+            .unwrap();
+        let replacement_lease = AdapterLeaseId::from_bytes([85; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer_id, replacement_lease, 1_100, 10_000)
+            .unwrap();
+        let replacement_deliveries = fixture
+            .store
+            .claim_remote_events(consumer_id, replacement_lease, 1_100, 9_000, 2)
+            .unwrap();
+        let second_delivery = replacement_deliveries
+            .iter()
+            .find(|delivery| delivery.event.notification_id == notifications[1])
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .claim_directed_request(request(
+                    second.message_id(),
+                    notifications[1],
+                    replacement_lease,
+                    second_delivery.lease_generation,
+                    1_100,
                 ))
                 .unwrap(),
             DirectedRequestClaimOutcome::Busy
@@ -16688,7 +16717,9 @@ mod tests {
             fixture.store.claim_directed_request(request(
                 second.message_id(),
                 notifications[1],
-                deliveries[1].lease_generation,
+                replacement_lease,
+                second_delivery.lease_generation,
+                1_100,
             )),
             Ok(DirectedRequestClaimOutcome::Claimed(_))
         ));
@@ -16985,6 +17016,52 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn ordinary_polling_does_not_renew_an_unsettled_event_claim() {
+        let fixture = conversation_fixture("event-claim-poll-expiry");
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        stage_policy_exchange_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+            ApplicationContent::text("terminal update").unwrap(),
+        );
+        let notification_id = NotificationId::from_bytes([88; NotificationId::LENGTH]);
+        fixture
+            .store
+            .complete_inbox_with_notification(fixture.conversation_id, 1, notification_id)
+            .unwrap();
+        let consumer_id = AdapterConsumerId::from_bytes([89; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([90; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer_id, lease_id, 100, 10_000)
+            .unwrap();
+        let first = fixture
+            .store
+            .claim_remote_events(consumer_id, lease_id, 1_000, 9_000, 1)
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .claim_remote_events(consumer_id, lease_id, 8_000, 17_000, 1)
+                .unwrap()
+                .is_empty()
+        );
+        let reclaimed = fixture
+            .store
+            .claim_remote_events(consumer_id, lease_id, 9_000, 18_000, 1)
+            .unwrap();
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].event.notification_id, notification_id);
+        assert!(reclaimed[0].lease_generation > first[0].lease_generation);
     }
 
     #[test]

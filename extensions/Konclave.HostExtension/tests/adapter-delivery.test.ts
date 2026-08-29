@@ -496,6 +496,69 @@ describe('delivery coordinator', () => {
     expect(state.requests[0]?.kind).toBe('acknowledge');
   });
 
+  it('terminalizes a request whose synthetic prompt never starts', async () => {
+    const state = harness();
+    const complete = vi.fn().mockResolvedValue('completed-no-response');
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send(message) {
+          state.sent.push(message.prompt);
+          return 'message-id';
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      clock: { now: () => state.now },
+      promptStartTimeoutMilliseconds: 1_000,
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => false,
+    });
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+
+    state.now += 1_000;
+    await delivery.flush();
+
+    expect(complete).toHaveBeenCalledOnce();
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+    expect(delivery.outstanding).toBe(false);
+    expect(state.errors.join(' ')).toContain('did not start in time');
+  });
+
+  it('serializes overlapping idle completion signals', async () => {
+    const state = harness();
+    let resolveCompletion!: (value: 'completed-no-response') => void;
+    const completion = new Promise<'completed-no-response'>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const complete = vi.fn().mockReturnValue(completion);
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: {
+        async send(message) {
+          state.sent.push(message.prompt);
+          return 'message-id';
+        },
+      },
+      diagnostics: { error: (message) => state.errors.push(message) },
+      authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => true,
+    });
+    delivery.enqueue([requestEvent()]);
+    await delivery.markIdle();
+    delivery.markActive();
+
+    const firstIdle = delivery.markIdle();
+    const secondIdle = delivery.markIdle();
+    resolveCompletion('completed-no-response');
+    await Promise.all([firstIdle, secondIdle]);
+
+    expect(complete).toHaveBeenCalledOnce();
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+  });
+
   it('stops starting turns at the global budget and resumes in the next window', async () => {
     const state = harness();
     const budget: WakeBudget = {
@@ -569,6 +632,27 @@ describe('delivery coordinator', () => {
 
     expect(delivery.pending).toBe(0);
     expect(authorize).toHaveBeenCalledWith([expect.objectContaining({ leaseGeneration: 2 })]);
+  });
+
+  it('settles an in-flight notification with its newest lease generation', async () => {
+    const state = harness();
+    const delivery = coordinator(state);
+    const notificationId = Buffer.alloc(16, 7);
+    delivery.enqueue([requestEvent({ notificationId, leaseGeneration: 1 })]);
+    await delivery.markIdle();
+
+    delivery.enqueue([requestEvent({ notificationId, leaseGeneration: 2 })]);
+    expect(delivery.pending).toBe(0);
+    delivery.markActive();
+    await delivery.markIdle();
+
+    expect(state.requests).toMatchObject([
+      {
+        kind: 'acknowledge',
+        notificationId,
+        leaseGeneration: 2,
+      },
+    ]);
   });
 
   it('reports a rejected acknowledgment after durable completion', async () => {

@@ -38,6 +38,9 @@ An idle observation cannot complete a newly enqueued request until the session h
 observed the exact token-bearing synthetic prompt. If foreground user work wins the
 race, the later collaboration prompt enters a deny-all gate and completes with no
 response rather than leaking authority into either turn.
+If the synthetic prompt does not start within five minutes, the adapter durably
+completes the request with no response and keeps any later stale prompt behind a
+deny-all gate instead of retaining the delivery lease indefinitely.
 
 ## Delivery is at least once
 

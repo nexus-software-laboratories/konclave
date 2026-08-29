@@ -137,8 +137,9 @@ crash or excessive-allocation case becomes a permanent regression input.
   local or absent target or a conversation with any legacy incapable remote member
   before sender-counter allocation;
 - prove delivery heartbeats renew one active handling claim without changing its
-  attempt or lease generation, and Copilot acknowledges only after terminal turn
-  completion;
+  attempt or lease generation, ordinary polling leaves abandoned event claims
+  reclaimable, prompt startup is bounded, and Copilot acknowledges only after
+  terminal turn completion;
 - verify schema-18 migration, authenticated downgrade refusal, sealed handling-record
   and row-count tampering detection, hard capacity, and absence of response plaintext
   from ordinary SQLite columns;

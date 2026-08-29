@@ -391,12 +391,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
     },
     observePrompt(prompt) {
       if (active) {
-        if (
-          active.kind !== 'authorized' ||
-          !authorizationTokenInTrustedHeader(prompt, active.authorization.turnToken)
-        ) {
-          active = { kind: 'blocked', authorization: active.authorization };
-        }
+        active = { kind: 'blocked', authorization: active.authorization };
         return;
       }
       const authorization = pending;
@@ -408,11 +403,23 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
           authorization,
         };
       } else if (authorization) {
-        delayed = authorization;
-        active = null;
-      } else if (delayed && authorizationTokenInTrustedHeader(prompt, delayed.turnToken)) {
-        active = { kind: 'blocked', authorization: delayed };
-        delayed = null;
+        if (authorizationTokenInTrustedHeader(prompt)) {
+          delayed = null;
+          active = { kind: 'blocked', authorization: null };
+        } else {
+          delayed = authorization;
+          active = null;
+        }
+      } else if (delayed) {
+        if (authorizationTokenInTrustedHeader(prompt, delayed.turnToken)) {
+          active = { kind: 'blocked', authorization: delayed };
+          delayed = null;
+        } else if (authorizationTokenInTrustedHeader(prompt)) {
+          delayed = null;
+          active = { kind: 'blocked', authorization: null };
+        } else {
+          active = null;
+        }
       } else {
         active = authorizationTokenInTrustedHeader(prompt)
           ? { kind: 'blocked', authorization: null }

@@ -36,6 +36,7 @@ export const defaultWakeBudget: WakeBudget = {
   windowMs: 5 * 60_000,
 };
 const deferredRetryMilliseconds = 20_000;
+export const defaultPromptStartTimeoutMilliseconds = 5 * 60_000;
 
 export interface DeliverySession {
   send(message: { readonly prompt: string; readonly mode: 'enqueue' }): Promise<string>;
@@ -55,6 +56,7 @@ export interface DeliveryCoordinatorOptions {
   readonly diagnostics: DeliveryDiagnostics;
   readonly clock?: DeliveryClock;
   readonly budget?: WakeBudget;
+  readonly promptStartTimeoutMilliseconds?: number;
   readonly authorizeTurn?: (
     events: readonly DeliveredEvent[],
   ) => Promise<CollaborationTurnDecision | null>;
@@ -94,8 +96,9 @@ interface TurnRecord {
 }
 
 interface InFlightTurn {
-  readonly event: DeliveredEvent;
+  event: DeliveredEvent;
   readonly authorization: CollaborationTurnAuthorization;
+  readonly promptStartDeadline: number;
 }
 
 function isDeferredDecision(
@@ -119,6 +122,8 @@ export function createDeliveryCoordinator(
   options: DeliveryCoordinatorOptions,
 ): DeliveryCoordinator {
   const budget = options.budget ?? defaultWakeBudget;
+  const promptStartTimeoutMilliseconds =
+    options.promptStartTimeoutMilliseconds ?? defaultPromptStartTimeoutMilliseconds;
   if (
     budget.maxEventsPerTurn !== 1 ||
     !Number.isSafeInteger(budget.maxCharactersPerTurn) ||
@@ -129,7 +134,9 @@ export function createDeliveryCoordinator(
     budget.maxTurnsPerConversationPerWindow < 1 ||
     budget.maxTurnsPerConversationPerWindow > budget.maxTurnsPerWindow ||
     !Number.isSafeInteger(budget.windowMs) ||
-    budget.windowMs < 1
+    budget.windowMs < 1 ||
+    !Number.isSafeInteger(promptStartTimeoutMilliseconds) ||
+    promptStartTimeoutMilliseconds < 1
   ) {
     throw new Error('the directed-request wake budget is invalid');
   }
@@ -140,6 +147,7 @@ export function createDeliveryCoordinator(
   let idle = false;
   let outstanding = false;
   let inFlight: InFlightTurn | null = null;
+  let finishingTurn: Promise<void> | null = null;
 
   const withinWindow = (now: number): TurnRecord[] => {
     while (turns.length > 0 && now - (turns[0]?.at ?? 0) >= budget.windowMs) {
@@ -247,8 +255,56 @@ export function createDeliveryCoordinator(
     }
   };
 
+  const finishInFlight = async (force: boolean): Promise<boolean> => {
+    if (finishingTurn) {
+      await finishingTurn;
+      return true;
+    }
+    const turn = inFlight;
+    if (!turn) {
+      options.clearAuthorizedTurn?.();
+      return false;
+    }
+    if (!force && !options.canCompleteAuthorizedTurn?.(turn.authorization)) {
+      return false;
+    }
+    inFlight = null;
+    finishingTurn = (async () => {
+      const accepted = await completeTurn(turn);
+      await settle([turn.event], accepted);
+      outstanding = false;
+    })();
+    try {
+      await finishingTurn;
+    } finally {
+      finishingTurn = null;
+    }
+    return true;
+  };
+
+  const expireUnstartedTurn = async (): Promise<void> => {
+    const turn = inFlight;
+    if (
+      !turn ||
+      options.canCompleteAuthorizedTurn?.(turn.authorization) ||
+      clock.now() < turn.promptStartDeadline
+    ) {
+      return;
+    }
+    options.diagnostics.error(
+      'Konclave completed a directed request because its synthetic prompt did not start in time.',
+    );
+    await finishInFlight(true);
+  };
+
   const deliver = async (): Promise<void> => {
-    if (outstanding || !idle || queue.length === 0) {
+    if (outstanding) {
+      await expireUnstartedTurn();
+      if (outstanding) {
+        return;
+      }
+    }
+    if (!idle || queue.length === 0) {
       return;
     }
 
@@ -277,6 +333,7 @@ export function createDeliveryCoordinator(
     }
 
     outstanding = true;
+    const notificationKey = request.notificationId.toString('hex');
     if (
       request.payload.kind !== 'directed-request' ||
       request.payload.text.length > budget.maxCharactersPerTurn
@@ -284,6 +341,7 @@ export function createDeliveryCoordinator(
       options.diagnostics.error(
         'Konclave retained a directed request outside the automatic turn budget.',
       );
+      deferredUntil.delete(notificationKey);
       await settle([request], true);
       outstanding = false;
       return deliver();
@@ -296,12 +354,12 @@ export function createDeliveryCoordinator(
       }
       const decision = await options.authorizeTurn([request]);
       if (isDeferredDecision(decision)) {
-        deferredUntil.set(request.notificationId.toString('hex'), now + deferredRetryMilliseconds);
+        deferredUntil.set(notificationKey, now + deferredRetryMilliseconds);
         queue.push(request);
         outstanding = false;
         return;
       }
-      deferredUntil.delete(request.notificationId.toString('hex'));
+      deferredUntil.delete(notificationKey);
       authorization = decision;
       if (!authorization) {
         options.diagnostics.error(
@@ -312,40 +370,29 @@ export function createDeliveryCoordinator(
         return deliver();
       }
       options.activateAuthorizedTurn?.(authorization);
-      inFlight = { event: request, authorization };
+      inFlight = {
+        event: request,
+        authorization,
+        promptStartDeadline: now + promptStartTimeoutMilliseconds,
+      };
       turns.push({ at: now, conversation });
       await options.session.send({
         prompt: frameDelivery([request], authorization),
         mode: 'enqueue',
       });
     } catch (error) {
-      let accepted = false;
-      if (authorization && inFlight) {
-        accepted = await completeTurn(inFlight);
-        inFlight = null;
-      } else if (authorization) {
+      deferredUntil.delete(notificationKey);
+      const completed = authorization ? await finishInFlight(true) : false;
+      if (authorization && !completed) {
         options.clearAuthorizedTurn?.();
       }
       options.diagnostics.error(`Konclave delivery was not accepted: ${describeError(error)}`);
-      await settle([request], accepted);
+      if (!completed) {
+        await settle([request], false);
+      }
       outstanding = false;
       return deliver();
     }
-  };
-
-  const finishInFlight = async (): Promise<void> => {
-    const turn = inFlight;
-    if (!turn) {
-      options.clearAuthorizedTurn?.();
-      return;
-    }
-    if (!options.canCompleteAuthorizedTurn?.(turn.authorization)) {
-      return;
-    }
-    const accepted = await completeTurn(turn);
-    inFlight = null;
-    await settle([turn.event], accepted);
-    outstanding = false;
   };
 
   return {
@@ -354,6 +401,9 @@ export function createDeliveryCoordinator(
         throw new Error('adapter request is outside its bound');
       }
       const retained = new Set(queue.map((event) => event.notificationId.toString('hex')));
+      if (inFlight) {
+        retained.add(inFlight.event.notificationId.toString('hex'));
+      }
       for (const event of events) {
         retained.add(event.notificationId.toString('hex'));
       }
@@ -372,10 +422,10 @@ export function createDeliveryCoordinator(
           }
           continue;
         }
-        if (
-          inFlight?.event.notificationId.equals(event.notificationId) &&
-          event.leaseGeneration <= inFlight.event.leaseGeneration
-        ) {
+        if (inFlight?.event.notificationId.equals(event.notificationId)) {
+          if (event.leaseGeneration > inFlight.event.leaseGeneration) {
+            inFlight.event = event;
+          }
           continue;
         }
         queue.push(event);
@@ -383,7 +433,7 @@ export function createDeliveryCoordinator(
     },
     async markIdle() {
       idle = true;
-      await finishInFlight();
+      await finishInFlight(false);
       await deliver();
     },
     markActive() {

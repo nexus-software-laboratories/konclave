@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { maximumClaimRetryMilliseconds, startDeliveryRuntime } from '../src/adapter/runtime.js';
+import {
+  maximumClaimRetryMilliseconds,
+  maximumHeartbeatRetryMilliseconds,
+  startDeliveryRuntime,
+} from '../src/adapter/runtime.js';
 import type { DeliveredEvent } from '../src/adapter/session.js';
 
 /**
@@ -341,6 +345,52 @@ describe('delivery runtime loop', () => {
     expect(requests).toEqual(['heartbeat', 'wait-and-claim']);
     expect(errors.join(' ')).toContain('heartbeat connection closed');
     expect(sleeps).toHaveLength(1);
+  });
+
+  it('caps repeated heartbeat retries below the delivery lease window', async () => {
+    const sleeps: number[] = [];
+    let outstanding = true;
+    let heartbeats = 0;
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request(request) {
+          if (request.kind === 'heartbeat') {
+            heartbeats += 1;
+            if (heartbeats >= 5) {
+              outstanding = false;
+              return { kind: 'accepted' };
+            }
+            return { kind: 'failure', code: 'adapter_internal_error' };
+          }
+          runtime.stop();
+          return { kind: 'batch', events: [] };
+        },
+        close() {},
+      },
+      coordinator: {
+        enqueue() {},
+        async markIdle() {},
+        markActive() {},
+        async flush() {},
+        pending: 0,
+        get outstanding() {
+          return outstanding;
+        },
+        activeTurn: null,
+      },
+      diagnostics: { error: () => {} },
+      clock: { now: () => 20_000 },
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      },
+    });
+
+    await runtime.completed;
+    expect(heartbeats).toBe(5);
+    expect(sleeps.slice(0, 4).every((delay) => delay <= maximumHeartbeatRetryMilliseconds)).toBe(
+      true,
+    );
   });
 
   it('backs off exponentially per profile, caps, and resets after a valid batch', async () => {

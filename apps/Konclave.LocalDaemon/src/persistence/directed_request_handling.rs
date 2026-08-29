@@ -501,7 +501,6 @@ impl ProfileStore {
                     if active_directed_request_claim_count(
                         &transaction,
                         request.consumer_id,
-                        request.lease_id,
                         request.now_unix_milliseconds,
                     )? > 0
                     {
@@ -514,7 +513,6 @@ impl ProfileStore {
                 if active_directed_request_claim_count(
                     &transaction,
                     request.consumer_id,
-                    request.lease_id,
                     request.now_unix_milliseconds,
                 )? > 0
                 {
@@ -1754,7 +1752,6 @@ fn directed_request_handling_count(connection: &Connection) -> Result<usize, Pro
 fn active_directed_request_claim_count(
     connection: &Connection,
     consumer_id: AdapterConsumerId,
-    lease_id: AdapterLeaseId,
     now_unix_milliseconds: u64,
 ) -> Result<usize, ProfileStoreError> {
     let count: i64 = connection
@@ -1763,11 +1760,9 @@ fn active_directed_request_claim_count(
              FROM daemon_directed_request_handling
              WHERE state = 1
                AND consumer_id = ?1
-               AND lease_id = ?2
-               AND claim_expires_at_unix_milliseconds > ?3",
+               AND claim_expires_at_unix_milliseconds > ?2",
             params![
                 consumer_id.as_bytes().as_slice(),
-                lease_id.as_bytes().as_slice(),
                 to_sql_integer(now_unix_milliseconds)?
             ],
             |row| row.get(0),

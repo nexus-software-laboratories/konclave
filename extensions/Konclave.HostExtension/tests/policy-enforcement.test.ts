@@ -220,6 +220,68 @@ describe('Copilot collaboration policy gate', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it('fails closed when an active authorization prompt is replayed', async () => {
+    const request = vi.fn();
+    const gate = createCopilotPolicyGate(client(request));
+    const turnToken = '79'.repeat(16);
+    gate.activate({
+      conversation,
+      policyDigest,
+      policyName: 'contract-alignment',
+      requestMessageId: '66'.repeat(16),
+      attempt: 1,
+      turnToken,
+    });
+    const prompt = `Konclave delivered 1 update\nKonclave collaboration authorization token: ${turnToken}`;
+    gate.observePrompt(prompt);
+    gate.observePrompt(prompt);
+
+    await expect(
+      gate.hooks.onPreToolUse?.(
+        hookInput('send_message', {
+          conversation_id: conversation,
+          message_id: '44'.repeat(16),
+          text: 'must not use a replayed authorization',
+        }),
+        { sessionId: 'session' },
+      ),
+    ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('delayed_prompt_unbound');
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('blocks a stale Konclave prompt while another authorization is pending', async () => {
+    const request = vi.fn();
+    const gate = createCopilotPolicyGate(client(request));
+    const authorization = {
+      conversation,
+      policyDigest,
+      policyName: 'contract-alignment',
+      requestMessageId: '66'.repeat(16),
+      attempt: 1,
+      turnToken: '7a'.repeat(16),
+    };
+    gate.activate(authorization);
+    gate.observePrompt(
+      `Konclave delivered 1 update\nKonclave collaboration authorization token: ${'7b'.repeat(16)}`,
+    );
+
+    expect(gate.active).toBe(true);
+    expect(gate.canCompleteTurn(authorization)).toBe(false);
+    await expect(
+      gate.hooks.onPreToolUse?.(
+        hookInput('send_message', {
+          conversation_id: conversation,
+          message_id: '44'.repeat(16),
+          text: 'must not use a stale prompt',
+        }),
+        { sessionId: 'session' },
+      ),
+    ).resolves.toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('delayed_prompt_unbound');
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('defers a request while another live handling claim owns it', async () => {
     const gate = createCopilotPolicyGate(
       client(
