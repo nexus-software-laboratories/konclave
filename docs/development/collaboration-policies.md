@@ -329,10 +329,14 @@ device and one bounded body. Its enclosing application message identifier is the
 request identifier. Ordinary text is terminal and never implies another request.
 The sender path remains disabled until authenticated member capability negotiation
 proves the target supports this additive variant. The current shared local-service
-and manual-history contracts preserve the request kind, target, and body. Until
-durable request handling exists, the Copilot delivery runtime withholds it from model
-turns and reports a body-free unsupported diagnostic while retaining the message in
-history. The closed binary adapter protocol projects it into a daemon-authored
+and manual-history contracts preserve the request kind, target, and body. The daemon
+now exposes durable request handling, but the Copilot delivery runtime withholds the
+request from model turns until its follow-up adapter integration adopts that protocol.
+It reports a body-free unsupported diagnostic while retaining the message in history.
+Ordinary text and other terminal updates likewise remain in history and produce only
+a concise local diagnostic; they do not start a model turn or consume the autonomous
+turn budget.
+The closed binary adapter protocol projects it into a daemon-authored
 unsupported-content notice without exposing the body, so an older adapter fails
 visibly rather than treating the request as ordinary actionable text.
 
@@ -346,30 +350,43 @@ cannot claim paved tool, permission, resource, or lifecycle controls.
 The packaged generic client may inspect and administer exact policy proposals,
 bindings, and revocations through the normal closed tool operations. Its operation
 allowlist excludes the paved `collaboration.turn.authorize` and
-`collaboration.action.evaluate` service methods. A generic harness therefore gains no
-autonomous execution authority from an active binding and must keep peer guidance
-advisory unless it independently implements and proves an enforcement boundary.
+`collaboration.turn.complete` and `collaboration.action.evaluate` service methods. A
+generic harness therefore gains no autonomous execution authority from an active
+binding and must keep peer content advisory unless it independently implements and
+proves an enforcement boundary.
 
 Peer content remains quoted inside the untrusted collaborator boundary. A locally
 active binding can authorize only the structured actions its statements, local
 authority, and harness evidence all permit.
 
-The paved Copilot integration evaluates `conversation.reply` before converting an
-idle delivery into an autonomous collaboration turn. The shared service derives
-local authority from positive targets in the locally activated bundle, supplies only
-the claims and exact controls the Copilot adapter proves, and evaluates duration plus
-one active collaboration request. The profile's single live delivery consumer and
-the extension's one-outstanding-turn gate enforce concurrency conservatively at one.
-Interactive and delivery connections retain fresh handshake instance identifiers;
-the daemon correlates their consumer authority only when both prove the same
-authenticated session public key.
+The shared service authorizes an autonomous turn only for an exact inbound
+`DirectedRequest` targeting the local device. Authorization requires the request's
+message and notification identifiers, delivery lease generation, live Copilot
+consumer, active policy digest, and positive `conversation.reply` decision. Before it
+returns authorization, profile schema version 18 atomically creates or reclaims a
+sealed handling attempt bound to that exact delivery claim. Ordinary text, policy
+exchange records, membership events, completed requests, stale claims, and requests
+targeting another device cannot authorize a turn.
 
-During that turn, Copilot's pre-tool hook maps only Konclave's `send_message` tool to
-`conversation.reply`. A successful evaluation issues a one-use authorization bound to
-the exact conversation and message arguments, active policy digest, delivery consumer,
-and the earliest policy, lease, or proof expiry. The daemon consumes it into the same
-SQLite reservation that verifies the digest, live consumer lease, and expiry before
-allocating a sender counter or preparing the send.
+The profile's single live delivery consumer and the handling claim enforce
+concurrency per request. Interactive and delivery connections retain fresh handshake
+instance identifiers; the daemon correlates their consumer authority only when both
+prove the same authenticated session public key.
+
+During that turn, the paved hook may map only Konclave's `send_message` tool to
+`conversation.reply`. Action evaluation requires the exact request message and
+handling-attempt number and permits only a response whose `reply_to` identifies that
+request. A successful evaluation issues a one-use authorization bound to the exact
+conversation, request claim, response arguments, active policy digest, delivery
+consumer, and earliest policy or lease expiry. The daemon consumes it into the same
+SQLite transaction that transitions the handling claim to `completed-response`
+before allocating a sender counter. A second response, stale attempt, changed policy,
+wrong target, or altered body conflicts before any new outbound reservation.
+If the process stops after that atomic reservation but before encryption is sealed,
+startup reopens the sealed response operation and finishes the same message,
+sender-counter, envelope identifier, timestamp, reply target, content, and expiry.
+An expired response or a responder removed before recovery becomes an abandoned
+counter gap rather than a different response.
 The SDK may represent pre-tool arguments as a JSON object or a serialized JSON object;
 the extension accepts only a bounded form with the exact `send_message` field allowlist
 before evaluating or modifying it.
@@ -384,8 +401,17 @@ leaking across an enqueue race into foreground user work. A later token-bearing
 collaboration prompt without its matching pending authorization enters a deny-all
 tool state until idle instead of running outside the gate.
 
+An exact `collaboration.turn.complete` operation transitions the same handling
+attempt to `completed-no-response` when a model turn becomes idle without a send. It
+may close that attempt after its event lease lapses, but cannot close an attempt that
+has already been reclaimed. Repeating completion is idempotent, and a later response
+cannot replace it. A crashed attempt may be reclaimed only after its delivery lease
+expires and a new consumer lease owns redelivery; the fixed attempt bound prevents
+indefinite no-effect model retries.
+
 Legacy policy guidance is never placed into a model turn. Collaborator text remains
-quoted as untrusted task input.
+quoted as untrusted task input. The current Copilot extension continues withholding
+directed requests until its follow-up integration adopts these handling operations.
 Finite turn and token limits currently deny autonomous execution because the adapter
 does not yet prove durable accounting for them. This is a truthful reduction, not an
 implicit unlimited fallback.

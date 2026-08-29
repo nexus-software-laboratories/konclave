@@ -66,7 +66,11 @@ function payload(value: unknown): DeliveredPayload {
       if (message.length === 0 || Buffer.byteLength(message, 'utf8') > maxEventTextBytes) {
         throw new Error('the local service delivery response is malformed');
       }
-      return { kind: 'application-text', text: message };
+      return {
+        kind: 'application-text',
+        messageId: Buffer.from(hex(value.messageId, hex16), 'hex'),
+        text: message,
+      };
     }
     case 'directed_request': {
       const message = text(value.text);
@@ -75,6 +79,7 @@ function payload(value: unknown): DeliveredPayload {
       }
       return {
         kind: 'directed-request',
+        messageId: Buffer.from(hex(value.messageId, hex16), 'hex'),
         target: Buffer.from(hex(value.targetDeviceId, hex32), 'hex'),
         text: message,
       };

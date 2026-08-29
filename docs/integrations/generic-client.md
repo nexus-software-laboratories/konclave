@@ -25,10 +25,11 @@ rejects the client with no fallback.
 
 The generic client also proves no automatic delivery, pre-tool policy gate, native
 permission intersection, subagent containment, or durable turn/token accounting.
-`collaboration.turn.authorize` and `collaboration.action.evaluate` are deliberately
-absent from its closed operation surface. Activating a policy therefore does not turn
-an unsupported harness into an autonomous collaborator; peer content remains data
-that the harness may inspect and answer only through explicit operations.
+`collaboration.turn.authorize`, `collaboration.turn.complete`, and
+`collaboration.action.evaluate` are deliberately absent from its closed operation
+surface. Activating a policy therefore does not turn an unsupported harness into an
+autonomous collaborator; peer content remains data that the harness may inspect and
+answer only through explicit operations.
 
 ## Profile selection
 

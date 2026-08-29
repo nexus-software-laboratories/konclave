@@ -834,7 +834,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_collaboration_policy_operation_state;
+                    "DROP TABLE daemon_directed_request_handling_state;
+                     DROP TABLE daemon_directed_request_handling;
+                     DROP TABLE daemon_collaboration_policy_operation_state;
                      DROP TABLE daemon_collaboration_policy_operation;
                      DROP TABLE daemon_collaboration_policy_exchange_state;
                      DROP TABLE daemon_collaboration_policy_exchange;
@@ -864,7 +866,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;

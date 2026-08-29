@@ -242,7 +242,6 @@ export function createDeliveryCoordinator(
     }
 
     outstanding = true;
-    turns.push({ at: now, conversation });
     let authorization: CollaborationTurnAuthorization | null = null;
 
     try {
@@ -254,10 +253,18 @@ export function createDeliveryCoordinator(
             `Konclave policy authorization failed: ${describeError(error)}`,
           );
         }
+        if (!authorization) {
+          options.diagnostics.error(
+            'Konclave retained a terminal update in message history; no automatic turn was started.',
+          );
+          await settle(batch, true);
+          return;
+        }
       }
       if (authorization) {
         options.activateAuthorizedTurn?.(authorization);
       }
+      turns.push({ at: now, conversation });
       await options.session.send({
         prompt: frameDelivery(batch, authorization ?? undefined),
         mode: 'enqueue',

@@ -48,6 +48,8 @@ pub enum SecretRecordKind {
     CollaborationPolicyExchangeState = 21,
     CollaborationPolicyOperation = 22,
     CollaborationPolicyOperationState = 23,
+    DirectedRequestHandling = 24,
+    DirectedRequestHandlingState = 25,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.

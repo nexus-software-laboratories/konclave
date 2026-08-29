@@ -1380,8 +1380,8 @@ mod tests {
     use crate::clock::{SystemUnixClock, UnixClock};
     use crate::conversation::tests::{invited_coordinators, paired_coordinators};
     use crate::persistence::{
-        CollaborationActionAuthorization, LockedProfile, MessageDirection, ProfileId,
-        ProfileStoreError,
+        CollaborationActionAuthorization, DirectedRequestClaim, LockedProfile, MessageDirection,
+        ProfileId, ProfileStoreError,
     };
     use crate::test_support::TestRelay;
 
@@ -2421,6 +2421,18 @@ mod tests {
             policy_digest: digest,
             consumer_id,
             not_after_unix_milliseconds: 2_000,
+            directed_request_claim: DirectedRequestClaim {
+                conversation_id: conversation.conversation_id,
+                request_message_id: MessageId::from_bytes([41; MessageId::LENGTH]),
+                responder_device_id: coordinator.device_id().unwrap(),
+                notification_id: KonclaveDomainCore::NotificationId::from_bytes([42; 16]),
+                consumer_id,
+                lease_id: AdapterLeaseId::from_bytes([32; AdapterLeaseId::LENGTH]),
+                lease_generation: 1,
+                claim_expires_at_unix_milliseconds: 2_000,
+                attempt: 1,
+                policy_digest: digest,
+            },
         });
         let message_id = request.message_id;
         let submission = service.submissions.lock().await;

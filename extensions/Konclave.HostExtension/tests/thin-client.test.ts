@@ -1833,7 +1833,11 @@ describe('shared-service delivery adaptation', () => {
           conversation: '04'.repeat(32),
           sender: '05'.repeat(32),
           relayCursor: 6,
-          payload: { kind: 'application_text', text: 'hello' },
+          payload: {
+            kind: 'application_text',
+            messageId: '07'.repeat(16),
+            text: 'hello',
+          },
         },
       ],
     });
@@ -1852,7 +1856,11 @@ describe('shared-service delivery adaptation', () => {
           conversation: Buffer.alloc(32, 4),
           sender: Buffer.alloc(32, 5),
           relayCursor: 6,
-          payload: { kind: 'application-text', text: 'hello' },
+          payload: {
+            kind: 'application-text',
+            messageId: Buffer.alloc(16, 7),
+            text: 'hello',
+          },
         },
       ],
     });
@@ -1875,6 +1883,7 @@ describe('shared-service delivery adaptation', () => {
           relayCursor: 6,
           payload: {
             kind: 'directed_request',
+            messageId: '07'.repeat(16),
             targetDeviceId: '06'.repeat(32),
             text: 'confirm the response contract',
           },
@@ -1891,6 +1900,7 @@ describe('shared-service delivery adaptation', () => {
         {
           payload: {
             kind: 'directed-request',
+            messageId: Buffer.alloc(16, 7),
             target: Buffer.alloc(32, 6),
             text: 'confirm the response contract',
           },
@@ -1909,7 +1919,11 @@ describe('shared-service delivery adaptation', () => {
           conversation: '04'.repeat(32),
           sender: '05'.repeat(32),
           relayCursor: 6,
-          payload: { kind: 'application_text', text: 'hello' },
+          payload: {
+            kind: 'application_text',
+            messageId: '07'.repeat(16),
+            text: 'hello',
+          },
         },
       ],
     });
@@ -2140,7 +2154,11 @@ describe('shared-service delivery adaptation', () => {
       conversation: '04'.repeat(32),
       sender: '05'.repeat(32),
       relayCursor: 6,
-      payload: { kind: 'application_text', text: 'hello' },
+      payload: {
+        kind: 'application_text',
+        messageId: '07'.repeat(16),
+        text: 'hello',
+      },
     };
     const invalid: unknown[] = [
       null,
@@ -2151,12 +2169,47 @@ describe('shared-service delivery adaptation', () => {
       { events: [{ ...validEvent, sequence: 1.5 }] },
       { events: [{ ...validEvent, sender: 'bad' }] },
       { events: [{ ...validEvent, payload: null }] },
-      { events: [{ ...validEvent, payload: { kind: 'application_text', text: '' } }] },
       {
         events: [
           {
             ...validEvent,
-            payload: { kind: 'application_text', text: 'é'.repeat(40_000) },
+            payload: { kind: 'application_text', text: 'hello' },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'application_text',
+              messageId: 'bad',
+              text: 'hello',
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'application_text',
+              messageId: '07'.repeat(16),
+              text: '',
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'application_text',
+              messageId: '07'.repeat(16),
+              text: 'é'.repeat(40_000),
+            },
           },
         ],
       },
@@ -2166,6 +2219,32 @@ describe('shared-service delivery adaptation', () => {
             ...validEvent,
             payload: {
               kind: 'directed_request',
+              targetDeviceId: '06'.repeat(32),
+              text: 'reply',
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'directed_request',
+              messageId: 'bad',
+              targetDeviceId: '06'.repeat(32),
+              text: 'reply',
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'directed_request',
+              messageId: '07'.repeat(16),
               targetDeviceId: 'bad',
               text: 'reply',
             },
@@ -2178,6 +2257,7 @@ describe('shared-service delivery adaptation', () => {
             ...validEvent,
             payload: {
               kind: 'directed_request',
+              messageId: '07'.repeat(16),
               targetDeviceId: '06'.repeat(32),
               text: '',
             },

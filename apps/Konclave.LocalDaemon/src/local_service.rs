@@ -9,7 +9,7 @@ use KonclaveDomainCore::{
     CollaborationPolicyDecision, CollaborationPolicyEffect, CollaborationPolicyEvaluationContext,
     CollaborationPolicyEvaluationRequest, CollaborationPolicyResponseOutcome,
     CollaborationPolicyTarget, CollaborationPolicyUsage, ConversationId, ConversationRole,
-    evaluate_collaboration_policy,
+    DeviceId, NotificationId, evaluate_collaboration_policy,
 };
 use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
@@ -30,7 +30,9 @@ use crate::adapter::DeliveryAttachment;
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
 use crate::persistence::{
-    ClaimedRemoteEvent, CollaborationActionAuthorization, RemoteEventPayload,
+    ActiveDirectedRequestClaim, ClaimDirectedRequest, ClaimedRemoteEvent,
+    CollaborationActionAuthorization, CompleteDirectedRequest, DirectedRequestClaim,
+    DirectedRequestClaimOutcome, RemoteEventPayload,
 };
 use crate::profile_runtime::ProfileServices;
 use crate::profile_supervisor::{ProfileSupervisor, ProfileSupervisorConfig};
@@ -935,9 +937,39 @@ async fn dispatch_request(
             let store = Arc::clone(&state.store);
             let grant = state.grant.clone();
             let consumer = state.consumer;
+            let delivery = state.delivery.clone();
+            let local_device = match state.services.conversations().device_id() {
+                Ok(value) => value,
+                Err(_) => {
+                    return response_from_result(request.request_id(), Err("internal".to_string()));
+                }
+            };
             let payload = request.payload().to_vec();
             run_collaboration_policy_request(move || {
-                authorize_collaboration_turn(&store, &grant, consumer, &payload)
+                authorize_collaboration_turn(
+                    &store,
+                    &grant,
+                    consumer,
+                    delivery.as_ref(),
+                    local_device,
+                    &payload,
+                )
+            })
+            .await
+        }
+        "collaboration.turn.complete" => {
+            let store = Arc::clone(&state.store);
+            let grant = state.grant.clone();
+            let consumer = state.consumer;
+            let local_device = match state.services.conversations().device_id() {
+                Ok(value) => value,
+                Err(_) => {
+                    return response_from_result(request.request_id(), Err("internal".to_string()));
+                }
+            };
+            let payload = request.payload().to_vec();
+            run_collaboration_policy_request(move || {
+                complete_collaboration_turn(&store, &grant, consumer, local_device, &payload)
             })
             .await
         }
@@ -945,9 +977,15 @@ async fn dispatch_request(
             let store = Arc::clone(&state.store);
             let grant = state.grant.clone();
             let consumer = state.consumer;
+            let local_device = match state.services.conversations().device_id() {
+                Ok(value) => value,
+                Err(_) => {
+                    return response_from_result(request.request_id(), Err("internal".to_string()));
+                }
+            };
             let payload = request.payload().to_vec();
             match run_collaboration_policy_request(move || {
-                evaluate_collaboration_action(&store, &grant, consumer, &payload)
+                evaluate_collaboration_action(&store, &grant, consumer, local_device, &payload)
             })
             .await
             {
@@ -1004,9 +1042,16 @@ async fn dispatch_send_message(
         policy_digest: candidate.policy_digest,
         consumer_id: candidate.consumer_id,
         not_after_unix_milliseconds,
+        directed_request_claim: candidate.directed_request_claim,
     };
     let valid = run_collaboration_policy_request(move || {
-        revalidate_collaboration_send(&store, &grant, consumer, &candidate)
+        revalidate_collaboration_send(
+            &store,
+            &grant,
+            consumer,
+            candidate.directed_request_claim.responder_device_id,
+            &candidate,
+        )
     })
     .await?;
     if !valid {
@@ -1051,6 +1096,7 @@ fn revalidate_collaboration_send(
     store: &crate::persistence::ProfileStore,
     grant: &SessionGrant,
     consumer: AdapterConsumerId,
+    local_device: DeviceId,
     candidate: &CollaborationSendCandidate,
 ) -> Result<bool, String> {
     let request = EvaluateCollaborationActionRequest {
@@ -1063,14 +1109,22 @@ fn revalidate_collaboration_send(
             .reply_to_message_id
             .map(|value| crate::mcp::encode_hex(value.as_bytes())),
         text: Some(candidate.text.as_str().to_string()),
+        request_message_id: crate::mcp::encode_hex(
+            candidate
+                .directed_request_claim
+                .request_message_id
+                .as_bytes(),
+        ),
+        attempt: candidate.directed_request_claim.attempt,
     };
-    match evaluate_collaboration_action_request(store, grant, consumer, request)? {
+    match evaluate_collaboration_action_request(store, grant, consumer, local_device, request)? {
         CollaborationActionEvaluation::Allow(revalidated) => Ok(revalidated.conversation_id
             == candidate.conversation_id
             && revalidated.policy_digest == candidate.policy_digest
             && revalidated.consumer_id == candidate.consumer_id
             && revalidated.message_id == candidate.message_id
             && revalidated.reply_to_message_id == candidate.reply_to_message_id
+            && revalidated.directed_request_claim == candidate.directed_request_claim
             && revalidated.text.as_str() == candidate.text.as_str()),
         CollaborationActionEvaluation::Deny(_) => Ok(false),
     }
@@ -1079,7 +1133,9 @@ fn revalidate_collaboration_send(
 fn is_fresh_collaboration_policy_request(operation: &str) -> bool {
     matches!(
         operation,
-        "collaboration.turn.authorize" | "collaboration.action.evaluate"
+        "collaboration.turn.authorize"
+            | "collaboration.turn.complete"
+            | "collaboration.action.evaluate"
     )
 }
 
@@ -1101,6 +1157,9 @@ fn required_capability(operation: &str) -> Option<SessionCapabilities> {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AuthorizeCollaborationTurnRequest {
     conversation_id: String,
+    request_message_id: String,
+    notification_id: String,
+    lease_generation: u64,
 }
 
 #[derive(Deserialize)]
@@ -1113,6 +1172,17 @@ struct EvaluateCollaborationActionRequest {
     message_id: Option<String>,
     reply_to_message_id: Option<String>,
     text: Option<String>,
+    request_message_id: String,
+    attempt: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CompleteCollaborationTurnRequest {
+    conversation_id: String,
+    policy_digest: String,
+    request_message_id: String,
+    attempt: u32,
 }
 
 #[derive(Deserialize)]
@@ -1131,6 +1201,8 @@ struct CollaborationTurnAuthorizationResult {
     reason: Option<&'static str>,
     policy_digest: Option<String>,
     policy_name: Option<String>,
+    request_message_id: Option<String>,
+    attempt: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1141,6 +1213,13 @@ struct CollaborationActionEvaluationResult {
     authorization: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteCollaborationTurnResult {
+    outcome: &'static str,
+    changed: bool,
+}
+
 struct CollaborationSendCandidate {
     conversation_id: ConversationId,
     policy_digest: KonclaveDomainCore::CollaborationPolicyDigest,
@@ -1149,6 +1228,7 @@ struct CollaborationSendCandidate {
     message_id: KonclaveDomainCore::MessageId,
     reply_to_message_id: Option<KonclaveDomainCore::MessageId>,
     text: Zeroizing<String>,
+    directed_request_claim: DirectedRequestClaim,
 }
 
 struct CollaborationSendAuthorization {
@@ -1157,7 +1237,7 @@ struct CollaborationSendAuthorization {
 }
 
 enum CollaborationActionEvaluation {
-    Allow(CollaborationSendCandidate),
+    Allow(Box<CollaborationSendCandidate>),
     Deny(&'static str),
 }
 
@@ -1165,33 +1245,38 @@ fn authorize_collaboration_turn(
     store: &crate::persistence::ProfileStore,
     grant: &SessionGrant,
     consumer: AdapterConsumerId,
+    delivery: Option<&DeliveryAttachment>,
+    local_device: DeviceId,
     payload: &[u8],
 ) -> Result<Vec<u8>, String> {
     let request: AuthorizeCollaborationTurnRequest =
         serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
     let conversation_id = parse_collaboration_conversation_id(&request.conversation_id)?;
-    if grant.harness() != HarnessKind::Copilot
-        || !store
-            .adapter_consumer_is_active(consumer, SystemUnixClock.now_unix_milliseconds())
-            .map_err(|_| "internal".to_string())?
-    {
+    let request_message_id = parse_collaboration_message_id(&request.request_message_id)?;
+    let notification_id = crate::mcp::decode_hex::<16>(&request.notification_id)
+        .map(NotificationId::from_bytes)
+        .map_err(|_| "invalid_request".to_string())?;
+    if grant.harness() != HarnessKind::Copilot || delivery.is_none() {
         return encode_collaboration_turn_authorization(
             "denied",
             Some("copilot_delivery_not_proven"),
             None,
+            None,
         );
     }
+    let delivery = delivery.ok_or_else(|| "internal".to_string())?;
     let Some(active) = store
         .active_collaboration_policy(conversation_id)
         .map_err(|_| "internal".to_string())?
     else {
-        return encode_collaboration_turn_authorization("inactive", None, None);
+        return encode_collaboration_turn_authorization("inactive", None, None, None);
     };
     if active.bundle().limits().turns().is_some() {
         return encode_collaboration_turn_authorization(
             "denied",
             Some("turn_accounting_unavailable"),
             Some(&active),
+            None,
         );
     }
     if active.bundle().limits().tokens().is_some() {
@@ -1199,6 +1284,7 @@ fn authorize_collaboration_turn(
             "denied",
             Some("token_accounting_unavailable"),
             Some(&active),
+            None,
         );
     }
     let Some(elapsed) = SystemUnixClock
@@ -1209,10 +1295,11 @@ fn authorize_collaboration_turn(
             "denied",
             Some("clock_regressed"),
             Some(&active),
+            None,
         );
     };
     let context = copilot_collaboration_policy_context(active.bundle())?;
-    let request = CollaborationPolicyEvaluationRequest::new(
+    let policy_request = CollaborationPolicyEvaluationRequest::new(
         CollaborationPolicyTarget::new("conversation.reply", None)
             .map_err(|_| "internal".to_string())?,
         CollaborationPolicyCost::new(0, 0, 1),
@@ -1221,44 +1308,177 @@ fn authorize_collaboration_turn(
     let decision = evaluate_collaboration_policy(
         active.bundle(),
         &context,
-        &request,
+        &policy_request,
         CollaborationPolicyUsage::new(elapsed, 0, 0, 0),
     );
     match decision {
         CollaborationPolicyDecision::Allow => {
-            encode_collaboration_turn_authorization("authorized", None, Some(&active))
+            let claim = match store.claim_directed_request(ClaimDirectedRequest {
+                conversation_id,
+                request_message_id,
+                responder_device_id: local_device,
+                notification_id,
+                consumer_id: consumer,
+                lease_id: delivery.lease_id(),
+                lease_generation: request.lease_generation,
+                policy_digest: active.digest(),
+                now_unix_milliseconds: SystemUnixClock.now_unix_milliseconds(),
+            }) {
+                Ok(outcome) => outcome,
+                Err(
+                    crate::persistence::ProfileStoreError::InvalidTransition
+                    | crate::persistence::ProfileStoreError::OperationNotFound,
+                ) => {
+                    return encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("directed_request_invalid"),
+                        Some(&active),
+                        None,
+                    );
+                }
+                Err(crate::persistence::ProfileStoreError::InvalidAdapterLease) => {
+                    return encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("directed_request_claim_inactive"),
+                        Some(&active),
+                        None,
+                    );
+                }
+                Err(
+                    crate::persistence::ProfileStoreError::CollaborationPolicyReplacementMismatch,
+                ) => {
+                    return encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("policy_changed"),
+                        Some(&active),
+                        None,
+                    );
+                }
+                Err(
+                    crate::persistence::ProfileStoreError::DirectedRequestHandlingCapacityExceeded,
+                ) => {
+                    return encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("directed_request_capacity_exceeded"),
+                        Some(&active),
+                        None,
+                    );
+                }
+                Err(_) => return Err("internal".to_string()),
+            };
+            match claim {
+                DirectedRequestClaimOutcome::Claimed(claim) => {
+                    encode_collaboration_turn_authorization(
+                        "authorized",
+                        None,
+                        Some(&active),
+                        Some(claim),
+                    )
+                }
+                DirectedRequestClaimOutcome::Busy => encode_collaboration_turn_authorization(
+                    "denied",
+                    Some("directed_request_claimed"),
+                    Some(&active),
+                    None,
+                ),
+                DirectedRequestClaimOutcome::AttemptsExhausted => {
+                    encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("directed_request_attempts_exhausted"),
+                        Some(&active),
+                        None,
+                    )
+                }
+                DirectedRequestClaimOutcome::CompletedResponse => {
+                    encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("directed_request_completed_response"),
+                        Some(&active),
+                        None,
+                    )
+                }
+                DirectedRequestClaimOutcome::CompletedNoResponse => {
+                    encode_collaboration_turn_authorization(
+                        "denied",
+                        Some("directed_request_completed_no_response"),
+                        Some(&active),
+                        None,
+                    )
+                }
+            }
         }
         CollaborationPolicyDecision::RequireLocalApproval => {
             encode_collaboration_turn_authorization(
                 "approval_required",
                 Some("local_approval_required"),
                 Some(&active),
+                None,
             )
         }
-        CollaborationPolicyDecision::Deny(reason) => {
-            encode_collaboration_turn_authorization("denied", Some(reason.code()), Some(&active))
-        }
+        CollaborationPolicyDecision::Deny(reason) => encode_collaboration_turn_authorization(
+            "denied",
+            Some(reason.code()),
+            Some(&active),
+            None,
+        ),
     }
+}
+
+fn complete_collaboration_turn(
+    store: &crate::persistence::ProfileStore,
+    grant: &SessionGrant,
+    consumer: AdapterConsumerId,
+    local_device: DeviceId,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    let request: CompleteCollaborationTurnRequest =
+        serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
+    if grant.harness() != HarnessKind::Copilot {
+        return Err("local_service_not_authorized".to_string());
+    }
+    let conversation_id = parse_collaboration_conversation_id(&request.conversation_id)?;
+    let request_message_id = parse_collaboration_message_id(&request.request_message_id)?;
+    let policy_digest = crate::mcp::decode_hex::<32>(&request.policy_digest)
+        .map(KonclaveDomainCore::CollaborationPolicyDigest::from_bytes)
+        .map_err(|_| "invalid_request".to_string())?;
+    let changed = store
+        .complete_directed_request_without_response(CompleteDirectedRequest {
+            conversation_id,
+            request_message_id,
+            responder_device_id: local_device,
+            consumer_id: consumer,
+            attempt: request.attempt,
+            policy_digest,
+        })
+        .map_err(|error| directed_request_handling_error(&error))?;
+    serde_json::to_vec(&CompleteCollaborationTurnResult {
+        outcome: "completed_no_response",
+        changed,
+    })
+    .map_err(|_| "response_encoding_failed".to_string())
 }
 
 fn evaluate_collaboration_action(
     store: &crate::persistence::ProfileStore,
     grant: &SessionGrant,
     consumer: AdapterConsumerId,
+    local_device: DeviceId,
     payload: &[u8],
 ) -> Result<CollaborationActionEvaluation, String> {
     let request: EvaluateCollaborationActionRequest =
         serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
-    evaluate_collaboration_action_request(store, grant, consumer, request)
+    evaluate_collaboration_action_request(store, grant, consumer, local_device, request)
 }
 
 fn evaluate_collaboration_action_request(
     store: &crate::persistence::ProfileStore,
     grant: &SessionGrant,
     consumer: AdapterConsumerId,
+    local_device: DeviceId,
     request: EvaluateCollaborationActionRequest,
 ) -> Result<CollaborationActionEvaluation, String> {
     let conversation_id = parse_collaboration_conversation_id(&request.conversation_id)?;
+    let request_message_id = parse_collaboration_message_id(&request.request_message_id)?;
     let now_unix_milliseconds = SystemUnixClock.now_unix_milliseconds();
     let lease_expires_at = store
         .active_adapter_consumer_expiry(consumer)
@@ -1311,6 +1531,24 @@ fn evaluate_collaboration_action_request(
         None => u64::MAX,
     };
     let not_after_unix_milliseconds = lease_expires_at.unwrap_or_default().min(policy_expires_at);
+    let Some(directed_request_claim) = store
+        .active_directed_request_claim(ActiveDirectedRequestClaim {
+            conversation_id,
+            request_message_id,
+            responder_device_id: local_device,
+            consumer_id: consumer,
+            attempt: request.attempt,
+            policy_digest: expected_digest,
+            now_unix_milliseconds,
+        })
+        .map_err(|error| directed_request_handling_error(&error))?
+    else {
+        return Ok(CollaborationActionEvaluation::Deny(
+            "directed_request_claim_inactive",
+        ));
+    };
+    let not_after_unix_milliseconds =
+        not_after_unix_milliseconds.min(directed_request_claim.claim_expires_at_unix_milliseconds);
     let context = copilot_collaboration_policy_context(active.bundle())?;
     let target = CollaborationPolicyTarget::new(&request.action, request.resource.clone())
         .map_err(|_| "invalid_request".to_string())?;
@@ -1342,9 +1580,14 @@ fn evaluate_collaboration_action_request(
                 .as_deref()
                 .map(parse_collaboration_message_id)
                 .transpose()?;
+            if reply_to_message_id != Some(request_message_id) {
+                return Ok(CollaborationActionEvaluation::Deny(
+                    "directed_request_reply_mismatch",
+                ));
+            }
             let text = request.text.ok_or_else(|| "invalid_request".to_string())?;
             ApplicationContent::text(text.as_str()).map_err(|_| "invalid_request".to_string())?;
-            Ok(CollaborationActionEvaluation::Allow(
+            Ok(CollaborationActionEvaluation::Allow(Box::new(
                 CollaborationSendCandidate {
                     conversation_id,
                     policy_digest: expected_digest,
@@ -1353,8 +1596,9 @@ fn evaluate_collaboration_action_request(
                     message_id,
                     reply_to_message_id,
                     text: Zeroizing::new(text),
+                    directed_request_claim,
                 },
-            ))
+            )))
         }
         CollaborationPolicyDecision::RequireLocalApproval => Ok(
             CollaborationActionEvaluation::Deny("policy_approval_not_composable"),
@@ -1377,16 +1621,37 @@ fn parse_collaboration_message_id(value: &str) -> Result<KonclaveDomainCore::Mes
         .map_err(|_| "invalid_request".to_string())
 }
 
+fn directed_request_handling_error(error: &crate::persistence::ProfileStoreError) -> String {
+    match error {
+        crate::persistence::ProfileStoreError::DirectedRequestHandlingCapacityExceeded => {
+            "busy".to_string()
+        }
+        crate::persistence::ProfileStoreError::InvalidAdapterLease => {
+            "collaboration_policy_conflict".to_string()
+        }
+        crate::persistence::ProfileStoreError::InvalidTransition
+        | crate::persistence::ProfileStoreError::CollaborationPolicyReplacementMismatch
+        | crate::persistence::ProfileStoreError::OperationNotFound => {
+            "collaboration_policy_conflict".to_string()
+        }
+        _ => "internal".to_string(),
+    }
+}
+
 fn encode_collaboration_turn_authorization(
     outcome: &'static str,
     reason: Option<&'static str>,
     active: Option<&crate::persistence::ActiveCollaborationPolicy>,
+    claim: Option<DirectedRequestClaim>,
 ) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&CollaborationTurnAuthorizationResult {
         outcome,
         reason,
         policy_digest: active.map(|policy| crate::mcp::encode_hex(policy.digest().as_bytes())),
         policy_name: active.map(|policy| policy.bundle().name().to_string()),
+        request_message_id: claim
+            .map(|value| crate::mcp::encode_hex(value.request_message_id.as_bytes())),
+        attempt: claim.map(|value| value.attempt),
     })
     .map_err(|_| "response_encoding_failed".to_string())
 }
@@ -1431,7 +1696,7 @@ fn issue_collaboration_action_evaluation(
                     .map_err(|_| "internal".to_string())?;
                 if let Entry::Vacant(entry) = authorizations.entry(token) {
                     entry.insert(CollaborationSendAuthorization {
-                        candidate,
+                        candidate: *candidate,
                         expires_at_unix_milliseconds,
                     });
                     issued = Some(crate::mcp::encode_hex(&token));
@@ -1739,9 +2004,11 @@ struct DeliveryEventResult {
 )]
 enum DeliveryPayloadResult {
     ApplicationText {
+        message_id: String,
         text: String,
     },
     DirectedRequest {
+        message_id: String,
         target_device_id: String,
         text: String,
     },
@@ -1855,11 +2122,13 @@ fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
         relay_cursor: event.relay_cursor,
         payload: match event.payload {
             RemoteEventPayload::ApplicationMessage(message) => match message.content() {
-                ApplicationContent::Text(text) => {
-                    DeliveryPayloadResult::ApplicationText { text: text.clone() }
-                }
+                ApplicationContent::Text(text) => DeliveryPayloadResult::ApplicationText {
+                    message_id: crate::mcp::encode_hex(message.message_id().as_bytes()),
+                    text: text.clone(),
+                },
                 ApplicationContent::DirectedRequest(request) => {
                     DeliveryPayloadResult::DirectedRequest {
+                        message_id: crate::mcp::encode_hex(message.message_id().as_bytes()),
                         target_device_id: crate::mcp::encode_hex(
                             request.target_device_id().as_bytes(),
                         ),
@@ -2359,6 +2628,7 @@ mod delivery_contract_tests {
             payload["payload"],
             json!({
                 "kind": "directed_request",
+                "messageId": "04".repeat(16),
                 "targetDeviceId": "09".repeat(32),
                 "text": "please reply"
             })
@@ -2403,6 +2673,9 @@ mod delivery_contract_tests {
             "collaboration.turn.authorize"
         ));
         assert!(is_fresh_collaboration_policy_request(
+            "collaboration.turn.complete"
+        ));
+        assert!(is_fresh_collaboration_policy_request(
             "collaboration.action.evaluate"
         ));
         assert!(!is_fresh_collaboration_policy_request("send_message"));
@@ -2437,8 +2710,10 @@ mod collaboration_policy_tests {
     use std::collections::HashMap;
 
     use KonclaveDomainCore::{
-        AdapterConsumerId, AdapterLeaseId, CollaborationPolicyBundle, CollaborationPolicyEffect,
-        CollaborationPolicyLimits, CollaborationPolicyStatement, Ed25519PublicKey, ProtocolVersion,
+        AdapterConsumerId, AdapterLeaseId, ApplicationContent, ApplicationMessage,
+        CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
+        CollaborationPolicyStatement, DeliveryClass, DeviceId, Ed25519PublicKey, EnvelopeId,
+        MessageId, NotificationId, ProtocolVersion, RelayEnvelope, RoutingId, StoredRelayEnvelope,
     };
     use KonclaveLocalServiceTransport::{
         AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicyVersion,
@@ -2452,10 +2727,12 @@ mod collaboration_policy_tests {
     use super::{
         CollaborationAuthorizedSendRequest, CollaborationSendAuthorization,
         CollaborationSendCandidate, SystemUnixClock, UnixClock, authorize_collaboration_turn,
-        consume_collaboration_send_authorization, evaluate_collaboration_action,
-        issue_collaboration_action_evaluation,
+        complete_collaboration_turn, consume_collaboration_send_authorization,
+        evaluate_collaboration_action, issue_collaboration_action_evaluation,
     };
+    use crate::adapter::DeliveryAttachment;
     use crate::conversation::tests::open_coordinator;
+    use crate::persistence::DirectedRequestClaim;
 
     fn grant(harness: HarnessKind) -> SessionGrant {
         SessionGrant::new(SessionGrantClaims {
@@ -2516,23 +2793,71 @@ mod collaboration_policy_tests {
         expires_at
     }
 
+    fn directed_request_delivery(
+        store: &std::sync::Arc<crate::persistence::ProfileStore>,
+        conversation_id: KonclaveDomainCore::ConversationId,
+        routing_id: RoutingId,
+        local_device: DeviceId,
+    ) -> (DeliveryAttachment, MessageId, NotificationId, u64) {
+        store
+            .set_adapter_delivery_enabled(conversation_id, true)
+            .unwrap();
+        let envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            routing_id,
+            EnvelopeId::from_bytes([41; EnvelopeId::LENGTH]),
+            DeliveryClass::GroupApplication,
+            None,
+            1_900_000_000,
+            vec![41],
+        )
+        .unwrap();
+        store
+            .record_inbox_envelope(&StoredRelayEnvelope::new(envelope, 1).unwrap())
+            .unwrap();
+        let request_message_id = MessageId::from_bytes([42; MessageId::LENGTH]);
+        let request = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            request_message_id,
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::directed_request(local_device, "review the contract").unwrap(),
+        )
+        .unwrap();
+        store
+            .save_inbox_message(
+                conversation_id,
+                1,
+                DeviceId::from_bytes([43; DeviceId::LENGTH]),
+                0,
+                &request,
+            )
+            .unwrap();
+        let notification_id = NotificationId::from_bytes([44; NotificationId::LENGTH]);
+        store
+            .complete_inbox_with_notification(conversation_id, 1, notification_id)
+            .unwrap();
+        let now = SystemUnixClock.now_unix_milliseconds();
+        let delivery = DeliveryAttachment::acquire(consumer(), store, now).unwrap();
+        let claimed = store
+            .claim_remote_events(consumer(), delivery.lease_id(), now, now + 60_000, 1)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        (
+            delivery,
+            request_message_id,
+            notification_id,
+            claimed[0].lease_generation,
+        )
+    }
+
     #[test]
     fn copilot_turn_authorization_and_action_evaluation_fail_closed() {
         let root = tempfile::tempdir().unwrap();
         let coordinator = open_coordinator(root.path(), "policy-eval");
         let conversation = coordinator.create().unwrap();
         let store = coordinator.store();
-        let delivery_expires_at = attach_delivery(&store);
-        assert!(
-            store
-                .adapter_consumer_is_active(consumer(), delivery_expires_at - 1)
-                .unwrap()
-        );
-        assert!(
-            !store
-                .adapter_consumer_is_active(consumer(), delivery_expires_at)
-                .unwrap()
-        );
         let digest = store
             .store_collaboration_policy_bundle(&bundle(
                 CollaborationPolicyLimits::new(None, None, None, Some(1)).unwrap(),
@@ -2541,9 +2866,20 @@ mod collaboration_policy_tests {
         store
             .activate_collaboration_policy(conversation.conversation_id, digest, 0)
             .unwrap();
+        let local_device = coordinator.device_id().unwrap();
+        let (delivery, request_message_id, notification_id, lease_generation) =
+            directed_request_delivery(
+                &store,
+                conversation.conversation_id,
+                conversation.routing_id,
+                local_device,
+            );
         let conversation_id = crate::mcp::encode_hex(conversation.conversation_id.as_bytes());
         let authorize_payload = serde_json::to_vec(&json!({
-            "conversationId": conversation_id
+            "conversationId": conversation_id,
+            "requestMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+            "notificationId": crate::mcp::encode_hex(notification_id.as_bytes()),
+            "leaseGeneration": lease_generation
         }))
         .unwrap();
 
@@ -2552,6 +2888,8 @@ mod collaboration_policy_tests {
                 &store,
                 &grant(HarnessKind::Copilot),
                 consumer(),
+                Some(&delivery),
+                local_device,
                 &authorize_payload,
             )
             .unwrap(),
@@ -2559,6 +2897,11 @@ mod collaboration_policy_tests {
         .unwrap();
         assert_eq!(authorized["outcome"], "authorized");
         assert!(authorized.get("guidance").is_none());
+        assert_eq!(
+            authorized["requestMessageId"],
+            crate::mcp::encode_hex(request_message_id.as_bytes())
+        );
+        assert_eq!(authorized["attempt"], 1);
 
         let action_payload = serde_json::to_vec(&json!({
             "conversationId": conversation_id,
@@ -2566,8 +2909,10 @@ mod collaboration_policy_tests {
             "action": "conversation.reply",
             "resource": null,
             "messageId": "11".repeat(16),
-            "replyToMessageId": null,
-            "text": "aligned"
+            "replyToMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+            "text": "aligned",
+            "requestMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+            "attempt": 1
         }))
         .unwrap();
         let mut authorizations = HashMap::new();
@@ -2578,6 +2923,7 @@ mod collaboration_policy_tests {
                     &store,
                     &grant(HarnessKind::Copilot),
                     consumer(),
+                    local_device,
                     &action_payload,
                 )
                 .unwrap(),
@@ -2593,7 +2939,7 @@ mod collaboration_policy_tests {
             conversation_id: conversation_id.clone(),
             message_id: "11".repeat(16),
             text: "aligned".to_string(),
-            reply_to_message_id: None,
+            reply_to_message_id: Some(crate::mcp::encode_hex(request_message_id.as_bytes())),
             collaboration_authorization: Some(authorization.to_string()),
         };
         consume_collaboration_send_authorization(
@@ -2613,12 +2959,66 @@ mod collaboration_policy_tests {
             )
             .is_err()
         );
+        let complete_payload = serde_json::to_vec(&json!({
+            "conversationId": conversation_id,
+            "policyDigest": crate::mcp::encode_hex(digest.as_bytes()),
+            "requestMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+            "attempt": 1
+        }))
+        .unwrap();
+        let completed: serde_json::Value = serde_json::from_slice(
+            &complete_collaboration_turn(
+                &store,
+                &grant(HarnessKind::Copilot),
+                consumer(),
+                local_device,
+                &complete_payload,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(completed["outcome"], "completed_no_response");
+        assert_eq!(completed["changed"], true);
+        let repeated: serde_json::Value = serde_json::from_slice(
+            &complete_collaboration_turn(
+                &store,
+                &grant(HarnessKind::Copilot),
+                consumer(),
+                local_device,
+                &complete_payload,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(repeated["changed"], false);
+        let after_completion: serde_json::Value = serde_json::from_slice(
+            &issue_collaboration_action_evaluation(
+                &mut authorizations,
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    local_device,
+                    &action_payload,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after_completion["decision"], "deny");
+        assert_eq!(
+            after_completion["reason"],
+            "directed_request_claim_inactive"
+        );
 
         let generic: serde_json::Value = serde_json::from_slice(
             &authorize_collaboration_turn(
                 &store,
                 &grant(HarnessKind::Generic),
                 consumer(),
+                Some(&delivery),
+                local_device,
                 &authorize_payload,
             )
             .unwrap(),
@@ -2632,6 +3032,7 @@ mod collaboration_policy_tests {
                     &store,
                     &grant(HarnessKind::Generic),
                     consumer(),
+                    local_device,
                     &action_payload,
                 )
                 .unwrap(),
@@ -2648,6 +3049,8 @@ mod collaboration_policy_tests {
                 &store,
                 &grant(HarnessKind::Copilot),
                 AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]),
+                None,
+                local_device,
                 &authorize_payload,
             )
             .unwrap(),
@@ -2661,8 +3064,10 @@ mod collaboration_policy_tests {
             "action": "conversation.reply",
             "resource": null,
             "messageId": "12".repeat(16),
-            "replyToMessageId": null,
-            "text": "aligned"
+            "replyToMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+            "text": "aligned",
+            "requestMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+            "attempt": 1
         }))
         .unwrap();
         let changed: serde_json::Value = serde_json::from_slice(
@@ -2672,6 +3077,7 @@ mod collaboration_policy_tests {
                     &store,
                     &grant(HarnessKind::Copilot),
                     consumer(),
+                    local_device,
                     &unsupported_digest_payload,
                 )
                 .unwrap(),
@@ -2701,7 +3107,8 @@ mod collaboration_policy_tests {
             let coordinator = open_coordinator(root.path(), profile);
             let conversation = coordinator.create().unwrap();
             let store = coordinator.store();
-            attach_delivery(&store);
+            let now = SystemUnixClock.now_unix_milliseconds();
+            let delivery = DeliveryAttachment::acquire(consumer(), &store, now).unwrap();
             let digest = store
                 .store_collaboration_policy_bundle(&bundle(limits))
                 .unwrap();
@@ -2709,7 +3116,10 @@ mod collaboration_policy_tests {
                 .activate_collaboration_policy(conversation.conversation_id, digest, 0)
                 .unwrap();
             let payload = serde_json::to_vec(&json!({
-                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes())
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "requestMessageId": "11".repeat(16),
+                "notificationId": "12".repeat(16),
+                "leaseGeneration": 1
             }))
             .unwrap();
             let result: serde_json::Value = serde_json::from_slice(
@@ -2717,6 +3127,8 @@ mod collaboration_policy_tests {
                     &store,
                     &grant(HarnessKind::Copilot),
                     consumer(),
+                    Some(&delivery),
+                    coordinator.device_id().unwrap(),
                     &payload,
                 )
                 .unwrap(),
@@ -2744,6 +3156,18 @@ mod collaboration_policy_tests {
             message_id,
             reply_to_message_id: Some(reply_to_message_id),
             text: Zeroizing::new("aligned".to_string()),
+            directed_request_claim: DirectedRequestClaim {
+                conversation_id,
+                request_message_id: reply_to_message_id,
+                responder_device_id: DeviceId::from_bytes([6; DeviceId::LENGTH]),
+                notification_id: NotificationId::from_bytes([7; NotificationId::LENGTH]),
+                consumer_id: consumer(),
+                lease_id: AdapterLeaseId::from_bytes([8; AdapterLeaseId::LENGTH]),
+                lease_generation: 1,
+                claim_expires_at_unix_milliseconds: now + 2_000,
+                attempt: 1,
+                policy_digest,
+            },
         };
         let request = |conversation_id: String,
                        message_id: String,

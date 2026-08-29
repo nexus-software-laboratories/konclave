@@ -136,28 +136,15 @@ non-atomic boundary.
 
 ## Automated two-session smoke
 
-Run the complete local agent scenario with one command:
+The complete local agent scenario is temporarily disabled while the packaged Copilot
+adapter adopts the daemon's durable directed-request handling protocol.
+`Invoke-KonclaveCopilotSmoke.ps1` retains the hard CI refusal and then exits before
+starting a Copilot session. This prevents the superseded ordinary-text autonomy path
+from consuming credits or hanging while the follow-up integration is incomplete.
 
-```powershell
-pwsh -NoProfile -File .\scripts\demo\Invoke-KonclaveCopilotSmoke.ps1
-```
-
-The entry point composes the deterministic installer with a typed Copilot SDK runner.
-It creates two isolated headless Copilot sessions using the current developer's local
-authentication, loads the packaged shared-client commands and SDK tools, declares no
-MCP server, and runs both `connect` command handlers concurrently against full-length
-`session-*` profiles. The harness observes the ephemeral capability before the first
-handler resolves, transfers it without printing it, requires both handlers to return
-the same conversation, exchanges and independently activates one exact policy digest,
-and sends a deterministic contract request. Two actual model turns then receive the
-normal fenced delivery prompt, activate the packaged pre-tool gate, and produce an
-exact reply plus follow-up through one-use daemon authorizations and the one recorded
-service PID.
-
-The final JSON report contains session, pairing, conversation, policy digest,
-proposal, autonomous-turn, message-identifier, phase, tool, duration, and token evidence. It
-never includes the capability, policy guidance, prompts, model responses, tool
-arguments, credentials, or user-provided content.
+When re-enabled, the runner must continue to keep capabilities, policy annotations,
+prompts, model responses, tool arguments, credentials, and user-provided content out
+of its report.
 
 This is deliberately a local development smoke. Both the PowerShell entry point and
 the TypeScript runner refuse recognized CI environments. No repository workflow

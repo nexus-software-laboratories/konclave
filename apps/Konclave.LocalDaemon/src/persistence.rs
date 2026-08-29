@@ -38,14 +38,19 @@ use crate::clock::{SystemUnixClock, UnixClock};
 
 mod collaboration_policy_exchange;
 mod collaboration_policy_operation;
+mod directed_request_handling;
 pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
 pub(crate) use collaboration_policy_operation::CollaborationPolicyActivationOperation;
+pub(crate) use directed_request_handling::{
+    ActiveDirectedRequestClaim, ClaimDirectedRequest, CompleteDirectedRequest,
+    DirectedRequestClaim, DirectedRequestClaimOutcome,
+};
 #[path = "enrollment_persistence.rs"]
 pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 17;
+const PROFILE_SCHEMA_VERSION: u32 = 18;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -158,6 +163,7 @@ pub(crate) struct CollaborationActionAuthorization {
     pub(crate) policy_digest: CollaborationPolicyDigest,
     pub(crate) consumer_id: AdapterConsumerId,
     pub(crate) not_after_unix_milliseconds: u64,
+    pub(crate) directed_request_claim: DirectedRequestClaim,
 }
 
 enum OutboundApplicationPolicy<'a> {
@@ -167,7 +173,11 @@ enum OutboundApplicationPolicy<'a> {
         reply_to: Option<MessageId>,
     },
     CollaborationAction {
-        authorization: CollaborationActionAuthorization,
+        authorization: &'a CollaborationActionAuthorization,
+        content: &'a ApplicationContent,
+        reply_to: Option<MessageId>,
+        sent_at_unix_milliseconds: u64,
+        expires_at_unix_seconds: u64,
     },
 }
 
@@ -345,11 +355,13 @@ impl LockedProfile {
             clock,
         };
         store.initialize_collaboration_policy_operation_schema(source_version)?;
+        store.initialize_directed_request_handling_schema()?;
         store.active_conversation_id()?;
         store.verify_collaboration_policies()?;
         store.backfill_collaboration_policy_exchange_records()?;
         store.verify_collaboration_policy_exchange_records()?;
         store.verify_collaboration_policy_operations()?;
+        store.verify_directed_request_handlings()?;
         store.verify_remote_event_journal()?;
         store.verify_local_request_outcomes()?;
         store.invalidate_remote_event_leases()?;
@@ -3999,18 +4011,32 @@ impl ProfileStore {
     ///
     /// Returns a missing, stale-policy, conflicting, sequence, capacity, or storage
     /// error.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exact response operation and recovery fields remain explicit"
+    )]
     pub(crate) fn reserve_outbound_collaboration_action(
         &self,
         conversation_id: ConversationId,
         message_id: MessageId,
         envelope_id: EnvelopeId,
         authorization: CollaborationActionAuthorization,
+        content: &ApplicationContent,
+        reply_to: Option<MessageId>,
+        sent_at_unix_milliseconds: u64,
+        expires_at_unix_seconds: u64,
     ) -> Result<OutboundReservation, ProfileStoreError> {
         self.reserve_outbound_application_with_policy(
             conversation_id,
             message_id,
             envelope_id,
-            OutboundApplicationPolicy::CollaborationAction { authorization },
+            OutboundApplicationPolicy::CollaborationAction {
+                authorization: &authorization,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+            },
         )
     }
 
@@ -4025,16 +4051,24 @@ impl ProfileStore {
         let transaction = connection
             .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
-        match policy {
-            OutboundApplicationPolicy::PolicyOperation { content, reply_to } => self
-                .verify_outbound_collaboration_policy_operation(
+        let collaboration_action = match policy {
+            OutboundApplicationPolicy::PolicyOperation { content, reply_to } => {
+                self.verify_outbound_collaboration_policy_operation(
                     &transaction,
                     conversation_id,
                     message_id,
                     content,
                     reply_to,
-                )?,
-            OutboundApplicationPolicy::CollaborationAction { authorization } => {
+                )?;
+                None
+            }
+            OutboundApplicationPolicy::CollaborationAction {
+                authorization,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+            } => {
                 let now_unix_milliseconds = self.clock.now_unix_milliseconds();
                 require_active_collaboration_policy_digest(
                     &transaction,
@@ -4043,7 +4077,7 @@ impl ProfileStore {
                 )?;
                 require_collaboration_action_lease(
                     &transaction,
-                    authorization,
+                    *authorization,
                     now_unix_milliseconds,
                 )?;
                 if self.collaboration_policy_operation_reserves_message_id(
@@ -4053,6 +4087,14 @@ impl ProfileStore {
                 )? {
                     return Err(ProfileStoreError::DuplicateOperation);
                 }
+                Some((
+                    authorization,
+                    content,
+                    reply_to,
+                    sent_at_unix_milliseconds,
+                    expires_at_unix_seconds,
+                    now_unix_milliseconds,
+                ))
             }
             OutboundApplicationPolicy::Unrestricted => {
                 if self.collaboration_policy_operation_reserves_message_id(
@@ -4062,8 +4104,9 @@ impl ProfileStore {
                 )? {
                     return Err(ProfileStoreError::DuplicateOperation);
                 }
+                None
             }
-        }
+        };
         let existing = {
             let mut statement = transaction
                 .prepare(
@@ -4113,12 +4156,34 @@ impl ProfileStore {
             if existing[0].4 != 1 || existing[0].5.is_some() {
                 return Err(ProfileStoreError::InvalidTransition);
             }
-            return Ok(OutboundReservation {
+            let reservation = OutboundReservation {
                 conversation_id,
                 message_id,
                 envelope_id,
                 sender_counter: from_sql_integer(existing[0].3)?,
-            });
+            };
+            if let Some((
+                authorization,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+                now_unix_milliseconds,
+            )) = collaboration_action
+            {
+                self.reserve_directed_request_response_in(
+                    &transaction,
+                    authorization.directed_request_claim,
+                    reservation,
+                    false,
+                    content,
+                    reply_to,
+                    sent_at_unix_milliseconds,
+                    expires_at_unix_seconds,
+                    now_unix_milliseconds,
+                )?;
+            }
+            return Ok(reservation);
         }
         let pending: i64 = transaction
             .query_row(
@@ -4171,15 +4236,37 @@ impl ProfileStore {
                 ],
             )
             .map_err(map_operation_insert_error)?;
-        transaction
-            .commit()
-            .map_err(|_| ProfileStoreError::Storage)?;
-        Ok(OutboundReservation {
+        let reservation = OutboundReservation {
             conversation_id,
             message_id,
             envelope_id,
             sender_counter,
-        })
+        };
+        if let Some((
+            authorization,
+            content,
+            reply_to,
+            sent_at_unix_milliseconds,
+            expires_at_unix_seconds,
+            now_unix_milliseconds,
+        )) = collaboration_action
+        {
+            self.reserve_directed_request_response_in(
+                &transaction,
+                authorization.directed_request_claim,
+                reservation,
+                true,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+                now_unix_milliseconds,
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(reservation)
     }
 
     /// Attaches one encrypted relay envelope to its reserved outbox operation.
@@ -8929,6 +9016,8 @@ pub(crate) enum ProfileStoreError {
     PairingCapacityExceeded,
     #[error("local collaboration-policy storage reached its limit")]
     CollaborationPolicyCapacityExceeded,
+    #[error("local directed-request handling storage reached its limit")]
+    DirectedRequestHandlingCapacityExceeded,
     #[error("collaboration-policy proposal is unavailable")]
     CollaborationPolicyProposalNotFound,
     #[error("collaboration-policy proposal identity is conflicted")]
@@ -8970,7 +9059,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION | 16 => return Ok(()),
+        PROFILE_SCHEMA_VERSION | 17 | 16 => return Ok(()),
         15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
@@ -11722,6 +11811,117 @@ mod tests {
         message
     }
 
+    fn directed_request_claim_input(
+        fixture: &ConversationFixture,
+        policy_digest: CollaborationPolicyDigest,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        target_device_id: DeviceId,
+    ) -> ClaimDirectedRequest {
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        let request = stage_policy_exchange_message(
+            fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+            ApplicationContent::directed_request(target_device_id, "review the contract").unwrap(),
+        );
+        let notification_id = NotificationId::from_bytes([45; NotificationId::LENGTH]);
+        fixture
+            .store
+            .complete_inbox_with_notification(fixture.conversation_id, 1, notification_id)
+            .unwrap();
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer_id, lease_id, 100, 10_000)
+            .unwrap();
+        let claimed = fixture
+            .store
+            .claim_remote_events(consumer_id, lease_id, 1_000, 9_000, 1)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        ClaimDirectedRequest {
+            conversation_id: fixture.conversation_id,
+            request_message_id: request.message_id(),
+            responder_device_id: fixture.device_id,
+            notification_id,
+            consumer_id,
+            lease_id,
+            lease_generation: claimed[0].lease_generation,
+            policy_digest,
+            now_unix_milliseconds: 1_000,
+        }
+    }
+
+    fn claim_directed_request_for(
+        fixture: &ConversationFixture,
+        policy_digest: CollaborationPolicyDigest,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+    ) -> DirectedRequestClaim {
+        match fixture
+            .store
+            .claim_directed_request(directed_request_claim_input(
+                fixture,
+                policy_digest,
+                consumer_id,
+                lease_id,
+                fixture.device_id,
+            ))
+            .unwrap()
+        {
+            DirectedRequestClaimOutcome::Claimed(claim) => claim,
+            _ => panic!("directed request should be claimable"),
+        }
+    }
+
+    fn activate_request_reply_policy(fixture: &ConversationFixture) -> CollaborationPolicyDigest {
+        let canonical_bundle = collaboration_policy_bytes("request-reply", "legacy annotation");
+        let digest = fixture
+            .store
+            .store_collaboration_policy_bundle(&canonical_bundle)
+            .unwrap();
+        fixture
+            .store
+            .activate_collaboration_policy(fixture.conversation_id, digest, 100)
+            .unwrap();
+        digest
+    }
+
+    fn reserve_directed_response_fixture(
+        profile: &str,
+    ) -> (ConversationFixture, OutboundReservation) {
+        let clock = Arc::new(MutableClock(AtomicU64::new(1_000)));
+        let fixture = conversation_fixture_with_clock(profile, clock);
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer_id = AdapterConsumerId::from_bytes([71; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([72; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+        let reservation = fixture
+            .store
+            .reserve_outbound_collaboration_action(
+                fixture.conversation_id,
+                MessageId::from_bytes([73; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([74; EnvelopeId::LENGTH]),
+                CollaborationActionAuthorization {
+                    policy_digest: digest,
+                    consumer_id,
+                    not_after_unix_milliseconds: 9_000,
+                    directed_request_claim: claim,
+                },
+                &ApplicationContent::text("bounded response").unwrap(),
+                Some(claim.request_message_id),
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        (fixture, reservation)
+    }
+
     fn completed_policy_revocation_fixture(profile: &str) -> ConversationFixture {
         let fixture = conversation_fixture(profile);
         stage_policy_exchange_message(
@@ -11841,6 +12041,40 @@ mod tests {
             .unwrap();
     }
 
+    fn set_device_identity_schema_floor(connection: &Connection, floor: u32) {
+        let (profile_id, sealed_identity): (String, Option<Vec<u8>>) = connection
+            .query_row(
+                "SELECT profile_id, sealed_device_identity
+                 FROM daemon_profile
+                 WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let Some(sealed_identity) = sealed_identity else {
+            return;
+        };
+        let sealed_identity = SealedBlob::from_bytes(sealed_identity).unwrap();
+        let identity = DeviceIdentity::open_with_profile_schema_floor(
+            &sealer(),
+            profile_id.as_bytes(),
+            &sealed_identity,
+        )
+        .unwrap()
+        .0;
+        let migrated = identity
+            .seal_with_profile_schema_floor(&sealer(), profile_id.as_bytes(), floor)
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE daemon_profile
+                 SET sealed_device_identity = ?1
+                 WHERE singleton_id = 1",
+                params![migrated.as_bytes()],
+            )
+            .unwrap();
+    }
+
     fn downgrade_v5_to_v4(connection: &Connection) {
         downgrade_v6_to_v5(connection);
         connection
@@ -11955,7 +12189,9 @@ mod tests {
         downgrade_device_identity_to_legacy(connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -14235,7 +14471,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -14267,7 +14505,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -14316,7 +14556,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -14344,7 +14586,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -14393,7 +14637,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -14421,7 +14667,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -15889,7 +16137,9 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  PRAGMA user_version = 16;",
             )
@@ -16015,15 +16265,10 @@ mod tests {
             .activate_collaboration_policy(fixture.conversation_id, digest, 100)
             .unwrap();
         let consumer_id = AdapterConsumerId::from_bytes([40; AdapterConsumerId::LENGTH]);
-        fixture
-            .store
-            .acquire_adapter_consumer(
-                consumer_id,
-                AdapterLeaseId::from_bytes([40; AdapterLeaseId::LENGTH]),
-                100,
-                10_000,
-            )
-            .unwrap();
+        let lease_id = AdapterLeaseId::from_bytes([40; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+        let response = ApplicationContent::text("aligned").unwrap();
+        let reply_to = Some(claim.request_message_id);
         assert_eq!(
             fixture
                 .store
@@ -16037,7 +16282,12 @@ mod tests {
                         ),
                         consumer_id,
                         not_after_unix_milliseconds: 9_000,
+                        directed_request_claim: claim,
                     },
+                    &response,
+                    reply_to,
+                    1_700_000_000_000,
+                    1_900_000_000,
                 )
                 .err(),
             Some(ProfileStoreError::CollaborationPolicyReplacementMismatch)
@@ -16052,10 +16302,35 @@ mod tests {
                     policy_digest: digest,
                     consumer_id,
                     not_after_unix_milliseconds: 9_000,
+                    directed_request_claim: claim,
                 },
+                &response,
+                reply_to,
+                1_700_000_000_000,
+                1_900_000_000,
             )
             .unwrap();
         assert_eq!(reserved.sender_counter, 1);
+        let sealed_handling: Vec<u8> = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sealed_handling
+                 FROM daemon_directed_request_handling
+                 WHERE conversation_id = ?1 AND request_message_id = ?2",
+                params![
+                    claim.conversation_id.as_bytes().as_slice(),
+                    claim.request_message_id.as_bytes().as_slice(),
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !sealed_handling
+                .windows(b"aligned".len())
+                .any(|window| window == b"aligned")
+        );
         for (message_byte, authorization, now) in [
             (
                 44,
@@ -16063,6 +16338,7 @@ mod tests {
                     policy_digest: digest,
                     consumer_id: AdapterConsumerId::from_bytes([41; AdapterConsumerId::LENGTH]),
                     not_after_unix_milliseconds: 9_000,
+                    directed_request_claim: claim,
                 },
                 1_000,
             ),
@@ -16072,6 +16348,7 @@ mod tests {
                     policy_digest: digest,
                     consumer_id,
                     not_after_unix_milliseconds: 1_000,
+                    directed_request_claim: claim,
                 },
                 1_000,
             ),
@@ -16081,6 +16358,7 @@ mod tests {
                     policy_digest: digest,
                     consumer_id,
                     not_after_unix_milliseconds: 11_000,
+                    directed_request_claim: claim,
                 },
                 10_000,
             ),
@@ -16094,6 +16372,10 @@ mod tests {
                         MessageId::from_bytes([message_byte; MessageId::LENGTH]),
                         EnvelopeId::from_bytes([message_byte; EnvelopeId::LENGTH]),
                         authorization,
+                        &response,
+                        reply_to,
+                        1_700_000_000_000,
+                        1_900_000_000,
                     )
                     .err(),
                 Some(ProfileStoreError::InvalidAdapterLease)
@@ -16115,7 +16397,12 @@ mod tests {
                         policy_digest: digest,
                         consumer_id,
                         not_after_unix_milliseconds: 9_000,
+                        directed_request_claim: claim,
                     },
+                    &response,
+                    reply_to,
+                    1_700_000_000_000,
+                    1_900_000_000,
                 )
                 .err(),
             Some(ProfileStoreError::CollaborationPolicyReplacementMismatch)
@@ -16128,6 +16415,706 @@ mod tests {
                 .sender_counter,
             1
         );
+    }
+
+    #[test]
+    fn directed_request_claim_completion_is_exact_and_idempotent() {
+        let fixture = conversation_fixture("directed-request-completion");
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer_id = AdapterConsumerId::from_bytes([51; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([52; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+        let exact = ClaimDirectedRequest {
+            conversation_id: claim.conversation_id,
+            request_message_id: claim.request_message_id,
+            responder_device_id: claim.responder_device_id,
+            notification_id: claim.notification_id,
+            consumer_id: claim.consumer_id,
+            lease_id: claim.lease_id,
+            lease_generation: claim.lease_generation,
+            policy_digest: claim.policy_digest,
+            now_unix_milliseconds: 1_100,
+        };
+        assert_eq!(
+            fixture.store.claim_directed_request(exact).unwrap(),
+            DirectedRequestClaimOutcome::Claimed(claim)
+        );
+        let completion = CompleteDirectedRequest {
+            conversation_id: claim.conversation_id,
+            request_message_id: claim.request_message_id,
+            responder_device_id: claim.responder_device_id,
+            consumer_id: claim.consumer_id,
+            attempt: claim.attempt,
+            policy_digest: claim.policy_digest,
+        };
+        assert!(
+            fixture
+                .store
+                .complete_directed_request_without_response(completion)
+                .unwrap()
+        );
+        assert!(
+            !fixture
+                .store
+                .complete_directed_request_without_response(completion)
+                .unwrap()
+        );
+        assert_eq!(
+            fixture.store.claim_directed_request(exact).unwrap(),
+            DirectedRequestClaimOutcome::CompletedNoResponse
+        );
+        assert!(
+            fixture
+                .store
+                .active_directed_request_claim(ActiveDirectedRequestClaim {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    consumer_id: claim.consumer_id,
+                    attempt: claim.attempt,
+                    policy_digest: claim.policy_digest,
+                    now_unix_milliseconds: 1_100,
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn directed_request_claim_rejects_another_target_and_ordinary_text() {
+        for (profile, content) in [
+            (
+                "directed-request-wrong-target",
+                ApplicationContent::directed_request(
+                    DeviceId::from_bytes([99; DeviceId::LENGTH]),
+                    "not for this device",
+                )
+                .unwrap(),
+            ),
+            (
+                "directed-request-ordinary-text",
+                ApplicationContent::text("ordinary notification").unwrap(),
+            ),
+        ] {
+            let fixture = conversation_fixture(profile);
+            let digest = activate_request_reply_policy(&fixture);
+            fixture
+                .store
+                .set_adapter_delivery_enabled(fixture.conversation_id, true)
+                .unwrap();
+            let message = stage_policy_exchange_message(
+                &fixture,
+                1,
+                1,
+                DeviceId::from_bytes([44; DeviceId::LENGTH]),
+                1,
+                content,
+            );
+            let notification_id = NotificationId::from_bytes([60; NotificationId::LENGTH]);
+            fixture
+                .store
+                .complete_inbox_with_notification(fixture.conversation_id, 1, notification_id)
+                .unwrap();
+            let consumer_id = AdapterConsumerId::from_bytes([61; AdapterConsumerId::LENGTH]);
+            let lease_id = AdapterLeaseId::from_bytes([62; AdapterLeaseId::LENGTH]);
+            fixture
+                .store
+                .acquire_adapter_consumer(consumer_id, lease_id, 100, 10_000)
+                .unwrap();
+            let claimed = fixture
+                .store
+                .claim_remote_events(consumer_id, lease_id, 1_000, 9_000, 1)
+                .unwrap();
+            assert_eq!(
+                fixture.store.claim_directed_request(ClaimDirectedRequest {
+                    conversation_id: fixture.conversation_id,
+                    request_message_id: message.message_id(),
+                    responder_device_id: fixture.device_id,
+                    notification_id,
+                    consumer_id,
+                    lease_id,
+                    lease_generation: claimed[0].lease_generation,
+                    policy_digest: digest,
+                    now_unix_milliseconds: 1_000,
+                }),
+                Err(ProfileStoreError::InvalidTransition)
+            );
+        }
+    }
+
+    #[test]
+    fn expired_directed_request_claim_reclaims_once_and_rejects_stale_attempts() {
+        let fixture = conversation_fixture("directed-request-reclaim");
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer_id = AdapterConsumerId::from_bytes([53; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([54; AdapterLeaseId::LENGTH]);
+        let first = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+        fixture
+            .store
+            .release_remote_event(
+                first.notification_id,
+                consumer_id,
+                lease_id,
+                first.lease_generation,
+                1_100,
+            )
+            .unwrap();
+        let second_delivery = fixture
+            .store
+            .claim_remote_events(consumer_id, lease_id, 1_100, 8_000, 1)
+            .unwrap();
+        let early = ClaimDirectedRequest {
+            conversation_id: first.conversation_id,
+            request_message_id: first.request_message_id,
+            responder_device_id: first.responder_device_id,
+            notification_id: first.notification_id,
+            consumer_id,
+            lease_id,
+            lease_generation: second_delivery[0].lease_generation,
+            policy_digest: digest,
+            now_unix_milliseconds: 1_100,
+        };
+        assert_eq!(
+            fixture.store.claim_directed_request(early).unwrap(),
+            DirectedRequestClaimOutcome::Busy
+        );
+        fixture
+            .store
+            .release_remote_event(
+                first.notification_id,
+                consumer_id,
+                lease_id,
+                second_delivery[0].lease_generation,
+                1_200,
+            )
+            .unwrap();
+        let third_delivery = fixture
+            .store
+            .claim_remote_events(consumer_id, lease_id, 9_000, 9_900, 1)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .claim_directed_request(ClaimDirectedRequest {
+                    lease_generation: third_delivery[0].lease_generation,
+                    now_unix_milliseconds: 9_000,
+                    ..early
+                })
+                .unwrap(),
+            DirectedRequestClaimOutcome::Busy
+        );
+        fixture
+            .store
+            .release_adapter_consumer(consumer_id, lease_id)
+            .unwrap();
+        let replacement_lease_id = AdapterLeaseId::from_bytes([55; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer_id, replacement_lease_id, 9_000, 19_000)
+            .unwrap();
+        let replacement_delivery = fixture
+            .store
+            .claim_remote_events(consumer_id, replacement_lease_id, 9_000, 18_000, 1)
+            .unwrap();
+        let reclaimed = match fixture
+            .store
+            .claim_directed_request(ClaimDirectedRequest {
+                lease_id: replacement_lease_id,
+                lease_generation: replacement_delivery[0].lease_generation,
+                now_unix_milliseconds: 9_000,
+                ..early
+            })
+            .unwrap()
+        {
+            DirectedRequestClaimOutcome::Claimed(claim) => claim,
+            _ => panic!("expired request handling should be reclaimed"),
+        };
+        assert_eq!(reclaimed.attempt, 2);
+        assert_eq!(
+            fixture
+                .store
+                .complete_directed_request_without_response(CompleteDirectedRequest {
+                    conversation_id: first.conversation_id,
+                    request_message_id: first.request_message_id,
+                    responder_device_id: first.responder_device_id,
+                    consumer_id,
+                    attempt: first.attempt,
+                    policy_digest: digest,
+                }),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        assert!(
+            fixture
+                .store
+                .complete_directed_request_without_response(CompleteDirectedRequest {
+                    conversation_id: reclaimed.conversation_id,
+                    request_message_id: reclaimed.request_message_id,
+                    responder_device_id: reclaimed.responder_device_id,
+                    consumer_id,
+                    attempt: reclaimed.attempt,
+                    policy_digest: digest,
+                })
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn no_response_completion_terminalizes_an_expired_event_claim() {
+        let fixture = conversation_fixture("request-expired-no-response");
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer_id = AdapterConsumerId::from_bytes([75; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([76; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+        let redelivered = fixture
+            .store
+            .claim_remote_events(consumer_id, lease_id, 9_000, 18_000, 1)
+            .unwrap();
+        assert_eq!(redelivered.len(), 1);
+        assert_ne!(redelivered[0].lease_generation, claim.lease_generation);
+        assert!(
+            fixture
+                .store
+                .complete_directed_request_without_response(CompleteDirectedRequest {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    consumer_id,
+                    attempt: claim.attempt,
+                    policy_digest: digest,
+                })
+                .unwrap()
+        );
+        assert_eq!(
+            fixture
+                .store
+                .claim_directed_request(ClaimDirectedRequest {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    notification_id: claim.notification_id,
+                    consumer_id,
+                    lease_id,
+                    lease_generation: redelivered[0].lease_generation,
+                    policy_digest: digest,
+                    now_unix_milliseconds: 9_000,
+                })
+                .unwrap(),
+            DirectedRequestClaimOutcome::CompletedNoResponse
+        );
+    }
+
+    #[test]
+    fn directed_request_reclaim_attempts_are_bounded() {
+        let fixture = conversation_fixture("directed-request-attempt-bound");
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer_id = AdapterConsumerId::from_bytes([77; AdapterConsumerId::LENGTH]);
+        let mut lease_id = AdapterLeaseId::from_bytes([78; AdapterLeaseId::LENGTH]);
+        let mut claim = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+
+        for expected_attempt in 2_u32..=16 {
+            let now = claim.claim_expires_at_unix_milliseconds;
+            fixture
+                .store
+                .release_adapter_consumer(consumer_id, lease_id)
+                .unwrap();
+            lease_id = AdapterLeaseId::from_bytes(
+                [u8::try_from(78 + expected_attempt).unwrap(); AdapterLeaseId::LENGTH],
+            );
+            fixture
+                .store
+                .acquire_adapter_consumer(consumer_id, lease_id, now, now + 10_000)
+                .unwrap();
+            let delivery = fixture
+                .store
+                .claim_remote_events(consumer_id, lease_id, now, now + 9_000, 1)
+                .unwrap();
+            claim = match fixture
+                .store
+                .claim_directed_request(ClaimDirectedRequest {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    notification_id: claim.notification_id,
+                    consumer_id,
+                    lease_id,
+                    lease_generation: delivery[0].lease_generation,
+                    policy_digest: digest,
+                    now_unix_milliseconds: now,
+                })
+                .unwrap()
+            {
+                DirectedRequestClaimOutcome::Claimed(claim) => claim,
+                outcome => panic!("attempt {expected_attempt} was not claimed: {outcome:?}"),
+            };
+            assert_eq!(claim.attempt, expected_attempt);
+        }
+
+        let now = claim.claim_expires_at_unix_milliseconds;
+        fixture
+            .store
+            .release_adapter_consumer(consumer_id, lease_id)
+            .unwrap();
+        let exhausted_lease = AdapterLeaseId::from_bytes([96; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer_id, exhausted_lease, now, now + 10_000)
+            .unwrap();
+        let delivery = fixture
+            .store
+            .claim_remote_events(consumer_id, exhausted_lease, now, now + 9_000, 1)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .claim_directed_request(ClaimDirectedRequest {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    notification_id: claim.notification_id,
+                    consumer_id,
+                    lease_id: exhausted_lease,
+                    lease_generation: delivery[0].lease_generation,
+                    policy_digest: digest,
+                    now_unix_milliseconds: now,
+                })
+                .unwrap(),
+            DirectedRequestClaimOutcome::AttemptsExhausted
+        );
+    }
+
+    #[test]
+    fn directed_request_claim_and_response_require_current_membership() {
+        let before_claim = conversation_fixture("request-removed-pre");
+        let before_digest = activate_request_reply_policy(&before_claim);
+        let claim_request = directed_request_claim_input(
+            &before_claim,
+            before_digest,
+            AdapterConsumerId::from_bytes([97; AdapterConsumerId::LENGTH]),
+            AdapterLeaseId::from_bytes([98; AdapterLeaseId::LENGTH]),
+            before_claim.device_id,
+        );
+        before_claim
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM daemon_conversation_binding
+                 WHERE conversation_id = ?1 AND device_id = ?2",
+                params![
+                    before_claim.conversation_id.as_bytes().as_slice(),
+                    before_claim.device_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            before_claim.store.claim_directed_request(claim_request),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+
+        let clock = Arc::new(MutableClock(AtomicU64::new(1_000)));
+        let after_claim = conversation_fixture_with_clock("request-removed-post", clock);
+        let after_digest = activate_request_reply_policy(&after_claim);
+        let consumer_id = AdapterConsumerId::from_bytes([99; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([100; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&after_claim, after_digest, consumer_id, lease_id);
+        after_claim
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM daemon_conversation_binding
+                 WHERE conversation_id = ?1 AND device_id = ?2",
+                params![
+                    after_claim.conversation_id.as_bytes().as_slice(),
+                    after_claim.device_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            after_claim.store.reserve_outbound_collaboration_action(
+                after_claim.conversation_id,
+                MessageId::from_bytes([101; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([101; EnvelopeId::LENGTH]),
+                CollaborationActionAuthorization {
+                    policy_digest: after_digest,
+                    consumer_id,
+                    not_after_unix_milliseconds: 9_000,
+                    directed_request_claim: claim,
+                },
+                &ApplicationContent::text("must not be sent").unwrap(),
+                Some(claim.request_message_id),
+                1_700_000_000_000,
+                1_900_000_000,
+            ),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        after_claim
+            .store
+            .deactivate_collaboration_policy(after_claim.conversation_id)
+            .unwrap();
+        assert!(
+            after_claim
+                .store
+                .complete_directed_request_without_response(CompleteDirectedRequest {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    consumer_id,
+                    attempt: claim.attempt,
+                    policy_digest: after_digest,
+                })
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn directed_request_response_reservation_is_atomic_and_single_effect() {
+        let clock = Arc::new(MutableClock(AtomicU64::new(1_000)));
+        let fixture = conversation_fixture_with_clock("directed-request-response", clock.clone());
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer_id = AdapterConsumerId::from_bytes([55; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([56; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer_id, lease_id);
+        let authorization = CollaborationActionAuthorization {
+            policy_digest: digest,
+            consumer_id,
+            not_after_unix_milliseconds: 9_000,
+            directed_request_claim: claim,
+        };
+        let response = ApplicationContent::text("aligned").unwrap();
+        assert_eq!(
+            fixture.store.reserve_outbound_collaboration_action(
+                fixture.conversation_id,
+                MessageId::from_bytes([57; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([57; EnvelopeId::LENGTH]),
+                authorization,
+                &response,
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            ),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
+        let response_message_id = MessageId::from_bytes([58; MessageId::LENGTH]);
+        let envelope_id = EnvelopeId::from_bytes([58; EnvelopeId::LENGTH]);
+        let reserved = fixture
+            .store
+            .reserve_outbound_collaboration_action(
+                fixture.conversation_id,
+                response_message_id,
+                envelope_id,
+                authorization,
+                &response,
+                Some(claim.request_message_id),
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        assert_eq!(reserved.sender_counter, 1);
+        assert_eq!(
+            fixture
+                .store
+                .reserve_outbound_collaboration_action(
+                    fixture.conversation_id,
+                    response_message_id,
+                    envelope_id,
+                    authorization,
+                    &response,
+                    Some(claim.request_message_id),
+                    1_700_000_000_000,
+                    1_900_000_000,
+                )
+                .unwrap(),
+            reserved
+        );
+        assert_eq!(
+            fixture.store.reserve_outbound_collaboration_action(
+                fixture.conversation_id,
+                response_message_id,
+                envelope_id,
+                authorization,
+                &response,
+                Some(claim.request_message_id),
+                1_700_000_000_001,
+                1_900_000_000,
+            ),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        assert_eq!(
+            fixture.store.reserve_outbound_collaboration_action(
+                fixture.conversation_id,
+                MessageId::from_bytes([59; MessageId::LENGTH]),
+                EnvelopeId::from_bytes([59; EnvelopeId::LENGTH]),
+                authorization,
+                &ApplicationContent::text("different").unwrap(),
+                Some(claim.request_message_id),
+                1_700_000_000_000,
+                1_900_000_000,
+            ),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .complete_directed_request_without_response(CompleteDirectedRequest {
+                    conversation_id: claim.conversation_id,
+                    request_message_id: claim.request_message_id,
+                    responder_device_id: claim.responder_device_id,
+                    consumer_id,
+                    attempt: claim.attempt,
+                    policy_digest: digest,
+                }),
+            Err(ProfileStoreError::InvalidTransition)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_conversation(fixture.conversation_id)
+                .unwrap()
+                .sender_counter,
+            1
+        );
+    }
+
+    #[test]
+    fn completed_response_survives_unsealed_outbox_recovery() {
+        let (fixture, _) = reserve_directed_response_fixture("request-response-recovery");
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+
+        let reopened = LockedProfile::acquire(root.path(), profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let recoverable = reopened.recoverable_directed_request_responses().unwrap();
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].response_text.as_str(), "bounded response");
+        assert_eq!(recoverable[0].sent_at_unix_milliseconds, 1_700_000_000_000);
+        assert_eq!(recoverable[0].expires_at_unix_seconds, 1_900_000_000);
+        assert_eq!(reopened.abandon_unsealed_outbox().unwrap(), 1);
+        drop(reopened);
+
+        LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+    }
+
+    #[test]
+    fn completed_response_requires_its_reserved_outbox_operation() {
+        let (fixture, reservation) = reserve_directed_response_fixture("request-response-binding");
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM daemon_outbox
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    reservation.conversation_id.as_bytes().as_slice(),
+                    reservation.message_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn completed_response_rejects_outbox_operation_substitution() {
+        let (fixture, reservation) =
+            reserve_directed_response_fixture("request-response-substitute");
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_outbox
+                 SET envelope_id = ?1
+                 WHERE conversation_id = ?2 AND message_id = ?3",
+                params![
+                    EnvelopeId::from_bytes([102; EnvelopeId::LENGTH])
+                        .as_bytes()
+                        .as_slice(),
+                    reservation.conversation_id.as_bytes().as_slice(),
+                    reservation.message_id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn directed_request_handling_tampering_and_deletion_fail_startup() {
+        for (profile, delete) in [
+            ("directed-request-handling-tamper", false),
+            ("directed-request-handling-delete", true),
+        ] {
+            let fixture = conversation_fixture(profile);
+            let digest = activate_request_reply_policy(&fixture);
+            claim_directed_request_for(
+                &fixture,
+                digest,
+                AdapterConsumerId::from_bytes([63; AdapterConsumerId::LENGTH]),
+                AdapterLeaseId::from_bytes([64; AdapterLeaseId::LENGTH]),
+            );
+            if delete {
+                fixture
+                    .store
+                    .lock()
+                    .unwrap()
+                    .execute("DELETE FROM daemon_directed_request_handling", [])
+                    .unwrap();
+            } else {
+                fixture
+                    .store
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE daemon_directed_request_handling SET attempt = 2",
+                        [],
+                    )
+                    .unwrap();
+            }
+            let profile_id = fixture.profile_id.clone();
+            let root = fixture.root;
+            drop(fixture.store);
+            assert_eq!(
+                LockedProfile::acquire(root.path(), profile_id)
+                    .unwrap()
+                    .open_store(sealer())
+                    .err(),
+                Some(ProfileStoreError::CorruptData)
+            );
+        }
     }
 
     #[test]
@@ -16476,7 +17463,9 @@ mod tests {
         downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  DROP TABLE daemon_collaboration_policy_exchange_state;
                  DROP TABLE daemon_collaboration_policy_exchange;
@@ -16554,7 +17543,9 @@ mod tests {
         downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_collaboration_policy_operation_state;
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
                  PRAGMA user_version = 16;",
             )
@@ -16596,6 +17587,145 @@ mod tests {
         assert_eq!(
             store.load_or_create_device().unwrap().device_id(),
             device_id
+        );
+    }
+
+    #[test]
+    fn schema_seventeen_adds_the_directed_request_handling_journal() {
+        let fixture = conversation_fixture("request-handling-migration");
+        let profile_id = fixture.profile_id.clone();
+        let device_id = fixture.device_id;
+        let database_path = fixture.store.locked_profile.profile_database_path();
+        let root = fixture.root;
+        drop(fixture.store);
+        let connection = Connection::open(&database_path).unwrap();
+        set_device_identity_schema_floor(&connection, 17);
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 PRAGMA user_version = 17;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = LockedProfile::acquire(root.path(), profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        let connection = store.lock().unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let handling_table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'daemon_directed_request_handling'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let sealed_state_length: i64 = connection
+            .query_row(
+                "SELECT length(sealed_state)
+                 FROM daemon_directed_request_handling_state
+                 WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert!(handling_table_exists);
+        assert!(sealed_state_length > 0);
+        drop(connection);
+        assert_eq!(
+            store.load_or_create_device().unwrap().device_id(),
+            device_id
+        );
+    }
+
+    #[test]
+    fn failed_directed_request_handling_migration_keeps_schema_seventeen_authoritative() {
+        let fixture = conversation_fixture("request-migration-rollback");
+        let profile_id = fixture.profile_id.clone();
+        let database_path = fixture.store.locked_profile.profile_database_path();
+        let root = fixture.root;
+        drop(fixture.store);
+        let connection = Connection::open(&database_path).unwrap();
+        set_device_identity_schema_floor(&connection, 17);
+        connection
+            .execute_batch(
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 CREATE TABLE daemon_directed_request_handling (
+                    sentinel INTEGER NOT NULL
+                 );
+                 INSERT INTO daemon_directed_request_handling (sentinel) VALUES (7);
+                 PRAGMA user_version = 17;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        let connection = Connection::open(database_path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let sentinel: i64 = connection
+            .query_row(
+                "SELECT sentinel FROM daemon_directed_request_handling",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let state_table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'daemon_directed_request_handling_state'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 17);
+        assert_eq!(sentinel, 7);
+        assert!(!state_table_exists);
+    }
+
+    #[test]
+    fn authenticated_schema_floor_rejects_directed_request_journal_downgrade() {
+        let fixture = conversation_fixture("request-handling-downgrade");
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE daemon_directed_request_handling_state;
+                 DROP TABLE daemon_directed_request_handling;
+                 PRAGMA user_version = 17;",
+            )
+            .unwrap();
+        let profile_id = fixture.profile_id.clone();
+        let root = fixture.root;
+        drop(fixture.store);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
         );
     }
 

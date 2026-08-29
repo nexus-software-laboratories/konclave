@@ -62,7 +62,11 @@ function queuedDeliveryClient(): LocalServiceClient {
               conversation: '02'.repeat(32),
               sender: '03'.repeat(32),
               relayCursor: 1,
-              payload: { kind: 'application_text', text: 'shared hello' },
+              payload: {
+                kind: 'application_text',
+                messageId: '04'.repeat(16),
+                text: 'shared hello',
+              },
             },
           ],
         };
@@ -72,6 +76,10 @@ function queuedDeliveryClient(): LocalServiceClient {
       });
     }),
   };
+}
+
+function requestCount(client: LocalServiceClient, operation: string): number {
+  return vi.mocked(client.request).mock.calls.filter(([name]) => name === operation).length;
 }
 
 type EventHandlerMap = {
@@ -396,7 +404,7 @@ describe('bootExtension', () => {
     controller?.dispose();
   });
 
-  it('delivers shared-service events only after the session becomes idle', async () => {
+  it('settles terminal shared-service events only after the session becomes idle', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
@@ -412,6 +420,7 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(0);
 
     sessionMock.emit('user.message', {});
     await vi.advanceTimersByTimeAsync(5_000);
@@ -421,12 +430,8 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    expect(sessionMock.send.mock.calls[0]?.[0]).toMatchObject({ mode: 'enqueue' });
-    expect(sessionMock.send.mock.calls[0]?.[0]).toHaveProperty(
-      'prompt',
-      expect.stringContaining('shared hello'),
-    );
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(1);
 
     controller?.dispose();
     await Promise.resolve();
@@ -434,7 +439,7 @@ describe('bootExtension', () => {
     expect(client.close).toHaveBeenCalledTimes(1);
   });
 
-  it('restores delivery when a resumed session stays idle after startup', async () => {
+  it('settles a terminal update when a resumed session stays idle after startup', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
     const sessionMock = createSessionMock();
@@ -454,12 +459,8 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    expect(sessionMock.send.mock.calls[0]?.[0]).toMatchObject({ mode: 'enqueue' });
-    expect(sessionMock.send.mock.calls[0]?.[0]).toHaveProperty(
-      'prompt',
-      expect.stringContaining('shared hello'),
-    );
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(1);
     controller?.dispose();
     await Promise.resolve();
     expect(client.close).toHaveBeenCalledTimes(1);
@@ -486,10 +487,12 @@ describe('bootExtension', () => {
     });
     await Promise.resolve();
     await Promise.resolve();
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(1);
 
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(requestCount(client, 'delivery.acknowledge')).toBe(1);
 
     controller?.dispose();
     await Promise.resolve();
@@ -517,13 +520,15 @@ describe('bootExtension', () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(sessionMock.send).not.toHaveBeenCalled();
+      expect(requestCount(client, 'delivery.acknowledge')).toBe(0);
       sessionMock.emit('session.idle', {
         data: {},
         timestamp: '2026-08-16T00:00:00.000Z',
       });
       await Promise.resolve();
       await Promise.resolve();
-      expect(sessionMock.send).toHaveBeenCalledTimes(1);
+      expect(sessionMock.send).not.toHaveBeenCalled();
+      expect(requestCount(client, 'delivery.acknowledge')).toBe(1);
 
       controller?.dispose();
       await Promise.resolve();

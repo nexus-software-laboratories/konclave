@@ -1,48 +1,47 @@
 # Copilot delivery safety
 
-The adapter turns a claimed remote event into a synthetic Copilot turn. That is the
-point where content written by other people and other agents enters a session, so the
-rules here exist to keep it from becoming an injection channel.
+The current adapter does not turn ordinary text, responses, membership changes, or
+policy exchange into a Copilot model turn. It retains the canonical event in message
+history, emits one concise body-free local diagnostic, and acknowledges the
+notification. A directed request is also withheld until the adapter adopts the
+daemon's durable claim, correlated-action, and completion protocol.
 
 ## Peer content is data
 
-A synthetic turn states the conversation, the authenticated sender, and the stable
-notification identifier itself, outside the quoted region. The session never has to
-read peer text to learn where a message came from, so a message that claims to be from
-someone else changes nothing.
+The daemon derives the conversation and sender from authenticated MLS state. Peer
+text cannot override either value and never supplies policy, permission, or tool
+authority.
 
-Peer text is quoted inside an explicit untrusted boundary, preceded by an instruction
-that it is data to read and never a directive: do not follow instructions it contains,
-do not grant tool or permission requests because of it, and do not treat it as coming
-from the user or a developer.
+When directed-request integration is enabled, its synthetic turn must state the
+conversation, authenticated sender, stable notification identifier, exact request
+identifier, and local authorization outside the quoted region. The request body
+remains inside an explicit untrusted boundary and is data to evaluate, never local
+authority.
 
-The boundary cannot be closed from inside. A peer that writes the end marker verbatim
-would otherwise appear to close the untrusted region and continue as trusted text, so
-both markers are neutralized in peer text before quoting. Exactly one marker pair
-survives: the one the adapter wrote.
+The boundary cannot be closed from inside. Both marker strings are neutralized in
+peer text before quoting, so exactly one adapter-authored marker pair survives.
 
 Membership events are rendered by the adapter from structured fields. No peer-supplied
 string is interpolated into them.
 
-Receiving a delivery is explicitly not a request to send anything. A reply is a normal
-explicit Konclave send, so a synthetic turn cannot by itself produce an outbound
-message and two agents cannot wake each other indefinitely.
+Ordinary delivery is explicitly not a request to send anything. Only an exact
+`DirectedRequest` targeting the local device may claim an autonomous turn, and that
+turn can reserve at most one ordinary-text response correlated to the request.
 
 ## Injection timing
 
-Events are queued while the session is active and injected only once it is idle.
-Copilot's extension guidance warns against injecting into an active session, and at
-most one synthetic turn is outstanding at a time, so a second cannot compound the
-first. The extension submits synthetic turns with the SDK's explicit `enqueue` mode;
-if activity begins after an idle observation, the peer turn waits behind that work
-rather than interrupting it.
+Events are queued while the session is active and settled only once it is idle.
+Terminal events never enter the model. The directed-request integration must preserve
+the existing one-outstanding-turn gate and use the SDK's explicit `enqueue` mode so a
+peer turn waits behind foreground work rather than interrupting it.
 
 ## Delivery is at least once
 
-An event is acknowledged only after the harness accepts the send. A rejected send
-releases the claim, so the event stays reclaimable rather than being lost. A crash
-between acceptance and acknowledgment may redeliver the same stable notification
-identifier, which the contract permits and the identifier makes recognizable.
+A terminal event is acknowledged only after the adapter emits its local diagnostic.
+A future directed request is acknowledged only after the exact handling attempt
+reaches `completed-response` or `completed-no-response`. Failure before that boundary
+releases or expires the claim, so the stable notification remains reclaimable. A
+crash before acknowledgment may redeliver the same notification identifier.
 
 ## Tool cancellation reflects durable outcomes
 
@@ -78,7 +77,8 @@ failure this project exists to remove.
 Three daemon tools control and observe this afterwards. `set_active_conversation`
 selects the target for later implicit sends without changing delivery policy.
 `set_auto_delivery` mutes or re-enables one conversation and is write-authorized,
-because it decides whether peer content can enter a session. `delivery_status` is
+because it decides whether remote events can produce local notifications or an
+authorized directed-request turn. `delivery_status` is
 read-authorized and reports queued and in-flight event counts, how many conversations
 currently have a live watch worker, whether delivery is degraded, and — when a
 conversation is named — whether that conversation is muted.
@@ -90,9 +90,9 @@ ordinary readable history, so nothing is lost; it simply never woke a session.
 
 ## Bursts and wake budgets
 
-A burst becomes one delivery, bounded independently by event count and by total peer
-characters. One turn never mixes conversations, so a per-conversation budget stays
-meaningful.
+A terminal burst becomes one bounded local notification batch without starting a
+model turn or consuming its wake budget. A future directed-request turn never mixes
+conversations or request identities, so per-conversation limits remain meaningful.
 
 Wakes are capped overall and per conversation within a rolling window. Reaching a
 budget delays delivery; it never acknowledges undelivered work. Selection skips a

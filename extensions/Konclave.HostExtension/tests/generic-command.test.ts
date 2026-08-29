@@ -60,6 +60,7 @@ describe('generic harness command', () => {
       ['--profile', 'generic-test'],
       ['--operation', 'unknown', '--profile', 'generic-test'],
       ['--operation', 'collaboration.turn.authorize', '--profile', 'generic-test'],
+      ['--operation', 'collaboration.turn.complete', '--profile', 'generic-test'],
       ['--operation', 'collaboration.action.evaluate', '--profile', 'generic-test'],
       ['--profile', 'first', '--profile', 'second', '--operation', 'get_identity'],
       ['--profile', 'generic-test', '--operation', 'get_identity', '--request-id', 'invalid'],

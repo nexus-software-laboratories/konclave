@@ -178,7 +178,11 @@ const defaultReconnectDelayMs = 50;
 
 /** Returns whether an operation must share the lease-owning delivery lane. */
 export function isDeliveryLaneOperation(operation: string): boolean {
-  return operation.startsWith('delivery.') || operation === 'collaboration.turn.authorize';
+  return (
+    operation.startsWith('delivery.') ||
+    operation === 'collaboration.turn.authorize' ||
+    operation === 'collaboration.turn.complete'
+  );
 }
 
 function defaultCreateSocket(endpoint: string): Socket {

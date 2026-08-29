@@ -16,8 +16,9 @@ management through the installed shared service.
 - This path does not prove automatic delivery, a pre-tool policy gate, native
   permission intersection, subagent containment, or durable turn/token accounting.
   A locally active policy does not authorize autonomous activity in this harness.
-  Never call `collaboration.turn.authorize` or `collaboration.action.evaluate`; those
-  operations are intentionally absent from the generic client's closed surface.
+  Never call `collaboration.turn.authorize`, `collaboration.turn.complete`, or
+  `collaboration.action.evaluate`; those operations are intentionally absent from the
+  generic client's closed surface.
 - Choose one explicit canonical profile alias. Reuse a user-approved alias for durable
   continuity; otherwise generate a clearly ephemeral `generic-<random>` alias. Never
   derive continuity from PID, working directory, time, model name, or free-form text.

@@ -24,6 +24,8 @@ evidence that implementations honor both.
   conversation bindings;
 - collaboration-policy exchange metadata and its references to sealed message
   history.
+- directed-request handling claims, bounded attempts, and terminal
+  response/no-response outcomes.
 
 ## Components and trust boundaries
 
@@ -90,6 +92,14 @@ The adapter-delivery journal is independent of relay cursors. Relay acknowledgme
 means the daemon durably processed an envelope; adapter acknowledgment means a
 harness accepted one bounded notification. Neither means that a model completed or
 obeyed a turn.
+
+The directed-request handling journal is separate from both cursors. It binds one
+exact inbound request and local responder to a live delivery consumer, lease
+generation, policy digest, and bounded attempt before model enqueue. It then records
+one terminal response operation or no-response outcome. Response terminalization and
+outbound reservation share one SQLite transaction. The sealed response operation
+retains the exact data needed to finish an unsealed reservation after restart; its
+startup verification requires the corresponding outbox and any existing history.
 
 ### Community relay
 
@@ -238,20 +248,21 @@ accepting policy content. Explicit local proposal, acceptance, rejection, and
 revocation operations use a sealed terminal journal and atomically mutate local
 bindings before their outbound notification can be submitted. Deterministic
 effective-policy evaluation is implemented as a pure domain boundary. The paved
-Copilot integration now authorizes idle collaboration turns and gates their tools
-through the active digest while preserving native permissions. Finite turn and token
-policies deny this autonomous path until durable accounting exists. Unsupported and
-generic harnesses retain explicit-send behavior.
+daemon surface authorizes only exact directed requests and gates their one correlated
+response through the active digest while preserving native permissions. The current
+Copilot adapter withholds directed requests until it adopts that durable claim and
+completion protocol. Finite turn and token policies deny the autonomous path until
+durable accounting exists. Unsupported and generic harnesses retain explicit-send
+behavior.
 
 Shared-local-service automatic delivery exposes only typed policy-exchange
 identifiers, digests, replacement intent, and response state for exchange
 notifications. Those notifications do not project canonical bundle content or model
 guidance, remain inside the untrusted collaborator fence, and state that proposal
-receipt did not activate local authority. For application text under an already
-active local policy, the service may return that locally accepted policy's bounded
-guidance to the paved Copilot adapter, which places it outside the peer-content fence.
-The legacy binary adapter receives only a bounded daemon-authored non-authorizing
-notice, preserving its closed v1 event grammar.
+receipt did not activate local authority. Legacy policy guidance is never returned as
+model instruction or authorization input. The legacy binary adapter receives only a
+bounded daemon-authored non-authorizing notice, preserving its closed v1 event
+grammar.
 
 ### Version integrity
 
@@ -298,14 +309,16 @@ the mutually supported maximum.
 | Remote policy activation | Exchange messages have no binding side effect; only a separately authorized local service operation may activate or remove local authority |
 | Policy broadening during evaluation | Exact-target base matching, deny-over-approval-over-allow precedence, positive local-authority and harness-control intersections, deny-only local restrictions, and fail-closed missing evidence |
 | Policy-limit overflow or approval bypass | Checked usage-plus-cost arithmetic, explicit unlimited values, fresh local approval that satisfies only approval requirements, and no approval override for denial, authority, evidence, or limit failures |
-| Peer request becomes local authority | Keep peer text inside immutable untrusted markers and place only locally activated policy identity and guidance outside; policy authorizes evaluation of data without changing its trust class |
-| Copilot tool escapes collaboration policy | Keep a turn-scoped pre-tool gate, accept only a bounded object or serialized object with the exact `send_message` field allowlist, correlate fresh interactive and delivery connections through their authenticated session public key, bind a one-use authorization to exact arguments, active digest, live delivery consumer, and bounded expiry, verify those conditions in the send reservation, and deny external, unknown, approval-required, or cross-conversation tools |
+| Peer request becomes local authority | Keep the request body inside immutable untrusted markers; require exact directed-request content, local target, active local policy, harness evidence, and a durable handling claim before model enqueue |
+| Copilot tool escapes collaboration policy | Keep a turn-scoped pre-tool gate, accept only a bounded object or serialized object with the exact `send_message` field allowlist, correlate fresh interactive and delivery connections through their authenticated session public key, bind a one-use authorization to the exact request, handling attempt, response arguments, active digest, live delivery consumer, and bounded expiry, verify those conditions in the atomic handling/outbox reservation, and deny external, unknown, approval-required, cross-conversation, or request-creating tools |
 | Collaboration gate leaks into a user turn | Prepare with a fresh local turn token, activate only on the matching observed synthetic prompt, clear pending state on every other user prompt, deny every tool if a delayed token-bearing prompt arrives after that clearance, and clear active state on idle or disposal |
 | External work outlives the policy gate | Do not register workspace, shell, web, MCP, subagent, or delegation controls until each paved integration can prove atomic effect and descendant lifecycle enforcement |
 | Unsupported harness accounting claim | Require the live single-consumer delivery lease for paved autonomy, enforce duration and one outstanding turn, and deny finite turn or token policies until durable accounting exists |
 | Contradictory local policy responses | Derive one stable response message identifier per conversation, device, and proposal, then bind its one terminal outcome in a sealed local-operation record |
 | Partial local policy exchange operation | Commit the terminal local-operation record and binding mutation in one transaction before submission; retain the owned serialization guard through blocking work; preserve the source proposal identifier; retry returns historical mutation state and reconciles the stable outbox message |
 | Policy-operation journal erasure or schema downgrade | Create the initial sealed journal state atomically with schema adoption, authenticate the adopted schema floor inside the sealed device identity, and reject null state or a plaintext version below that floor |
+| Directed-request handling erasure or replay | Seal each complete handling record and an independent exact row count, bind claims to the live notification lease and generation, cap reclaim attempts, reject stale attempts, and advance the authenticated profile schema floor |
+| Duplicate, concurrent, or crash-interrupted directed-request response | Atomically transition one exact handling attempt to a terminal response in the same transaction as sender-counter and outbox reservation; seal the recovery inputs, finish the exact unsealed reservation on startup, accept only an exact retry, and reject changed identifiers, targets, timestamps, expiry, or content |
 | Policy response identifier preemption | Reserve the application identifier in the terminal-operation transaction, reject pre-existing history or outbox records before authority mutation, accept only an exact already-recorded outbound envelope as its own echo, reject later inbound collisions, and require outbound content to reproduce the sealed operation |
 | Paved policy-source path escape or replacement | Accept only an explicit relative path whose physical target remains under the current workspace, require a regular bounded UTF-8 file, compare file-descriptor identity and metadata before and after the read, re-resolve the final path, and compile the transferred source through the shared strict Rust compiler |
 | Mutable-source proposal retry | Recover by stable proposal identifier from the sealed terminal operation and content-addressed bundle rather than rereading the source path; an edited source requires a new identifier |
@@ -313,7 +326,7 @@ the mutually supported maximum.
 | Repeated revocation after reactivation | Require a caller-stable revocation message identifier so a later activation cycle can emit a distinct revocation while retries remain idempotent |
 | Collaboration-policy persistence tampering | Sealed canonical bundle and binding records, profile/conversation/digest context binding, startup verification, hard capacity, and fail-closed binding deletion |
 | Wake-up or token-spend abuse | Explicit per-conversation enablement, mute controls, one outstanding synthetic turn, burst coalescing, and global/per-conversation budgets |
-| Agent-to-agent feedback loop | Authenticated sender classification, local-echo suppression, stable notification identifiers, and no send side effect from receipt alone |
+| Agent-to-agent feedback loop | Authenticated sender classification, local-echo suppression, stable notification identifiers, no model turn for terminal updates, and an exact directed-request claim for the only autonomous path |
 | Adapter backlog exhaustion | Hard count/byte bounds, terminal suppression while muted, replay backpressure before enabled events would be dropped, and visible degraded state |
 | Dependency/provider compromise | Exact versions, supply-chain review, upstream advisories, isolated adapter, and replaceable provider boundary |
 
