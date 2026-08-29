@@ -97,10 +97,10 @@ pwsh -NoProfile -File .\scripts\demo\Start-KonclaveLocalDemo.ps1
 
 See [Local Copilot demo](docs/distribution/local-demo.md) for pairing and cleanup.
 
-The local-only two-session agent smoke is temporarily disabled while the packaged
-adapter adopts durable directed-request handling. Its entry point fails before
-starting a Copilot session rather than exercising the superseded ordinary-text
-autonomy path.
+The local-only two-session agent smoke remains temporarily disabled until its scenario
+is rewritten around the new directed-request tool and terminal response lifecycle.
+Its entry point fails before starting a Copilot session rather than exercising the
+superseded ordinary-text autonomy path.
 
 The smoke uses the current developer's local Copilot authentication and remains prohibited
 from running in CI.

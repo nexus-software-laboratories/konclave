@@ -46,6 +46,9 @@ const COLLABORATION_POLICY_REVOCATION_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-revocation-message.bin");
 const CREDENTIAL_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/device-credential-binding.bin");
+const DIRECTED_REQUEST_CREDENTIAL_FIXTURE: &[u8] = include_bytes!(
+    "../../../../fixtures/protocol/v1/directed-request-device-credential-binding.bin"
+);
 const INVITATION_FIXTURE: &[u8] = include_bytes!("../../../../fixtures/protocol/v1/invitation.bin");
 const ROUTE_BOUND_INVITATION_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/route-bound-invitation.bin");
@@ -170,6 +173,15 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         )
         .expect("fixture should encode"),
         CREDENTIAL_FIXTURE
+    );
+    let directed_request_credential =
+        decode_device_credential_binding(DIRECTED_REQUEST_CREDENTIAL_FIXTURE)
+            .expect("fixture should decode");
+    assert!(directed_request_credential.supports_directed_requests());
+    assert_eq!(
+        encode_device_credential_binding(&directed_request_credential)
+            .expect("fixture should encode"),
+        DIRECTED_REQUEST_CREDENTIAL_FIXTURE
     );
     assert_eq!(
         encode_invitation(&decode_invitation(INVITATION_FIXTURE).expect("fixture should decode"))
@@ -686,6 +698,30 @@ fn invitation_binding_and_wire_shapes_are_validated() {
             }
         ))
     ));
+
+    let mut credential =
+        wire::DeviceCredentialBinding::decode(CREDENTIAL_FIXTURE).expect("wire should decode");
+    credential.application_capabilities = 1;
+    assert!(decode_device_credential_binding(&credential.encode_to_vec()).is_err());
+    credential.application_capabilities_signature =
+        prost::bytes::Bytes::from_static(&[1; KonclaveDomainCore::Ed25519Signature::LENGTH]);
+    assert!(decode_device_credential_binding(&credential.encode_to_vec()).is_ok());
+    credential.application_capabilities = 0;
+    assert!(decode_device_credential_binding(&credential.encode_to_vec()).is_err());
+
+    let legacy = decode_device_credential_binding(CREDENTIAL_FIXTURE).unwrap();
+    let invalid = KonclaveDomainCore::DeviceCredentialBinding::new_with_capabilities(
+        legacy.version(),
+        legacy.device_id(),
+        legacy.conversation_id(),
+        legacy.signature_scheme(),
+        legacy.device_root_public_key(),
+        legacy.conversation_signature_public_key(),
+        legacy.device_binding_signature(),
+        1,
+        None,
+    );
+    assert!(invalid.is_err());
 }
 
 #[test]

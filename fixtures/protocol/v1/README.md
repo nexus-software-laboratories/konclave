@@ -15,6 +15,7 @@ production identifiers, or cryptographic test vectors.
 | `collaboration-policy-revocation-message.bin` | 71 | `fbd646563ac08e4825dff21e220c9b385cbf2fa3a91f9d3b117e1082a09781d9` |
 | `conversation-state.bin` | 164 | `3c78dc0c93743ee53dcaa8737b7ed4e8c69004d831b4287a0faafdf44884bb58` |
 | `device-credential-binding.bin` | 212 | `8d9d93e470d0adccdc0298312304b9669e1102769bf69ecadac3453d75651ab3` |
+| `directed-request-device-credential-binding.bin` | 280 | `ebbc1c1f2d087134bf9620336d69b34fdeb00a028184c9c904af185a859829c6` |
 | `directed-request-message.bin` | 131 | `f0ddb0b589dffe52ab848f02d07ce9708d448b7cd21b941b891e8866bbd1a127` |
 | `invitation.bin` | 240 | `cdca99b5057721c7f557b3fe2d04a5cd5ffb0e8b022790e592371612d9b65183` |
 | `join-proof.bin` | 492 | `edd36bc487fae333ab4acd701a999355e3897e9b7979ce79a08e0cc343a19539` |

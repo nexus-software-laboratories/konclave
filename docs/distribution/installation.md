@@ -117,6 +117,9 @@ service, install the complete new archive, rerun the exact `init` command with t
 same explicit policy, and then start the shared service. The demo's `-Refresh` path
 replaces only the obsolete development authorization record, issuer key, sidecar, and
 package after stopping that service; durable profiles remain separate.
+Existing conversation credential bindings remain valid for ordinary text but do not
+gain directed-request capability retroactively. Create new membership with the
+upgraded clients before using `send_directed_request` or `/konclave request`.
 
 An external-custody profile must have its original key copied to
 `<profile-key-directory>/<profile-id>.key` before the shared service opens it. Every

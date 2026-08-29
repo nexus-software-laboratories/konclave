@@ -1299,6 +1299,8 @@ describe('deterministic commands', () => {
 
   it('sends, replies, and displays synchronized peer text ephemerally', async () => {
     const replyToMessageId = '66'.repeat(16);
+    const directedRequestId = '67'.repeat(16);
+    const implicitDirectedRequestId = '68'.repeat(16);
     const sentMessageId = '88'.repeat(16);
     const request = vi.fn(async (operation: string, payload: unknown, _options?: unknown) => {
       if (operation === 'send_message') {
@@ -1310,6 +1312,17 @@ describe('deterministic commands', () => {
           message_id: payload.message_id,
           sender_counter: 1,
           cursor: 8,
+        };
+      }
+      if (operation === 'send_directed_request') {
+        if (typeof payload !== 'object' || payload === null || !('message_id' in payload)) {
+          throw new Error('missing request identifier');
+        }
+        return {
+          conversation_id: conversationId,
+          message_id: payload.message_id,
+          sender_counter: 2,
+          cursor: 9,
         };
       }
       if (operation === 'sync_messages') {
@@ -1379,6 +1392,16 @@ describe('deterministic commands', () => {
     await command?.handler(
       commandContext(`reply ${conversationId} ${replyToMessageId} -- acknowledged`),
     );
+    await command?.handler(
+      commandContext(
+        `request ${conversationId} ${inviterDeviceId} ${directedRequestId} -- confirm contract`,
+      ),
+    );
+    await command?.handler(
+      commandContext(
+        `request ${conversationId} ${implicitDirectedRequestId} -- resolve the only peer`,
+      ),
+    );
     await command?.handler(commandContext('send -- implicit hello'));
     await command?.handler(commandContext(`messages ${conversationId} 7`));
 
@@ -1398,9 +1421,28 @@ describe('deterministic commands', () => {
       conversation_id: conversationId,
       text: 'implicit hello',
     });
+    expect(request).toHaveBeenCalledWith(
+      'send_directed_request',
+      {
+        conversation_id: conversationId,
+        message_id: directedRequestId,
+        target_device_id: inviterDeviceId,
+        text: 'confirm contract',
+      },
+      { requestId: expect.any(Buffer) },
+    );
+    expect(request).toHaveBeenCalledWith(
+      'send_directed_request',
+      {
+        conversation_id: conversationId,
+        message_id: implicitDirectedRequestId,
+        text: 'resolve the only peer',
+      },
+      { requestId: expect.any(Buffer) },
+    );
     expect(
       request.mock.calls.filter(([operation]) => operation === 'set_active_conversation'),
-    ).toHaveLength(2);
+    ).toHaveLength(4);
     expect(
       sends.every(
         ([, payload]) =>
@@ -1986,6 +2028,7 @@ describe('shared-service delivery adaptation', () => {
       .mockResolvedValueOnce({ events })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce(
         serviceStatus({
           deviceId: '0a'.repeat(32),
@@ -2024,6 +2067,25 @@ describe('shared-service delivery adaptation', () => {
         leaseGeneration: 2,
       }),
     ).resolves.toEqual({ kind: 'accepted' });
+    await expect(
+      channel.request({
+        kind: 'heartbeat',
+        turn: {
+          conversation: '04'.repeat(32),
+          policyDigest: '0b'.repeat(32),
+          requestMessageId: '0c'.repeat(16),
+          attempt: 2,
+        },
+      }),
+    ).resolves.toEqual({ kind: 'accepted' });
+    expect(request).toHaveBeenCalledWith('delivery.heartbeat', {
+      turn: {
+        conversationId: '04'.repeat(32),
+        policyDigest: '0b'.repeat(32),
+        requestMessageId: '0c'.repeat(16),
+        attempt: 2,
+      },
+    });
     await expect(channel.request({ kind: 'status' })).resolves.toMatchObject({
       kind: 'status',
       status: {

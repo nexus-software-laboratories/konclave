@@ -25,6 +25,7 @@ export const toolOperations = [
   'create_invitation',
   'create_join_proof',
   'send_message',
+  'send_directed_request',
   'propose_collaboration_policy',
   'propose_collaboration_policy_source',
   'resume_collaboration_policy_proposal',
@@ -49,6 +50,7 @@ export const deliveryOperations = {
   claim: 'delivery.claim',
   acknowledge: 'delivery.acknowledge',
   release: 'delivery.release',
+  heartbeat: 'delivery.heartbeat',
 } as const;
 
 /** Paved Copilot policy decisions that remain outside the agent tool surface. */

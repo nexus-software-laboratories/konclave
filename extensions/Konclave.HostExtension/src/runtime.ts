@@ -298,6 +298,8 @@ export async function bootExtension(
       session,
       diagnostics: options.diagnostics,
       authorizeTurn: (events) => policyGate.authorizeTurn(events),
+      completeAuthorizedTurn: (authorization) => policyGate.completeTurn(authorization),
+      canCompleteAuthorizedTurn: (authorization) => policyGate.canCompleteTurn(authorization),
       activateAuthorizedTurn: (authorization) => policyGate.activate(authorization),
       clearAuthorizedTurn: () => policyGate.clear(),
     });

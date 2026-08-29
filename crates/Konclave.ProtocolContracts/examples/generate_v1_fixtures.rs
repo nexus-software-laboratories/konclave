@@ -67,6 +67,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write(
         &output,
+        "directed-request-device-credential-binding.bin",
+        encode_device_credential_binding(&directed_request_credential(1))?,
+    )?;
+    write(
+        &output,
         "invitation.bin",
         encode_invitation(&invitation(1))?,
     )?;
@@ -302,6 +307,21 @@ fn credential(device: u8) -> DeviceCredentialBinding {
         Ed25519PublicKey::from_bytes([3; 32]),
         Ed25519Signature::from_bytes([4; 64]),
     )
+}
+
+fn directed_request_credential(device: u8) -> DeviceCredentialBinding {
+    DeviceCredentialBinding::new_with_capabilities(
+        ProtocolVersion::application_v1(),
+        DeviceId::from_bytes([device; 32]),
+        ConversationId::from_bytes([6; 32]),
+        SignatureScheme::Ed25519,
+        Ed25519PublicKey::from_bytes([2; 32]),
+        Ed25519PublicKey::from_bytes([3; 32]),
+        Ed25519Signature::from_bytes([4; 64]),
+        KonclaveDomainCore::APPLICATION_CAPABILITY_DIRECTED_REQUEST,
+        Some(Ed25519Signature::from_bytes([5; 64])),
+    )
+    .expect("directed-request capability fixture is valid")
 }
 
 fn invitation(expected_device: u8) -> Invitation {

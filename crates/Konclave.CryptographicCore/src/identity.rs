@@ -1,10 +1,11 @@
 use std::mem::size_of;
 
 use KonclaveDomainCore::{
-    ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
-    Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
-    MessageId, NotificationId, PairingContextHash, PairingControl, PairingId, PairingMessageId,
-    PairingOffer, PairingStage, ProtocolVersion, RoutingId, SignatureScheme,
+    APPLICATION_CAPABILITY_DIRECTED_REQUEST, ConversationId, ConversationRole,
+    CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Ed25519Signature,
+    EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId, NotificationId,
+    PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer, PairingStage,
+    ProtocolVersion, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -20,6 +21,7 @@ use crate::KonclaveCryptographicError;
 pub(crate) const CIPHER_SUITE: CipherSuite = CipherSuite::CURVE25519_AES128;
 const DEVICE_ID_DOMAIN: &[u8] = b"konclave-device-id-v1\0";
 const CREDENTIAL_DOMAIN: &[u8] = b"konclave-device-credential-binding-v1\0";
+const CREDENTIAL_CAPABILITY_DOMAIN: &[u8] = b"konclave-device-credential-capabilities-v1\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] = b"konclave-device-credential-binding-hash-v1\0";
 const INVITATION_DOMAIN: &[u8] = b"konclave-invitation-v1\0";
 const PAIRING_OFFER_DOMAIN: &[u8] = b"konclave-pairing-offer-v1\0";
@@ -316,7 +318,12 @@ impl DeviceIdentity {
         let signature = cipher_suite
             .sign(&self.secret_key, &canonical)
             .map_err(|_| provider_failure("device credential binding signature"))?;
-        let binding = DeviceCredentialBinding::new(
+        let capability_canonical =
+            canonical_credential_capabilities(&canonical, APPLICATION_CAPABILITY_DIRECTED_REQUEST);
+        let capability_signature = cipher_suite
+            .sign(&self.secret_key, &capability_canonical)
+            .map_err(|_| provider_failure("device credential capability signature"))?;
+        let binding = DeviceCredentialBinding::new_with_capabilities(
             ProtocolVersion::application_v1(),
             self.device_id,
             conversation_id,
@@ -324,7 +331,9 @@ impl DeviceIdentity {
             self.public_key,
             public_key,
             Ed25519Signature::from_slice(&signature)?,
-        );
+            APPLICATION_CAPABILITY_DIRECTED_REQUEST,
+            Some(Ed25519Signature::from_slice(&capability_signature)?),
+        )?;
         Ok(ConversationSigningMaterial {
             secret_key,
             binding,
@@ -710,6 +719,21 @@ pub fn verify_device_credential_binding(
             &canonical,
         )
         .map_err(|_| KonclaveCryptographicError::InvalidCredentialBinding)?;
+    match (
+        binding.application_capabilities(),
+        binding.application_capabilities_signature(),
+    ) {
+        (0, None) => {}
+        (0, Some(_)) | (_, None) => {
+            return Err(KonclaveCryptographicError::InvalidCredentialBinding);
+        }
+        (capabilities, Some(signature)) => {
+            let capability_canonical = canonical_credential_capabilities(&canonical, capabilities);
+            cipher_suite
+                .verify(&public_key, signature.as_bytes(), &capability_canonical)
+                .map_err(|_| KonclaveCryptographicError::InvalidCredentialBinding)?;
+        }
+    }
     let hash = credential_binding_hash_with_suite(&cipher_suite, binding)?;
     Ok(VerifiedDeviceCredentialBinding {
         binding: binding.clone(),
@@ -922,6 +946,18 @@ fn canonical_credential_binding(
     output
 }
 
+fn canonical_credential_capabilities(
+    credential_canonical: &[u8],
+    application_capabilities: u64,
+) -> Vec<u8> {
+    let mut output =
+        Vec::with_capacity(CREDENTIAL_CAPABILITY_DOMAIN.len() + credential_canonical.len() + 8);
+    output.extend_from_slice(CREDENTIAL_CAPABILITY_DOMAIN);
+    output.extend_from_slice(credential_canonical);
+    output.extend_from_slice(&application_capabilities.to_be_bytes());
+    output
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the canonical signed invitation fields remain explicit"
@@ -1059,6 +1095,7 @@ mod tests {
     const ROOT_PUBLIC: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
     const DEVICE_ID: &str = "b2d3febedf65e69979aa2c0c2ea47870a760ee3030613382eb6b775f2a0c0e93";
     const CREDENTIAL_SIGNATURE: &str = "e94d639344a2af53f8b155c6871d4528397df8a4b4aa1e83c46464f68c494d30e566a4c47e1fa18757eb8587026494d9f76b870ac387654b0ca1ad3550beb401";
+    const CAPABILITY_SIGNATURE: &str = "3a78fe1936f628c6e470e20a9ad4c612aba4ef43348ced62d33b448d294e23a6bd7811e1bf35d3a77694976da0c66aa71d300e50a21cf8373b867ce6fb660603";
     const CREDENTIAL_HASH: &str =
         "ee10d5432136d42fc389d49eb1c2c70cca03da8ccdfbf58d687eb34f81a28a47";
     const INVITATION_SIGNATURE: &str = "312b28a1b5d395e56e1f251a8e2f1f2d6d55eb8d68ca795ebbe98ba8669188d5a7430d1804a00c5a98474c0c3433df074b8737d0b9513be858dc3225aad76c07";
@@ -1097,6 +1134,46 @@ mod tests {
                 &blob,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn directed_request_capability_is_root_signed() {
+        let identity = DeviceIdentity::generate().unwrap();
+        let material = identity
+            .create_conversation_signing_material(ConversationId::from_bytes([0x73; 32]))
+            .unwrap();
+        let binding = material.binding();
+        assert!(binding.supports_directed_requests());
+        verify_device_credential_binding(binding).unwrap();
+
+        let stripped = DeviceCredentialBinding::new(
+            binding.version(),
+            binding.device_id(),
+            binding.conversation_id(),
+            binding.signature_scheme(),
+            binding.device_root_public_key(),
+            binding.conversation_signature_public_key(),
+            binding.device_binding_signature(),
+        );
+        assert!(!stripped.supports_directed_requests());
+        verify_device_credential_binding(&stripped).unwrap();
+
+        let altered = DeviceCredentialBinding::new_with_capabilities(
+            binding.version(),
+            binding.device_id(),
+            binding.conversation_id(),
+            binding.signature_scheme(),
+            binding.device_root_public_key(),
+            binding.conversation_signature_public_key(),
+            binding.device_binding_signature(),
+            binding.application_capabilities() | 2,
+            binding.application_capabilities_signature(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_device_credential_binding(&altered).err(),
+            Some(KonclaveCryptographicError::InvalidCredentialBinding)
         );
     }
 
@@ -1180,6 +1257,16 @@ mod tests {
         );
         let credential_signature = cipher_suite.sign(&secret_key, &credential_input).unwrap();
         assert_eq!(credential_signature, decode_hex(CREDENTIAL_SIGNATURE));
+        let capability_signature = cipher_suite
+            .sign(
+                &secret_key,
+                &canonical_credential_capabilities(
+                    &credential_input,
+                    APPLICATION_CAPABILITY_DIRECTED_REQUEST,
+                ),
+            )
+            .unwrap();
+        assert_eq!(capability_signature, decode_hex(CAPABILITY_SIGNATURE));
         let binding = DeviceCredentialBinding::new(
             ProtocolVersion::application_v1(),
             device_id,

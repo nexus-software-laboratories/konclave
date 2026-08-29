@@ -251,6 +251,36 @@ describe('identity contracts', () => {
       () => encodeDeviceCredentialBinding(credential({ signatureLength: 63 })),
       protocolErrorCodes.invalidLength,
     );
+    expectCode(
+      () =>
+        encodeDeviceCredentialBinding(
+          create(DeviceCredentialBindingSchema, {
+            ...credential(),
+            applicationCapabilities: 1n,
+          }),
+        ),
+      protocolErrorCodes.invalidLength,
+    );
+    expectCode(
+      () =>
+        encodeDeviceCredentialBinding(
+          create(DeviceCredentialBindingSchema, {
+            ...credential(),
+            applicationCapabilities: -1n,
+          }),
+        ),
+      protocolErrorCodes.outOfRange,
+    );
+    expectCode(
+      () =>
+        encodeDeviceCredentialBinding(
+          create(DeviceCredentialBindingSchema, {
+            ...credential({ applicationCapabilities: 1n }),
+            applicationCapabilities: 0n,
+          }),
+        ),
+      protocolErrorCodes.invalidLength,
+    );
     const unspecifiedCredential = create(DeviceCredentialBindingSchema, {
       ...credential(),
       signatureScheme: 0,

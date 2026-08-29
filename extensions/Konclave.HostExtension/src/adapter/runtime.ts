@@ -1,4 +1,10 @@
-import { createDeliveryCoordinator, type DeliveryCoordinator } from './delivery.js';
+import { performance } from 'node:perf_hooks';
+
+import {
+  createDeliveryCoordinator,
+  type DeliveryClock,
+  type DeliveryCoordinator,
+} from './delivery.js';
 import {
   maxClaimBatch,
   type AdapterChannel,
@@ -13,6 +19,9 @@ import {
  * profile holds a request open.
  */
 const claimWaitMilliseconds = 20_000;
+const backpressurePollMilliseconds = 250;
+const heartbeatMilliseconds = 20_000;
+export const maximumHeartbeatRetryMilliseconds = 5_000;
 
 /** Largest batch requested in one wait. */
 /** Default backoff after a rejected claim, so a broken channel cannot spin. */
@@ -24,6 +33,7 @@ export interface DeliveryRuntimeOptions {
   readonly coordinator: DeliveryCoordinator;
   readonly diagnostics: { error(message: string): void };
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly clock?: DeliveryClock;
   readonly retryMilliseconds?: number;
 }
 
@@ -37,9 +47,10 @@ export interface DeliveryRuntime {
 /**
  * Claims remote events and hands them to the delivery coordinator.
  *
- * The loop owns claiming only. Deciding when a claimed event may reach the session,
- * and whether it was accepted, belongs to the coordinator, so a change to wake policy
- * cannot accidentally alter claim or acknowledgment behaviour.
+ * The loop owns claiming and claim heartbeats. While the coordinator retains work,
+ * it renews existing leases instead of claiming an unbounded queue. Deciding when a
+ * claimed event may reach the session, and whether it was accepted, belongs to the
+ * coordinator.
  */
 export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryRuntime {
   const sleep =
@@ -49,19 +60,62 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
         setTimeout(resolve, milliseconds).unref?.();
       }));
   const retryMilliseconds = options.retryMilliseconds ?? defaultClaimRetryMilliseconds;
+  const clock = options.clock ?? { now: () => performance.now() };
   let running = true;
   let consecutiveFailures = 0;
+  let lastHeartbeatAt = clock.now() - heartbeatMilliseconds;
 
-  const retryDelay = (): number => {
+  const retryDelay = (maximum = maximumClaimRetryMilliseconds): number => {
     const exponent = Math.min(Math.max(0, consecutiveFailures - 1), 10);
-    const raw = Math.min(maximumClaimRetryMilliseconds, retryMilliseconds * 2 ** exponent);
+    const raw = Math.min(maximum, retryMilliseconds * 2 ** exponent);
     const profileSpread =
       [...options.channel.profile].reduce((sum, value) => sum + value.charCodeAt(0), 0) % 401;
-    return Math.min(maximumClaimRetryMilliseconds, Math.round(raw * (0.8 + profileSpread / 1_000)));
+    return Math.min(maximum, Math.round(raw * (0.8 + profileSpread / 1_000)));
   };
 
   const completed = (async () => {
     while (running) {
+      if (options.coordinator.outstanding || options.coordinator.pending > 0) {
+        await options.coordinator.flush();
+        if (!options.coordinator.outstanding && options.coordinator.pending === 0) {
+          continue;
+        }
+        const now = clock.now();
+        if (now - lastHeartbeatAt >= heartbeatMilliseconds) {
+          try {
+            const heartbeat = await options.channel.request({
+              kind: 'heartbeat',
+              turn: options.coordinator.activeTurn ?? undefined,
+            });
+            if (heartbeat.kind === 'failure') {
+              options.diagnostics.error(`Konclave rejected a heartbeat: ${heartbeat.code}`);
+              consecutiveFailures += 1;
+              await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
+              continue;
+            }
+            if (heartbeat.kind !== 'accepted') {
+              options.diagnostics.error(
+                'Konclave answered a delivery heartbeat with an unexpected response.',
+              );
+              consecutiveFailures += 1;
+              await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
+              continue;
+            }
+            lastHeartbeatAt = now;
+            consecutiveFailures = 0;
+          } catch (error) {
+            if (!running) {
+              return;
+            }
+            options.diagnostics.error(`Konclave heartbeat failed: ${describeError(error)}`);
+            consecutiveFailures += 1;
+            await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
+            continue;
+          }
+        }
+        await sleep(backpressurePollMilliseconds);
+        continue;
+      }
       let response: AdapterResponse;
       try {
         response = await options.channel.request({

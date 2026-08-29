@@ -110,9 +110,13 @@ metadata is required.
 
 A device credential binding identifies the device and conversation, names the
 signature scheme, carries the device-root and conversation-scoped public keys, and
-carries the device-root signature over that canonical binding. A join proof combines
-the exact credential binding with an invitation for the same device and conversation
-and one bounded MLS KeyPackage. Newly issued join-capable invitations also bind the
+carries the device-root signature over that canonical binding. New bindings may also
+carry application capability bits plus a separate device-root signature over the
+base credential and those bits. Bit `0` advertises
+`DirectedRequest`; legacy bindings decode with no capabilities and cannot receive
+that content kind. A join proof combines the exact credential binding with an
+invitation for the same device and conversation and one bounded MLS KeyPackage. Newly
+issued join-capable invitations also bind the
 opaque relay routing identifier in the issuer signature, so handoff cannot redirect
 the new member to a different route. Generic readers retain compatibility with early
 unbound invitation fixtures, but the daemon refuses them for joining. Signature,
@@ -136,8 +140,12 @@ Application data encrypted by MLS includes:
 Protocol-v1 content kinds include UTF-8 text, a request directed to one exact device,
 and collaboration-policy proposal, response, and revocation messages. These are
 additive application content variants. An endpoint MUST negotiate support before
-sending a variant to a member that needs to interpret it. An older endpoint presented
-with a directed request fails visibly rather than treating its body as ordinary text.
+sending a variant to a member that needs to interpret it. Directed-request senders
+require the exact target to be a current remote member and every remote current
+member's verified credential binding to advertise the capability. MLS delivers the
+group application message to every current member before local target handling, so
+any older remote binding fails visibly before sender-counter or outbox allocation
+rather than receiving an undecodable request.
 
 The entire application message is covered by MLS authentication. Sender identity is
 derived from the authenticated MLS leaf and validated device credential. Application

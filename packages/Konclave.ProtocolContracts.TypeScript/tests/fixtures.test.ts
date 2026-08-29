@@ -109,6 +109,12 @@ const cases: ReadonlyArray<{
     roundTrip: (bytes) => encodeDeviceCredentialBinding(decodeDeviceCredentialBinding(bytes)),
   },
   {
+    decode: decodeDeviceCredentialBinding,
+    expected: credential({ applicationCapabilities: 1n }),
+    name: 'directed-request-device-credential-binding.bin',
+    roundTrip: (bytes) => encodeDeviceCredentialBinding(decodeDeviceCredentialBinding(bytes)),
+  },
+  {
     decode: decodeInvitation,
     expected: invitation(),
     name: 'invitation.bin',

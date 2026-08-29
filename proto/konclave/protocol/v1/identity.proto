@@ -22,6 +22,10 @@ message DeviceCredentialBinding {
   bytes conversation_signature_public_key = 6;
   // Exactly 64 bytes for Ed25519 in protocol v1.
   bytes device_binding_signature = 7;
+  // Root-signed application capabilities. Bit 0 advertises DirectedRequest support.
+  uint64 application_capabilities = 8;
+  // Exactly 64 bytes when application_capabilities is nonzero.
+  bytes application_capabilities_signature = 9;
 }
 
 // Authorizes one expected device to request membership in one conversation.

@@ -32,7 +32,7 @@ use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
 use crate::persistence::{
     ActiveDirectedRequestClaim, ClaimDirectedRequest, ClaimedRemoteEvent,
     CollaborationActionAuthorization, CompleteDirectedRequest, DirectedRequestClaim,
-    DirectedRequestClaimOutcome, RemoteEventPayload,
+    DirectedRequestClaimOutcome, DirectedRequestCompletionOutcome, RemoteEventPayload,
 };
 use crate::profile_runtime::ProfileServices;
 use crate::profile_supervisor::{ProfileSupervisor, ProfileSupervisorConfig};
@@ -933,6 +933,22 @@ async fn dispatch_request(
         "delivery.release" => {
             delivery_finish(&state.delivery, &state.store, request.payload(), false).await
         }
+        "delivery.heartbeat" => {
+            let local_device = match state.services.conversations().device_id() {
+                Ok(value) => value,
+                Err(_) => {
+                    return response_from_result(request.request_id(), Err("internal".to_string()));
+                }
+            };
+            delivery_heartbeat(
+                &state.delivery,
+                &state.store,
+                state.consumer,
+                local_device,
+                request.payload(),
+            )
+            .await
+        }
         "collaboration.turn.authorize" => {
             let store = Arc::clone(&state.store);
             let grant = state.grant.clone();
@@ -1441,7 +1457,7 @@ fn complete_collaboration_turn(
     let policy_digest = crate::mcp::decode_hex::<32>(&request.policy_digest)
         .map(KonclaveDomainCore::CollaborationPolicyDigest::from_bytes)
         .map_err(|_| "invalid_request".to_string())?;
-    let changed = store
+    let outcome = store
         .complete_directed_request_without_response(CompleteDirectedRequest {
             conversation_id,
             request_message_id,
@@ -1451,11 +1467,19 @@ fn complete_collaboration_turn(
             policy_digest,
         })
         .map_err(|error| directed_request_handling_error(&error))?;
-    serde_json::to_vec(&CompleteCollaborationTurnResult {
-        outcome: "completed_no_response",
-        changed,
-    })
-    .map_err(|_| "response_encoding_failed".to_string())
+    let result = match outcome {
+        DirectedRequestCompletionOutcome::CompletedResponse => CompleteCollaborationTurnResult {
+            outcome: "completed_response",
+            changed: false,
+        },
+        DirectedRequestCompletionOutcome::CompletedNoResponse { changed } => {
+            CompleteCollaborationTurnResult {
+                outcome: "completed_no_response",
+                changed,
+            }
+        }
+    };
+    serde_json::to_vec(&result).map_err(|_| "response_encoding_failed".to_string())
 }
 
 fn evaluate_collaboration_action(
@@ -1827,7 +1851,9 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "invalid_peer_bindings"
         | "invalid_peer_binding"
         | "invalid_issuer_public_key"
-        | "invalid_routing_id" => LocalServiceErrorCode::InvalidRequest,
+        | "invalid_routing_id"
+        | "directed_request_unsupported"
+        | "directed_request_target_required" => LocalServiceErrorCode::InvalidRequest,
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
         "relay_not_configured" => LocalServiceErrorCode::ProfileUnavailable,
         "local_service_not_authorized" | "invalid_collaboration_authorization" => {
@@ -1847,6 +1873,7 @@ fn is_tool_operation(operation: &str) -> bool {
             | "create_conversation"
             | "list_conversations"
             | "send_message"
+            | "send_directed_request"
             | "propose_collaboration_policy"
             | "propose_collaboration_policy_source"
             | "resume_collaboration_policy_proposal"
@@ -1976,6 +2003,21 @@ struct DeliveryClaimRequest {
 struct DeliveryFinishRequest {
     notification_id: String,
     lease_generation: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryHeartbeatRequest {
+    turn: Option<DeliveryHeartbeatTurnRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DeliveryHeartbeatTurnRequest {
+    conversation_id: String,
+    policy_digest: String,
+    request_message_id: String,
+    attempt: u32,
 }
 
 #[derive(Serialize)]
@@ -2108,6 +2150,44 @@ async fn delivery_finish(
     .await
     .map_err(|_| "profile_unavailable".to_string())?
     .map_err(|_| "profile_unavailable".to_string())?;
+    Ok(b"{}".to_vec())
+}
+
+async fn delivery_heartbeat(
+    delivery: &Option<DeliveryAttachment>,
+    store: &Arc<crate::persistence::ProfileStore>,
+    consumer: AdapterConsumerId,
+    local_device: DeviceId,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    let request: DeliveryHeartbeatRequest =
+        serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
+    let now = SystemUnixClock.now_unix_milliseconds();
+    let turn = request
+        .turn
+        .map(|turn| -> Result<ActiveDirectedRequestClaim, String> {
+            Ok(ActiveDirectedRequestClaim {
+                conversation_id: parse_collaboration_conversation_id(&turn.conversation_id)?,
+                request_message_id: parse_collaboration_message_id(&turn.request_message_id)?,
+                responder_device_id: local_device,
+                consumer_id: consumer,
+                attempt: turn.attempt,
+                policy_digest: crate::mcp::decode_hex::<32>(&turn.policy_digest)
+                    .map(KonclaveDomainCore::CollaborationPolicyDigest::from_bytes)
+                    .map_err(|_| "invalid_request".to_string())?,
+                now_unix_milliseconds: now,
+            })
+        })
+        .transpose()?;
+    let attachment = delivery
+        .as_ref()
+        .ok_or_else(|| "profile_unavailable".to_string())?
+        .clone();
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || attachment.heartbeat(&store, now, turn))
+        .await
+        .map_err(|_| "profile_unavailable".to_string())?
+        .map_err(|_| "profile_unavailable".to_string())?;
     Ok(b"{}".to_vec())
 }
 
@@ -2668,6 +2748,10 @@ mod delivery_contract_tests {
         assert_eq!(
             operation_error_code("invalid_collaboration_authorization"),
             LocalServiceErrorCode::NotAuthorized
+        );
+        assert_eq!(
+            operation_error_code("directed_request_unsupported"),
+            LocalServiceErrorCode::InvalidRequest
         );
         assert!(is_fresh_collaboration_policy_request(
             "collaboration.turn.authorize"
@@ -3972,15 +4056,10 @@ mod tests {
             }
             stream = fixture.connect("session-storage-failure", 25) => stream,
         };
-        let database = wait_for_outcome_database(&fixture.root, "session-storage-failure").await;
-        tokio::task::spawn_blocking(move || {
-            rusqlite::Connection::open(database)
-                .unwrap()
-                .execute("DROP TABLE daemon_local_request_outcome", [])
-                .unwrap();
-        })
-        .await
-        .unwrap();
+        crate::persistence::inject_local_request_outcome_read_failures(
+            "session-storage-failure",
+            2,
+        );
 
         for _ in 0..2 {
             assert!(matches!(

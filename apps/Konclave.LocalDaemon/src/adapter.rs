@@ -16,7 +16,10 @@ use tokio::sync::watch;
 
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::health::DeliveryHealth;
-use crate::persistence::{ClaimedRemoteEvent, ProfileStore, ProfileStoreError, RemoteEventPayload};
+use crate::persistence::{
+    ActiveDirectedRequestClaim, ClaimedRemoteEvent, ProfileStore, ProfileStoreError,
+    RemoteEventPayload,
+};
 
 /// How often the daemon re-checks for eligible work inside a bounded wait.
 ///
@@ -179,6 +182,24 @@ impl DeliveryAttachment {
     /// Releases this consumer and all of its unacknowledged claims.
     pub(crate) fn release(&self, store: &ProfileStore) -> Result<(), ProfileStoreError> {
         store.release_adapter_consumer(self.consumer_id, self.lease_id)
+    }
+
+    /// Renews the consumer and every still-live claim without claiming new events.
+    pub(crate) fn heartbeat(
+        &self,
+        store: &ProfileStore,
+        now_unix_milliseconds: u64,
+        directed_request: Option<ActiveDirectedRequestClaim>,
+    ) -> Result<(), ProfileStoreError> {
+        let expires_at = now_unix_milliseconds
+            .saturating_add(u64::try_from(CONSUMER_LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
+        store.heartbeat_adapter_consumer(
+            self.consumer_id,
+            self.lease_id,
+            now_unix_milliseconds,
+            expires_at,
+            directed_request,
+        )
     }
 
     /// Waits for and claims one bounded delivery batch.

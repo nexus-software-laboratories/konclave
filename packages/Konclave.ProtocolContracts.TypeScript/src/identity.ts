@@ -23,6 +23,7 @@ import {
 } from './generated/konclave/protocol/v1/identity_pb.js';
 
 const credentialContract = 'DeviceCredentialBinding';
+const maxUint64 = 18_446_744_073_709_551_615n;
 const invitationContract = 'Invitation';
 const joinProofContract = 'JoinProof';
 
@@ -132,6 +133,26 @@ function validateDeviceCredentialBinding(value: DeviceCredentialBinding): void {
   validateFixedBytes(value.deviceRootPublicKey, 32, 'device_root_public_key');
   validateFixedBytes(value.conversationSignaturePublicKey, 32, 'conversation_signature_public_key');
   validateFixedBytes(value.deviceBindingSignature, 64, 'device_binding_signature');
+  if (value.applicationCapabilities < 0n || value.applicationCapabilities > maxUint64) {
+    throw new ProtocolValidationError(
+      protocolErrorCodes.outOfRange,
+      'application_capabilities is outside uint64',
+    );
+  }
+  if (value.applicationCapabilities === 0n) {
+    if (value.applicationCapabilitiesSignature.length !== 0) {
+      throw new ProtocolValidationError(
+        protocolErrorCodes.invalidLength,
+        'application_capabilities_signature must be absent without capabilities',
+      );
+    }
+  } else {
+    validateFixedBytes(
+      value.applicationCapabilitiesSignature,
+      64,
+      'application_capabilities_signature',
+    );
+  }
 }
 
 function validateInvitation(value: Invitation): void {

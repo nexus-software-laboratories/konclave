@@ -753,6 +753,7 @@ describe('shared local service client', () => {
 
   it('routes turn authorization with delivery while action checks stay interactive', () => {
     expect(isDeliveryLaneOperation('delivery.claim')).toBe(true);
+    expect(isDeliveryLaneOperation('delivery.heartbeat')).toBe(true);
     expect(isDeliveryLaneOperation('collaboration.turn.authorize')).toBe(true);
     expect(isDeliveryLaneOperation('collaboration.turn.complete')).toBe(true);
     expect(isDeliveryLaneOperation('collaboration.action.evaluate')).toBe(false);

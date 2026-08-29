@@ -34,6 +34,10 @@ management through the installed shared service.
   `sync_messages`, then `read_messages` or `watch_messages` with the explicit
   conversation identifier. Do not busy-poll; let the operation's bounded wait finish
   before issuing another call.
+- Use `send_directed_request` only for an explicit request to one exact device. Omit
+  `target_device_id` only for a two-member conversation; groups require it. A target
+  whose root-signed binding does not advertise support is rejected, and ordinary
+  `send_message` text never asks for an automatic response.
 - Policy management uses the same exact-digest operations as paved clients:
   `get_collaboration_policy_status`,
   `inspect_collaboration_policy_proposal`,

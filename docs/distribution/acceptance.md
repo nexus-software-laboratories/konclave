@@ -19,8 +19,8 @@ The job proves:
 - two shared-service clients pair through one capability and exchange exact messages
   in both directions;
 - both clients exchange and independently activate one exact collaboration-policy
-  digest, retain it across service restart, and complete two proof-authorized replies
-  through separate interactive and delivery connections;
+  digest, retain it across service restart, and prove ordinary text cannot authorize
+  an autonomous reply through separate interactive and delivery connections;
 - an untrusted relay certificate is rejected before the same endpoint succeeds with
   its temporary CA explicitly trusted;
 - disconnecting one client, sending while it is offline, and reconnecting replays the
@@ -63,8 +63,9 @@ delivery handshakes under one authenticated session key and claims the live deli
 lease. After service restart, ordinary text cannot authorize an autonomous turn; an
 explicit reply preserves its exact reply chain and remains terminal at the peer. Rust
 service tests cover exact directed-request claim, one-use response authorization,
-no-response completion, and crash recovery until the packaged Copilot adapter adopts
-that protocol.
+no-response completion, claim renewal, capability negotiation, and crash recovery.
+Packaged plugin tests cover exact request authorization, one correlated send, idle
+completion, and acknowledgment after the terminal handling outcome.
 
 The CI-safe `shared_service_process` test additionally attaches 20 logical clients
 with 40 authenticated interactive/delivery lanes and 20 delivery leases to one PID,

@@ -327,12 +327,16 @@ contains non-text application content.
 The same application contract also carries a `DirectedRequest` with one exact target
 device and one bounded body. Its enclosing application message identifier is the
 request identifier. Ordinary text is terminal and never implies another request.
-The sender path remains disabled until authenticated member capability negotiation
-proves the target supports this additive variant. The current shared local-service
-and manual-history contracts preserve the request kind, target, and body. The daemon
-now exposes durable request handling, but the Copilot delivery runtime withholds the
-request from model turns until its follow-up adapter integration adopts that protocol.
-It reports a body-free unsupported diagnostic while retaining the message in history.
+The `send_directed_request` tool and `/konclave request` command resolve an omitted
+target only when the conversation contains exactly one remote member; group
+conversations require the full target `DeviceId`. The target must be a current remote
+member, and every remote member's verified root-signed credential binding must
+advertise directed-request support because MLS delivers the group application message
+to every current member before local target handling. Newly generated bindings
+advertise it; legacy bindings remain readable but unsupported, so existing
+conversations must establish fully capable membership before using the sender path.
+The shared local-service and manual-history contracts preserve the request kind,
+target, body, and request message identifier.
 Ordinary text and other terminal updates likewise remain in history and produce only
 a concise local diagnostic; they do not start a model turn or consume the autonomous
 turn budget.
@@ -369,9 +373,10 @@ exchange records, membership events, completed requests, stale claims, and reque
 targeting another device cannot authorize a turn.
 
 The profile's single live delivery consumer and the handling claim enforce
-concurrency per request. Interactive and delivery connections retain fresh handshake
-instance identifiers; the daemon correlates their consumer authority only when both
-prove the same authenticated session public key.
+one active autonomous request turn for that consumer. A second request remains
+deferred until the first reaches a terminal outcome. Interactive and delivery
+connections retain fresh handshake instance identifiers; the daemon correlates their
+consumer authority only when both prove the same authenticated session public key.
 
 During that turn, the paved hook may map only Konclave's `send_message` tool to
 `conversation.reply`. Action evaluation requires the exact request message and
@@ -405,13 +410,19 @@ An exact `collaboration.turn.complete` operation transitions the same handling
 attempt to `completed-no-response` when a model turn becomes idle without a send. It
 may close that attempt after its event lease lapses, but cannot close an attempt that
 has already been reclaimed. Repeating completion is idempotent, and a later response
-cannot replace it. A crashed attempt may be reclaimed only after its delivery lease
-expires and a new consumer lease owns redelivery; the fixed attempt bound prevents
-indefinite no-effect model retries.
+cannot replace it. If the correlated response already committed, completion reports
+that terminal response rather than conflicting. The delivery lane renews the active
+event and handling expiry while a model turn is running. A crashed attempt may be
+reclaimed only after that lease expires and a fresh delivery generation owns
+redelivery; the fixed attempt bound prevents indefinite no-effect model retries. A
+live duplicate claim is deferred without acknowledgment until that recovery boundary
+rather than orphaning its handling state.
 
 Legacy policy guidance is never placed into a model turn. Collaborator text remains
-quoted as untrusted task input. The current Copilot extension continues withholding
-directed requests until its follow-up integration adopts these handling operations.
+quoted as untrusted task input. The Copilot extension injects only one authorized
+directed request at a time, binds the pre-tool gate to its request message and attempt,
+and acknowledges delivery only after `completed-response` or
+`completed-no-response`.
 Finite turn and token limits currently deny autonomous execution because the adapter
 does not yet prove durable accounting for them. This is a truthful reduction, not an
 implicit unlimited fallback.
