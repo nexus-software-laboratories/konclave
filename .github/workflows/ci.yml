@@ -103,6 +103,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: bash ./scripts/ci/Validate-RustSecurityDependencies.sh
       - run: pwsh ./scripts/protocol/Test-ProtocolRelease.ps1
+      - run: pwsh ./scripts/a2a/Test-A2AProvenance.ps1
+      - run: pwsh ./scripts/a2a/Test-A2AFixtures.ps1
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p KonclaveSecretStorage --no-default-features --all-targets -- -D warnings
       - run: cargo clippy -p KonclaveSecretStorage --no-default-features --features sqlite --all-targets -- -D warnings

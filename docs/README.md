@@ -21,6 +21,7 @@ This map lists the documentation contributed by the selected project shape.
 
 ## Protocol
 
+- [A2A compatibility contract](protocol/a2a-compatibility.md)
 - [Protocol compatibility contract](protocol/compatibility.md)
 - [Identity signature encodings](protocol/identity-signatures.md)
 - [Relay transport authentication](protocol/relay-authentication.md)

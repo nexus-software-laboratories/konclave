@@ -17,6 +17,7 @@
 *.gif binary
 *.ico binary
 fixtures/protocol/**/*.bin binary
+fixtures/a2a/**/*.bin binary
 
 # Generated bindings preserve generator formatting.
 packages/Konclave.ProtocolContracts.TypeScript/src/generated/**/*.ts -whitespace
