@@ -1,4 +1,4 @@
-import type { SessionHooks, Tool } from "@github/copilot-sdk";
+import { ToolSet, type SessionHooks, type Tool } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -32,12 +32,18 @@ describe("shared-client session configuration", () => {
     expect(config.tools).toBe(tools);
     expect(config.hooks).toBe(hooks);
     expect(config.availableTools).toBeInstanceOf(Object);
+    expect((config.availableTools as ToolSet).toArray()).toContain(
+      "custom:send_directed_request",
+    );
+    expect((config.availableTools as ToolSet).toArray()).not.toContain(
+      "custom:*",
+    );
     expect(JSON.stringify(config)).not.toContain("KonclaveLocalDaemon");
     expect(JSON.stringify(config)).not.toContain('"type":"stdio"');
     expect(JSON.stringify(config)).not.toContain("policy guidance");
   });
 
-  it("builds an exact-digest policy source for two autonomous replies", () => {
+  it("builds an exact-digest policy source for one autonomous response", () => {
     const source = requireRecord(
       JSON.parse(createSmokePolicySource()),
       "policy source",

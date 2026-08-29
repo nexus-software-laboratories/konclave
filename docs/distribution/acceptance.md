@@ -78,3 +78,9 @@ and does not request cloud model inference. Those operations require a billed,
 interactive external account and produce nondeterministic model output. Konclave's
 public protocol, package, local process, and delivery claims do not depend on that
 external behavior.
+
+The separate local-only SDK smoke uses the packaged shared client with the current
+developer's Copilot authentication. It sends one explicit directed request, permits
+one correlated response under the exact active policy, confirms the response remains
+terminal, and observes bounded empty delivery watches without another model or tool
+turn. Its output is local evidence only and is never uploaded by CI.

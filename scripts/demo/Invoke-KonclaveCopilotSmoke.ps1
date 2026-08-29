@@ -39,14 +39,6 @@ foreach ($name in @(
     }
 }
 
-$directedRequestAdapterAvailable = $false
-if (-not $directedRequestAdapterAvailable) {
-    throw (
-        'Live Copilot smoke is disabled until the packaged adapter implements ' +
-        'durable directed-request handling; no Copilot sessions were started.'
-    )
-}
-
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $setupScript = Join-Path $PSScriptRoot 'Start-KonclaveLocalDemo.ps1'
 $smokeRoot = Join-Path $projectRoot 'tools' 'Konclave.CopilotSmoke'
