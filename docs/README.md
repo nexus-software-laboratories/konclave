@@ -16,6 +16,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0009: Evidence-bound exact-profile session grants](adr/adr-0009-evidence-bound-session-grants.md)
 - [ADR 0010: AccountTrusted two-command pairing](adr/adr-0010-account-trusted-two-command-pairing.md)
 - [ADR 0011: Content-addressed collaboration policies](adr/adr-0011-content-addressed-collaboration-policies.md)
+- [ADR 0012: Structured directed collaboration requests](adr/adr-0012-structured-directed-collaboration-requests.md)
 
 ## Protocol
 

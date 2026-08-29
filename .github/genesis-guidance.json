@@ -89,6 +89,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0012-structured-directed-collaboration-requests.md",
+        "title": "ADR 0012: Structured directed collaboration requests",
+        "section": "Architecture",
+        "order": 120,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

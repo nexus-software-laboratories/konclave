@@ -1,6 +1,6 @@
 ---
 title: Exchange content-addressed collaboration policies with local activation
-status: Accepted
+status: Superseded
 date: 2026-08-27
 authors:
   - Konclave maintainers
@@ -10,7 +10,8 @@ tags:
   - authorization
   - harnesses
 supersedes: []
-superseded_by: []
+superseded_by:
+  - adr-0012-structured-directed-collaboration-requests
 ---
 
 # Exchange content-addressed collaboration policies with local activation
