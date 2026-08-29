@@ -21,6 +21,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::activity::ProfileActivity;
+use crate::clock::{SystemUnixClock, UnixClock};
 use crate::pairing::PairingOperationState;
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
@@ -439,6 +440,29 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let local_device = self.device_id()?;
+        let now_unix_seconds = SystemUnixClock.now_unix_milliseconds() / 1_000;
+        for response in self.store.recoverable_directed_request_responses()? {
+            let conversation = self
+                .store
+                .load_conversation(response.reservation.conversation_id)?;
+            if response.expires_at_unix_seconds <= now_unix_seconds
+                || conversation.state.member(local_device).is_none()
+            {
+                self.store
+                    .abandon_outbound_application(response.reservation)?;
+                continue;
+            }
+            let content = ApplicationContent::text(response.response_text.as_str())
+                .map_err(|_| ConversationCoordinatorError::Protocol)?;
+            self.prepare_reserved_application(
+                response.reservation,
+                content,
+                Some(response.request_message_id),
+                response.sent_at_unix_milliseconds,
+                response.expires_at_unix_seconds,
+            )?;
+        }
         self.store.abandon_unsealed_outbox()?;
         let mut pending_after = None;
         loop {
@@ -1062,6 +1086,10 @@ impl ConversationCoordinator {
                 request.message_id,
                 envelope_id,
                 authorization,
+                &request.content,
+                request.reply_to,
+                request.sent_at_unix_milliseconds,
+                request.expires_at_unix_seconds,
             )?
         } else {
             self.store.reserve_outbound_application(
@@ -3157,6 +3185,114 @@ pub(crate) mod tests {
             received.message.message_id()
         );
         assert_eq!(bob.replay_position(conversation_id).unwrap().1, 1);
+    }
+
+    #[test]
+    fn restart_finishes_an_exact_reserved_directed_request_response() {
+        use KonclaveDomainCore::{AdapterConsumerId, AdapterLeaseId};
+
+        use crate::persistence::{
+            ClaimDirectedRequest, DirectedRequestClaimOutcome, OutboundApplicationStatus,
+        };
+
+        let (root, alice, bob, conversation_id, _) = paired_coordinators();
+        let bob_device_id = bob.device_id().unwrap();
+        let canonical_bundle =
+            include_bytes!("../../../fixtures/protocol/v1/collaboration-policy-bundle.bin");
+        let policy_digest = bob
+            .store
+            .store_collaboration_policy_bundle(canonical_bundle)
+            .unwrap();
+        bob.store
+            .activate_collaboration_policy(conversation_id, policy_digest, 100)
+            .unwrap();
+        bob.store
+            .set_adapter_delivery_enabled(conversation_id, true)
+            .unwrap();
+
+        let now = SystemUnixClock.now_unix_milliseconds();
+        let expires_at = now / 1_000 + 3_600;
+        let request = alice
+            .prepare_application(
+                conversation_id,
+                ApplicationContent::directed_request(bob_device_id, "return the agreed contract")
+                    .unwrap(),
+                None,
+                now,
+                expires_at,
+            )
+            .unwrap();
+        let request_message_id = request.message.message_id();
+        bob.process_inbound_application(
+            conversation_id,
+            &StoredRelayEnvelope::new(request.envelope, 1).unwrap(),
+        )
+        .unwrap();
+
+        let consumer_id = AdapterConsumerId::from_bytes([81; AdapterConsumerId::LENGTH]);
+        let lease_id = AdapterLeaseId::from_bytes([82; AdapterLeaseId::LENGTH]);
+        bob.store
+            .acquire_adapter_consumer(consumer_id, lease_id, now, now + 60_000)
+            .unwrap();
+        let delivery = bob
+            .store
+            .claim_remote_events(consumer_id, lease_id, now, now + 60_000, 1)
+            .unwrap();
+        let claim = match bob
+            .store
+            .claim_directed_request(ClaimDirectedRequest {
+                conversation_id,
+                request_message_id,
+                responder_device_id: bob_device_id,
+                notification_id: delivery[0].event.notification_id,
+                consumer_id,
+                lease_id,
+                lease_generation: delivery[0].lease_generation,
+                policy_digest,
+                now_unix_milliseconds: now,
+            })
+            .unwrap()
+        {
+            DirectedRequestClaimOutcome::Claimed(claim) => claim,
+            outcome => panic!("directed request was not claimed: {outcome:?}"),
+        };
+        let response_message_id = MessageId::from_bytes([83; MessageId::LENGTH]);
+        let response_envelope_id = EnvelopeId::from_bytes([84; EnvelopeId::LENGTH]);
+        bob.store
+            .reserve_outbound_collaboration_action(
+                conversation_id,
+                response_message_id,
+                response_envelope_id,
+                CollaborationActionAuthorization {
+                    policy_digest,
+                    consumer_id,
+                    not_after_unix_milliseconds: now + 60_000,
+                    directed_request_claim: claim,
+                },
+                &ApplicationContent::text("recovered response").unwrap(),
+                Some(request_message_id),
+                now,
+                expires_at,
+            )
+            .unwrap();
+        drop(alice);
+        drop(bob);
+
+        let reopened = open_coordinator(root.path(), "bob");
+        reopened.recover().unwrap();
+        let recovered = reopened
+            .outbound_application(conversation_id, response_message_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, OutboundApplicationStatus::Ready);
+        assert_eq!(recovered.message.reply_to(), Some(request_message_id));
+        assert_eq!(recovered.message.sent_at_unix_milliseconds(), now);
+        assert_eq!(recovered.envelope.expires_at_unix_seconds(), expires_at);
+        assert_eq!(recovered.envelope.envelope_id(), response_envelope_id);
+        assert!(matches!(
+            recovered.message.content(),
+            ApplicationContent::Text(body) if body == "recovered response"
+        ));
     }
 
     #[test]

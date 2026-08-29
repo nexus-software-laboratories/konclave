@@ -124,8 +124,17 @@ crash or excessive-allocation case becomes a permanent regression input.
 - prove fresh interactive and delivery handshakes correlate policy authority only
   through the same authenticated session public key, then reject another session key;
 - exchange and activate one exact policy digest across packaged clients, restart the
-  shared service, and complete two proof-authorized reply actions without bypassing
-  native permission or delivery-lease checks;
+  shared service, and complete one exact directed request without bypassing native
+  permission or delivery-lease checks;
+- reject ordinary text, another device's request, stale delivery generations, stale
+  handling attempts, changed policy digests, and a second response before any model
+  or outbound side effect;
+- prove claim recovery is bounded, idle no-response completion is terminal and
+  idempotent, and one response transition shares the sender-counter/outbox
+  transaction;
+- verify schema-18 migration, authenticated downgrade refusal, sealed handling-record
+  and row-count tampering detection, hard capacity, and absence of response plaintext
+  from ordinary SQLite columns;
 - normalize bounded object and serialized-object pre-tool arguments into the same
   exact `send_message` decision while rejecting malformed, oversized, scalar,
   collection, proxy, and unknown-field inputs;

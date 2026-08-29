@@ -137,6 +137,7 @@ describe('untrusted content framing', () => {
       event({
         payload: {
           kind: 'directed-request',
+          messageId: Buffer.alloc(16, 2),
           target: Buffer.alloc(32, 4),
           text: 'confirm the response contract',
         },
@@ -225,6 +226,7 @@ describe('delivery coordinator', () => {
       event({
         payload: {
           kind: 'directed-request',
+          messageId: Buffer.alloc(16, 2),
           target: Buffer.alloc(32, 4),
           text: requestBody,
         },
@@ -247,6 +249,7 @@ describe('delivery coordinator', () => {
       event({
         payload: {
           kind: 'directed-request',
+          messageId: Buffer.alloc(16, 2),
           target: Buffer.alloc(32, 4),
           text: requestBody,
         },

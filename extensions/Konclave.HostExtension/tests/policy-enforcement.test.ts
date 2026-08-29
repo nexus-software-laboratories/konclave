@@ -57,37 +57,20 @@ function activateGate(gate: CopilotPolicyGate): void {
 }
 
 describe('Copilot collaboration policy gate', () => {
-  it('binds an authorized delivery to tool enforcement until the next idle', async () => {
-    const request = vi.fn(async (operation: string) => {
-      if (operation === 'collaboration.turn.authorize') {
-        return {
-          outcome: 'authorized',
-          reason: null,
-          policyDigest,
-          policyName: 'contract-alignment',
-          guidance: null,
-        };
-      }
-      if (operation === 'collaboration.action.evaluate') {
-        return { decision: 'allow', reason: null, authorization: 'aa'.repeat(16) };
-      }
-      throw new Error(`unexpected operation: ${operation}`);
-    });
+  it('keeps terminal delivery out of model turns until directed handling is integrated', async () => {
+    const request = vi.fn();
     const gate = createCopilotPolicyGate(client(request));
-    const prompts: string[] = [];
+    const channelRequest = vi.fn().mockResolvedValue({ kind: 'accepted' });
+    const send = vi.fn();
+    const error = vi.fn();
     const delivery = createDeliveryCoordinator({
       channel: {
         profile: 'session-policy-gate',
-        request: vi.fn().mockResolvedValue({ kind: 'accepted' }),
+        request: channelRequest,
         close() {},
       },
-      session: {
-        async send(message) {
-          prompts.push(message.prompt);
-          return 'message-id';
-        },
-      },
-      diagnostics: { error: vi.fn() },
+      session: { send },
+      diagnostics: { error },
       authorizeTurn: (events) => gate.authorizeTurn(events),
       activateAuthorizedTurn: (authorization) => gate.activate(authorization),
       clearAuthorizedTurn: () => gate.clear(),
@@ -95,103 +78,50 @@ describe('Copilot collaboration policy gate', () => {
 
     delivery.enqueue([event()]);
     await delivery.markIdle();
-    expect(gate.active).toBe(false);
-    expect(prompts[0]).toContain('explicitly activated by the local operator');
-    const prompt = prompts[0];
-    if (!prompt) {
-      throw new Error('authorized prompt was not delivered');
-    }
-    gate.observePrompt(prompt);
-    expect(gate.active).toBe(true);
-    await expect(
-      gate.hooks.onPreToolUse?.(
-        hookInput('send_message', {
-          conversation_id: conversation,
-          message_id: '55'.repeat(16),
-          text: 'aligned',
-        }),
-        {
-          sessionId: 'session',
-        },
-      ),
-    ).resolves.toMatchObject({ additionalContext: expect.stringContaining('normal Copilot') });
 
-    delivery.markActive();
-    await delivery.markIdle();
     expect(gate.active).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(channelRequest).toHaveBeenCalledWith({
+      kind: 'acknowledge',
+      notificationId: event().notificationId,
+      leaseGeneration: 1,
+    });
+    expect(error).toHaveBeenCalledWith(
+      'Konclave retained a terminal update in message history; no automatic turn was started.',
+    );
   });
 
-  it('authorizes one conversation turn without trusting legacy policy guidance', async () => {
-    const request = vi.fn().mockResolvedValue({
-      outcome: 'authorized',
-      reason: null,
-      policyDigest,
-      policyName: 'contract-alignment',
-      guidance: 'Align the contract and report the result.',
-    });
+  it('does not infer an automatic request from ordinary application text', async () => {
+    const request = vi.fn();
     const gate = createCopilotPolicyGate(client(request));
 
-    const authorization = await gate.authorizeTurn([event()]);
-
-    expect(authorization).toEqual({
-      conversation,
-      policyDigest,
-      policyName: 'contract-alignment',
-      turnToken: expect.stringMatching(/^[0-9a-f]{32}$/u),
-    });
-    expect(request).toHaveBeenCalledWith('collaboration.turn.authorize', {
-      conversationId: conversation,
-    });
-    expect(gate.active).toBe(false);
-    if (!authorization) {
-      throw new Error('turn was not authorized');
-    }
-    gate.activate(authorization);
-    expect(gate.active).toBe(false);
-    gate.observePrompt(
-      `Konclave delivered 1 update\nKonclave collaboration authorization token: ${authorization.turnToken}`,
-    );
-    expect(gate.active).toBe(true);
-    gate.clear();
-    expect(gate.active).toBe(false);
+    await expect(gate.authorizeTurn([event()])).resolves.toBeNull();
+    expect(request).not.toHaveBeenCalled();
   });
 
-  it('keeps inactive, denied, approval, malformed, and mixed turns unauthorized', async () => {
-    for (const outcome of ['inactive', 'denied', 'approval_required']) {
-      const gate = createCopilotPolicyGate(
-        client(vi.fn().mockResolvedValue({ outcome, reason: 'not_authorized' })),
-      );
-      await expect(gate.authorizeTurn([event()])).resolves.toBeNull();
-    }
-    const malformed = createCopilotPolicyGate(
-      client(
-        vi.fn().mockResolvedValue({
-          outcome: 'authorized',
-          policyDigest: 'not-a-digest',
-          policyName: 'policy',
-        }),
-      ),
-    );
-    await expect(malformed.authorizeTurn([event()])).rejects.toThrow('malformed');
-    await expect(malformed.authorizeTurn([event(), event(0x12)])).rejects.toThrow(
+  it('keeps metadata, directed requests, and mixed batches unauthorized in this adapter version', async () => {
+    const request = vi.fn();
+    const gate = createCopilotPolicyGate(client(request));
+    await expect(gate.authorizeTurn([event(), event(0x12)])).rejects.toThrow(
       'cannot mix conversations',
     );
-    malformed.activate({
+    gate.activate({
       conversation,
       policyDigest,
       policyName: 'contract-alignment',
       turnToken: '44'.repeat(16),
     });
-    malformed.observePrompt('ordinary user prompt');
-    malformed.observePrompt(
+    gate.observePrompt('ordinary user prompt');
+    gate.observePrompt(
       `Konclave delivered 1 update\nKonclave collaboration authorization token: ${'44'.repeat(16)}`,
     );
-    expect(malformed.active).toBe(true);
+    expect(gate.active).toBe(true);
     await expect(
-      malformed.hooks.onPreToolUse?.(hookInput('send_message', {}), { sessionId: 'session' }),
+      gate.hooks.onPreToolUse?.(hookInput('send_message', {}), { sessionId: 'session' }),
     ).resolves.toMatchObject({ permissionDecision: 'deny' });
-    malformed.clear();
-    malformed.observePrompt(
+    gate.clear();
+    gate.observePrompt(
       [
         'Konclave delivered 1 update',
         '--- BEGIN UNTRUSTED COLLABORATOR CONTENT ---',
@@ -199,32 +129,30 @@ describe('Copilot collaboration policy gate', () => {
         '--- END UNTRUSTED COLLABORATOR CONTENT ---',
       ].join('\n'),
     );
-    expect(malformed.active).toBe(false);
-    const metadataRequest = vi.fn();
-    const metadataGate = createCopilotPolicyGate(client(metadataRequest));
+    expect(gate.active).toBe(false);
     await expect(
-      metadataGate.authorizeTurn([
+      gate.authorizeTurn([
         {
           ...event(),
           payload: { kind: 'member-removed', device: Buffer.alloc(32, 4) },
         },
       ]),
     ).resolves.toBeNull();
-    expect(metadataRequest).not.toHaveBeenCalled();
 
     await expect(
-      metadataGate.authorizeTurn([
+      gate.authorizeTurn([
         {
           ...event(),
           payload: {
             kind: 'directed-request',
+            messageId: Buffer.alloc(16, 6),
             target: Buffer.alloc(32, 5),
             text: 'reply',
           },
         },
       ]),
     ).resolves.toBeNull();
-    expect(metadataRequest).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('maps supported tools while preserving native permission checks', async () => {

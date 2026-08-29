@@ -12,6 +12,7 @@ use super::{
 };
 
 const MAX_COLLABORATION_POLICY_OPERATIONS: usize = 2_048;
+const COLLABORATION_POLICY_OPERATION_SCHEMA_VERSION: u32 = 17;
 const OPERATION_KIND_PROPOSAL: i64 = 1;
 const OPERATION_KIND_ACCEPTANCE: i64 = 2;
 const OPERATION_KIND_REJECTION: i64 = 3;
@@ -137,7 +138,11 @@ fn initialize_schema(
         }
     }
     transaction
-        .pragma_update(None, "user_version", 17)
+        .pragma_update(
+            None,
+            "user_version",
+            COLLABORATION_POLICY_OPERATION_SCHEMA_VERSION,
+        )
         .map_err(|_| ProfileStoreError::Storage)?;
     transaction.commit().map_err(|_| ProfileStoreError::Storage)
 }
@@ -170,12 +175,7 @@ impl ProfileStore {
             .lock()?
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ProfileStoreError::Storage)?;
-        if current_version == super::PROFILE_SCHEMA_VERSION {
-            if let Some((_, floor)) = opened_identity
-                && floor != super::PROFILE_SCHEMA_VERSION
-            {
-                return Err(ProfileStoreError::CorruptData);
-            }
+        if current_version >= COLLABORATION_POLICY_OPERATION_SCHEMA_VERSION {
             return Ok(());
         }
         if current_version != 16 {
@@ -183,7 +183,8 @@ impl ProfileStore {
         }
         let migrated_identity = match opened_identity {
             Some((identity, floor)) => {
-                if floor > source_version || floor >= super::PROFILE_SCHEMA_VERSION {
+                if floor > source_version || floor >= COLLABORATION_POLICY_OPERATION_SCHEMA_VERSION
+                {
                     return Err(ProfileStoreError::CorruptData);
                 }
                 Some(
@@ -191,7 +192,7 @@ impl ProfileStore {
                         .seal_with_profile_schema_floor(
                             &self.sealer,
                             self.locked_profile.profile_id.as_bytes(),
-                            super::PROFILE_SCHEMA_VERSION,
+                            COLLABORATION_POLICY_OPERATION_SCHEMA_VERSION,
                         )
                         .map_err(|_| ProfileStoreError::Cryptographic)?,
                 )

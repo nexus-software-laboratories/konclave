@@ -54,6 +54,7 @@ export const deliveryOperations = {
 /** Paved Copilot policy decisions that remain outside the agent tool surface. */
 export const collaborationOperations = {
   authorizeTurn: 'collaboration.turn.authorize',
+  completeTurn: 'collaboration.turn.complete',
   evaluateAction: 'collaboration.action.evaluate',
 } as const;
 
@@ -82,8 +83,13 @@ export interface DeliveryEventRecord {
   readonly sender: string;
   readonly relayCursor: number;
   readonly payload:
-    | { readonly kind: 'application_text'; readonly text: string }
-    | { readonly kind: 'directed_request'; readonly targetDeviceId: string; readonly text: string }
+    | { readonly kind: 'application_text'; readonly messageId: string; readonly text: string }
+    | {
+        readonly kind: 'directed_request';
+        readonly messageId: string;
+        readonly targetDeviceId: string;
+        readonly text: string;
+      }
     | { readonly kind: 'member_added'; readonly device: string; readonly role: string }
     | { readonly kind: 'member_removed'; readonly device: string }
     | { readonly kind: 'member_role_changed'; readonly device: string; readonly role: string }

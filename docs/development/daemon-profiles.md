@@ -125,6 +125,17 @@ Startup opens and verifies every retained bundle and binding before accepting th
 profile. Deleting a binding removes authority, while substituting its digest,
 conversation, timestamp, or ciphertext fails authentication.
 
+Version 18 adds a bounded sealed directed-request handling journal. One row is keyed
+by conversation, inbound request message, and local responder device. It records an
+exact delivery consumer, lease, generation, policy digest, and bounded attempt before
+model enqueue, then transitions once to either a sealed exact response operation or a
+terminal no-response result. The response operation also seals its message identity,
+body, reply target by invariant, display timestamp, and relay expiry. Startup verifies
+its matching outbox/history state and finishes an exact unsealed response reservation
+before abandoning unrelated counter gaps. A separately sealed row count detects
+deletion or insertion, and the authenticated device-identity schema floor prevents
+recreating an erased journal by lowering `user_version`.
+
 Remote application and membership completion create one context-bound event before
 advancing the relay cursor. Local echoes do not create events. Muted conversations
 create terminally suppressed records while relay replay and sealed history continue.

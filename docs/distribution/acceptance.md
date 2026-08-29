@@ -53,14 +53,18 @@ confirming the separate profile state remains.
 
 CI simulates the Copilot host contract around the packaged thin client: registered
 SDK tools, authenticated profile attachment, delivery settlement, idle injection
-safety, and no process launch. Existing plugin tests exercise session callbacks,
-slash commands, reconnect, and safety framing.
+safety, terminal updates that do not enter model turns, and no process launch.
+Existing plugin tests exercise session callbacks, slash commands, reconnect, and
+safety framing.
 
 The packaged shared-service scenario now verifies the daemon-owned collaboration
 boundary without cloud inference. Each logical client opens fresh interactive and
-delivery handshakes under one authenticated session key, claims the live delivery
-lease, authorizes the turn, obtains a one-use exact-argument send capability, and
-preserves the reply chain across two autonomous-policy actions after service restart.
+delivery handshakes under one authenticated session key and claims the live delivery
+lease. After service restart, ordinary text cannot authorize an autonomous turn; an
+explicit reply preserves its exact reply chain and remains terminal at the peer. Rust
+service tests cover exact directed-request claim, one-use response authorization,
+no-response completion, and crash recovery until the packaged Copilot adapter adopts
+that protocol.
 
 The CI-safe `shared_service_process` test additionally attaches 20 logical clients
 with 40 authenticated interactive/delivery lanes and 20 delivery leases to one PID,

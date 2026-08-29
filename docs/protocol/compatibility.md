@@ -144,6 +144,13 @@ derived from the authenticated MLS leaf and validated device credential. Applica
 bytes MUST NOT override attribution, authorization, counters, or replay state with a
 self-asserted sender identifier.
 
+Automatic request handling is local durable state, not peer-authored application
+content. It is keyed by conversation, directed-request message, and local responder.
+Only a live exact delivery claim may create a bounded handling attempt. A response
+must reference that request and is reserved atomically with the terminal handling
+transition; a no-response outcome is terminal without creating an application
+message.
+
 ### Collaboration-policy bundle
 
 The protocol-v1 `CollaborationPolicyBundle` is a source-independent, content-addressed

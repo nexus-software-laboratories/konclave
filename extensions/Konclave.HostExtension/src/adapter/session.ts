@@ -25,8 +25,13 @@ export type DeliveredRole = 'administrator' | 'member';
 export type DeliveredPolicyResponseOutcome = 'accepted' | 'rejected';
 
 export type DeliveredPayload =
-  | { readonly kind: 'application-text'; readonly text: string }
-  | { readonly kind: 'directed-request'; readonly target: Buffer; readonly text: string }
+  | { readonly kind: 'application-text'; readonly messageId?: Buffer; readonly text: string }
+  | {
+      readonly kind: 'directed-request';
+      readonly messageId: Buffer;
+      readonly target: Buffer;
+      readonly text: string;
+    }
   | {
       readonly kind: 'collaboration-policy-proposal';
       readonly proposalId: Buffer;

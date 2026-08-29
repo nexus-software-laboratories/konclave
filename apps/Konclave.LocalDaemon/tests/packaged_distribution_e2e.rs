@@ -198,53 +198,26 @@ async fn claim_application_text(
     .expect("expected application delivery was not claimed")
 }
 
-async fn send_policy_authorized_reply(
-    interactive: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
+async fn assert_terminal_text_not_authorized(
     delivery: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
     conversation_id: &str,
     policy_digest: &str,
-    message_id: &str,
-    reply_to_message_id: &str,
-    text: &str,
+    event: &serde_json::Value,
 ) {
     let turn = rpc(
         delivery,
         "collaboration.turn.authorize",
-        serde_json::json!({"conversationId": conversation_id}),
-    )
-    .await;
-    assert_eq!(turn["outcome"].as_str(), Some("authorized"));
-    assert_eq!(turn["policyDigest"].as_str(), Some(policy_digest));
-    let decision = rpc(
-        interactive,
-        "collaboration.action.evaluate",
         serde_json::json!({
             "conversationId": conversation_id,
-            "policyDigest": policy_digest,
-            "action": "conversation.reply",
-            "resource": null,
-            "messageId": message_id,
-            "replyToMessageId": reply_to_message_id,
-            "text": text
+            "requestMessageId": event["payload"]["messageId"],
+            "notificationId": event["notificationId"],
+            "leaseGeneration": event["leaseGeneration"]
         }),
     )
     .await;
-    assert_eq!(decision["decision"].as_str(), Some("allow"));
-    let authorization = decision["authorization"].as_str().unwrap();
-    let sent = rpc(
-        interactive,
-        "send_message",
-        serde_json::json!({
-            "conversation_id": conversation_id,
-            "message_id": message_id,
-            "reply_to_message_id": reply_to_message_id,
-            "text": text,
-            "collaboration_authorization": authorization
-        }),
-    )
-    .await;
-    assert_eq!(sent["conversation_id"].as_str(), Some(conversation_id));
-    assert_eq!(sent["message_id"].as_str(), Some(message_id));
+    assert_eq!(turn["outcome"].as_str(), Some("denied"));
+    assert_eq!(turn["reason"].as_str(), Some("directed_request_invalid"));
+    assert_eq!(turn["policyDigest"].as_str(), Some(policy_digest));
 }
 
 async fn connect_session_lane(
@@ -690,7 +663,9 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             "resource": null,
             "messageId": "50".repeat(16),
             "replyToMessageId": null,
-            "text": "unrelated session must not inherit the delivery lease"
+            "text": "unrelated session must not inherit the delivery lease",
+            "requestMessageId": "49".repeat(16),
+            "attempt": 1
         }),
     )
     .await;
@@ -702,11 +677,9 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     drop(unrelated);
 
     let policy_request = "packaged policy-authorized request";
-    let policy_reply = "packaged policy-authorized reply";
-    let policy_follow_up = "packaged policy-authorized follow-up";
+    let policy_reply = "packaged explicit terminal reply";
     let policy_request_id = "51".repeat(16);
     let policy_reply_id = "52".repeat(16);
-    let policy_follow_up_id = "53".repeat(16);
     rpc(
         &mut first,
         "send_message",
@@ -718,45 +691,37 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     )
     .await;
     let request_event = claim_application_text(&mut second_delivery, policy_request).await;
-    send_policy_authorized_reply(
-        &mut second,
+    assert_terminal_text_not_authorized(
         &mut second_delivery,
         &conversation_id,
         &policy_digest,
-        &policy_reply_id,
-        &policy_request_id,
-        policy_reply,
+        &request_event,
+    )
+    .await;
+    rpc(
+        &mut second,
+        "send_message",
+        serde_json::json!({
+            "conversation_id": conversation_id,
+            "message_id": policy_reply_id,
+            "reply_to_message_id": policy_request_id,
+            "text": policy_reply
+        }),
     )
     .await;
     finish_delivery_event(&mut second_delivery, &request_event).await;
 
     let reply_event = claim_application_text(&mut first_delivery, policy_reply).await;
-    send_policy_authorized_reply(
-        &mut first,
+    assert_terminal_text_not_authorized(
         &mut first_delivery,
         &conversation_id,
         &policy_digest,
-        &policy_follow_up_id,
-        &policy_reply_id,
-        policy_follow_up,
+        &reply_event,
     )
     .await;
     finish_delivery_event(&mut first_delivery, &reply_event).await;
 
-    let follow_up_event = claim_application_text(&mut second_delivery, policy_follow_up).await;
-    finish_delivery_event(&mut second_delivery, &follow_up_event).await;
-    for (client, message_id, reply_to) in [
-        (
-            &mut first,
-            policy_reply_id.as_str(),
-            policy_request_id.as_str(),
-        ),
-        (
-            &mut second,
-            policy_follow_up_id.as_str(),
-            policy_reply_id.as_str(),
-        ),
-    ] {
+    for client in [&mut first, &mut second] {
         let history = rpc(
             client,
             "read_messages",
@@ -767,25 +732,20 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             .as_array()
             .unwrap()
             .iter()
-            .find(|message| message["message_id"].as_str() == Some(message_id))
+            .find(|message| message["message_id"].as_str() == Some(policy_reply_id.as_str()))
             .unwrap();
-        assert_eq!(message["reply_to_message_id"].as_str(), Some(reply_to));
+        assert_eq!(
+            message["reply_to_message_id"].as_str(),
+            Some(policy_request_id.as_str())
+        );
     }
     assert_process_has_no_secret_input(
         restarted.id(),
-        &[
-            policy_request.as_bytes(),
-            policy_reply.as_bytes(),
-            policy_follow_up.as_bytes(),
-        ],
+        &[policy_request.as_bytes(), policy_reply.as_bytes()],
     );
     assert_relay_opaque(
         &paths.relay_state,
-        &[
-            policy_request.as_bytes(),
-            policy_reply.as_bytes(),
-            policy_follow_up.as_bytes(),
-        ],
+        &[policy_request.as_bytes(), policy_reply.as_bytes()],
     );
     drop((first, first_delivery, second, second_delivery));
     restarted.shutdown().await;

@@ -1,14 +1,10 @@
-import { randomBytes } from 'node:crypto';
-
 import type { SessionHooks } from '@github/copilot-sdk';
 
 import type { CollaborationTurnAuthorization, DeliveredEvent } from '../adapter/session.js';
 import type { LocalServiceClient } from './client.js';
 import { collaborationOperations } from './operations.js';
 
-const hex32 = /^[0-9a-f]{64}$/u;
 const hex16 = /^[0-9a-f]{32}$/u;
-const maxPolicyNameBytes = 128;
 const maxToolArgumentsBytes = 128 * 1024;
 const maxMessageTextBytes = 64 * 1024;
 const sendArgumentKeys = new Set([
@@ -53,46 +49,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-}
-
-function boundedString(value: unknown, maximum: number, label: string): string {
-  if (
-    typeof value !== 'string' ||
-    Buffer.byteLength(value, 'utf8') === 0 ||
-    Buffer.byteLength(value, 'utf8') > maximum
-  ) {
-    throw new Error(`the local service ${label} is malformed`);
-  }
-  return value;
-}
-
-function parseTurnAuthorization(
-  value: unknown,
-  conversation: string,
-): CollaborationTurnAuthorization | null {
-  if (!isRecord(value)) {
-    throw new Error('the local service collaboration authorization is malformed');
-  }
-  if (
-    value.outcome === 'inactive' ||
-    value.outcome === 'denied' ||
-    value.outcome === 'approval_required'
-  ) {
-    return null;
-  }
-  if (
-    value.outcome !== 'authorized' ||
-    typeof value.policyDigest !== 'string' ||
-    !hex32.test(value.policyDigest)
-  ) {
-    throw new Error('the local service collaboration authorization is malformed');
-  }
-  return {
-    conversation,
-    policyDigest: value.policyDigest,
-    policyName: boundedString(value.policyName, maxPolicyNameBytes, 'policy name'),
-    turnToken: randomBytes(16).toString('hex'),
-  };
 }
 
 function parseActionDecision(value: unknown): {
@@ -291,27 +247,16 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
         }
       },
     },
-    async authorizeTurn(events) {
+    authorizeTurn(events) {
       const first = events[0];
       if (!first) {
-        return null;
-      }
-      if (
-        events.some((event) => event.payload.kind === 'directed-request') ||
-        !events.some((event) => event.payload.kind === 'application-text')
-      ) {
-        return null;
+        return Promise.resolve(null);
       }
       const conversation = first.conversation.toString('hex');
       if (events.some((event) => event.conversation.toString('hex') !== conversation)) {
-        throw new Error('a collaboration turn cannot mix conversations');
+        return Promise.reject(new Error('a collaboration turn cannot mix conversations'));
       }
-      return parseTurnAuthorization(
-        await client.request(collaborationOperations.authorizeTurn, {
-          conversationId: conversation,
-        }),
-        conversation,
-      );
+      return Promise.resolve(null);
     },
     activate(authorization) {
       active = null;
