@@ -54,7 +54,9 @@ if (-not $SkipSetup) {
         '-NoProfile',
         '-File',
         $setupScript,
-        '-IsolatedSmokeProfiles'
+        '-Port',
+        '43181',
+        '-IsolatedSmokeState'
     )
     if ($Refresh) {
         $setupArguments += '-Refresh'
@@ -88,7 +90,7 @@ foreach ($path in @($clientModulePath, $serviceConfigPath)) {
         throw "Installed Konclave shared-client asset is unavailable: $path"
     }
 }
-$statusPath = Join-Path $localAppData 'Konclave' 'demo' 'demo-status.json'
+$statusPath = Join-Path $localAppData 'Konclave' 'demo' 'smoke' 'demo-status.json'
 if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
     throw 'Konclave demo status is unavailable; run setup without -SkipSetup.'
 }

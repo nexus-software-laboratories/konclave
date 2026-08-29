@@ -157,9 +157,10 @@ sessions.
 
 The runner keeps capabilities, policy annotations, prompts, model responses, tool
 arguments, credentials, and user-provided content out of its report.
-It uses a dedicated `smoke-profiles` root under the demo state directory, so
-historical manual-demo sessions cannot exhaust its bounded preflight diagnostics and
-the smoke does not delete or rewrite those profiles.
+It uses a dedicated `smoke` state root and loopback port under the demo directory, so
+historical manual-demo profiles cannot exhaust its bounded preflight diagnostics and
+existing relay access, service identity, and profile state are neither overwritten
+nor deleted.
 
 This is deliberately a local development smoke. Both the PowerShell entry point and
 the TypeScript runner refuse recognized CI environments. No repository workflow

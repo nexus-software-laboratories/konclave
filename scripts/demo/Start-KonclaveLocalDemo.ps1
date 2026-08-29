@@ -14,7 +14,7 @@ param(
 
     [switch]$Stop,
 
-    [switch]$IsolatedSmokeProfiles,
+    [switch]$IsolatedSmokeState,
 
     [Alias('UninstallPlugin')]
     [switch]$UninstallExtension
@@ -141,9 +141,14 @@ if ([string]::IsNullOrWhiteSpace($localAppData)) {
     throw 'LOCALAPPDATA is unavailable.'
 }
 
-$demoRoot = Join-Path $localAppData 'Konclave' 'demo'
-$profileRootName = if ($IsolatedSmokeProfiles) { 'smoke-profiles' } else { 'profiles' }
-$profileRoot = Join-Path $demoRoot $profileRootName
+$demoBaseRoot = Join-Path $localAppData 'Konclave' 'demo'
+$demoRoot = if ($IsolatedSmokeState) {
+    Join-Path $demoBaseRoot 'smoke'
+}
+else {
+    $demoBaseRoot
+}
+$profileRoot = Join-Path $demoRoot 'profiles'
 $relayStateRoot = Join-Path $demoRoot 'relay'
 $statusPath = Join-Path $demoRoot 'demo-status.json'
 $profileRootBackupPath = Join-Path $demoRoot 'original-profile-root.json'
