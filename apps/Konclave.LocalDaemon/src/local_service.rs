@@ -4056,15 +4056,10 @@ mod tests {
             }
             stream = fixture.connect("session-storage-failure", 25) => stream,
         };
-        let database = wait_for_outcome_database(&fixture.root, "session-storage-failure").await;
-        tokio::task::spawn_blocking(move || {
-            rusqlite::Connection::open(database)
-                .unwrap()
-                .execute("DROP TABLE daemon_local_request_outcome", [])
-                .unwrap();
-        })
-        .await
-        .unwrap();
+        crate::persistence::inject_local_request_outcome_read_failures(
+            "session-storage-failure",
+            2,
+        );
 
         for _ in 0..2 {
             assert!(matches!(
