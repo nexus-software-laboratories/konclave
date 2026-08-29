@@ -67,6 +67,8 @@ if (-not $SkipSetup) {
     }
 }
 
+$smokeError = $null
+try {
 $localAppData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
 )
@@ -107,7 +109,6 @@ if (
     throw 'Konclave demo shared-service process no longer matches recorded status.'
 }
 
-$smokeError = $null
 Push-Location $smokeRoot
 try {
     $packageDocument = Get-Content -LiteralPath (
@@ -158,11 +159,12 @@ try {
         throw "Konclave Copilot smoke failed with exit code $LASTEXITCODE."
     }
 }
-catch {
-    $smokeError = $_.Exception
-}
 finally {
     Pop-Location
+}
+}
+catch {
+    $smokeError = $_.Exception
 }
 
 $cleanupError = $null

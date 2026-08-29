@@ -155,7 +155,8 @@ $profileRootBackupPath = Join-Path $demoRoot 'original-profile-root.json'
 $copilotExperimentalBackupPath = Join-Path $demoRoot 'original-copilot-experimental.json'
 $genericSkillStatePath = Join-Path $demoRoot 'generic-skill-install.json'
 $installParent = Join-Path $localAppData 'Programs' 'Konclave'
-$installRoot = Join-Path $installParent 'demo'
+$installRootName = if ($IsolatedSmokeState) { 'smoke' } else { 'demo' }
+$installRoot = Join-Path $installParent $installRootName
 $releaseManifest = Get-Content -LiteralPath (
     Join-Path $projectRoot 'distribution' 'release-artifacts.json'
 ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
@@ -1741,4 +1742,10 @@ Write-Output 'Session A: run /konclave connect and keep the command active.'
 Write-Output 'Session B: paste the capability into /konclave connect <capability>.'
 Write-Output 'After both report connected, either session can run /konclave send -- hello.'
 Write-Output ''
-Write-Output "Stop later with: pwsh -NoProfile -File `"$PSCommandPath`" -Stop"
+$stopArguments = if ($IsolatedSmokeState) {
+    "-Port $Port -IsolatedSmokeState -Stop"
+}
+else {
+    '-Stop'
+}
+Write-Output "Stop later with: pwsh -NoProfile -File `"$PSCommandPath`" $stopArguments"

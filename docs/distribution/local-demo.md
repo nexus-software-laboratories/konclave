@@ -159,8 +159,8 @@ The runner keeps capabilities, policy annotations, prompts, model responses, too
 arguments, credentials, and user-provided content out of its report.
 It uses a dedicated `smoke` state root and loopback port under the demo directory, so
 historical manual-demo profiles cannot exhaust its bounded preflight diagnostics and
-existing relay access, service identity, Copilot extension sidecar, and profile state
-are neither overwritten nor deleted.
+existing package installation, relay access, service identity, Copilot extension
+sidecar, and profile state are neither overwritten nor deleted.
 When the entry point performs setup, it stops only that isolated relay and shared
 service after the smoke while preserving their state. `-SkipSetup` leaves the
 caller-managed processes running.
