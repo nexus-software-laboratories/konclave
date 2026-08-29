@@ -50,7 +50,12 @@ foreach ($command in @('node', 'npm', 'copilot')) {
 }
 
 if (-not $SkipSetup) {
-    $setupArguments = @('-NoProfile', '-File', $setupScript)
+    $setupArguments = @(
+        '-NoProfile',
+        '-File',
+        $setupScript,
+        '-IsolatedSmokeProfiles'
+    )
     if ($Refresh) {
         $setupArguments += '-Refresh'
     }
