@@ -50,10 +50,10 @@ export interface SmokeReport {
   readonly policyProposalId: string;
   readonly policyDigest: string;
   readonly pairingPhases: string[];
-  readonly messageAToBId: string;
-  readonly messageBToAId: string;
-  readonly messageAToBFollowUpId: string;
+  readonly directedRequestId: string;
+  readonly responseMessageId: string;
   readonly autonomousTurns: number;
+  readonly terminalSilenceWaitMilliseconds: number;
   readonly sessionATools: string[];
   readonly sessionBTools: string[];
   readonly sessionAUsage: ParticipantUsage;
@@ -79,6 +79,7 @@ const scenarioTools = [
   "sync_pairing",
   "cancel_pairing",
   "send_message",
+  "send_directed_request",
   "sync_messages",
   "read_messages",
 ] as const;
@@ -99,15 +100,14 @@ function prompt(tool: string, argumentsValue: Record<string, unknown>): string {
 function smokeDeliveryRule(
   expectedText: string,
   messageId: string,
-  replyToMessageId: string,
   text: string,
 ): string {
   return (
-    ` For the one locally authorized delivery whose fenced message is exactly ${JSON.stringify(expectedText)}, ` +
+    ` For the one locally authorized delivery whose fenced request body is exactly ${JSON.stringify(expectedText)}, ` +
     "call send_message exactly once. Set conversation_id to the full conversation identifier " +
     "in the trusted Konclave text above the fence. " +
-    `Set message_id to ${JSON.stringify(messageId)}, reply_to_message_id to ` +
-    `${JSON.stringify(replyToMessageId)}, and text to ${JSON.stringify(text)}. ` +
+    `Set message_id to ${JSON.stringify(messageId)} and text to ${JSON.stringify(text)}. ` +
+    "Do not set reply_to_message_id; the Konclave policy hook binds it to the request. " +
     "For every other delivery, call no tool."
   );
 }
@@ -186,6 +186,7 @@ interface SmokeDeliveredEvent {
   readonly conversation: Buffer;
   readonly payload: {
     readonly kind: string;
+    readonly messageId?: Buffer;
     readonly text?: string;
   };
 }
@@ -194,14 +195,23 @@ interface SmokeTurnAuthorization {
   readonly conversation: string;
   readonly policyDigest: string;
   readonly policyName: string;
+  readonly requestMessageId: string;
+  readonly attempt: number;
   readonly turnToken: string;
 }
+
+type SmokeTurnDecision =
+  SmokeTurnAuthorization | { readonly kind: "deferred" } | null;
 
 interface SmokePolicyGate {
   readonly hooks: SessionHooks;
   authorizeTurn(
     events: readonly SmokeDeliveredEvent[],
-  ): Promise<SmokeTurnAuthorization | null>;
+  ): Promise<SmokeTurnDecision>;
+  completeTurn(
+    authorization: SmokeTurnAuthorization,
+  ): Promise<"completed-response" | "completed-no-response">;
+  canCompleteTurn(authorization: SmokeTurnAuthorization): boolean;
   activate(authorization: SmokeTurnAuthorization): void;
   observePrompt(prompt: string): void;
   clear(): void;
@@ -220,6 +230,10 @@ interface SmokeDeliveryChannel {
           readonly kind: "acknowledge" | "release";
           readonly notificationId: Buffer;
           readonly leaseGeneration: number;
+        }
+      | {
+          readonly kind: "heartbeat";
+          readonly turn?: SmokeTurnAuthorization;
         },
   ): Promise<
     | {
@@ -568,7 +582,9 @@ async function drainDelivery(channel: SmokeDeliveryChannel): Promise<void> {
 
 async function claimExpectedDelivery(
   channel: SmokeDeliveryChannel,
+  expectedKind: "application-text" | "directed-request",
   expectedText: string,
+  expectedMessageId: string,
   timeoutMs: number,
 ): Promise<{
   readonly event: SmokeDeliveredEvent;
@@ -591,8 +607,9 @@ async function claimExpectedDelivery(
         for (const event of response.events) {
           if (
             expected === undefined &&
-            event.payload.kind === "application-text" &&
-            event.payload.text === expectedText
+            event.payload.kind === expectedKind &&
+            event.payload.text === expectedText &&
+            event.payload.messageId?.toString("hex") === expectedMessageId
           ) {
             expected = event;
           } else {
@@ -609,42 +626,158 @@ async function claimExpectedDelivery(
   );
 }
 
+const deliveryHeartbeatMilliseconds = 20_000;
+const terminalSilenceWaitMilliseconds = 5_000;
+
+async function withDeliveryHeartbeat<T>(
+  channel: SmokeDeliveryChannel,
+  authorization: SmokeTurnAuthorization,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const heartbeat = async (): Promise<void> => {
+    const response = await channel.request({
+      kind: "heartbeat",
+      turn: authorization,
+    });
+    if (response.kind !== "accepted") {
+      throw new Error("Konclave did not renew the smoke delivery claim.");
+    }
+  };
+  await heartbeat();
+  let failure: Error | undefined;
+  let inFlight: Promise<void> | undefined;
+  const handle = setInterval(() => {
+    if (inFlight || failure) {
+      return;
+    }
+    inFlight = heartbeat()
+      .catch((error: unknown) => {
+        failure =
+          error instanceof Error
+            ? error
+            : new Error("Unknown delivery heartbeat failure.");
+      })
+      .finally(() => {
+        inFlight = undefined;
+      });
+  }, deliveryHeartbeatMilliseconds);
+  handle.unref();
+  try {
+    const result = await operation();
+    await inFlight;
+    if (failure) {
+      throw failure;
+    }
+    return result;
+  } finally {
+    clearInterval(handle);
+    await inFlight;
+  }
+}
+
+async function assertTerminalSilence(
+  channels: readonly SmokeDeliveryChannel[],
+): Promise<void> {
+  const responses = await Promise.all(
+    channels.map((channel) =>
+      channel.request({
+        kind: "wait-and-claim",
+        maxEvents: 16,
+        waitMilliseconds: terminalSilenceWaitMilliseconds,
+      }),
+    ),
+  );
+  const unexpected: SmokeDeliveredEvent[] = [];
+  for (let index = 0; index < responses.length; index += 1) {
+    const response = responses[index];
+    const channel = channels[index];
+    if (!response || !channel || response.kind !== "batch") {
+      throw new Error(
+        "Konclave did not return a terminal-silence delivery batch.",
+      );
+    }
+    unexpected.push(...response.events);
+    for (const event of response.events) {
+      await settleDelivery(channel, event, true);
+    }
+  }
+  if (unexpected.length > 0) {
+    const kinds = [...new Set(unexpected.map((event) => event.payload.kind))];
+    throw new Error(
+      `Terminal silence observed ${unexpected.length} unexpected deliveries (${kinds.join(", ")}).`,
+    );
+  }
+}
+
 async function invokeAuthorizedDelivery(
   thinClient: ThinClientModule,
   participant: SmokeParticipant,
   gate: SmokePolicyGate,
   channel: SmokeDeliveryChannel,
   expectedText: string,
+  expectedRequestMessageId: string,
   expectedArguments: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<{
   readonly result: JsonRecord;
   readonly claimAttempts: number;
 }> {
-  const claimed = await claimExpectedDelivery(channel, expectedText, timeoutMs);
+  const claimed = await claimExpectedDelivery(
+    channel,
+    "directed-request",
+    expectedText,
+    expectedRequestMessageId,
+    timeoutMs,
+  );
   const { event } = claimed;
-  const authorization = await gate.authorizeTurn([event]);
-  if (!authorization) {
+  const decision = await gate.authorizeTurn([event]);
+  if (!decision || "kind" in decision) {
     await settleDelivery(channel, event, false);
     throw new Error(
       "Konclave did not authorize the expected collaboration turn.",
     );
   }
+  const authorization = decision;
   gate.activate(authorization);
+  let settled = false;
+  let phase = "model_response";
   try {
-    const result = await participant.invoke(
-      "send_message",
-      thinClient.frameDelivery([event], authorization),
-      timeoutMs,
-      false,
-      expectedArguments,
+    const result = await withDeliveryHeartbeat(
+      channel,
+      authorization,
+      async () =>
+        participant.invoke(
+          "send_message",
+          thinClient.frameDelivery([event], authorization),
+          timeoutMs,
+          false,
+          expectedArguments,
+        ),
     );
+    phase = "turn_completion";
+    const outcome = await gate.completeTurn(authorization);
+    phase = "delivery_settlement";
     await settleDelivery(channel, event, true);
+    settled = true;
+    if (outcome !== "completed-response") {
+      throw new Error(
+        "Konclave completed the smoke turn without its response.",
+      );
+    }
     return { result, claimAttempts: claimed.attempts };
   } catch (error) {
-    await settleDelivery(channel, event, false);
+    if (!settled) {
+      try {
+        await gate.completeTurn(authorization);
+        await settleDelivery(channel, event, true);
+      } catch {
+        await settleDelivery(channel, event, false);
+      }
+    }
+    const detail =
+      error instanceof Error ? error.message : "unknown response failure";
     throw new Error(
-      `Policy-aware send failed after gate outcome ${gate.lastDecision ?? "unobserved"}.`,
+      `Policy-aware send failed during ${phase} after gate outcome ${gate.lastDecision ?? "unobserved"}: ${detail}`,
       { cause: error },
     );
   } finally {
@@ -713,23 +846,14 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
 
   try {
     report = await (async (): Promise<SmokeReport> => {
-      const firstText = `konclave-smoke:${runId}:A-to-B`;
-      const firstMessageId = stableMessageId(runId, "a-to-b");
-      const replyText = `ACK:${firstText}`;
-      const replyMessageId = stableMessageId(runId, "b-to-a");
-      const followUpText = `CONFIRMED:${firstText}`;
-      const followUpMessageId = stableMessageId(runId, "a-to-b-follow-up");
-      const ruleA = smokeDeliveryRule(
-        replyText,
-        followUpMessageId,
-        replyMessageId,
-        followUpText,
-      );
+      const directedRequestText = `konclave-smoke:${runId}:request`;
+      const directedRequestId = stableMessageId(runId, "directed-request");
+      const responseText = `ACK:${directedRequestText}`;
+      const responseMessageId = stableMessageId(runId, "response");
       const ruleB = smokeDeliveryRule(
-        firstText,
-        replyMessageId,
-        firstMessageId,
-        replyText,
+        directedRequestText,
+        responseMessageId,
+        responseText,
       );
       const thinClient = await loadThinClient(options.clientModulePath);
       const environment = {
@@ -775,7 +899,7 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
       const deliveryA = thinClient.createLocalServiceDeliveryChannel(localA);
       const deliveryB = thinClient.createLocalServiceDeliveryChannel(localB);
       const sessionA = await client.createSession(
-        createSessionConfig(options, randomUUID(), toolsA, gateA.hooks, ruleA),
+        createSessionConfig(options, randomUUID(), toolsA, gateA.hooks),
       );
       sessions.push(sessionA);
       const sessionB = await client.createSession(
@@ -880,17 +1004,15 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         rounds: pairingSyncRounds,
       });
 
-      const replyArguments = {
+      const directedRequestArguments = {
         conversation_id: conversationId,
-        message_id: replyMessageId,
-        reply_to_message_id: firstMessageId,
-        text: replyText,
+        message_id: directedRequestId,
+        text: directedRequestText,
       };
-      const followUpArguments = {
+      const responseArguments = {
         conversation_id: conversationId,
-        message_id: followUpMessageId,
-        reply_to_message_id: replyMessageId,
-        text: followUpText,
+        message_id: responseMessageId,
+        text: responseText,
       };
       const policySource = createSmokePolicySource();
       const policy = await activateSmokePolicy(
@@ -911,100 +1033,91 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         policyDigest: policy.policyDigest,
       });
 
-      await withinDeadline(
-        commandA.handler({
-          sessionId: participantA.sessionId,
-          command: `/konclave send ${conversationId} ${firstMessageId} -- ${firstText}`,
-          commandName: "konclave",
-          args: `send ${conversationId} ${firstMessageId} -- ${firstText}`,
-        }),
+      const peerIdentity = requireRecord(
+        await localB.request("get_identity", {}),
+        "peer identity",
+      );
+      const peerDeviceId = requireString(
+        peerIdentity,
+        "device_id",
+        "peer identity",
+      );
+      const directedRequestSent = await participantA.invoke(
+        "send_directed_request",
+        prompt("send_directed_request", directedRequestArguments),
         options.timeoutMs,
-        "Policy request send command",
+        false,
+        directedRequestArguments,
       );
-      assertCommandSucceeded(captureA.lines, "policy request send");
-      const sentMessageId = commandValue(
-        captureA.lines,
-        "message id: ",
-        "policy request send",
-      );
-      if (sentMessageId !== firstMessageId) {
+      if (
+        requireString(
+          directedRequestSent,
+          "conversation_id",
+          "directed request result",
+        ) !== conversationId ||
+        requireString(
+          directedRequestSent,
+          "message_id",
+          "directed request result",
+        ) !== directedRequestId
+      ) {
         throw new Error(
-          "Policy request used an unexpected message identifier.",
+          "Session A sent an unexpected directed-request identity.",
         );
       }
-      progress(options, "message_a_sent", {
+      progress(options, "directed_request_sent", {
         conversationId,
-        messageId: firstMessageId,
+        messageId: directedRequestId,
       });
-      const replyDelivery = await invokeAuthorizedDelivery(
+      const responseDelivery = await invokeAuthorizedDelivery(
         thinClient,
         participantB,
         gateB,
         deliveryB,
-        firstText,
-        replyArguments,
+        directedRequestText,
+        directedRequestId,
+        responseArguments,
         options.timeoutMs,
       );
-      const replySent = replyDelivery.result;
-      if (
-        requireString(replySent, "conversation_id", "reply send result") !==
-          conversationId ||
-        requireString(replySent, "message_id", "reply send result") !==
-          replyMessageId
-      ) {
-        throw new Error(
-          "Session B sent an unexpected Konclave reply identity.",
-        );
-      }
-      progress(options, "message_b_sent", {
-        conversationId,
-        messageId: replyMessageId,
-        claimAttempts: replyDelivery.claimAttempts,
-      });
-      const followUpDelivery = await invokeAuthorizedDelivery(
-        thinClient,
-        participantA,
-        gateA,
-        deliveryA,
-        replyText,
-        followUpArguments,
-        options.timeoutMs,
-      );
-      const followUpSent = followUpDelivery.result;
+      const responseSent = responseDelivery.result;
       if (
         requireString(
-          followUpSent,
+          responseSent,
           "conversation_id",
-          "follow-up send result",
+          "response send result",
         ) !== conversationId ||
-        requireString(followUpSent, "message_id", "follow-up send result") !==
-          followUpMessageId
+        requireString(responseSent, "message_id", "response send result") !==
+          responseMessageId
       ) {
         throw new Error(
-          "Session A sent an unexpected Konclave follow-up identity.",
+          "Session B sent an unexpected Konclave response identity.",
         );
       }
-      progress(options, "message_a_followed_up", {
+      progress(options, "response_sent", {
         conversationId,
-        messageId: followUpMessageId,
-        claimAttempts: followUpDelivery.claimAttempts,
+        messageId: responseMessageId,
+        claimAttempts: responseDelivery.claimAttempts,
       });
-      const finalDelivery = await claimExpectedDelivery(
-        deliveryB,
-        followUpText,
+      const terminalDelivery = await claimExpectedDelivery(
+        deliveryA,
+        "application-text",
+        responseText,
+        responseMessageId,
         options.timeoutMs,
       );
-      await settleDelivery(deliveryB, finalDelivery.event, true);
-      progress(options, "message_b_received_follow_up", {
+      if ((await gateA.authorizeTurn([terminalDelivery.event])) !== null) {
+        throw new Error(
+          "An ordinary response incorrectly authorized another model turn.",
+        );
+      }
+      await settleDelivery(deliveryA, terminalDelivery.event, true);
+      progress(options, "terminal_response_observed", {
         conversationId,
-        messageId: followUpMessageId,
-        claimAttempts: finalDelivery.attempts,
+        messageId: responseMessageId,
+        claimAttempts: terminalDelivery.attempts,
       });
 
-      for (const [local, messageId, replyTo] of [
-        [localA, replyMessageId, firstMessageId],
-        [localB, followUpMessageId, replyMessageId],
-      ] as const) {
+      for (const local of [localA, localB]) {
         const history = requireRecord(
           await local.request("read_messages", {
             conversation_id: conversationId,
@@ -1016,17 +1129,58 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
           history,
           "messages",
           "policy message history",
-        )
-          .map((value) => requireRecord(value, "policy message"))
-          .find((value) => value.message_id === messageId);
+        ).map((value) => requireRecord(value, "policy message"));
+        const requestMessage = message.find(
+          (value) => value.message_id === directedRequestId,
+        );
+        const responseMessage = message.find(
+          (value) => value.message_id === responseMessageId,
+        );
         if (
-          !message ||
-          requireString(message, "reply_to_message_id", "policy message") !==
-            replyTo
+          !requestMessage ||
+          requireString(
+            requestMessage,
+            "content_type",
+            "directed request history",
+          ) !== "directed_request" ||
+          requireString(
+            requestMessage,
+            "target_device_id",
+            "directed request history",
+          ) !== peerDeviceId ||
+          !responseMessage ||
+          requireString(
+            responseMessage,
+            "reply_to_message_id",
+            "response history",
+          ) !== directedRequestId
         ) {
-          throw new Error("Policy-authorized reply chain was not preserved.");
+          throw new Error(
+            "Directed request target or terminal response chain was not preserved.",
+          );
         }
       }
+
+      const toolsBeforeSilence = [
+        participantA.toolNames.length,
+        participantB.toolNames.length,
+      ];
+      const modelCallsBeforeSilence = [
+        participantA.usage().modelCalls,
+        participantB.usage().modelCalls,
+      ];
+      await assertTerminalSilence([deliveryA, deliveryB]);
+      if (
+        participantA.toolNames.length !== toolsBeforeSilence[0] ||
+        participantB.toolNames.length !== toolsBeforeSilence[1] ||
+        participantA.usage().modelCalls !== modelCallsBeforeSilence[0] ||
+        participantB.usage().modelCalls !== modelCallsBeforeSilence[1]
+      ) {
+        throw new Error("Terminal silence allowed additional agent activity.");
+      }
+      progress(options, "terminal_silence_confirmed", {
+        waitMilliseconds: terminalSilenceWaitMilliseconds,
+      });
 
       return {
         status: "passed",
@@ -1042,19 +1196,17 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
         policyProposalId: policy.proposalId,
         policyDigest: policy.policyDigest,
         pairingPhases: [...phases],
-        messageAToBId: firstMessageId,
-        messageBToAId: replyMessageId,
-        messageAToBFollowUpId: followUpMessageId,
-        autonomousTurns: 2,
+        directedRequestId,
+        responseMessageId,
+        autonomousTurns: 1,
+        terminalSilenceWaitMilliseconds,
         sessionATools: [...participantA.toolNames],
         sessionBTools: [...participantB.toolNames],
         sessionAUsage: participantA.usage(),
         sessionBUsage: participantB.usage(),
         pairingSyncRounds,
         deliveryClaimAttempts:
-          replyDelivery.claimAttempts +
-          followUpDelivery.claimAttempts +
-          finalDelivery.attempts,
+          responseDelivery.claimAttempts + terminalDelivery.attempts,
         terminationReason: "completed",
       };
     })();

@@ -148,15 +148,22 @@ non-atomic boundary.
 
 ## Automated two-session smoke
 
-The complete local agent scenario remains temporarily disabled until its prompts and
-assertions are rewritten around `send_directed_request`, one correlated response, and
-terminal silence. `Invoke-KonclaveCopilotSmoke.ps1` retains the hard CI refusal and
-then exits before starting a Copilot session. This prevents the superseded
-ordinary-text autonomy path from consuming credits or hanging during the transition.
+The complete local agent scenario creates two empty-mode Copilot SDK sessions, pairs
+their packaged Konclave clients, activates one exact structured policy, sends one
+`send_directed_request`, and permits the targeted session to make one correlated
+`send_message` call. The response is delivered as terminal ordinary text, is rejected
+as another autonomous turn, and is followed by bounded empty delivery watches on both
+sessions.
 
-When re-enabled, the runner must continue to keep capabilities, policy annotations,
-prompts, model responses, tool arguments, credentials, and user-provided content out
-of its report.
+The runner keeps capabilities, policy annotations, prompts, model responses, tool
+arguments, credentials, and user-provided content out of its report.
+It uses a dedicated `smoke` state root and loopback port under the demo directory, so
+historical manual-demo profiles cannot exhaust its bounded preflight diagnostics and
+existing package installation, relay access, service identity, Copilot extension
+sidecar, and profile state are neither overwritten nor deleted.
+When the entry point performs setup, it stops only that isolated relay and shared
+service after the smoke while preserving their state. `-SkipSetup` leaves the
+caller-managed processes running.
 
 This is deliberately a local development smoke. Both the PowerShell entry point and
 the TypeScript runner refuse recognized CI environments. No repository workflow

@@ -39,14 +39,6 @@ foreach ($name in @(
     }
 }
 
-$directedRequestAdapterAvailable = $false
-if (-not $directedRequestAdapterAvailable) {
-    throw (
-        'Live Copilot smoke is disabled until the packaged adapter implements ' +
-        'durable directed-request handling; no Copilot sessions were started.'
-    )
-}
-
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $setupScript = Join-Path $PSScriptRoot 'Start-KonclaveLocalDemo.ps1'
 $smokeRoot = Join-Path $projectRoot 'tools' 'Konclave.CopilotSmoke'
@@ -58,7 +50,14 @@ foreach ($command in @('node', 'npm', 'copilot')) {
 }
 
 if (-not $SkipSetup) {
-    $setupArguments = @('-NoProfile', '-File', $setupScript)
+    $setupArguments = @(
+        '-NoProfile',
+        '-File',
+        $setupScript,
+        '-Port',
+        '43181',
+        '-IsolatedSmokeState'
+    )
     if ($Refresh) {
         $setupArguments += '-Refresh'
     }
@@ -68,21 +67,13 @@ if (-not $SkipSetup) {
     }
 }
 
+$smokeError = $null
+try {
 $localAppData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
 )
-$userProfile = [Environment]::GetFolderPath(
-    [Environment+SpecialFolder]::UserProfile
-)
-$copilotHome = if ([string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-    Join-Path $userProfile '.copilot'
-}
-else {
-    if (-not [IO.Path]::IsPathRooted($env:COPILOT_HOME)) {
-        throw 'COPILOT_HOME must be an absolute path.'
-    }
-    [IO.Path]::GetFullPath($env:COPILOT_HOME)
-}
+$smokeStateRoot = Join-Path $localAppData 'Konclave' 'demo' 'smoke'
+$copilotHome = Join-Path $smokeStateRoot 'copilot-home'
 $extensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
 $clientModulePath = Join-Path $extensionRoot 'client.mjs'
 $serviceConfigPath = Join-Path $extensionRoot 'konclave.service.json'
@@ -91,7 +82,7 @@ foreach ($path in @($clientModulePath, $serviceConfigPath)) {
         throw "Installed Konclave shared-client asset is unavailable: $path"
     }
 }
-$statusPath = Join-Path $localAppData 'Konclave' 'demo' 'demo-status.json'
+$statusPath = Join-Path $smokeStateRoot 'demo-status.json'
 if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
     throw 'Konclave demo status is unavailable; run setup without -SkipSetup.'
 }
@@ -170,4 +161,36 @@ try {
 }
 finally {
     Pop-Location
+}
+}
+catch {
+    $smokeError = $_.Exception
+}
+
+$cleanupError = $null
+if (-not $SkipSetup) {
+    try {
+        [void](& pwsh -NoProfile -File $setupScript `
+            -Port 43181 `
+            -IsolatedSmokeState `
+            -Stop)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Konclave smoke cleanup failed with exit code $LASTEXITCODE."
+        }
+    }
+    catch {
+        $cleanupError = $_.Exception
+    }
+}
+if ($null -ne $smokeError -and $null -ne $cleanupError) {
+    throw [AggregateException]::new(
+        'Konclave smoke and cleanup failed.',
+        [Exception[]]@($smokeError, $cleanupError)
+    )
+}
+if ($null -ne $smokeError) {
+    throw $smokeError
+}
+if ($null -ne $cleanupError) {
+    throw $cleanupError
 }
