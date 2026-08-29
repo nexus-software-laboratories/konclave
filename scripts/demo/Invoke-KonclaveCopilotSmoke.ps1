@@ -107,6 +107,7 @@ if (
     throw 'Konclave demo shared-service process no longer matches recorded status.'
 }
 
+$smokeError = $null
 Push-Location $smokeRoot
 try {
     $packageDocument = Get-Content -LiteralPath (
@@ -157,6 +158,37 @@ try {
         throw "Konclave Copilot smoke failed with exit code $LASTEXITCODE."
     }
 }
+catch {
+    $smokeError = $_.Exception
+}
 finally {
     Pop-Location
+}
+
+$cleanupError = $null
+if (-not $SkipSetup) {
+    try {
+        [void](& pwsh -NoProfile -File $setupScript `
+            -Port 43181 `
+            -IsolatedSmokeState `
+            -Stop)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Konclave smoke cleanup failed with exit code $LASTEXITCODE."
+        }
+    }
+    catch {
+        $cleanupError = $_.Exception
+    }
+}
+if ($null -ne $smokeError -and $null -ne $cleanupError) {
+    throw [AggregateException]::new(
+        'Konclave smoke and cleanup failed.',
+        [Exception[]]@($smokeError, $cleanupError)
+    )
+}
+if ($null -ne $smokeError) {
+    throw $smokeError
+}
+if ($null -ne $cleanupError) {
+    throw $cleanupError
 }

@@ -740,6 +740,7 @@ async function invokeAuthorizedDelivery(
   const authorization = decision;
   gate.activate(authorization);
   let settled = false;
+  let phase = "model_response";
   try {
     const result = await withDeliveryHeartbeat(
       channel,
@@ -753,7 +754,9 @@ async function invokeAuthorizedDelivery(
           expectedArguments,
         ),
     );
+    phase = "turn_completion";
     const outcome = await gate.completeTurn(authorization);
+    phase = "delivery_settlement";
     await settleDelivery(channel, event, true);
     settled = true;
     if (outcome !== "completed-response") {
@@ -771,8 +774,10 @@ async function invokeAuthorizedDelivery(
         await settleDelivery(channel, event, false);
       }
     }
+    const detail =
+      error instanceof Error ? error.message : "unknown response failure";
     throw new Error(
-      `Policy-aware send failed after gate outcome ${gate.lastDecision ?? "unobserved"}.`,
+      `Policy-aware send failed during ${phase} after gate outcome ${gate.lastDecision ?? "unobserved"}: ${detail}`,
       { cause: error },
     );
   } finally {
@@ -1007,7 +1012,6 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
       const responseArguments = {
         conversation_id: conversationId,
         message_id: responseMessageId,
-        reply_to_message_id: directedRequestId,
         text: responseText,
       };
       const policySource = createSmokePolicySource();
