@@ -96,6 +96,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0013-a2a-edge-interoperability.md",
+        "title": "ADR 0013: A2A edge interoperability",
+        "section": "Architecture",
+        "order": 130,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

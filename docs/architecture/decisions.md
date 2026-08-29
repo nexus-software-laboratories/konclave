@@ -15,6 +15,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0009: Authorize local sessions through evidence-bound exact-profile grants](../adr/adr-0009-evidence-bound-session-grants.md)
 - [ADR 0010: Automate two-command pairing only under AccountTrusted capability policy](../adr/adr-0010-account-trusted-two-command-pairing.md)
 - [ADR 0012: Separate deterministic collaboration policy from directed request content](../adr/adr-0012-structured-directed-collaboration-requests.md)
+- [ADR 0013: Expose A2A through an edge gateway without replacing Konclave transport](../adr/adr-0013-a2a-edge-interoperability.md)
 
 ## Superseded records
 
