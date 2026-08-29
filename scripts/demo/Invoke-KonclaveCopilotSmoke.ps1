@@ -70,18 +70,8 @@ if (-not $SkipSetup) {
 $localAppData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
 )
-$userProfile = [Environment]::GetFolderPath(
-    [Environment+SpecialFolder]::UserProfile
-)
-$copilotHome = if ([string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-    Join-Path $userProfile '.copilot'
-}
-else {
-    if (-not [IO.Path]::IsPathRooted($env:COPILOT_HOME)) {
-        throw 'COPILOT_HOME must be an absolute path.'
-    }
-    [IO.Path]::GetFullPath($env:COPILOT_HOME)
-}
+$smokeStateRoot = Join-Path $localAppData 'Konclave' 'demo' 'smoke'
+$copilotHome = Join-Path $smokeStateRoot 'copilot-home'
 $extensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
 $clientModulePath = Join-Path $extensionRoot 'client.mjs'
 $serviceConfigPath = Join-Path $extensionRoot 'konclave.service.json'
@@ -90,7 +80,7 @@ foreach ($path in @($clientModulePath, $serviceConfigPath)) {
         throw "Installed Konclave shared-client asset is unavailable: $path"
     }
 }
-$statusPath = Join-Path $localAppData 'Konclave' 'demo' 'smoke' 'demo-status.json'
+$statusPath = Join-Path $smokeStateRoot 'demo-status.json'
 if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
     throw 'Konclave demo status is unavailable; run setup without -SkipSetup.'
 }

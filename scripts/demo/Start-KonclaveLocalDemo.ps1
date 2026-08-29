@@ -185,7 +185,10 @@ $genericSkillSource = Join-Path $pluginRoot 'skills' 'konclave-generic' 'SKILL.m
 $serviceConfigPath = Join-Path $demoRoot 'service' 'konclave-local-service.json'
 $serviceIdentityPath = Join-Path $demoRoot 'service' 'identity.key'
 $copilotHomeValue = $env:COPILOT_HOME
-if ([string]::IsNullOrWhiteSpace($copilotHomeValue)) {
+if ($IsolatedSmokeState) {
+    $copilotHome = Join-Path $demoRoot 'copilot-home'
+}
+elseif ([string]::IsNullOrWhiteSpace($copilotHomeValue)) {
     $userProfile = [Environment]::GetFolderPath(
         [Environment+SpecialFolder]::UserProfile
     )
