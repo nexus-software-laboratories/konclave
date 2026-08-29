@@ -68,6 +68,17 @@ function payload(value: unknown): DeliveredPayload {
       }
       return { kind: 'application-text', text: message };
     }
+    case 'directed_request': {
+      const message = text(value.text);
+      if (message.length === 0 || Buffer.byteLength(message, 'utf8') > maxEventTextBytes) {
+        throw new Error('the local service delivery response is malformed');
+      }
+      return {
+        kind: 'directed-request',
+        target: Buffer.from(hex(value.targetDeviceId, hex32), 'hex'),
+        text: message,
+      };
+    }
     case 'collaboration_policy_proposal':
       return {
         kind: 'collaboration-policy-proposal',

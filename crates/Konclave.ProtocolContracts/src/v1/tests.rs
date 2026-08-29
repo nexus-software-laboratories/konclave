@@ -3,7 +3,7 @@ use prost::Message;
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, CollaborationPolicyDigest, CollaborationPolicyProposal,
     CollaborationPolicyProposalId, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
-    CollaborationPolicyRevocation, KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES,
+    CollaborationPolicyRevocation, DeviceId, KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES,
     MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_COLLABORATION_POLICY_STATEMENTS, MAX_MEMBERS,
     MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES,
     MAX_REPLAY_PAGE_SIZE, MessageId, ProtocolVersion,
@@ -34,6 +34,8 @@ use crate::wire::v1 as wire;
 
 const APPLICATION_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/application-message.bin");
+const DIRECTED_REQUEST_FIXTURE: &[u8] =
+    include_bytes!("../../../../fixtures/protocol/v1/directed-request-message.bin");
 const COLLABORATION_POLICY_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/collaboration-policy-bundle.bin");
 const COLLABORATION_POLICY_PROPOSAL_FIXTURE: &[u8] =
@@ -133,6 +135,13 @@ fn immutable_v1_fixtures_round_trip_exactly() {
         )
         .expect("fixture should encode"),
         APPLICATION_FIXTURE
+    );
+    assert_eq!(
+        encode_application_message(
+            &decode_application_message(DIRECTED_REQUEST_FIXTURE).expect("fixture should decode")
+        )
+        .expect("fixture should encode"),
+        DIRECTED_REQUEST_FIXTURE
     );
     assert_eq!(
         encode_collaboration_policy_bundle(
@@ -461,6 +470,76 @@ fn collaboration_policy_exchange_application_content_round_trips() {
         let decoded = decode_application_message(&encoded).unwrap();
         assert_eq!(encode_application_message(&decoded).unwrap(), encoded);
     }
+}
+
+#[test]
+fn directed_request_application_content_round_trips() {
+    let message = ApplicationMessage::new(
+        ProtocolVersion::application_v1(),
+        MessageId::from_bytes([60; 16]),
+        1,
+        1_700_000_000_000,
+        Some(MessageId::from_bytes([61; 16])),
+        ApplicationContent::directed_request(
+            DeviceId::from_bytes([62; 32]),
+            "review this contract",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let encoded = encode_application_message(&message).unwrap();
+    let decoded = decode_application_message(&encoded).unwrap();
+    let ApplicationContent::DirectedRequest(request) = decoded.content() else {
+        panic!("directed request should retain its content kind");
+    };
+    assert_eq!(request.target_device_id(), DeviceId::from_bytes([62; 32]));
+    assert_eq!(request.body(), "review this contract");
+    assert_eq!(encode_application_message(&decoded).unwrap(), encoded);
+}
+
+#[test]
+fn directed_request_rejects_malformed_wire_values() {
+    let decode = |target_device_id, body| {
+        let mut application = wire::ApplicationMessage::decode(APPLICATION_FIXTURE)
+            .expect("fixture wire should decode");
+        application.content = Some(wire::application_message::Content::DirectedRequest(
+            wire::DirectedRequestContent {
+                target_device_id,
+                body,
+            },
+        ));
+        decode_application_message(&application.encode_to_vec())
+    };
+
+    assert!(decode(None, "body".to_owned()).is_err());
+    assert!(
+        decode(
+            Some(wire::DeviceId {
+                value: vec![1; DeviceId::LENGTH - 1].into(),
+            }),
+            "body".to_owned(),
+        )
+        .is_err()
+    );
+    assert!(
+        decode(
+            Some(wire::DeviceId {
+                value: vec![1; DeviceId::LENGTH].into(),
+            }),
+            String::new(),
+        )
+        .is_err()
+    );
+    assert!(
+        decode(
+            Some(wire::DeviceId {
+                value: vec![1; DeviceId::LENGTH].into(),
+            }),
+            "x".repeat(KonclaveDomainCore::MAX_TEXT_BODY_BYTES + 1),
+        )
+        .is_err()
+    );
 }
 
 #[test]

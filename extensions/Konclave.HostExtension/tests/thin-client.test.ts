@@ -1341,6 +1341,22 @@ describe('deterministic commands', () => {
               text: 'peer line one\npeer \u202Eline two',
               duplicate: false,
             },
+            {
+              conversation_id: conversationId,
+              message_id: '89'.repeat(16),
+              envelope_id: '90'.repeat(16),
+              sender_device_id: inviterDeviceId,
+              epoch: 1,
+              sender_counter: 3,
+              sent_at_unix_milliseconds: 2,
+              reply_to_message_id: null,
+              cursor: 9,
+              direction: 'inbound',
+              content_type: 'directed_request',
+              target_device_id: '91'.repeat(32),
+              text: 'confirm the response contract',
+              duplicate: false,
+            },
           ],
           has_more: true,
         };
@@ -1418,7 +1434,15 @@ describe('deterministic commands', () => {
           entry.options?.ephemeral === true,
       ),
     ).toBe(true);
-    expect(entries.some((entry) => entry.line === 'resume after cursor: 8')).toBe(true);
+    expect(
+      entries.some(
+        (entry) =>
+          entry.line ===
+            `untrusted peer directed request to ${'91'.repeat(32)}: "confirm the response contract"` &&
+          entry.options?.ephemeral === true,
+      ),
+    ).toBe(true);
+    expect(entries.some((entry) => entry.line === 'resume after cursor: 9')).toBe(true);
     expect(entries.some((entry) => entry.line.includes('more messages are available'))).toBe(true);
   });
 
@@ -1813,6 +1837,7 @@ describe('shared-service delivery adaptation', () => {
         },
       ],
     });
+
     const channel = createLocalServiceDeliveryChannel(stubClient(request));
 
     await expect(
@@ -1836,6 +1861,42 @@ describe('shared-service delivery adaptation', () => {
       { maxEvents: 8, waitMilliseconds: 20 },
       5_020,
     );
+  });
+
+  it('preserves directed-request target and body in the coordinator contract', async () => {
+    const request = vi.fn().mockResolvedValue({
+      events: [
+        {
+          notificationId: '01'.repeat(16),
+          leaseGeneration: 2,
+          sequence: 3,
+          conversation: '04'.repeat(32),
+          sender: '05'.repeat(32),
+          relayCursor: 6,
+          payload: {
+            kind: 'directed_request',
+            targetDeviceId: '06'.repeat(32),
+            text: 'confirm the response contract',
+          },
+        },
+      ],
+    });
+    const channel = createLocalServiceDeliveryChannel(stubClient(request));
+
+    await expect(
+      channel.request({ kind: 'wait-and-claim', maxEvents: 8, waitMilliseconds: 20 }),
+    ).resolves.toMatchObject({
+      kind: 'batch',
+      events: [
+        {
+          payload: {
+            kind: 'directed-request',
+            target: Buffer.alloc(32, 6),
+            text: 'confirm the response contract',
+          },
+        },
+      ],
+    });
   });
 
   it('rejects malformed event identifiers before they reach the coordinator', async () => {
@@ -2096,6 +2157,30 @@ describe('shared-service delivery adaptation', () => {
           {
             ...validEvent,
             payload: { kind: 'application_text', text: 'é'.repeat(40_000) },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'directed_request',
+              targetDeviceId: 'bad',
+              text: 'reply',
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          {
+            ...validEvent,
+            payload: {
+              kind: 'directed_request',
+              targetDeviceId: '06'.repeat(32),
+              text: '',
+            },
           },
         ],
       },

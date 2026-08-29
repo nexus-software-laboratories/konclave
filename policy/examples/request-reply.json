@@ -1,11 +1,10 @@
 {
-  "apiVersion": "konclave.dev/v1",
+  "apiVersion": "konclave.dev/v2",
   "kind": "CollaborationPolicy",
   "metadata": {
-    "name": "contract-alignment"
+    "name": "request-reply"
   },
   "spec": {
-    "guidance": "Collaborate on the API contract, validate locally appropriate changes, and report decisions and blockers.",
     "statements": [
       {
         "id": "conversation-reply",

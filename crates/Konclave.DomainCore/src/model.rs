@@ -1275,10 +1275,49 @@ impl MembershipAuthorization {
     }
 }
 
+/// One bounded request directed to an exact conversation member.
+#[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct DirectedRequest {
+    #[zeroize(skip)]
+    target_device_id: DeviceId,
+    body: String,
+}
+
+impl DirectedRequest {
+    /// Creates one directed request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the body is empty or exceeds
+    /// [`MAX_TEXT_BODY_BYTES`].
+    pub fn new(
+        target_device_id: DeviceId,
+        body: impl Into<String>,
+    ) -> Result<Self, KonclaveDomainError> {
+        Ok(Self {
+            target_device_id,
+            body: validate_application_text(body.into(), "directed_request_body")?,
+        })
+    }
+
+    /// Returns the exact member expected to answer.
+    #[must_use]
+    pub const fn target_device_id(&self) -> DeviceId {
+        self.target_device_id
+    }
+
+    /// Returns the untrusted request body.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
 /// Validated application content.
 #[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum ApplicationContent {
     Text(String),
+    DirectedRequest(DirectedRequest),
     CollaborationPolicyProposal(Box<CollaborationPolicyProposal>),
     CollaborationPolicyResponse(CollaborationPolicyResponse),
     CollaborationPolicyRevocation(CollaborationPolicyRevocation),
@@ -1292,18 +1331,22 @@ impl ApplicationContent {
     /// Returns a validation error when the body is empty or exceeds
     /// [`MAX_TEXT_BODY_BYTES`].
     pub fn text(body: impl Into<String>) -> Result<Self, KonclaveDomainError> {
-        let body = body.into();
-        if body.is_empty() {
-            return Err(KonclaveDomainError::EmptyText { field: "text_body" });
-        }
-        if body.len() > MAX_TEXT_BODY_BYTES {
-            return Err(KonclaveDomainError::TextTooLong {
-                field: "text_body",
-                maximum: MAX_TEXT_BODY_BYTES,
-                actual: body.len(),
-            });
-        }
+        let body = validate_application_text(body.into(), "text_body")?;
         Ok(Self::Text(body))
+    }
+
+    /// Creates a request directed to one exact member.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the body is empty or exceeds
+    /// [`MAX_TEXT_BODY_BYTES`].
+    pub fn directed_request(
+        target_device_id: DeviceId,
+        body: impl Into<String>,
+    ) -> Result<Self, KonclaveDomainError> {
+        let request = DirectedRequest::new(target_device_id, body)?;
+        Ok(Self::DirectedRequest(request))
     }
 
     /// Wraps one validated collaboration-policy proposal without inflating every
@@ -1312,6 +1355,23 @@ impl ApplicationContent {
     pub fn collaboration_policy_proposal(proposal: CollaborationPolicyProposal) -> Self {
         Self::CollaborationPolicyProposal(Box::new(proposal))
     }
+}
+
+fn validate_application_text(
+    body: String,
+    field: &'static str,
+) -> Result<String, KonclaveDomainError> {
+    if body.is_empty() {
+        return Err(KonclaveDomainError::EmptyText { field });
+    }
+    if body.len() > MAX_TEXT_BODY_BYTES {
+        return Err(KonclaveDomainError::TextTooLong {
+            field,
+            maximum: MAX_TEXT_BODY_BYTES,
+            actual: body.len(),
+        });
+    }
+    Ok(body)
 }
 
 /// Versioned application operation authenticated by MLS.

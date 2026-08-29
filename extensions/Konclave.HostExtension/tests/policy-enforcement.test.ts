@@ -121,7 +121,7 @@ describe('Copilot collaboration policy gate', () => {
     expect(gate.active).toBe(false);
   });
 
-  it('authorizes one conversation turn and preserves bounded local guidance', async () => {
+  it('authorizes one conversation turn without trusting legacy policy guidance', async () => {
     const request = vi.fn().mockResolvedValue({
       outcome: 'authorized',
       reason: null,
@@ -137,7 +137,6 @@ describe('Copilot collaboration policy gate', () => {
       conversation,
       policyDigest,
       policyName: 'contract-alignment',
-      guidance: 'Align the contract and report the result.',
       turnToken: expect.stringMatching(/^[0-9a-f]{32}$/u),
     });
     expect(request).toHaveBeenCalledWith('collaboration.turn.authorize', {
@@ -208,6 +207,20 @@ describe('Copilot collaboration policy gate', () => {
         {
           ...event(),
           payload: { kind: 'member-removed', device: Buffer.alloc(32, 4) },
+        },
+      ]),
+    ).resolves.toBeNull();
+    expect(metadataRequest).not.toHaveBeenCalled();
+
+    await expect(
+      metadataGate.authorizeTurn([
+        {
+          ...event(),
+          payload: {
+            kind: 'directed-request',
+            target: Buffer.alloc(32, 5),
+            text: 'reply',
+          },
         },
       ]),
     ).resolves.toBeNull();

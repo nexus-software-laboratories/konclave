@@ -344,6 +344,10 @@ enum MessageContentResult {
     Text {
         text: String,
     },
+    DirectedRequest {
+        target_device_id: String,
+        text: String,
+    },
     CollaborationPolicyProposal {
         proposal_id: String,
         policy_digest: String,
@@ -1943,6 +1947,10 @@ fn message_result(
 ) -> Result<MessageResult, String> {
     let content = match message.content() {
         ApplicationContent::Text(text) => MessageContentResult::Text { text: text.clone() },
+        ApplicationContent::DirectedRequest(request) => MessageContentResult::DirectedRequest {
+            target_device_id: encode_hex(request.target_device_id().as_bytes()),
+            text: request.body().to_owned(),
+        },
         ApplicationContent::CollaborationPolicyProposal(proposal) => {
             MessageContentResult::CollaborationPolicyProposal {
                 proposal_id: encode_hex(proposal.proposal_id().as_bytes()),
@@ -2497,6 +2505,41 @@ mod tests {
             "collaboration_policy_revocation"
         );
         assert_eq!(results[2]["policy_digest"], "06".repeat(32));
+    }
+
+    #[test]
+    fn message_results_preserve_directed_request_metadata() {
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([4; MessageId::LENGTH]),
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::directed_request(
+                DeviceId::from_bytes([8; DeviceId::LENGTH]),
+                "please reply",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let result = serde_json::to_value(
+            super::message_result(
+                ConversationId::from_bytes([1; ConversationId::LENGTH]),
+                1,
+                EnvelopeId::from_bytes([2; EnvelopeId::LENGTH]),
+                DeviceId::from_bytes([3; DeviceId::LENGTH]),
+                0,
+                message,
+                "inbound",
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(result["content_type"], "directed_request");
+        assert_eq!(result["target_device_id"], "08".repeat(32));
+        assert_eq!(result["text"], "please reply");
     }
 
     #[test]

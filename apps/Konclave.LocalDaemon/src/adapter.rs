@@ -698,6 +698,12 @@ fn deliver(claimed: ClaimedRemoteEvent) -> DeliveredEvent {
         payload: match event.payload {
             RemoteEventPayload::ApplicationMessage(message) =>             match message.content() {
                 ApplicationContent::Text(text) => DeliveredPayload::ApplicationText(text.clone()),
+                ApplicationContent::DirectedRequest(request) => {
+                    DeliveredPayload::ApplicationText(format!(
+                        "Konclave received a directed request for device {} through a legacy adapter that cannot process this content kind; inspect message history with a supported client.",
+                        crate::mcp::encode_hex(request.target_device_id().as_bytes())
+                    ))
+                }
                 ApplicationContent::CollaborationPolicyProposal(_) => {
                     DeliveredPayload::ApplicationText(
                         "Konclave received a collaboration-policy proposal through a legacy adapter; no local authority was activated.".to_string(),
@@ -849,6 +855,40 @@ mod tests {
                     if text.contains("legacy adapter") && text.contains(expected)
             ));
         }
+    }
+
+    #[test]
+    fn legacy_adapter_preserves_directed_request_intent() {
+        let target = DeviceId::from_bytes([4; DeviceId::LENGTH]);
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([3; MessageId::LENGTH]),
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::directed_request(target, "please reply").unwrap(),
+        )
+        .unwrap();
+        let delivered = deliver(ClaimedRemoteEvent {
+            event: RemoteEvent {
+                sequence: 1,
+                notification_id: NotificationId::from_bytes([5; 16]),
+                conversation_id: ConversationId::from_bytes([6; 32]),
+                relay_cursor: 7,
+                sender: DeviceId::from_bytes([8; 32]),
+                payload: RemoteEventPayload::ApplicationMessage(message),
+            },
+            lease_generation: 9,
+        });
+
+        assert!(matches!(
+            delivered.payload,
+            DeliveredPayload::ApplicationText(ref text)
+                if text.contains("legacy adapter")
+                    && text.contains("cannot process this content kind")
+                    && text.contains(&crate::mcp::encode_hex(target.as_bytes()))
+                    && !text.contains("please reply")
+        ));
     }
 
     #[cfg(unix)]

@@ -12,7 +12,7 @@ pub const COLLABORATION_POLICY_BUNDLE_MINOR: u32 = 0;
 pub const MAX_COLLABORATION_POLICY_BUNDLE_BYTES: usize = 64 * 1024;
 /// Maximum UTF-8 bytes in one policy name.
 pub const MAX_COLLABORATION_POLICY_NAME_BYTES: usize = 128;
-/// Maximum UTF-8 bytes in optional model guidance.
+/// Maximum UTF-8 bytes in legacy policy guidance retained for wire compatibility.
 pub const MAX_COLLABORATION_POLICY_GUIDANCE_BYTES: usize = 32 * 1024;
 /// Maximum number of statements in one policy bundle.
 pub const MAX_COLLABORATION_POLICY_STATEMENTS: usize = 256;
@@ -437,7 +437,10 @@ impl CollaborationPolicyBundle {
         &self.name
     }
 
-    /// Returns optional model guidance.
+    /// Returns legacy guidance as untrusted historical annotation.
+    ///
+    /// This value is retained for protocol-v1 byte and digest compatibility. It does
+    /// not grant model authority and must not be injected into model turns.
     #[must_use]
     pub fn guidance(&self) -> Option<&str> {
         self.guidance.as_deref()

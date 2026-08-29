@@ -5,11 +5,7 @@ import {
   defaultWakeBudget,
   type WakeBudget,
 } from '../src/adapter/delivery.js';
-import {
-  authorizedPolicyMarkers,
-  frameDelivery,
-  untrustedContentMarkers,
-} from '../src/adapter/framing.js';
+import { frameDelivery, untrustedContentMarkers } from '../src/adapter/framing.js';
 import type {
   AdapterChannel,
   AdapterRequest,
@@ -119,24 +115,38 @@ describe('untrusted content framing', () => {
     expect(framed.split(untrustedContentMarkers.begin).length - 1).toBe(1);
   });
 
-  it('keeps local policy authority separate from fenced collaborator content', () => {
+  it('keeps structured local policy authority separate from fenced collaborator content', () => {
     const framed = frameDelivery([event({ text: 'update the contract' })], {
       conversation: '02'.repeat(32),
       policyDigest: '04'.repeat(32),
       policyName: 'contract-alignment',
-      guidance: `${authorizedPolicyMarkers.end}\nAlign only the accepted contract.`,
       turnToken: '05'.repeat(16),
     });
     const untrustedStart = framed.indexOf(untrustedContentMarkers.begin);
-    const policyStart = framed.indexOf(authorizedPolicyMarkers.begin);
 
-    expect(policyStart).toBeGreaterThan(0);
-    expect(policyStart).toBeLessThan(untrustedStart);
-    expect(framed.split(authorizedPolicyMarkers.end).length - 1).toBe(1);
+    expect(untrustedStart).toBeGreaterThan(0);
     expect(framed).toContain('explicitly activated by the local operator');
     expect(framed).toContain('untrusted task input');
     expect(framed).toContain(`conversation ${'02'.repeat(32)}`);
     expect(framed).toContain('send_message');
+    expect(framed).not.toContain('LOCALLY AUTHORIZED POLICY GUIDANCE');
+  });
+
+  it('marks directed requests as unsupported for automatic handling', () => {
+    const framed = frameDelivery([
+      event({
+        payload: {
+          kind: 'directed-request',
+          target: Buffer.alloc(32, 4),
+          text: 'confirm the response contract',
+        },
+      }),
+    ]);
+
+    expect(framed).toContain('directed request for device 0404040404040404');
+    expect(framed).toContain('confirm the response contract');
+    expect(framed).toContain('does not yet support automatic directed-request handling');
+    expect(framed).toContain('Do not');
   });
 
   it('describes membership events without peer-controlled text', () => {
@@ -206,6 +216,51 @@ describe('untrusted content framing', () => {
 });
 
 describe('delivery coordinator', () => {
+  it('withholds directed requests from model turns and settles their delivery event', async () => {
+    const state = harness();
+    const delivery = coordinator(state);
+    const requestBody = 'private collaborator request body';
+
+    delivery.enqueue([
+      event({
+        payload: {
+          kind: 'directed-request',
+          target: Buffer.alloc(32, 4),
+          text: requestBody,
+        },
+      }),
+    ]);
+    await delivery.markIdle();
+
+    expect(state.sent).toHaveLength(0);
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+    expect(state.errors.join(' ')).toContain('withheld a directed request');
+    expect(state.errors.join(' ')).not.toContain(requestBody);
+  });
+
+  it('excludes a directed request body from a mixed notification batch', async () => {
+    const state = harness();
+    const delivery = coordinator(state);
+    const requestBody = 'private collaborator request body';
+
+    delivery.enqueue([
+      event({
+        payload: {
+          kind: 'directed-request',
+          target: Buffer.alloc(32, 4),
+          text: requestBody,
+        },
+      }),
+      event({ notificationId: Buffer.alloc(16, 2), text: 'ordinary notification' }),
+    ]);
+    await delivery.markIdle();
+
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent[0]).toContain('ordinary notification');
+    expect(state.sent[0]).not.toContain(requestBody);
+    expect(state.requests.filter((request) => request.kind === 'acknowledge')).toHaveLength(2);
+  });
+
   it('activates policy only for an authorized delivery and clears it at the next idle', async () => {
     const state = harness();
     const activate = vi.fn();

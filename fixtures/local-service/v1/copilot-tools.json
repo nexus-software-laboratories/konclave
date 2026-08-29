@@ -1338,6 +1338,26 @@
             {
               "properties": {
                 "content_type": {
+                  "const": "directed_request",
+                  "type": "string"
+                },
+                "target_device_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "target_device_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
                   "const": "collaboration_policy_proposal",
                   "type": "string"
                 },
@@ -1968,6 +1988,26 @@
             {
               "properties": {
                 "content_type": {
+                  "const": "directed_request",
+                  "type": "string"
+                },
+                "target_device_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "target_device_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
                   "const": "collaboration_policy_proposal",
                   "type": "string"
                 },
@@ -2238,6 +2278,26 @@
               },
               "required": [
                 "content_type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "directed_request",
+                  "type": "string"
+                },
+                "target_device_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "target_device_id",
                 "text"
               ],
               "type": "object"

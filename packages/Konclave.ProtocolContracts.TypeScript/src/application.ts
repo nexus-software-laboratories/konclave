@@ -69,15 +69,16 @@ function validateApplicationMessage(value: ApplicationMessage): void {
     validateFixedBytes(value.replyTo.value, 16, 'reply_to');
   }
   switch (value.content.case) {
-    case 'text': {
-      const bodyLength = textEncoder.encode(value.content.value.body).byteLength;
-      if (bodyLength === 0) {
-        throw new ProtocolValidationError(
-          protocolErrorCodes.emptyValue,
-          'text_body must not be empty',
-        );
-      }
-      validateLengthRange(bodyLength, 1, MAX_TEXT_BODY_BYTES, 'text_body');
+    case 'text':
+      validateApplicationBody(value.content.value.body, 'text_body');
+      break;
+    case 'directedRequest': {
+      validateFixedBytes(
+        required(value.content.value.targetDeviceId, 'directed_request_target_device_id').value,
+        32,
+        'directed_request_target_device_id',
+      );
+      validateApplicationBody(value.content.value.body, 'directed_request_body');
       break;
     }
     case 'collaborationPolicyProposal':
@@ -95,4 +96,12 @@ function validateApplicationMessage(value: ApplicationMessage): void {
         'application_message.content is missing',
       );
   }
+}
+
+function validateApplicationBody(body: string, field: string): void {
+  const bodyLength = textEncoder.encode(body).byteLength;
+  if (bodyLength === 0) {
+    throw new ProtocolValidationError(protocolErrorCodes.emptyValue, `${field} must not be empty`);
+  }
+  validateLengthRange(bodyLength, 1, MAX_TEXT_BODY_BYTES, field);
 }

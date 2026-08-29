@@ -34,6 +34,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "application-message.bin",
         encode_application_message(&application_message())?,
     )?;
+    write(
+        &output,
+        "directed-request-message.bin",
+        encode_application_message(&directed_request_message())?,
+    )?;
     let bundle_bytes = encode_collaboration_policy_bundle(&collaboration_policy_bundle())?;
     write(
         &output,
@@ -183,6 +188,22 @@ fn application_message() -> ApplicationMessage {
         ApplicationContent::text("hello").expect("fixture text is valid"),
     )
     .expect("fixture message is valid")
+}
+
+fn directed_request_message() -> ApplicationMessage {
+    ApplicationMessage::new(
+        ProtocolVersion::application_v1(),
+        MessageId::from_bytes([6; 16]),
+        6,
+        1_700_000_000_006,
+        Some(MessageId::from_bytes([1; 16])),
+        ApplicationContent::directed_request(
+            DeviceId::from_bytes([7; 32]),
+            "Can you confirm the response contract?",
+        )
+        .expect("fixture request is valid"),
+    )
+    .expect("fixture application message is valid")
 }
 
 fn collaboration_policy_proposal_message(canonical_bundle: Vec<u8>) -> ApplicationMessage {

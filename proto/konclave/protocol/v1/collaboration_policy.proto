@@ -44,6 +44,7 @@ message CollaborationPolicyLimits {
 message CollaborationPolicyBundle {
   ProtocolVersion version = 1;
   string name = 2;
+  // Legacy untrusted annotation retained only for historical byte and digest compatibility.
   optional string guidance = 3;
   repeated CollaborationPolicyStatement statements = 4;
   repeated string required_harness_claims = 5;

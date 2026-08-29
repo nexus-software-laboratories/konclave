@@ -2,6 +2,7 @@ import { create } from '@bufbuild/protobuf';
 
 import {
   ApplicationMessageSchema,
+  DirectedRequestContentSchema,
   TextContentSchema,
   type ApplicationMessage,
 } from '../src/generated/konclave/protocol/v1/application_pb.js';
@@ -148,6 +149,28 @@ export function applicationMessage(options?: {
               body: options?.body ?? 'hello',
             }),
           },
+  });
+}
+
+export function directedRequestMessage(options?: {
+  body?: string;
+  targetDeviceIdLength?: number;
+}): ApplicationMessage {
+  return create(ApplicationMessageSchema, {
+    version: create(ProtocolVersionSchema, { major: 1, minor: 0 }),
+    messageId: create(MessageIdSchema, { value: bytes(16, 6) }),
+    senderCounter: 6n,
+    sentAtUnixMilliseconds: 1_700_000_000_006n,
+    replyTo: create(MessageIdSchema, { value: bytes(16, 1) }),
+    content: {
+      case: 'directedRequest',
+      value: create(DirectedRequestContentSchema, {
+        targetDeviceId: create(DeviceIdSchema, {
+          value: bytes(options?.targetDeviceIdLength ?? 32, 7),
+        }),
+        body: options?.body ?? 'Can you confirm the response contract?',
+      }),
+    },
   });
 }
 

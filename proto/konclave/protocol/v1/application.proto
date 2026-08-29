@@ -11,6 +11,15 @@ message TextContent {
   string body = 1;
 }
 
+// Carries one request for an explicit response from one conversation member.
+message DirectedRequestContent {
+  // The exact member expected to provide the authoritative response.
+  DeviceId target_device_id = 1;
+
+  // Bounded to 255 KiB of UTF-8 in protocol v1.
+  string body = 2;
+}
+
 // Carries one application operation encrypted and authenticated by MLS.
 // The complete encoded message is bounded to 256 KiB in protocol v1.
 message ApplicationMessage {
@@ -25,5 +34,6 @@ message ApplicationMessage {
     CollaborationPolicyProposal collaboration_policy_proposal = 11;
     CollaborationPolicyResponse collaboration_policy_response = 12;
     CollaborationPolicyRevocation collaboration_policy_revocation = 13;
+    DirectedRequestContent directed_request = 14;
   }
 }

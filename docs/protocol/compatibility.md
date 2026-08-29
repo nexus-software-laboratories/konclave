@@ -133,10 +133,11 @@ Application data encrypted by MLS includes:
 - optional reply/reference identifiers;
 - sender timestamp as display metadata, never authorization or ordering authority.
 
-Protocol-v1 content kinds include UTF-8 text plus collaboration-policy proposal,
-response, and revocation messages. The policy exchange messages are additive
-application content variants; endpoints that participate in a policy exchange must
-negotiate support before sending them to members that need to interpret them.
+Protocol-v1 content kinds include UTF-8 text, a request directed to one exact device,
+and collaboration-policy proposal, response, and revocation messages. These are
+additive application content variants. An endpoint MUST negotiate support before
+sending a variant to a member that needs to interpret it. An older endpoint presented
+with a directed request fails visibly rather than treating its body as ordinary text.
 
 The entire application message is covered by MLS authentication. Sender identity is
 derived from the authenticated MLS leaf and validated device credential. Application
@@ -146,10 +147,12 @@ self-asserted sender identifier.
 ### Collaboration-policy bundle
 
 The protocol-v1 `CollaborationPolicyBundle` is a source-independent, content-addressed
-contract. It contains a canonical name, optional guidance, ordered action statements,
-ordered required harness claims, and fully resolved optional semantic limits. It does
-not contain source paths, mutable includes, executable code, or unresolved provider
-references.
+contract. It contains a canonical name, ordered action statements, ordered required
+harness claims, fully resolved optional semantic limits, and a legacy optional
+guidance field retained only for historical byte and digest compatibility. Guidance
+is untrusted annotation and is never injected into a model turn or used as authority.
+The bundle does not contain source paths, mutable includes, executable code, or
+unresolved provider references.
 
 Policy names are display metadata. Bundle identity is the domain-separated SHA-256
 digest defined in [Collaboration policy contracts](../development/collaboration-policies.md).

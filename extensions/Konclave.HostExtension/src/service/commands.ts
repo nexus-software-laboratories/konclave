@@ -140,6 +140,7 @@ interface MessageSummary {
 
 type MessageContentSummary =
   | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'directed-request'; readonly targetDeviceId: string; readonly text: string }
   | {
       readonly kind: 'collaboration-policy-proposal';
       readonly proposalId: string;
@@ -900,6 +901,23 @@ function parseMessageContent(message: Record<string, unknown>): MessageContentSu
         throw new Error('the local service message-list response is malformed');
       }
       return { kind: 'text', text: message.text };
+    case 'directed_request':
+      if (typeof message.text !== 'string') {
+        throw new Error('the local service message-list response is malformed');
+      }
+      return {
+        kind: 'directed-request',
+        targetDeviceId: requireHexIdentifier(
+          requiredString(
+            message,
+            'target_device_id',
+            'the local service directed-request target is malformed',
+          ),
+          deviceIdCharacters,
+          'directed-request target device identifier',
+        ),
+        text: message.text,
+      };
     case 'collaboration_policy_proposal':
       return {
         kind: 'collaboration-policy-proposal',
@@ -1302,6 +1320,11 @@ function displayMessageContent(message: MessageSummary): string {
   switch (message.content.kind) {
     case 'text':
       return `${message.direction === 'inbound' ? 'untrusted peer text' : 'local message text'}: ${displayText(message.content.text)}`;
+    case 'directed-request':
+      return (
+        `${source} directed request to ${message.content.targetDeviceId}: ` +
+        displayText(message.content.text)
+      );
     case 'collaboration-policy-proposal': {
       const replacement =
         message.content.replacesPolicyDigest === undefined

@@ -46,6 +46,7 @@ import {
   collaborationPolicyRevocationMessage,
   conversationState,
   credential,
+  directedRequestMessage,
   invitation,
   joinProof,
   membershipCommitBundle,
@@ -69,6 +70,12 @@ const cases: ReadonlyArray<{
     decode: decodeApplicationMessage,
     expected: applicationMessage({ replyToLength: 16 }),
     name: 'application-message.bin',
+    roundTrip: (bytes) => encodeApplicationMessage(decodeApplicationMessage(bytes)),
+  },
+  {
+    decode: decodeApplicationMessage,
+    expected: directedRequestMessage(),
+    name: 'directed-request-message.bin',
     roundTrip: (bytes) => encodeApplicationMessage(decodeApplicationMessage(bytes)),
   },
   {
