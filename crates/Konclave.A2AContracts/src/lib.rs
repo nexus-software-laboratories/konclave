@@ -2,14 +2,16 @@
 #![allow(non_snake_case)]
 
 mod error;
+mod identifier;
 mod initial_profile;
 
 pub use error::A2AContractError;
+pub use identifier::{A2AIdentifier, MAX_A2A_IDENTIFIER_BYTES};
 pub use initial_profile::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
     InitialA2AInterfaceEnvironment, InitialA2AValidatedInterface, InitialGetTaskRequest,
-    InitialSendMessageRequest, MAX_A2A_ENCODED_REQUEST_BYTES, MAX_A2A_IDENTIFIER_BYTES,
-    MAX_A2A_TEXT_BYTES, decode_initial_get_task_json, decode_initial_get_task_protobuf,
+    InitialSendMessageRequest, MAX_A2A_ENCODED_REQUEST_BYTES, MAX_A2A_TEXT_BYTES,
+    decode_initial_get_task_json, decode_initial_get_task_protobuf,
     decode_initial_send_message_json, decode_initial_send_message_protobuf,
     validate_initial_agent_interface, validate_initial_get_task_request,
     validate_initial_send_message_request,

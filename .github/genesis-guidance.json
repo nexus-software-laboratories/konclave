@@ -222,6 +222,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/a2a-domain-mapping.md",
+        "title": "A2A domain mapping",
+        "section": "Development",
+        "order": 35,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",

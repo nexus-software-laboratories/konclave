@@ -20,6 +20,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveA2ADomain"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveDomainCore",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "KonclaveAdapterTransport"
 version = "0.1.0"
 dependencies = [

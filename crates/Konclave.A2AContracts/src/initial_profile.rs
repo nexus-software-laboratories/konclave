@@ -2,8 +2,8 @@ use prost::Message as _;
 use serde::de::DeserializeOwned;
 use url::{Host, Url};
 
-use crate::A2AContractError;
 use crate::wire::{AgentInterface, GetTaskRequest, Role, SendMessageRequest, part};
+use crate::{A2AContractError, A2AIdentifier};
 
 /// A2A protocol version exposed by the initial Konclave gateway profile.
 pub const A2A_PROTOCOL_VERSION: &str = "1.0";
@@ -15,8 +15,6 @@ pub const A2A_TEXT_MEDIA_TYPE: &str = "text/plain";
 pub const MAX_A2A_ENCODED_REQUEST_BYTES: usize = 128 * 1024;
 /// Maximum UTF-8 byte length of an initial-profile text part.
 pub const MAX_A2A_TEXT_BYTES: usize = 64 * 1024;
-/// Maximum byte length of an A2A task, context, message, or tenant identifier.
-pub const MAX_A2A_IDENTIFIER_BYTES: usize = 128;
 const MAX_A2A_INTERFACE_URL_BYTES: usize = 2 * 1024;
 const MAX_A2A_HISTORY_LENGTH: i32 = 1;
 
@@ -66,6 +64,12 @@ impl InitialSendMessageRequest {
     #[must_use]
     pub const fn history_length(&self) -> Option<u32> {
         self.history_length
+    }
+
+    /// Returns the validated request body and consumes the request.
+    #[must_use]
+    pub fn into_text(self) -> String {
+        self.text
     }
 }
 
@@ -412,16 +416,7 @@ fn optional_identifier(
 }
 
 fn validate_identifier(value: String, field: &'static str) -> Result<String, A2AContractError> {
-    if value.is_empty()
-        || value.len() > MAX_A2A_IDENTIFIER_BYTES
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
-    {
-        Err(A2AContractError::InvalidIdentifier { field })
-    } else {
-        Ok(value)
-    }
+    A2AIdentifier::parse_for_field(value, field).map(A2AIdentifier::into_string)
 }
 
 fn validate_text(value: String, field: &'static str) -> Result<String, A2AContractError> {

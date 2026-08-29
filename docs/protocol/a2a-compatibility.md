@@ -57,12 +57,15 @@ The initial validator accepts one client message with:
 
 The optional `return_immediately` value is preserved for the gateway task layer.
 Semantic task creation, context ownership, idempotency, and Konclave target selection
-belong to the A2A domain-mapping and bridge layers.
+belong to the [A2A domain-mapping](../development/a2a-domain-mapping.md) and bridge
+layers.
 
 ## `GetTask` and encoded bounds
 
 `GetTask` requires one canonical task identifier of at most 128 ASCII bytes, the
 exact configured tenant, and optional history length `0` or `1`.
+The gateway domain layer further requires its own task identifiers to be exactly 32
+lowercase hexadecimal characters, matching the mapped Konclave request identifier.
 
 Protocol Buffer and ProtoJSON request bodies are rejected before decoding when they
 exceed 128 KiB. Generated DTOs may represent the broader A2A schema, but unsupported
