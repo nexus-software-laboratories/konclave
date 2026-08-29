@@ -57,7 +57,8 @@ The initial validator accepts one client message with:
 
 The optional `return_immediately` value is preserved for the gateway task layer.
 Semantic task creation, context ownership, idempotency, and Konclave target selection
-belong to the A2A domain-mapping and bridge layers.
+belong to the [A2A domain-mapping](../development/a2a-domain-mapping.md) and bridge
+layers.
 
 ## `GetTask` and encoded bounds
 

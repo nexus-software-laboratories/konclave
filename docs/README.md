@@ -46,6 +46,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Shared local service transport](development/local-service-transport.md)
 - [Copilot delivery safety](development/copilot-delivery-safety.md)
 - [Collaboration policy contracts](development/collaboration-policies.md)
+- [A2A domain mapping](development/a2a-domain-mapping.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 

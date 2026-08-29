@@ -53,6 +53,9 @@ manifest whose release already exists.
 - reject initial-profile A2A requests that use another protocol version, binding,
   tenant, role, part form, media type, metadata, extension, task reference, URL trust
   mode, encoded size, text size, identifier shape, or history range.
+- prove A2A mapping derives one stable task and Konclave request identifier from the
+  exact tenant, agent, context, and source message; rejects tenant/context
+  substitution; and keeps A2A task state distinct from delivery and handling state.
 
 ### MLS and cryptographic integration
 
