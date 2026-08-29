@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CollaborationPolicies", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.A2AContracts", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CollaborationPolicies", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
 
 [workspace.dependencies]
 async-trait = "0.1.92"
@@ -13,8 +13,12 @@ log = { version = "0.4.33", features = ["max_level_debug", "release_max_level_in
 mls-rs = { version = "=0.55.3", default-features = false, features = ["std", "rfc_compliant", "tree_index", "fast_serialize"] }
 mls-rs-core = { version = "=0.27.0", default-features = false, features = ["std", "rfc_compliant", "fast_serialize"] }
 mls-rs-crypto-awslc = "=0.25.0"
+pbjson = "0.9.0"
+pbjson-build = "0.9.0"
+pbjson-types = "0.9.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
+prost-types = "0.14.4"
 protoc-bin-vendored = "3.2.0"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }

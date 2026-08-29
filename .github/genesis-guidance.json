@@ -124,6 +124,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/protocol/a2a-compatibility.md",
+        "title": "A2A compatibility contract",
+        "section": "Protocol",
+        "order": 40,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/security/threat-model.md",
         "title": "Threat model",
         "section": "Security",

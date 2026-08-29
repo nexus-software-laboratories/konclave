@@ -1,0 +1,24 @@
+[package]
+name = "KonclaveA2AContracts"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+pbjson.workspace = true
+pbjson-types.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[build-dependencies]
+pbjson-build.workspace = true
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

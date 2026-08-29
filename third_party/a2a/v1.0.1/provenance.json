@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "protocol": {
+    "name": "Linux Foundation Agent2Agent Protocol",
+    "protocolVersion": "1.0",
+    "repository": "https://github.com/a2aproject/A2A",
+    "release": "v1.0.1",
+    "commit": "3303592588e388e62e0f69f701af531d2f4e3991",
+    "sourcePath": "specification/a2a.proto",
+    "gitBlobSha1": "400cdbad934654e27d7abbae1e145923eb40ac52",
+    "bytes": 35844,
+    "sha256": "e195bf96ab630c69797851970203e1b2b6b19528f2e9803b7d904b91a5104016",
+    "license": "Apache-2.0",
+    "licenseGitBlobSha1": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+    "licenseBytes": 11358,
+    "licenseSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "generationStubs": {
+    "repository": "https://github.com/a2aproject/a2a-rs",
+    "commit": "4fdb6a9e6016978cb35e3f91cc50ffd056ce21b5",
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "path": "google/api/annotations.proto",
+        "gitBlobSha1": "dc6d045559c8da908020ea893fc08860833b0a31",
+        "bytes": 445,
+        "sha256": "c29a8babaaeec1572f3fae74ebf5168de7ac2f83b28fa8744c03c39e26ab02df"
+      },
+      {
+        "path": "google/api/client.proto",
+        "gitBlobSha1": "f41d48608ca3fe653b3c20f6659d59a2de35e4b8",
+        "bytes": 280,
+        "sha256": "da5f31475cc03a0cf2f6294d7ee0dca129aa6fde86f9610ffc0141b024e42cc0"
+      },
+      {
+        "path": "google/api/field_behavior.proto",
+        "gitBlobSha1": "7668e664129c9dc3fcce2dfc407149015e7629ee",
+        "bytes": 363,
+        "sha256": "e44d489fdf0477df072faa13aa1fd86237fa2ebec55ff70d2e249dcf7dca1e93"
+      }
+    ]
+  }
+}

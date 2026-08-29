@@ -41,12 +41,18 @@ manifest whose release already exists.
 
 ### Schema compatibility
 
-- compile every `.proto` schema for Rust and TypeScript;
+- compile every Konclave-owned `.proto` schema for Rust and TypeScript, and compile
+  the vendored A2A schema through its dedicated Rust boundary;
 - decode immutable fixtures from every supported major version;
 - verify additive-field compatibility with a previous reader;
 - reject reused field numbers, invalid enum zero values, malformed lengths, and
   unsupported major versions;
 - compare canonical semantic values across Rust and TypeScript implementations.
+- verify the vendored A2A v1.0.1 schema, license, generation stubs, and immutable
+  fixtures against their recorded byte lengths and SHA-256 digests;
+- reject initial-profile A2A requests that use another protocol version, binding,
+  tenant, role, part form, media type, metadata, extension, task reference, URL trust
+  mode, encoded size, text size, identifier shape, or history range.
 
 ### MLS and cryptographic integration
 
