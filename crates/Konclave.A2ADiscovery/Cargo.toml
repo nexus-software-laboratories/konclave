@@ -1,25 +1,19 @@
 [package]
-name = "KonclaveA2AContracts"
+name = "KonclaveA2ADiscovery"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
 
 [dependencies]
+KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+KonclaveA2ADomain = { path = "../Konclave.A2ADomain" }
 KonclaveBoundedDocuments = { path = "../Konclave.BoundedDocuments" }
-pbjson.workspace = true
-pbjson-types.workspace = true
-prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
-[build-dependencies]
-pbjson-build.workspace = true
-prost-build.workspace = true
-protoc-bin-vendored.workspace = true
-sha2.workspace = true
-
 [dev-dependencies]
-serde_json.workspace = true
+tempfile = "3.27.0"

@@ -116,6 +116,13 @@ fn catalog_rejects_duplicates_unsafe_paths_and_name_mismatch() {
 #[test]
 fn catalog_rejects_unknown_version_and_unavailable_files() {
     let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        FileCollaborationPolicyCatalog::open(&root.path().join("absent.json")).err(),
+        Some(CollaborationPolicySourceError::FileUnavailable {
+            document: "catalog"
+        })
+    );
+
     let version = root.path().join("version.json");
     std::fs::write(&version, r#"{"schemaVersion":2,"entries":[]}"#).unwrap();
     assert_eq!(

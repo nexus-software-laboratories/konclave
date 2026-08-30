@@ -1,15 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
+use KonclaveBoundedDocuments::{
+    BoundedDocumentError, BoundedVec, JsonFileCatalogRoot, deserialize_strict,
+    read_bounded_regular_file,
+};
 use KonclaveDomainCore::{
     CollaborationPolicyLimits, MAX_COLLABORATION_POLICY_STATEMENTS,
     validate_collaboration_policy_name,
 };
 use serde::Deserialize;
 
-use crate::file::read_bounded_regular_file;
-use crate::source::{BoundedVec, CompiledCollaborationPolicy, deserialize_strict};
-use crate::{CollaborationPolicySourceError, compile_collaboration_policy_file};
+use crate::source::{CompiledCollaborationPolicy, map_document_error};
+use crate::{CollaborationPolicySourceError, compile_collaboration_policy_source};
 
 const CATALOG_SCHEMA_VERSION: u32 = 1;
 const MAX_CATALOG_BYTES: usize = 64 * 1024;
@@ -17,7 +20,8 @@ const MAX_CATALOG_ENTRIES: usize = MAX_COLLABORATION_POLICY_STATEMENTS;
 
 /// Explicit descriptor-backed catalog of collaboration-policy source files.
 pub struct FileCollaborationPolicyCatalog {
-    entries: BTreeMap<String, PathBuf>,
+    root: JsonFileCatalogRoot,
+    entries: BTreeMap<String, String>,
 }
 
 impl FileCollaborationPolicyCatalog {
@@ -30,57 +34,34 @@ impl FileCollaborationPolicyCatalog {
     ///
     /// Returns a typed file, schema, duplicate, path, or domain validation failure.
     pub fn open(path: &Path) -> Result<Self, CollaborationPolicySourceError> {
-        let bytes = read_bounded_regular_file(path, MAX_CATALOG_BYTES, "catalog")?;
-        let descriptor: CatalogDescriptor = deserialize_strict(&bytes, "catalog")?;
+        let bytes = read_bounded_regular_file(path, MAX_CATALOG_BYTES)
+            .map_err(map_catalog_document_error)?;
+        let descriptor: CatalogDescriptor =
+            deserialize_strict(&bytes, MAX_CATALOG_BYTES).map_err(map_catalog_document_error)?;
         if descriptor.schema_version != CATALOG_SCHEMA_VERSION {
             return Err(CollaborationPolicySourceError::UnsupportedCatalogVersion);
         }
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let canonical_root = parent
-            .canonicalize()
-            .map_err(|_| CollaborationPolicySourceError::UnsafeCatalogPath)?;
+        let root =
+            JsonFileCatalogRoot::from_descriptor(path).map_err(map_catalog_document_error)?;
         let mut entries = BTreeMap::new();
         let mut source_paths = BTreeSet::new();
         for entry in descriptor.entries.into_inner() {
             validate_collaboration_policy_name(&entry.name)?;
-            if !portable_catalog_source(&entry.source) {
-                return Err(CollaborationPolicySourceError::UnsafeCatalogPath);
-            }
-            let relative = Path::new(&entry.source);
-            if relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-            {
-                return Err(CollaborationPolicySourceError::UnsafeCatalogPath);
-            }
-            let source = canonical_root.join(relative);
-            let source_metadata = std::fs::symlink_metadata(&source)
-                .map_err(|_| CollaborationPolicySourceError::UnsafeCatalogPath)?;
-            if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
-                return Err(CollaborationPolicySourceError::UnsafeCatalogPath);
-            }
-            let canonical_source = source
-                .canonicalize()
-                .map_err(|_| CollaborationPolicySourceError::UnsafeCatalogPath)?;
-            if !canonical_source.starts_with(&canonical_root) {
-                return Err(CollaborationPolicySourceError::UnsafeCatalogPath);
-            }
+            root.read(&entry.source, crate::MAX_COLLABORATION_POLICY_SOURCE_BYTES)
+                .map_err(map_catalog_source_error)?;
             if entries.contains_key(&entry.name) {
                 return Err(CollaborationPolicySourceError::DuplicateCatalogEntry {
                     field: "name",
                 });
             }
-            if !source_paths.insert(canonical_source.clone()) {
+            if !source_paths.insert(entry.source.clone()) {
                 return Err(CollaborationPolicySourceError::DuplicateCatalogEntry {
                     field: "source",
                 });
             }
-            entries.insert(entry.name, canonical_source);
+            entries.insert(entry.name, entry.source);
         }
-        Ok(Self { entries })
+        Ok(Self { root, entries })
     }
 
     /// Returns catalog names in canonical lexical order.
@@ -104,7 +85,11 @@ impl FileCollaborationPolicyCatalog {
             .entries
             .get(name)
             .ok_or(CollaborationPolicySourceError::PolicyNotFound)?;
-        let compiled = compile_collaboration_policy_file(source, defaults)?;
+        let bytes = self
+            .root
+            .read(source, crate::MAX_COLLABORATION_POLICY_SOURCE_BYTES)
+            .map_err(|error| map_document_error(error, "source"))?;
+        let compiled = compile_collaboration_policy_source(&bytes, defaults)?;
         if compiled.bundle().name() != name {
             return Err(CollaborationPolicySourceError::CatalogNameMismatch);
         }
@@ -112,22 +97,42 @@ impl FileCollaborationPolicyCatalog {
     }
 }
 
-fn portable_catalog_source(value: &str) -> bool {
-    !value.is_empty()
-        && value.is_ascii()
-        && !value.starts_with('.')
-        && !value.starts_with('/')
-        && !value.contains('\\')
-        && value.ends_with(".json")
-        && value.split('/').all(|segment| {
-            !segment.is_empty()
-                && segment != "."
-                && segment != ".."
-                && !segment.ends_with('.')
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        })
+fn map_catalog_document_error(error: BoundedDocumentError) -> CollaborationPolicySourceError {
+    match error {
+        BoundedDocumentError::DocumentTooLarge { maximum } => {
+            CollaborationPolicySourceError::DocumentTooLarge {
+                document: "catalog",
+                maximum,
+            }
+        }
+
+        BoundedDocumentError::InvalidJson => CollaborationPolicySourceError::InvalidJson {
+            document: "catalog",
+        },
+        BoundedDocumentError::FileUnavailable => CollaborationPolicySourceError::FileUnavailable {
+            document: "catalog",
+        },
+        BoundedDocumentError::UnsafeCatalogPath => {
+            CollaborationPolicySourceError::UnsafeCatalogPath
+        }
+    }
+}
+
+fn map_catalog_source_error(error: BoundedDocumentError) -> CollaborationPolicySourceError {
+    match error {
+        BoundedDocumentError::DocumentTooLarge { maximum } => {
+            CollaborationPolicySourceError::DocumentTooLarge {
+                document: "source",
+                maximum,
+            }
+        }
+        BoundedDocumentError::InvalidJson => {
+            CollaborationPolicySourceError::InvalidJson { document: "source" }
+        }
+        BoundedDocumentError::FileUnavailable | BoundedDocumentError::UnsafeCatalogPath => {
+            CollaborationPolicySourceError::UnsafeCatalogPath
+        }
+    }
 }
 
 #[derive(Deserialize)]

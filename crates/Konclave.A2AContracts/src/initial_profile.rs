@@ -1,8 +1,11 @@
+use KonclaveBoundedDocuments::deserialize_strict;
 use prost::Message as _;
 use serde::de::DeserializeOwned;
 use url::{Host, Url};
 
-use crate::wire::{AgentInterface, GetTaskRequest, Role, SendMessageRequest, part};
+use crate::wire::{
+    AgentInterface, GetExtendedAgentCardRequest, GetTaskRequest, Role, SendMessageRequest, part,
+};
 use crate::{A2AContractError, A2AIdentifier};
 
 /// A2A protocol version exposed by the initial Konclave gateway profile.
@@ -11,6 +14,10 @@ pub const A2A_PROTOCOL_VERSION: &str = "1.0";
 pub const A2A_HTTP_JSON_BINDING: &str = "HTTP+JSON";
 /// Only media type accepted by the initial text-only profile.
 pub const A2A_TEXT_MEDIA_TYPE: &str = "text/plain";
+/// Standard public Agent Card discovery path registered by A2A.
+pub const A2A_WELL_KNOWN_AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
+/// Standard unscoped HTTP+JSON extended Agent Card path.
+pub const A2A_EXTENDED_AGENT_CARD_PATH: &str = "/extendedAgentCard";
 /// Maximum encoded protobuf or ProtoJSON request accepted before decoding.
 pub const MAX_A2A_ENCODED_REQUEST_BYTES: usize = 128 * 1024;
 /// Maximum UTF-8 byte length of an initial-profile text part.
@@ -81,6 +88,20 @@ pub struct InitialGetTaskRequest {
     history_length: Option<u32>,
 }
 
+/// Validated `GetExtendedAgentCard` request accepted by the initial profile.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InitialGetExtendedAgentCardRequest {
+    tenant: Option<String>,
+}
+
+impl InitialGetExtendedAgentCardRequest {
+    /// Returns the deployment-selected tenant, when the published interface uses one.
+    #[must_use]
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+}
+
 impl InitialGetTaskRequest {
     /// Returns the deployment-selected tenant, when the published interface uses one.
     #[must_use]
@@ -141,7 +162,7 @@ pub fn decode_initial_send_message_protobuf(
     bytes: &[u8],
     expected_tenant: Option<&str>,
 ) -> Result<InitialSendMessageRequest, A2AContractError> {
-    require_encoded_bound(bytes)?;
+    require_encoded_bound(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
     let request =
         SendMessageRequest::decode(bytes).map_err(|_| A2AContractError::MalformedEncoding)?;
     validate_initial_send_message_request(request, expected_tenant)
@@ -157,7 +178,7 @@ pub fn decode_initial_send_message_json(
     bytes: &[u8],
     expected_tenant: Option<&str>,
 ) -> Result<InitialSendMessageRequest, A2AContractError> {
-    let request = decode_json(bytes)?;
+    let request = decode_json_bounded(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
     validate_initial_send_message_request(request, expected_tenant)
 }
 
@@ -279,7 +300,7 @@ pub fn decode_initial_get_task_protobuf(
     bytes: &[u8],
     expected_tenant: Option<&str>,
 ) -> Result<InitialGetTaskRequest, A2AContractError> {
-    require_encoded_bound(bytes)?;
+    require_encoded_bound(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
     let request = GetTaskRequest::decode(bytes).map_err(|_| A2AContractError::MalformedEncoding)?;
     validate_initial_get_task_request(request, expected_tenant)
 }
@@ -294,8 +315,58 @@ pub fn decode_initial_get_task_json(
     bytes: &[u8],
     expected_tenant: Option<&str>,
 ) -> Result<InitialGetTaskRequest, A2AContractError> {
-    let request = decode_json(bytes)?;
+    let request = decode_json_bounded(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
     validate_initial_get_task_request(request, expected_tenant)
+}
+
+/// Decodes and validates one bounded initial-profile protobuf
+/// `GetExtendedAgentCard` request.
+///
+/// # Errors
+///
+/// Returns a stable contract error for oversized, malformed, or
+/// deployment-mismatched input.
+pub fn decode_initial_get_extended_agent_card_protobuf(
+    bytes: &[u8],
+    expected_tenant: Option<&str>,
+) -> Result<InitialGetExtendedAgentCardRequest, A2AContractError> {
+    require_encoded_bound(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
+    let request = GetExtendedAgentCardRequest::decode(bytes)
+        .map_err(|_| A2AContractError::MalformedEncoding)?;
+    validate_initial_get_extended_agent_card_request(request, expected_tenant)
+}
+
+/// Decodes and validates one bounded initial-profile ProtoJSON
+/// `GetExtendedAgentCard` request.
+///
+/// # Errors
+///
+/// Returns a stable contract error for oversized, malformed, or
+/// deployment-mismatched input.
+pub fn decode_initial_get_extended_agent_card_json(
+    bytes: &[u8],
+    expected_tenant: Option<&str>,
+) -> Result<InitialGetExtendedAgentCardRequest, A2AContractError> {
+    let request = decode_json_bounded(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
+    validate_initial_get_extended_agent_card_request(request, expected_tenant)
+}
+
+/// Narrows one generated `GetExtendedAgentCard` DTO to the initial profile.
+///
+/// Authentication and authorization occur at the gateway before the validated
+/// request reaches private discovery.
+///
+/// # Errors
+///
+/// Returns a stable contract error when the tenant differs from the selected
+/// publication interface.
+pub fn validate_initial_get_extended_agent_card_request(
+    request: GetExtendedAgentCardRequest,
+    expected_tenant: Option<&str>,
+) -> Result<InitialGetExtendedAgentCardRequest, A2AContractError> {
+    Ok(InitialGetExtendedAgentCardRequest {
+        tenant: validate_tenant(request.tenant, expected_tenant)?,
+    })
 }
 
 /// Narrows one generated `GetTask` DTO to the initial profile.
@@ -371,15 +442,18 @@ pub fn validate_initial_agent_interface(
     })
 }
 
-fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, A2AContractError> {
-    require_encoded_bound(bytes)?;
-    serde_json::from_slice(bytes).map_err(|_| A2AContractError::MalformedEncoding)
+pub(crate) fn decode_json_bounded<T: DeserializeOwned>(
+    bytes: &[u8],
+    maximum: usize,
+) -> Result<T, A2AContractError> {
+    require_encoded_bound(bytes, maximum)?;
+    deserialize_strict(bytes, maximum).map_err(|_| A2AContractError::MalformedEncoding)
 }
 
-fn require_encoded_bound(bytes: &[u8]) -> Result<(), A2AContractError> {
-    if bytes.len() > MAX_A2A_ENCODED_REQUEST_BYTES {
+pub(crate) fn require_encoded_bound(bytes: &[u8], maximum: usize) -> Result<(), A2AContractError> {
+    if bytes.len() > maximum {
         Err(A2AContractError::EncodedMessageTooLarge {
-            maximum: MAX_A2A_ENCODED_REQUEST_BYTES,
+            maximum,
             actual: bytes.len(),
         })
     } else {
@@ -387,7 +461,7 @@ fn require_encoded_bound(bytes: &[u8]) -> Result<(), A2AContractError> {
     }
 }
 
-fn validate_tenant(
+pub(crate) fn validate_tenant(
     tenant: String,
     expected_tenant: Option<&str>,
 ) -> Result<Option<String>, A2AContractError> {
@@ -404,7 +478,7 @@ fn validate_tenant(
     }
 }
 
-fn optional_identifier(
+pub(crate) fn optional_identifier(
     value: String,
     field: &'static str,
 ) -> Result<Option<String>, A2AContractError> {
@@ -415,11 +489,17 @@ fn optional_identifier(
     }
 }
 
-fn validate_identifier(value: String, field: &'static str) -> Result<String, A2AContractError> {
+pub(crate) fn validate_identifier(
+    value: String,
+    field: &'static str,
+) -> Result<String, A2AContractError> {
     A2AIdentifier::parse_for_field(value, field).map(A2AIdentifier::into_string)
 }
 
-fn validate_text(value: String, field: &'static str) -> Result<String, A2AContractError> {
+pub(crate) fn validate_text(
+    value: String,
+    field: &'static str,
+) -> Result<String, A2AContractError> {
     if value.is_empty() || value.len() > MAX_A2A_TEXT_BYTES {
         Err(A2AContractError::InvalidText { field })
     } else {

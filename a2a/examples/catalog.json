@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "name": "contract-agent",
+      "source": "agent-publication.json"
+    }
+  ]
+}
