@@ -7,8 +7,14 @@ use std::time::Duration;
 use KonclaveA2AContracts::wire::{GetTaskRequest, TaskState, part};
 use KonclaveA2AContracts::{InitialA2AInterfaceEnvironment, validate_initial_get_task_request};
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
-use KonclaveA2AGateway::{A2AGatewayApplication, A2AGatewayError, A2AGatewayWaitConfig};
+use KonclaveA2ADomain::{A2AAgentId, A2AArtifactId, A2ATaskId, A2ATaskState, A2ATenantId};
+use KonclaveA2AGateway::{
+    A2AGatewayApplication, A2AGatewayError, A2AGatewayWaitConfig, A2ATaskSubmission,
+    A2ATaskSubmissionError, A2ATaskSubmitter,
+};
+use KonclaveA2ATaskStore::{A2ATaskArtifact, A2ATaskKey, A2ATaskStore, A2ATaskTransition};
 use KonclaveA2ATaskStoreSqlite::A2ASqliteTaskStoreConfig;
+use async_trait::async_trait;
 
 use common::{
     CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application, request, route,
@@ -175,4 +181,87 @@ async fn non_immediate_send_expires_without_fabricating_completion() {
             .err(),
         Some(A2AGatewayError::ResponseWaitExpired)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn submission_is_inside_the_configured_response_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let application = application(
+        store(&root),
+        Arc::new(PendingSubmitter),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::new(Duration::from_secs(5), Duration::from_millis(1)).unwrap(),
+    );
+    assert_eq!(
+        application
+            .send_message(request("request", true, 0))
+            .await
+            .err(),
+        Some(A2AGatewayError::ResponseWaitExpired)
+    );
+}
+
+#[tokio::test]
+async fn artifact_only_completion_is_not_projected_as_text_success() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        A2ATaskId::parse(task.task_id().to_owned()).unwrap(),
+    );
+    store
+        .append_artifact(
+            A2ATaskArtifact::new(
+                key.clone(),
+                A2AArtifactId::parse("artifact-1").unwrap(),
+                vec![1],
+                true,
+                110,
+            )
+            .unwrap(),
+            110,
+        )
+        .unwrap();
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            0,
+            A2ATaskState::Completed,
+            None,
+            120,
+        ))
+        .unwrap();
+    let get = validate_initial_get_task_request(
+        GetTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task.task_id().to_owned(),
+            history_length: Some(0),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        application.get_task(get).await.err(),
+        Some(A2AGatewayError::InvalidTaskProjection)
+    );
+}
+
+struct PendingSubmitter;
+
+#[async_trait]
+impl A2ATaskSubmitter for PendingSubmitter {
+    async fn submit(&self, _submission: A2ATaskSubmission) -> Result<(), A2ATaskSubmissionError> {
+        std::future::pending().await
+    }
 }

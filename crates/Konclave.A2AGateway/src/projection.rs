@@ -18,13 +18,20 @@ pub(crate) fn project_task(
         .iter()
         .map(|message| project_message(message, &task_id, &context_id))
         .collect::<Vec<_>>();
+    let agent_message = messages
+        .iter()
+        .zip(&wire_messages)
+        .rev()
+        .find(|(message, _)| message.role() == A2ATaskMessageRole::Agent)
+        .map(|(_, message)| message.clone());
+    if record.state() == A2ATaskState::Completed
+        && !record.content_pruned()
+        && agent_message.is_none()
+    {
+        return Err(A2AGatewayError::InvalidTaskProjection);
+    }
     let status_message = if response_state(record.state()) {
-        messages
-            .iter()
-            .zip(&wire_messages)
-            .rev()
-            .find(|(message, _)| message.role() == A2ATaskMessageRole::Agent)
-            .map(|(_, message)| message.clone())
+        agent_message
     } else {
         None
     };

@@ -17,7 +17,7 @@ use KonclaveA2ATaskStore::{
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use async_trait::async_trait;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout_at};
 
 use crate::A2AGatewayError;
 use crate::projection::project_task;
@@ -288,15 +288,18 @@ impl A2AGatewayApplication {
             }
         };
         let key = record.key().clone();
+        let deadline = Instant::now() + self.wait.timeout;
         if record.state() == KonclaveA2ADomain::A2ATaskState::Submitted {
             let submission = submission_from_record(record)?;
-            self.submitter
-                .submit(submission)
+            timeout_at(deadline, self.submitter.submit(submission))
                 .await
+                .map_err(|_| A2AGatewayError::ResponseWaitExpired)?
                 .map_err(|_| A2AGatewayError::SubmissionUnavailable)?;
         }
         if return_immediately {
-            return self.project_current(key, history_length).await;
+            return timeout_at(deadline, self.project_current(key, history_length))
+                .await
+                .map_err(|_| A2AGatewayError::ResponseWaitExpired)?;
         }
         let wait = async {
             loop {
@@ -307,7 +310,7 @@ impl A2AGatewayApplication {
                 sleep(self.wait.poll_interval).await;
             }
         };
-        timeout(self.wait.timeout, wait)
+        timeout_at(deadline, wait)
             .await
             .map_err(|_| A2AGatewayError::ResponseWaitExpired)?
     }
@@ -339,8 +342,7 @@ impl A2AGatewayApplication {
     ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let record = store.get_task(&key).map_err(map_store_error)?;
-            let messages = store.messages(&key, 2).map_err(map_store_error)?;
+            let (record, messages) = store.task_with_messages(&key, 2).map_err(map_store_error)?;
             project_task(record, messages, history_length)
         })
         .await

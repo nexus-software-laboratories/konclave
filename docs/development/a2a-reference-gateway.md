@@ -107,10 +107,11 @@ state after submission. Otherwise it polls the portable store until the task rea
 - `INPUT_REQUIRED`; or
 - `AUTH_REQUIRED`.
 
-The default response wait is 30 seconds with a 250-millisecond poll interval. Both are
-finite and configurable; the hard wait maximum is five minutes and poll maximum is
-one second. Expiry returns `504` without changing or fabricating task state. A retry
-can continue from the same durable task.
+The default response deadline is 30 seconds with a 250-millisecond poll interval. The
+deadline begins before downstream submission and covers submission plus durable-state
+polling, including immediate requests. It is finite and configurable; the hard
+maximum is five minutes and poll maximum is one second. Expiry returns `504` without
+changing or fabricating task state. A retry can continue from the same durable task.
 
 ## Task response projection
 
@@ -127,6 +128,10 @@ The initial projection:
 - omits history when `historyLength=0`; and
 - includes the most-recent agent message in status only for terminal or interrupted
   response states.
+
+A retained non-pruned `COMPLETED` task must contain an agent text message. Artifact-only
+completion is valid in the broader portable store but fails this text-only gateway
+projection instead of reporting success without a response.
 
 Task and SendMessageResponse decoders reject oversized bodies, duplicate JSON keys,
 missing status or timestamps, unspecified states, mismatched task/context identity,

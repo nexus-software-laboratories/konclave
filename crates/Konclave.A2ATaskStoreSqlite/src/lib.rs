@@ -4,6 +4,8 @@
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Barrier};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -114,8 +116,6 @@ const CREATE_SCHEMA_SQL: &str = "
             REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
     );";
 type ExistingArtifactRow = (i64, Vec<u8>, Vec<u8>, i64, Vec<u8>, i64);
-#[cfg(test)]
-static FAIL_AFTER_TASK_INSERT: AtomicBool = AtomicBool::new(false);
 
 /// Validated capacities and retention windows for one SQLite task store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +182,16 @@ impl A2ASqliteTaskStoreConfig {
 pub struct A2ASqliteTaskStore {
     connection: Mutex<Connection>,
     config: A2ASqliteTaskStoreConfig,
+    #[cfg(test)]
+    test_hooks: TestHooks,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    fail_after_task_insert: AtomicBool,
+    snapshot_after_task_load: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    prune_before_commit: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
 }
 
 impl A2ASqliteTaskStore {
@@ -215,6 +225,8 @@ impl A2ASqliteTaskStore {
         Ok(Self {
             connection: Mutex::new(connection),
             config,
+            #[cfg(test)]
+            test_hooks: TestHooks::default(),
         })
     }
 
@@ -296,7 +308,11 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             return Err(A2ATaskStoreError::CorruptData);
         }
         #[cfg(test)]
-        if FAIL_AFTER_TASK_INSERT.swap(false, Ordering::SeqCst) {
+        if self
+            .test_hooks
+            .fail_after_task_insert
+            .swap(false, Ordering::SeqCst)
+        {
             return Err(A2ATaskStoreError::Storage);
         }
         insert_status(
@@ -511,6 +527,30 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         load_messages(&connection, key, limit)
     }
 
+    fn task_with_messages(
+        &self,
+        key: &A2ATaskKey,
+        limit: usize,
+    ) -> Result<(A2ATaskRecord, Vec<StoredA2ATaskMessage>), A2ATaskStoreError> {
+        validate_page_limit(limit, self.config.max_messages_per_task)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        let task = load_task(&transaction, key)?;
+        #[cfg(test)]
+        run_test_barrier(&self.test_hooks.snapshot_after_task_load);
+        let messages = if task.content_pruned() {
+            Vec::new()
+        } else {
+            load_messages(&transaction, key, limit)?
+        };
+        transaction
+            .commit()
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        Ok((task, messages))
+    }
+
     fn artifacts(
         &self,
         key: &A2ATaskKey,
@@ -531,6 +571,8 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| A2ATaskStoreError::Storage)?;
         let outcome = prune_in(&transaction, self.config, now_unix_milliseconds)?;
+        #[cfg(test)]
+        run_test_barrier(&self.test_hooks.prune_before_commit);
         transaction
             .commit()
             .map_err(|_| A2ATaskStoreError::Storage)?;
@@ -1964,6 +2006,15 @@ fn map_insert_error(error: rusqlite::Error) -> A2ATaskStoreError {
 }
 
 #[cfg(test)]
+fn run_test_barrier(barrier: &Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>) {
+    let barriers = barrier.lock().unwrap().take();
+    if let Some((arrived, release)) = barriers {
+        arrived.wait();
+        release.wait();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use KonclaveA2AContracts::wire::{Message, Part, Role, SendMessageRequest, part};
@@ -2013,7 +2064,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("tasks.sqlite");
         let store = A2ASqliteTaskStore::open(&path, A2ASqliteTaskStoreConfig::default()).unwrap();
-        FAIL_AFTER_TASK_INSERT.store(true, Ordering::SeqCst);
+        store
+            .test_hooks
+            .fail_after_task_insert
+            .store(true, Ordering::SeqCst);
         assert_eq!(
             store.create_task(creation(100)).err(),
             Some(A2ATaskStoreError::Storage)
@@ -2038,5 +2092,75 @@ mod tests {
             store.create_task(creation(101)).unwrap(),
             CreateA2ATaskOutcome::Created(_)
         ));
+    }
+
+    #[test]
+    fn task_message_snapshot_stays_consistent_while_prune_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tasks.sqlite");
+        let config = A2ASqliteTaskStoreConfig {
+            max_tasks: 16,
+            max_messages_per_task: 8,
+            max_artifacts_per_task: 4,
+            max_payload_bytes: 1024 * 1024,
+            max_prune_batch: 8,
+            content_retention_milliseconds: 10,
+            idempotency_retention_milliseconds: 20,
+            busy_timeout_milliseconds: 1_000,
+        };
+        let store = Arc::new(A2ASqliteTaskStore::open(&path, config).unwrap());
+        let task = match store.create_task(creation(90)).unwrap() {
+            CreateA2ATaskOutcome::Created(task) => task,
+            CreateA2ATaskOutcome::Existing(_) => panic!("task should be new"),
+        };
+        let key = task.key().clone();
+        store
+            .append_message(
+                A2ATaskMessage::new(
+                    key.clone(),
+                    A2AMessageId::parse("response-a").unwrap(),
+                    A2ATaskMessageRole::Agent,
+                    "response",
+                    95,
+                )
+                .unwrap(),
+                95,
+            )
+            .unwrap();
+        store
+            .transition_task(A2ATaskTransition::new(
+                key.clone(),
+                0,
+                A2ATaskState::Completed,
+                None,
+                100,
+            ))
+            .unwrap();
+        let pruning_store = Arc::new(A2ASqliteTaskStore::open(&path, config).unwrap());
+        let snapshot_arrived = Arc::new(Barrier::new(2));
+        let snapshot_release = Arc::new(Barrier::new(2));
+        let prune_arrived = Arc::new(Barrier::new(2));
+        let prune_release = Arc::new(Barrier::new(2));
+        *store.test_hooks.snapshot_after_task_load.lock().unwrap() =
+            Some((snapshot_arrived.clone(), snapshot_release.clone()));
+        *pruning_store.test_hooks.prune_before_commit.lock().unwrap() =
+            Some((prune_arrived.clone(), prune_release.clone()));
+
+        let snapshot_store = store.clone();
+        let snapshot_key = key.clone();
+        let snapshot =
+            std::thread::spawn(move || snapshot_store.task_with_messages(&snapshot_key, 2));
+        snapshot_arrived.wait();
+        let pruning = std::thread::spawn(move || pruning_store.prune(110));
+        prune_arrived.wait();
+        snapshot_release.wait();
+        let (task, messages) = snapshot.join().unwrap().unwrap();
+        assert!(!task.content_pruned());
+        assert_eq!(messages.len(), 2);
+        prune_release.wait();
+        assert_eq!(pruning.join().unwrap().unwrap().pruned_task_payloads, 1);
+        let (task, messages) = store.task_with_messages(&key, 2).unwrap();
+        assert!(task.content_pruned());
+        assert!(messages.is_empty());
     }
 }
