@@ -103,6 +103,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0014-a2a-task-projection-store.md",
+        "title": "ADR 0014: A2A task projection store",
+        "section": "Architecture",
+        "order": 140,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -226,6 +233,13 @@
         "title": "A2A domain mapping",
         "section": "Development",
         "order": 35,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/a2a-task-store.md",
+        "title": "A2A task store",
+        "section": "Development",
+        "order": 36,
         "owner": "project:konclave"
       },
       {

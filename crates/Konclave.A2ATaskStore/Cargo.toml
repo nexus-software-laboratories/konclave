@@ -1,0 +1,13 @@
+[package]
+name = "KonclaveA2ATaskStore"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+KonclaveA2ADomain = { path = "../Konclave.A2ADomain" }
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+sha2.workspace = true
+thiserror.workspace = true

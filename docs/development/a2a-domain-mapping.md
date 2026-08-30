@@ -86,6 +86,9 @@ directed-request handling claims, and response/no-response outcomes. Later task
 lifecycle code may project observed Konclave facts into A2A state, but neither state
 machine may be cast, stored, or interpreted as the other.
 
+The [A2A task store](a2a-task-store.md) persists these values behind a portable
+semantic contract and keeps the context-to-route binding durable across restart.
+
 ## Verification
 
 Tests require:

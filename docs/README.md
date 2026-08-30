@@ -18,6 +18,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0011: Content-addressed collaboration policies](adr/adr-0011-content-addressed-collaboration-policies.md)
 - [ADR 0012: Structured directed collaboration requests](adr/adr-0012-structured-directed-collaboration-requests.md)
 - [ADR 0013: A2A edge interoperability](adr/adr-0013-a2a-edge-interoperability.md)
+- [ADR 0014: A2A task projection store](adr/adr-0014-a2a-task-projection-store.md)
 
 ## Protocol
 
@@ -47,6 +48,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Copilot delivery safety](development/copilot-delivery-safety.md)
 - [Collaboration policy contracts](development/collaboration-policies.md)
 - [A2A domain mapping](development/a2a-domain-mapping.md)
+- [A2A task store](development/a2a-task-store.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 

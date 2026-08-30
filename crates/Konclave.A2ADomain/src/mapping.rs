@@ -145,6 +145,12 @@ impl A2ADirectedRequestMapping {
         &self.text
     }
 
+    /// Returns the validated request body and consumes the mapping.
+    #[must_use]
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
     /// Returns whether the caller requested an immediate submitted-task response.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {

@@ -56,6 +56,10 @@ manifest whose release already exists.
 - prove A2A mapping derives one stable task and Konclave request identifier from the
   exact tenant, agent, context, and source message; rejects tenant/context
   substitution; and keeps A2A task state distinct from delivery and handling state.
+- run the portable A2A task-store contract against SQLite, covering exact create
+  retry, context binding, expected-generation transitions, completion evidence,
+  terminal immutability, message/artifact idempotency, restart recovery, hard byte
+  and row capacities, retention tombstones, and corruption refusal.
 
 ### MLS and cryptographic integration
 

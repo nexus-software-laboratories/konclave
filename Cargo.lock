@@ -30,6 +30,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveA2ATaskStore"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveA2ADomain",
+ "KonclaveDomainCore",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "KonclaveA2ATaskStoreSqlite"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveA2ADomain",
+ "KonclaveA2ATaskStore",
+ "KonclaveDomainCore",
+ "rusqlite",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "KonclaveAdapterTransport"
 version = "0.1.0"
 dependencies = [
