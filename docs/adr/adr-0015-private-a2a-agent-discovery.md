@@ -183,8 +183,9 @@ The self-hosted file catalog:
 - lists every publication source by exact canonical agent identifier;
 - accepts only portable relative regular-file paths beneath the descriptor's physical
   parent;
-- rejects symlinks, traversal, rooted paths, duplicate identifiers, and duplicate
-  source files;
+- opens sources through a pinned directory capability, rejects linked final files and
+  root-escaping links, and rejects traversal, rooted paths, duplicate identifiers,
+  and duplicate source paths;
 - eagerly compiles every bounded source before the catalog becomes available; and
 - returns identifiers in canonical lexical order.
 
@@ -322,8 +323,8 @@ Continued compliance requires:
 - production rejection of unauthenticated publications and loopback-only development
   exceptions;
 - exact public/extended identity, interface, security, and skill-union tests;
-- path traversal, rooted path, symlink, duplicate identifier, and duplicate source
-  rejection;
+- path traversal, rooted path, linked-file escape, duplicate identifier, and duplicate
+  source rejection;
 - deterministic card and OASF artifact bytes, size, and digest vectors;
 - tests proving OASF taxonomy values come only from explicit supported mappings;
 - checks that no OASF locator is generated for an A2A runtime endpoint;

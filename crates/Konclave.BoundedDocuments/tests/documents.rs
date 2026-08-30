@@ -62,10 +62,7 @@ fn catalog_root_accepts_only_confined_portable_json_sources() {
     let descriptor = root.path().join("catalog.json");
     std::fs::write(&descriptor, b"{}").unwrap();
     let catalog = JsonFileCatalogRoot::from_descriptor(&descriptor).unwrap();
-    assert_eq!(
-        catalog.resolve("agents/agent-a.json").unwrap(),
-        source.canonicalize().unwrap()
-    );
+    assert_eq!(catalog.read("agents/agent-a.json", 16).unwrap(), b"{}");
     for unsafe_source in [
         "../agent-a.json",
         "/agent-a.json",
@@ -74,7 +71,7 @@ fn catalog_root_accepts_only_confined_portable_json_sources() {
         "agents/agent-a.txt",
     ] {
         assert_eq!(
-            catalog.resolve(unsafe_source).err(),
+            catalog.read(unsafe_source, 16).err(),
             Some(BoundedDocumentError::UnsafeCatalogPath)
         );
     }
@@ -94,7 +91,25 @@ fn catalog_root_rejects_linked_sources() {
     std::fs::write(&descriptor, b"{}").unwrap();
     let catalog = JsonFileCatalogRoot::from_descriptor(&descriptor).unwrap();
     assert_eq!(
-        catalog.resolve("linked.json").err(),
+        catalog.read("linked.json", 16).err(),
+        Some(BoundedDocumentError::UnsafeCatalogPath)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_root_rejects_intermediate_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("outside.json"), b"{}").unwrap();
+    symlink(outside.path(), root.path().join("agents")).unwrap();
+    let descriptor = root.path().join("catalog.json");
+    std::fs::write(&descriptor, b"{}").unwrap();
+    let catalog = JsonFileCatalogRoot::from_descriptor(&descriptor).unwrap();
+    assert_eq!(
+        catalog.read("agents/outside.json", 16).err(),
         Some(BoundedDocumentError::UnsafeCatalogPath)
     );
 }

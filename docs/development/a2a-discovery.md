@@ -19,8 +19,10 @@ durable visibility, authorization, direct-configuration, OASF, and signing decis
 - tenant-bound `GetExtendedAgentCard` requests.
 
 `Konclave.BoundedDocuments` owns reusable bounded regular-file reads, strict
-single-document JSON decoding, bounded sequence decoding, and confined explicit JSON
-catalog paths. Collaboration-policy and A2A discovery code share these primitives.
+single-document JSON decoding, bounded sequence decoding, and capability-based
+explicit JSON catalog roots. Catalog sources are opened and read relative to one
+pinned directory handle rather than validated as paths and reopened. Collaboration
+policy and A2A discovery code share these primitives.
 
 `Konclave.A2ADiscovery` owns:
 
@@ -146,8 +148,8 @@ The catalog descriptor is at most 64 KiB and contains at most 64 entries:
 
 The catalog never scans. Sources must be portable relative `.json` paths beneath the
 descriptor's physical parent. Rooted paths, traversal, hidden paths, backslashes,
-symlinks, non-files, duplicate resolved source paths, duplicate identifiers, and
-source-name mismatches fail catalog creation.
+root-escaping links, linked final files, non-files, duplicate source paths, duplicate
+identifiers, and source-name mismatches fail catalog creation.
 
 Every publication is compiled eagerly. A returned catalog therefore contains no
 deferred source validation or partial entry set. Configuration changes require an

@@ -6,6 +6,7 @@ members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Ko
 async-trait = "0.1.92"
 aws-lc-rs = { version = "=1.16.3", default-features = false, features = ["alloc", "aws-lc-sys"] }
 base64 = "0.22.1"
+cap-std = "4.0.3"
 futures-util = "0.3.34"
 fs4 = "1.1.0"
 keyring = "=4.1.6"

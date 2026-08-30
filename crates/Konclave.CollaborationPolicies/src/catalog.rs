@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use KonclaveBoundedDocuments::{
     BoundedDocumentError, BoundedVec, JsonFileCatalogRoot, deserialize_strict,
@@ -11,8 +11,8 @@ use KonclaveDomainCore::{
 };
 use serde::Deserialize;
 
-use crate::source::CompiledCollaborationPolicy;
-use crate::{CollaborationPolicySourceError, compile_collaboration_policy_file};
+use crate::source::{CompiledCollaborationPolicy, map_document_error};
+use crate::{CollaborationPolicySourceError, compile_collaboration_policy_source};
 
 const CATALOG_SCHEMA_VERSION: u32 = 1;
 const MAX_CATALOG_BYTES: usize = 64 * 1024;
@@ -20,7 +20,8 @@ const MAX_CATALOG_ENTRIES: usize = MAX_COLLABORATION_POLICY_STATEMENTS;
 
 /// Explicit descriptor-backed catalog of collaboration-policy source files.
 pub struct FileCollaborationPolicyCatalog {
-    entries: BTreeMap<String, PathBuf>,
+    root: JsonFileCatalogRoot,
+    entries: BTreeMap<String, String>,
 }
 
 impl FileCollaborationPolicyCatalog {
@@ -46,22 +47,21 @@ impl FileCollaborationPolicyCatalog {
         let mut source_paths = BTreeSet::new();
         for entry in descriptor.entries.into_inner() {
             validate_collaboration_policy_name(&entry.name)?;
-            let canonical_source = root
-                .resolve(&entry.source)
-                .map_err(map_catalog_document_error)?;
+            root.read(&entry.source, crate::MAX_COLLABORATION_POLICY_SOURCE_BYTES)
+                .map_err(map_catalog_source_error)?;
             if entries.contains_key(&entry.name) {
                 return Err(CollaborationPolicySourceError::DuplicateCatalogEntry {
                     field: "name",
                 });
             }
-            if !source_paths.insert(canonical_source.clone()) {
+            if !source_paths.insert(entry.source.clone()) {
                 return Err(CollaborationPolicySourceError::DuplicateCatalogEntry {
                     field: "source",
                 });
             }
-            entries.insert(entry.name, canonical_source);
+            entries.insert(entry.name, entry.source);
         }
-        Ok(Self { entries })
+        Ok(Self { root, entries })
     }
 
     /// Returns catalog names in canonical lexical order.
@@ -85,7 +85,11 @@ impl FileCollaborationPolicyCatalog {
             .entries
             .get(name)
             .ok_or(CollaborationPolicySourceError::PolicyNotFound)?;
-        let compiled = compile_collaboration_policy_file(source, defaults)?;
+        let bytes = self
+            .root
+            .read(source, crate::MAX_COLLABORATION_POLICY_SOURCE_BYTES)
+            .map_err(|error| map_document_error(error, "source"))?;
+        let compiled = compile_collaboration_policy_source(&bytes, defaults)?;
         if compiled.bundle().name() != name {
             return Err(CollaborationPolicySourceError::CatalogNameMismatch);
         }
@@ -101,9 +105,30 @@ fn map_catalog_document_error(error: BoundedDocumentError) -> CollaborationPolic
                 maximum,
             }
         }
+
         BoundedDocumentError::InvalidJson => CollaborationPolicySourceError::InvalidJson {
             document: "catalog",
         },
+        BoundedDocumentError::FileUnavailable => CollaborationPolicySourceError::FileUnavailable {
+            document: "catalog",
+        },
+        BoundedDocumentError::UnsafeCatalogPath => {
+            CollaborationPolicySourceError::UnsafeCatalogPath
+        }
+    }
+}
+
+fn map_catalog_source_error(error: BoundedDocumentError) -> CollaborationPolicySourceError {
+    match error {
+        BoundedDocumentError::DocumentTooLarge { maximum } => {
+            CollaborationPolicySourceError::DocumentTooLarge {
+                document: "source",
+                maximum,
+            }
+        }
+        BoundedDocumentError::InvalidJson => {
+            CollaborationPolicySourceError::InvalidJson { document: "source" }
+        }
         BoundedDocumentError::FileUnavailable | BoundedDocumentError::UnsafeCatalogPath => {
             CollaborationPolicySourceError::UnsafeCatalogPath
         }

@@ -12,7 +12,6 @@ use crate::source::map_document_error;
 use crate::{
     A2ADiscoveryAction, A2ADiscoveryAuthorizationDecision, A2ADiscoveryAuthorizer,
     A2ADiscoveryError, CompiledA2AAgentPublication, OasfAgentRecord,
-    compile_a2a_agent_publication_file,
 };
 
 /// Maximum byte length of one file-catalog descriptor.
@@ -54,13 +53,13 @@ impl FileA2AAgentCatalog {
         for entry in descriptor.entries.into_inner() {
             let id =
                 A2AAgentId::parse(entry.name).map_err(|_| A2ADiscoveryError::InvalidAgentId)?;
-            let source = root
-                .resolve(&entry.source)
-                .map_err(|_| A2ADiscoveryError::UnsafeCatalogPath)?;
-            if !sources.insert(source.clone()) {
+            if !sources.insert(entry.source.clone()) {
                 return Err(A2ADiscoveryError::DuplicateCatalogEntry { field: "source" });
             }
-            let publication = compile_a2a_agent_publication_file(&source, environment)?;
+            let source = root
+                .read(&entry.source, crate::MAX_A2A_AGENT_PUBLICATION_SOURCE_BYTES)
+                .map_err(|error| map_document_error(error, "publication"))?;
+            let publication = crate::compile_a2a_agent_publication_source(&source, environment)?;
             if publication.id() != &id {
                 return Err(A2ADiscoveryError::CatalogNameMismatch);
             }

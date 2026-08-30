@@ -353,7 +353,7 @@ fn validate_security(
                         MAX_A2A_SECURITY_DESCRIPTION_BYTES,
                         "agent_card.security_scheme.description",
                     )?;
-                    if scheme.scheme != "Bearer" {
+                    if !scheme.scheme.eq_ignore_ascii_case("Bearer") {
                         return Err(A2AContractError::UnsupportedField {
                             field: "agent_card.security_scheme.http.scheme",
                         });

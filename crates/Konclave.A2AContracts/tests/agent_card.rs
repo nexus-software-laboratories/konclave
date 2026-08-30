@@ -141,6 +141,29 @@ fn agent_card_accepts_mtls_and_rejects_unsupported_or_inconsistent_security() {
         InitialA2AAgentSecurityKind::MutualTls
     );
 
+    let mut mixed_case_bearer = card();
+    let security_scheme::Scheme::HttpAuthSecurityScheme(scheme) = mixed_case_bearer
+        .security_schemes
+        .get_mut("bearer")
+        .unwrap()
+        .scheme
+        .as_mut()
+        .unwrap()
+    else {
+        panic!("test card must use HTTP authentication");
+    };
+    scheme.scheme = "bEaReR".to_owned();
+    let validated = validate_initial_agent_card(
+        mixed_case_bearer,
+        InitialA2AInterfaceEnvironment::Production,
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        validated.security().unwrap().kind(),
+        InitialA2AAgentSecurityKind::Bearer
+    );
+
     let mut oauth = card();
     oauth.security_schemes = HashMap::from([(
         "oauth".to_owned(),

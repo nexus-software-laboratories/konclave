@@ -5,8 +5,10 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::marker::PhantomData;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use serde::de::{DeserializeOwned, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -193,7 +195,7 @@ impl<'de> Visitor<'de> for UniqueJsonVisitor {
 
 /// Canonical physical root used to confine explicitly listed JSON catalog sources.
 pub struct JsonFileCatalogRoot {
-    root: PathBuf,
+    root: Dir,
 }
 
 impl JsonFileCatalogRoot {
@@ -211,16 +213,20 @@ impl JsonFileCatalogRoot {
         let root = parent
             .canonicalize()
             .map_err(|_| BoundedDocumentError::UnsafeCatalogPath)?;
+        let root = Dir::open_ambient_dir(root, ambient_authority())
+            .map_err(|_| BoundedDocumentError::UnsafeCatalogPath)?;
         Ok(Self { root })
     }
 
-    /// Resolves one portable relative JSON source beneath the physical catalog root.
+    /// Opens and reads one portable relative JSON source beneath the pinned catalog
+    /// root.
     ///
     /// # Errors
     ///
     /// Returns an unsafe-path error for rooted, hidden, traversing, linked, missing,
-    /// non-JSON, or root-escaping sources.
-    pub fn resolve(&self, source: &str) -> Result<PathBuf, BoundedDocumentError> {
+    /// non-JSON, or root-escaping sources, and a size error when content exceeds
+    /// `maximum`.
+    pub fn read(&self, source: &str, maximum: usize) -> Result<Vec<u8>, BoundedDocumentError> {
         if !portable_json_source(source) {
             return Err(BoundedDocumentError::UnsafeCatalogPath);
         }
@@ -231,19 +237,18 @@ impl JsonFileCatalogRoot {
         {
             return Err(BoundedDocumentError::UnsafeCatalogPath);
         }
-        let candidate = self.root.join(relative);
-        let metadata = std::fs::symlink_metadata(&candidate)
+        let metadata = self
+            .root
+            .symlink_metadata(relative)
             .map_err(|_| BoundedDocumentError::UnsafeCatalogPath)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(BoundedDocumentError::UnsafeCatalogPath);
         }
-        let canonical = candidate
-            .canonicalize()
+        let file = self
+            .root
+            .open(relative)
             .map_err(|_| BoundedDocumentError::UnsafeCatalogPath)?;
-        if !canonical.starts_with(&self.root) {
-            return Err(BoundedDocumentError::UnsafeCatalogPath);
-        }
-        Ok(canonical)
+        read_bounded_capability_file(file, maximum)
     }
 }
 
@@ -331,4 +336,34 @@ fn portable_json_source(value: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         })
+}
+
+fn read_bounded_capability_file(
+    file: cap_std::fs::File,
+    maximum: usize,
+) -> Result<Vec<u8>, BoundedDocumentError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| BoundedDocumentError::UnsafeCatalogPath)?;
+    if !metadata.is_file() {
+        return Err(BoundedDocumentError::UnsafeCatalogPath);
+    }
+    if usize::try_from(metadata.len())
+        .ok()
+        .is_none_or(|length| length > maximum)
+    {
+        return Err(BoundedDocumentError::DocumentTooLarge { maximum });
+    }
+    let take_limit = u64::try_from(maximum)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(BoundedDocumentError::DocumentTooLarge { maximum })?;
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(maximum));
+    file.take(take_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_| BoundedDocumentError::UnsafeCatalogPath)?;
+    if bytes.len() > maximum {
+        return Err(BoundedDocumentError::DocumentTooLarge { maximum });
+    }
+    Ok(bytes)
 }

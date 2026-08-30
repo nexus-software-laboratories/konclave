@@ -345,7 +345,7 @@ impl<'de> Visitor<'de> for SourceLimitVisitor<u32> {
     }
 }
 
-fn map_document_error(
+pub(crate) fn map_document_error(
     error: BoundedDocumentError,
     document: &'static str,
 ) -> CollaborationPolicySourceError {
