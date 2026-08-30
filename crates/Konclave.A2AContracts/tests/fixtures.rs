@@ -2,7 +2,7 @@ use KonclaveA2AContracts::wire::{AgentCard, GetTaskRequest, SendMessageRequest};
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, InitialA2AInterfaceEnvironment,
     decode_initial_get_task_protobuf, decode_initial_send_message_protobuf,
-    validate_initial_agent_interface,
+    validate_initial_agent_card, validate_initial_agent_interface,
 };
 use prost::Message as _;
 
@@ -32,6 +32,13 @@ fn immutable_a2a_fixtures_round_trip_exactly() {
 
     let card = AgentCard::decode(AGENT_CARD).unwrap();
     assert_eq!(card.encode_to_vec(), AGENT_CARD);
+    let validated_card = validate_initial_agent_card(
+        card.clone(),
+        InitialA2AInterfaceEnvironment::Production,
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(validated_card.name(), "Konclave gateway");
     assert_eq!(card.supported_interfaces.len(), 1);
     let interface = validate_initial_agent_interface(
         card.supported_interfaces.into_iter().next().unwrap(),

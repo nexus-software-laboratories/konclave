@@ -38,6 +38,12 @@ pub enum A2AContractError {
         /// Stable field name.
         field: &'static str,
     },
+    /// A collection repeated a value that must be unique.
+    #[error("A2A value is duplicated: {field}")]
+    DuplicateValue {
+        /// Stable field name.
+        field: &'static str,
+    },
     /// A numeric field exceeded the initial profile range.
     #[error("A2A numeric field is outside its supported range: {field}")]
     OutOfRange {

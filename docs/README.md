@@ -19,10 +19,12 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0012: Structured directed collaboration requests](adr/adr-0012-structured-directed-collaboration-requests.md)
 - [ADR 0013: A2A edge interoperability](adr/adr-0013-a2a-edge-interoperability.md)
 - [ADR 0014: A2A task projection store](adr/adr-0014-a2a-task-projection-store.md)
+- [ADR 0015: Private A2A agent discovery](adr/adr-0015-private-a2a-agent-discovery.md)
 
 ## Protocol
 
 - [A2A compatibility contract](protocol/a2a-compatibility.md)
+- [OASF compatibility contract](protocol/oasf-compatibility.md)
 - [Protocol compatibility contract](protocol/compatibility.md)
 - [Identity signature encodings](protocol/identity-signatures.md)
 - [Relay transport authentication](protocol/relay-authentication.md)
@@ -49,6 +51,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Collaboration policy contracts](development/collaboration-policies.md)
 - [A2A domain mapping](development/a2a-domain-mapping.md)
 - [A2A task store](development/a2a-task-store.md)
+- [A2A agent discovery](development/a2a-discovery.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 

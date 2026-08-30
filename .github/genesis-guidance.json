@@ -110,6 +110,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0015-private-a2a-agent-discovery.md",
+        "title": "ADR 0015: Private A2A agent discovery",
+        "section": "Architecture",
+        "order": 150,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -135,6 +142,13 @@
         "title": "A2A compatibility contract",
         "section": "Protocol",
         "order": 40,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/protocol/oasf-compatibility.md",
+        "title": "OASF compatibility contract",
+        "section": "Protocol",
+        "order": 50,
         "owner": "project:konclave"
       },
       {
@@ -240,6 +254,13 @@
         "title": "A2A task store",
         "section": "Development",
         "order": 36,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/a2a-discovery.md",
+        "title": "A2A agent discovery",
+        "section": "Development",
+        "order": 37,
         "owner": "project:konclave"
       },
       {

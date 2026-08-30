@@ -6,6 +6,7 @@ version = 4
 name = "KonclaveA2AContracts"
 version = "0.1.0"
 dependencies = [
+ "KonclaveBoundedDocuments",
  "pbjson",
  "pbjson-build",
  "pbjson-types",
@@ -15,6 +16,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "KonclaveA2ADiscovery"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveA2ADomain",
+ "KonclaveBoundedDocuments",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
  "url",
 ]
@@ -68,6 +84,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveBoundedDocuments"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "KonclaveClientLibrary"
 version = "0.1.0"
 dependencies = [
@@ -99,6 +125,7 @@ dependencies = [
 name = "KonclaveCollaborationPolicies"
 version = "0.1.0"
 dependencies = [
+ "KonclaveBoundedDocuments",
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",

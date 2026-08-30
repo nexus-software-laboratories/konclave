@@ -32,7 +32,7 @@ The initial profile negotiates exactly:
 - protocol version `1.0`;
 - binding `HTTP+JSON`;
 - media type `text/plain`;
-- `SendMessage`, `GetTask`, and a bounded Agent Card interface.
+- `SendMessage`, `GetTask`, `GetExtendedAgentCard`, and bounded Agent Cards.
 
 Production interfaces require an absolute HTTPS URL without credentials, query, or
 fragment. Development mode additionally permits HTTP on `localhost`, `127.0.0.0/8`,
@@ -70,6 +70,31 @@ lowercase hexadecimal characters, matching the mapped Konclave request identifie
 Protocol Buffer and ProtoJSON request bodies are rejected before decoding when they
 exceed 128 KiB. Generated DTOs may represent the broader A2A schema, but unsupported
 fields never become defaults, flattened text, fetched URLs, or silent truncation.
+
+## Agent Cards and private discovery
+
+The standard public discovery path is `/.well-known/agent-card.json`. Konclave
+exposes it only when a publication explicitly enables public well-known discovery.
+Otherwise clients use direct configuration or the authenticated self-hosted catalog;
+there is no public enumeration route.
+
+Agent Cards are rejected before decoding when they exceed 256 KiB. ProtoJSON also
+rejects duplicate object keys before generated DTO decoding. The initial
+publication profile permits at most four canonical interfaces, 32 unique skills, and
+one HTTP Bearer or mutual-TLS security declaration with one matching requirement.
+It advertises only HTTP+JSON, `text/plain`, no streaming, no push notifications, and
+no arbitrary extension. Provider, documentation, icon, example, metadata, and
+signature fields remain unsupported.
+
+Production publication requires Bearer or mutual TLS. Unauthenticated publication is
+limited to explicit loopback-development interfaces. `GetExtendedAgentCard` retains
+only the exact configured tenant after web authentication and authorization occur at
+the gateway.
+
+The [A2A agent discovery contract](../development/a2a-discovery.md) owns publication,
+public/private visibility, catalog, and authorization semantics. The
+[OASF compatibility contract](oasf-compatibility.md) owns the optional generated
+catalog projection and its conformance limits.
 
 ## Fixtures and validation
 

@@ -17,6 +17,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0012: Separate deterministic collaboration policy from directed request content](../adr/adr-0012-structured-directed-collaboration-requests.md)
 - [ADR 0013: Expose A2A through an edge gateway without replacing Konclave transport](../adr/adr-0013-a2a-edge-interoperability.md)
 - [ADR 0014: Persist A2A task projections behind a portable store contract](../adr/adr-0014-a2a-task-projection-store.md)
+- [ADR 0015: Keep A2A agent discovery private by default with authenticated projections](../adr/adr-0015-private-a2a-agent-discovery.md)
 
 ## Superseded records
 

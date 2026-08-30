@@ -2,6 +2,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::path::Path;
 
+use KonclaveBoundedDocuments::{
+    BoundedDocumentError, BoundedVec, deserialize_strict, read_bounded_regular_file,
+};
 use KonclaveCryptographicCore::derive_collaboration_policy_digest;
 use KonclaveDomainCore::{
     CollaborationPolicyBundle, CollaborationPolicyDigest, CollaborationPolicyEffect,
@@ -10,11 +13,11 @@ use KonclaveDomainCore::{
     validate_collaboration_policy_name,
 };
 use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
-use serde::de::{DeserializeOwned, SeqAccess, Visitor};
+use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 
 use crate::CollaborationPolicySourceError;
-use crate::file::{create_new_file, read_bounded_regular_file};
+use crate::file::create_new_file;
 
 pub const MAX_COLLABORATION_POLICY_SOURCE_BYTES: usize = 128 * 1024;
 const SOURCE_API_VERSION_V1: &str = "konclave.dev/v1";
@@ -68,7 +71,9 @@ pub fn compile_collaboration_policy_source(
             maximum: MAX_COLLABORATION_POLICY_SOURCE_BYTES,
         });
     }
-    let source: CollaborationPolicySource = deserialize_strict(bytes, "source")?;
+    let source: CollaborationPolicySource =
+        deserialize_strict(bytes, MAX_COLLABORATION_POLICY_SOURCE_BYTES)
+            .map_err(|error| map_document_error(error, "source"))?;
     if source.kind != SOURCE_KIND {
         return Err(CollaborationPolicySourceError::UnsupportedKind);
     }
@@ -136,7 +141,8 @@ pub fn compile_collaboration_policy_file(
     path: &Path,
     defaults: CollaborationPolicyLimits,
 ) -> Result<CompiledCollaborationPolicy, CollaborationPolicySourceError> {
-    let bytes = read_bounded_regular_file(path, MAX_COLLABORATION_POLICY_SOURCE_BYTES, "source")?;
+    let bytes = read_bounded_regular_file(path, MAX_COLLABORATION_POLICY_SOURCE_BYTES)
+        .map_err(|error| map_document_error(error, "source"))?;
     compile_collaboration_policy_source(&bytes, defaults)
 }
 
@@ -185,19 +191,6 @@ pub fn write_compiled_collaboration_policy_file(
     compiled: &CompiledCollaborationPolicy,
 ) -> Result<(), CollaborationPolicySourceError> {
     create_new_file(path, compiled.canonical_bytes(), "bundle")
-}
-
-pub(crate) fn deserialize_strict<T: DeserializeOwned>(
-    bytes: &[u8],
-    document: &'static str,
-) -> Result<T, CollaborationPolicySourceError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = T::deserialize(&mut deserializer)
-        .map_err(|_| CollaborationPolicySourceError::InvalidJson { document })?;
-    deserializer
-        .end()
-        .map_err(|_| CollaborationPolicySourceError::InvalidJson { document })?;
-    Ok(value)
 }
 
 #[derive(Deserialize)]
@@ -352,48 +345,22 @@ impl<'de> Visitor<'de> for SourceLimitVisitor<u32> {
     }
 }
 
-pub(crate) struct BoundedVec<T, const MAXIMUM: usize>(Vec<T>);
-
-impl<T, const MAXIMUM: usize> BoundedVec<T, MAXIMUM> {
-    pub(crate) fn into_inner(self) -> Vec<T> {
-        self.0
-    }
-}
-
-impl<T, const MAXIMUM: usize> Default for BoundedVec<T, MAXIMUM> {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
-
-impl<'de, T: Deserialize<'de>, const MAXIMUM: usize> Deserialize<'de> for BoundedVec<T, MAXIMUM> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_seq(BoundedVecVisitor::<T, MAXIMUM>(PhantomData))
-    }
-}
-
-struct BoundedVecVisitor<T, const MAXIMUM: usize>(PhantomData<T>);
-
-impl<'de, T: Deserialize<'de>, const MAXIMUM: usize> Visitor<'de>
-    for BoundedVecVisitor<T, MAXIMUM>
-{
-    type Value = BoundedVec<T, MAXIMUM>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "an array with at most {MAXIMUM} items")
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-        if sequence.size_hint().is_some_and(|size| size > MAXIMUM) {
-            return Err(serde::de::Error::custom("array exceeds its item bound"));
+fn map_document_error(
+    error: BoundedDocumentError,
+    document: &'static str,
+) -> CollaborationPolicySourceError {
+    match error {
+        BoundedDocumentError::FileUnavailable => {
+            CollaborationPolicySourceError::FileUnavailable { document }
         }
-        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAXIMUM));
-        while let Some(value) = sequence.next_element()? {
-            if values.len() == MAXIMUM {
-                return Err(serde::de::Error::custom("array exceeds its item bound"));
-            }
-            values.push(value);
+        BoundedDocumentError::DocumentTooLarge { maximum } => {
+            CollaborationPolicySourceError::DocumentTooLarge { document, maximum }
         }
-        Ok(BoundedVec(values))
+        BoundedDocumentError::InvalidJson => {
+            CollaborationPolicySourceError::InvalidJson { document }
+        }
+        BoundedDocumentError::UnsafeCatalogPath => {
+            CollaborationPolicySourceError::UnsafeCatalogPath
+        }
     }
 }

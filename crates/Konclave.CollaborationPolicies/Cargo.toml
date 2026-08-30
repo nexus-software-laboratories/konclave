@@ -6,6 +6,7 @@ license = "Apache-2.0"
 rust-version = "1.85"
 
 [dependencies]
+KonclaveBoundedDocuments = { path = "../Konclave.BoundedDocuments" }
 KonclaveCryptographicCore = { path = "../Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }

@@ -1,0 +1,55 @@
+{
+  "apiVersion": "konclave.dev/v1",
+  "kind": "A2AAgentPublication",
+  "metadata": {
+    "name": "contract-agent"
+  },
+  "spec": {
+    "publicWellKnown": false,
+    "name": "Contract agent",
+    "description": "Coordinates one bounded text contract request.",
+    "version": "1.0.0",
+    "interfaces": [
+      {
+        "url": "https://agent.example.com/a2a/v1",
+        "tenant": "tenant-a"
+      }
+    ],
+    "authentication": {
+      "type": "bearer",
+      "name": "bearer",
+      "bearerFormat": "JWT"
+    },
+    "skills": [
+      {
+        "id": "contract-review",
+        "name": "Contract review",
+        "description": "Reviews one text contract and returns one response.",
+        "tags": [
+          "contracts",
+          "text"
+        ]
+      }
+    ],
+    "extendedSkills": [
+      {
+        "id": "private-contract-review",
+        "name": "Private contract review",
+        "description": "Reviews deployment-scoped contract details.",
+        "tags": [
+          "contracts",
+          "private"
+        ]
+      }
+    ],
+    "oasf": {
+      "authors": [
+        "Maintainers <maintainers@example.com>"
+      ],
+      "createdAt": "2026-08-30T00:00:00Z",
+      "skills": [
+        "language_generation"
+      ]
+    }
+  }
+}
