@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use KonclaveProtectedHttp::protected_http_client_builder;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::StreamExt;
@@ -27,10 +28,8 @@ pub(crate) struct ProtectedHttpResponse {
 
 impl ProtectedHttpClient {
     pub(crate) fn new(endpoint: RelayEndpoint) -> Result<Self, KonclaveClientError> {
-        ensure_tls_provider()?;
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
+        let client = protected_http_client_builder()
+            .map_err(|_| KonclaveClientError::TransportUnavailable)?
             .connect_timeout(DEFAULT_OPERATION_TIMEOUT)
             .timeout(DEFAULT_OPERATION_TIMEOUT)
             .user_agent(concat!("KonclaveClientLibrary/", env!("CARGO_PKG_VERSION")))
@@ -117,17 +116,6 @@ pub(crate) fn authorization_header(bytes: &[u8; 32]) -> Option<HeaderValue> {
     let mut header = HeaderValue::from_bytes(&value).ok()?;
     header.set_sensitive(true);
     Some(header)
-}
-
-fn ensure_tls_provider() -> Result<(), KonclaveClientError> {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-    if rustls::crypto::CryptoProvider::get_default().is_some() {
-        Ok(())
-    } else {
-        Err(KonclaveClientError::TransportUnavailable)
-    }
 }
 
 async fn read_bounded(response: Response, maximum: usize) -> Result<Vec<u8>, KonclaveClientError> {

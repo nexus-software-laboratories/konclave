@@ -9,6 +9,7 @@ rust-version = "1.85"
 KonclaveCryptographicCore = { path = "../Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveProtocolContracts = { path = "../Konclave.ProtocolContracts" }
+KonclaveProtectedHttp = { path = "../Konclave.ProtectedHttp" }
 KonclaveRelayAuthentication = { path = "../Konclave.RelayAuthentication" }
 KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }
 async-trait.workspace = true
@@ -17,7 +18,6 @@ futures-util.workspace = true
 log.workspace = true
 reqwest.workspace = true
 rustix = { workspace = true, features = ["fs"] }
-rustls.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["net", "time"] }
 tokio-tungstenite.workspace = true

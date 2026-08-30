@@ -129,6 +129,12 @@ impl A2ATaskRecord {
         self.request_text.as_deref()
     }
 
+    /// Returns retained request text and consumes the task projection.
+    #[must_use]
+    pub fn into_request_text(self) -> Option<String> {
+        self.request_text
+    }
+
     /// Returns whether immediate response was requested.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {

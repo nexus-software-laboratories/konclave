@@ -59,6 +59,17 @@ fn send_message_protobuf_and_protojson_narrow_to_one_text_part() {
     assert_eq!(json.text(), validated.text());
     assert_eq!(json.return_immediately(), validated.return_immediately());
     assert_eq!(json.history_length(), validated.history_length());
+
+    let reconstructed =
+        validate_initial_send_message_request(json.into_wire(), Some("tenant-a")).unwrap();
+    assert_eq!(reconstructed.message_id(), validated.message_id());
+    assert_eq!(reconstructed.context_id(), validated.context_id());
+    assert_eq!(reconstructed.text(), validated.text());
+    assert_eq!(
+        reconstructed.return_immediately(),
+        validated.return_immediately()
+    );
+    assert_eq!(reconstructed.history_length(), validated.history_length());
 }
 
 #[test]

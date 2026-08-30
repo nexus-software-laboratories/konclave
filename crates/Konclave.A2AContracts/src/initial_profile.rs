@@ -78,6 +78,42 @@ impl InitialSendMessageRequest {
     pub fn into_text(self) -> String {
         self.text
     }
+
+    /// Reconstructs the canonical generated request DTO for an outbound initial-profile
+    /// client.
+    #[must_use]
+    pub fn into_wire(self) -> SendMessageRequest {
+        SendMessageRequest {
+            tenant: self.tenant.unwrap_or_default(),
+            message: Some(crate::wire::Message {
+                message_id: self.message_id,
+                context_id: self.context_id.unwrap_or_default(),
+                task_id: String::new(),
+                role: Role::User as i32,
+                parts: vec![crate::wire::Part {
+                    content: Some(part::Content::Text(self.text)),
+                    metadata: None,
+                    filename: String::new(),
+                    media_type: A2A_TEXT_MEDIA_TYPE.to_owned(),
+                }],
+                metadata: None,
+                extensions: vec![],
+                reference_task_ids: vec![],
+            }),
+            configuration: Some(crate::wire::SendMessageConfiguration {
+                accepted_output_modes: vec![A2A_TEXT_MEDIA_TYPE.to_owned()],
+                task_push_notification_config: None,
+                history_length: match self.history_length {
+                    Some(0) => Some(0),
+                    Some(1) => Some(1),
+                    None => None,
+                    Some(_) => unreachable!(),
+                },
+                return_immediately: self.return_immediately,
+            }),
+            metadata: None,
+        }
+    }
 }
 
 /// Validated `GetTask` request accepted by the initial profile.
@@ -521,7 +557,7 @@ fn validate_history_length(value: Option<i32>) -> Result<Option<u32>, A2AContrac
     }
 }
 
-fn require_empty_struct(
+pub(crate) fn require_empty_struct(
     value: Option<pbjson_types::Struct>,
     field: &'static str,
 ) -> Result<(), A2AContractError> {

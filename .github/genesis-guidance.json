@@ -264,6 +264,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/a2a-reference-gateway.md",
+        "title": "A2A reference gateway",
+        "section": "Development",
+        "order": 38,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/repository-controls.md",
         "title": "Repository controls",
         "section": "Development",
