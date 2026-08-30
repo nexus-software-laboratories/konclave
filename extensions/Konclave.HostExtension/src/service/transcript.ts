@@ -12,6 +12,7 @@ export const harnessWireValues = {
   'claude-code': 2,
   codex: 3,
   generic: 4,
+  'a2a-gateway': 5,
 } as const;
 
 export type HarnessKind = keyof typeof harnessWireValues;

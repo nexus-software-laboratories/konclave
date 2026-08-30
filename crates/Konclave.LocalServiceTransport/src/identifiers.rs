@@ -26,6 +26,7 @@ const HARNESS_CODEX: u16 = 3;
 
 /// Wire value for a harness using the universal generic client contract.
 const HARNESS_GENERIC: u16 = 4;
+const HARNESS_A2A_GATEWAY: u16 = 5;
 
 macro_rules! define_fixed_identifier {
     ($(#[$meta:meta])* $name:ident, $length:expr, $field:literal) => {
@@ -166,6 +167,8 @@ pub enum HarnessKind {
     Codex,
     /// A harness without a paved Konclave lifecycle adapter.
     Generic,
+    /// A network-edge A2A gateway using the authenticated local service contract.
+    A2AGateway,
 }
 
 impl HarnessKind {
@@ -177,6 +180,7 @@ impl HarnessKind {
             Self::ClaudeCode => HARNESS_CLAUDE_CODE,
             Self::Codex => HARNESS_CODEX,
             Self::Generic => HARNESS_GENERIC,
+            Self::A2AGateway => HARNESS_A2A_GATEWAY,
         }
     }
 
@@ -192,6 +196,7 @@ impl HarnessKind {
             HARNESS_CLAUDE_CODE => Ok(Self::ClaudeCode),
             HARNESS_CODEX => Ok(Self::Codex),
             HARNESS_GENERIC => Ok(Self::Generic),
+            HARNESS_A2A_GATEWAY => Ok(Self::A2AGateway),
             _ => Err(LocalServiceTransportError::UnknownHarnessKind),
         }
     }
@@ -204,6 +209,7 @@ impl HarnessKind {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::Generic => "generic",
+            Self::A2AGateway => "a2a-gateway",
         }
     }
 }
@@ -330,13 +336,16 @@ mod tests {
             HarnessKind::ClaudeCode,
             HarnessKind::Codex,
             HarnessKind::Generic,
+            HarnessKind::A2AGateway,
         ] {
             assert_eq!(
                 HarnessKind::from_wire_value(harness.wire_value()).unwrap(),
                 harness
             );
         }
-        for value in [0_u16, 5, u16::MAX] {
+        assert_eq!(HarnessKind::A2AGateway.wire_value(), 5);
+        assert_eq!(HarnessKind::A2AGateway.as_str(), "a2a-gateway");
+        for value in [0_u16, 6, u16::MAX] {
             assert_eq!(
                 HarnessKind::from_wire_value(value).unwrap_err(),
                 LocalServiceTransportError::UnknownHarnessKind

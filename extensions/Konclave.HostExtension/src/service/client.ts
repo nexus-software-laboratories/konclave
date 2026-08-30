@@ -773,7 +773,13 @@ function parseUnsignedBigInt(value: unknown): bigint {
 }
 
 function parseHarness(value: unknown): HarnessKind {
-  if (value === 'copilot' || value === 'claude-code' || value === 'codex' || value === 'generic') {
+  if (
+    value === 'copilot' ||
+    value === 'claude-code' ||
+    value === 'codex' ||
+    value === 'generic' ||
+    value === 'a2a-gateway'
+  ) {
     return value;
   }
   throw new LocalServiceProtocolError('the issued session grant is malformed');

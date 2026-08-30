@@ -18,13 +18,16 @@ owns publication and discovery visibility.
 - one HTTP authentication and authorization boundary; and
 - one outbound-only A2A client.
 
-`A2AGatewayApplication::open_sqlite` is the complete public reference constructor.
-`A2AGatewayApplication::new` accepts the portable store trait for managed or
-alternative self-hosted implementations.
+`A2AGatewayApplication::open_sqlite` is the complete public reference constructor
+for an injected submitter that does not need direct task-store access.
+`A2AGatewayApplication::new` accepts the portable store trait for the Konclave bridge,
+managed implementations, or alternative self-hosted implementations. The bridge and
+application receive the same store instance through that constructor.
 
 The gateway does not open local daemon storage, MLS provider state, profile keys, or
-local service internals. The later Konclave bridge implements `A2ATaskSubmitter`
-through public client/service contracts.
+local service internals. The
+[A2A-to-Konclave bridge](a2a-konclave-bridge.md) implements `A2ATaskSubmitter`
+through the public authenticated local-service contract.
 
 `Konclave.ProtectedHttp` owns the shared credential-bearing reqwest builder. It
 installs the existing rustls ring provider and disables redirects and automatic proxy
@@ -86,8 +89,10 @@ credentials never enter application, task, log, error, or telemetry values.
 `SendMessage` validates and maps the request before opening durable state. Task
 creation occurs on a blocking-storage executor.
 
-After a task is durably created or an exact existing `SUBMITTED` task is recovered,
-the application invokes `A2ATaskSubmitter`. The submission contains the exact task
+After a task is durably created, or an exact existing `SUBMITTED` or `WORKING` task
+is recovered, the application invokes `A2ATaskSubmitter`. Resubmitting `WORKING`
+allows an exact caller retry to restore response observation after gateway process
+restart without scanning local daemon state. The submission contains the exact task
 key, source A2A message identifier, Konclave conversation and target, deterministic
 Konclave request identifier, and request text. It does not implement `Clone` or
 `Debug`.
@@ -263,5 +268,6 @@ Focused tests cover:
 - response byte bounds and task/context correlation; and
 - TLS-or-loopback binding policy.
 
-The later A2A-to-Konclave bridge must run the same application and HTTP suites with
-the real idempotent submitter before end-to-end interoperability is claimed.
+The A2A-to-Konclave bridge test suite runs the application and authenticated
+HTTP+JSON path with the real idempotent submitter, SQLite task state, adversarial
+message filtering, exact retries, and bounded observation.
