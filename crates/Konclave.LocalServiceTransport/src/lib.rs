@@ -41,6 +41,7 @@ mod endpoint;
 mod error;
 mod grant;
 mod handshake;
+mod hex;
 mod identifiers;
 mod installation;
 mod message;
@@ -76,6 +77,7 @@ pub use handshake::{
     AuthorizationRegistration, ClientHandshakeRequest, HANDSHAKE_TIMEOUT, IssuerRegistration,
     complete_client_handshake, complete_service_handshake,
 };
+pub use hex::{decode_lowercase_hex, encode_lowercase_hex};
 pub use identifiers::{
     AdapterKeyId, AdapterKeyVersion, CHALLENGE_LENGTH, ClientInstanceId, HarnessKind, IssuerKeyId,
     IssuerKeyVersion, LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceChallenge, MAX_PROFILE_ID_LENGTH,

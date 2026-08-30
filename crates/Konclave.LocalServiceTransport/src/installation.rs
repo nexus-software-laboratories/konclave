@@ -6,6 +6,7 @@ use KonclaveDomainCore::Ed25519PublicKey;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::hex::{decode_lowercase_hex, encode_lowercase_hex};
 use crate::{
     AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     AuthorizationPolicyVersion, HarnessKind, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
@@ -404,6 +405,7 @@ impl TryFrom<IssuerDocument> for InstalledIssuerRegistration {
             "claude-code" => HarnessKind::ClaudeCode,
             "codex" => HarnessKind::Codex,
             "generic" => HarnessKind::Generic,
+            "a2a-gateway" => HarnessKind::A2AGateway,
             _ => return Err(LocalServiceInstallationError::Invalid),
         };
         let issuer_key_id = IssuerKeyId::from_bytes(decode_hex(&document.issuer_key_id)?);
@@ -468,6 +470,7 @@ impl From<&LocalServiceInstallation> for InstallationDocument {
                         HarnessKind::ClaudeCode => "claude-code",
                         HarnessKind::Codex => "codex",
                         HarnessKind::Generic => "generic",
+                        HarnessKind::A2AGateway => "a2a-gateway",
                     }
                     .to_string(),
                     profile_kind: match issuer.registration.profiles() {
@@ -562,31 +565,11 @@ fn validate_absolute_path(path: &Path) -> Result<(), LocalServiceInstallationErr
 }
 
 fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], LocalServiceInstallationError> {
-    if value.len() != N * 2
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(LocalServiceInstallationError::Invalid);
-    }
-    let mut decoded = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let text =
-            core::str::from_utf8(pair).map_err(|_| LocalServiceInstallationError::Invalid)?;
-        decoded[index] =
-            u8::from_str_radix(text, 16).map_err(|_| LocalServiceInstallationError::Invalid)?;
-    }
-    Ok(decoded)
+    decode_lowercase_hex(value).ok_or(LocalServiceInstallationError::Invalid)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
+    encode_lowercase_hex(bytes)
 }
 
 #[cfg(test)]

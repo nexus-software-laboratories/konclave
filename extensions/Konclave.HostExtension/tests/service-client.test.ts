@@ -26,6 +26,7 @@ import {
   clientSigningMessage,
   encodeIssuerTranscript,
   encodeSessionTranscript,
+  harnessWireValues,
   serviceSigningMessage,
   type HarnessKind,
   type SessionGrantRecord,
@@ -144,6 +145,8 @@ function harness(value: number): HarnessKind {
       return 'codex';
     case 4:
       return 'generic';
+    case 5:
+      return 'a2a-gateway';
     default:
       throw new Error('unknown harness');
   }
@@ -467,6 +470,10 @@ afterEach(() => {
 });
 
 describe('shared local service client', () => {
+  it('keeps the additive A2A gateway harness wire value distinct', () => {
+    expect(harnessWireValues['a2a-gateway']).toBe(5);
+  });
+
   it('connects an unsupported harness through the installed generic issuer', async () => {
     const service = await startService(() => ({
       kind: 'respond',

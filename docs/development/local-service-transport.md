@@ -47,11 +47,13 @@ Active grants are bounded globally, per issuer, and per profile. Expired grants 
 reclaimed before issuance; quota exhaustion denies the new grant and never evicts an
 active one.
 
-The built-in Generic integration uses the same AccountTrusted issuer and grant
-contract. A self-declared harness label is metadata, not evidence. A generic client
-must supply an explicit durable profile alias or use a clearly ephemeral isolated
-profile; PID, working directory, time, model name, and free-form text do not establish
-continuity.
+The built-in Generic integration and A2A gateway use the same AccountTrusted issuer
+and grant contract. `HarnessKind::A2AGateway` has additive wire value `5`, allowing
+registration, audit, and policy code to distinguish an internet-facing A2A edge from
+an unsupported generic harness. A self-declared harness label remains metadata, not
+evidence. A generic client must supply an explicit durable profile alias or use a
+clearly ephemeral isolated profile; PID, working directory, time, model name, and
+free-form text do not establish continuity.
 
 ## Authenticated transcript
 
@@ -142,6 +144,16 @@ path, identifier, or plaintext.
 
 The transport does not interpret an operation or its payload, so a new operation needs
 no transport change and every bound applies to all of them uniformly.
+
+`Konclave.LocalServiceClient` provides the reusable Rust client for these opaque JSON
+operations without making the transport interpret operation names or payloads. Its
+`LocalServiceJsonClient` pins the configured service key, authenticates through one
+installed issuer, generates one memory-only session identity, obtains an exact-profile
+grant, and opens a fresh owner-verified local connection for each bounded operation.
+It retries an ambiguous transport failure with the same request identifier and
+payload. One caller-visible deadline covers grant-lock contention, refresh, retry,
+handshake, request, and response. Grant refresh preserves the same session identity,
+so request-ledger reconciliation remains stable across replacement grants.
 
 The request identifier is the idempotency key. Pending work is keyed by the ephemeral
 session public key, profile, and request identifier, so a replacement grant for the

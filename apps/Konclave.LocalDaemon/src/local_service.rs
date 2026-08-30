@@ -506,6 +506,7 @@ fn parse_harness(value: &str) -> Option<HarnessKind> {
         "claude-code" => Some(HarnessKind::ClaudeCode),
         "codex" => Some(HarnessKind::Codex),
         "generic" => Some(HarnessKind::Generic),
+        "a2a-gateway" => Some(HarnessKind::A2AGateway),
         _ => None,
     }
 }
@@ -2801,8 +2802,8 @@ mod collaboration_policy_tests {
     };
     use KonclaveLocalServiceTransport::{
         AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicyVersion,
-        HarnessKind, IssuerKeyId, IssuerKeyVersion, ServiceProfileId, SessionCapabilities,
-        SessionGrant, SessionGrantClaims, SessionGrantId,
+        HarnessKind, IssuerKeyId, IssuerKeyVersion, RequestId, ServiceProfileId,
+        SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
     };
     use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
     use serde_json::json;
@@ -2819,12 +2820,20 @@ mod collaboration_policy_tests {
     use crate::persistence::DirectedRequestClaim;
 
     fn grant(harness: HarnessKind) -> SessionGrant {
+        grant_with_identity(harness, [1; 16], [3; 32])
+    }
+
+    fn grant_with_identity(
+        harness: HarnessKind,
+        grant_id: [u8; 16],
+        session_public_key: [u8; 32],
+    ) -> SessionGrant {
         SessionGrant::new(SessionGrantClaims {
-            grant_id: SessionGrantId::from_bytes([1; 16]),
+            grant_id: SessionGrantId::from_bytes(grant_id),
             issuer_key_id: IssuerKeyId::from_bytes([2; 16]),
             issuer_key_version: IssuerKeyVersion::new(1).unwrap(),
             profile: ServiceProfileId::parse("policy-eval").unwrap(),
-            session_public_key: Ed25519PublicKey::from_bytes([3; 32]),
+            session_public_key: Ed25519PublicKey::from_bytes(session_public_key),
             harness,
             evidence: AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
                 .unwrap(),
@@ -2834,6 +2843,23 @@ mod collaboration_policy_tests {
             capabilities: SessionCapabilities::ALL,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn refreshed_grants_preserve_the_session_request_ledger_principal() {
+        let request_id = RequestId::from_bytes([7; 16]);
+        let first = grant_with_identity(HarnessKind::A2AGateway, [1; 16], [3; 32]);
+        let refreshed = grant_with_identity(HarnessKind::A2AGateway, [9; 16], [3; 32]);
+        let another_session = grant_with_identity(HarnessKind::A2AGateway, [10; 16], [4; 32]);
+
+        assert!(
+            super::LedgerKey::for_grant(&first, request_id)
+                == super::LedgerKey::for_grant(&refreshed, request_id)
+        );
+        assert!(
+            super::LedgerKey::for_grant(&first, request_id)
+                != super::LedgerKey::for_grant(&another_session, request_id)
+        );
     }
 
     fn bundle(limits: CollaborationPolicyLimits) -> Vec<u8> {

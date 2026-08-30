@@ -74,6 +74,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveA2AKonclaveBridge"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveA2ADiscovery",
+ "KonclaveA2ADomain",
+ "KonclaveA2AGateway",
+ "KonclaveA2ATaskStore",
+ "KonclaveA2ATaskStoreSqlite",
+ "KonclaveBoundedDocuments",
+ "KonclaveCryptographicCore",
+ "KonclaveDomainCore",
+ "KonclaveLocalServiceClient",
+ "KonclaveLocalServiceTransport",
+ "async-trait",
+ "axum",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "KonclaveA2ATaskStore"
 version = "0.1.0"
 dependencies = [
@@ -293,6 +320,22 @@ dependencies = [
 name = "KonclaveLocalFraming"
 version = "0.1.0"
 dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "KonclaveLocalServiceClient"
+version = "0.1.0"
+dependencies = [
+ "KonclaveBoundedDocuments",
+ "KonclaveCryptographicCore",
+ "KonclaveDomainCore",
+ "KonclaveLocalServiceTransport",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

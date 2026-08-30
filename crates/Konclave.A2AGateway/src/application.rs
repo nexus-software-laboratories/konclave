@@ -289,7 +289,10 @@ impl A2AGatewayApplication {
         };
         let key = record.key().clone();
         let deadline = Instant::now() + self.wait.timeout;
-        if record.state() == KonclaveA2ADomain::A2ATaskState::Submitted {
+        if matches!(
+            record.state(),
+            KonclaveA2ADomain::A2ATaskState::Submitted | KonclaveA2ADomain::A2ATaskState::Working
+        ) {
             let submission = submission_from_record(record)?;
             timeout_at(deadline, self.submitter.submit(submission))
                 .await
