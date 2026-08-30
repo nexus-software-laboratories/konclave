@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.A2AContracts", "crates/Konclave.A2ADomain", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CollaborationPolicies", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
+members = ["apps/Konclave.CommandLine", "apps/Konclave.CommunityRelay", "apps/Konclave.LocalDaemon", "crates/Konclave.A2AContracts", "crates/Konclave.A2ADomain", "crates/Konclave.A2ATaskStore", "crates/Konclave.A2ATaskStoreSqlite", "crates/Konclave.AdapterTransport", "crates/Konclave.ClientLibrary", "crates/Konclave.CollaborationPolicies", "crates/Konclave.CryptographicCore", "crates/Konclave.DomainCore", "crates/Konclave.LocalFraming", "crates/Konclave.LocalServiceTransport", "crates/Konclave.ProtocolContracts", "crates/Konclave.RelayAuthentication", "crates/Konclave.RelayCore", "crates/Konclave.SecretStorage", "crates/Konclave.WindowsSecurity"]
 
 [workspace.dependencies]
 async-trait = "0.1.92"

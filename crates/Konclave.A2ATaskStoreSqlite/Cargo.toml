@@ -1,0 +1,17 @@
+[package]
+name = "KonclaveA2ATaskStoreSqlite"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+KonclaveA2ADomain = { path = "../Konclave.A2ADomain" }
+KonclaveA2ATaskStore = { path = "../Konclave.A2ATaskStore" }
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+rusqlite.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+tempfile = "3.27.0"
