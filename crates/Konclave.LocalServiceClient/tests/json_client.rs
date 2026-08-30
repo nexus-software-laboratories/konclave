@@ -179,7 +179,10 @@ fn endpoint(name: &str) -> (LocalServiceEndpoint, Option<tempfile::TempDir>) {
 
 #[cfg(unix)]
 fn endpoint(name: &str) -> (LocalServiceEndpoint, Option<tempfile::TempDir>) {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let endpoint =
         LocalServiceEndpoint::parse(root.path().join(format!("{name}.sock")).to_str().unwrap())
             .unwrap();
