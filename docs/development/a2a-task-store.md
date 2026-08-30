@@ -75,9 +75,14 @@ artifact workstream has produced those bytes.
 
 The adapter:
 
-- enables foreign keys, WAL mode, `synchronous=FULL`, and a finite busy timeout;
-- creates or opens schema version `1` in one immediate transaction;
-- refuses a partial pre-existing `a2a_*` schema without a version row;
+- disables trusted-schema execution, triggers, views, writable-schema access, legacy
+  quoted-string parsing, and other unsafe database features before examining state;
+- validates every schema row, including exact implicit autoindexes, against the
+  complete canonical schema before writing to an existing database;
+- enables foreign keys, rollback journaling, `synchronous=FULL`, and a finite busy
+  timeout;
+- creates schema version `1` in one immediate transaction;
+- refuses partial, modified, or unexpected pre-existing schema objects;
 - parameterizes caller values and keeps network work outside transactions;
 - serializes one connection through a process-local mutex;
 - verifies context bindings, task/message/artifact digests, task-to-message identity,
@@ -124,6 +129,6 @@ The SQLite suite covers:
 - UTF-8 byte, row, task, and artifact capacity;
 - response-before-transition restart recovery;
 - payload pruning, tombstone retry, tombstone expiry, and active-task preservation;
-- WAL and synchronous settings;
-- partial and unsupported schemas; and
+- rollback-journal and synchronous settings;
+- partial, modified, unexpected, and executable schemas; and
 - live-row, status-history, and pruned-tombstone corruption.

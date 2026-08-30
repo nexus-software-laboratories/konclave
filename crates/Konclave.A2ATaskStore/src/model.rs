@@ -518,3 +518,138 @@ fn append_bytes(digest: &mut Sha256, value: &[u8]) {
     digest.update(length.to_be_bytes());
     digest.update(value);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(tenant: Option<&str>) -> A2ATaskKey {
+        A2ATaskKey::new(
+            A2AAgentId::parse("agent-a").unwrap(),
+            tenant.map(|value| A2ATenantId::parse(value).unwrap()),
+            A2ATaskId::parse("00112233445566778899aabbccddeeff").unwrap(),
+        )
+    }
+
+    fn creation(
+        tenant: Option<&str>,
+        history_length: Option<u32>,
+        created_at: u64,
+    ) -> A2ATaskCreation {
+        A2ATaskCreation {
+            key: key(tenant),
+            context_id: A2AContextId::parse("context-a").unwrap(),
+            source_message_id: A2AMessageId::parse("message-a").unwrap(),
+            conversation_id: ConversationId::from_bytes([1; ConversationId::LENGTH]),
+            target_device_id: DeviceId::from_bytes([2; DeviceId::LENGTH]),
+            request_message_id: MessageId::from_bytes([3; MessageId::LENGTH]),
+            request_text: "request".to_owned(),
+            return_immediately: history_length.is_some(),
+            history_length,
+            created_at_unix_milliseconds: created_at,
+        }
+    }
+
+    fn to_hex(bytes: [u8; 32]) -> String {
+        use std::fmt::Write as _;
+
+        bytes
+            .iter()
+            .fold(String::with_capacity(64), |mut output, byte| {
+                write!(output, "{byte:02x}").unwrap();
+                output
+            })
+    }
+
+    #[test]
+    fn task_identity_digest_has_fixed_vectors_and_excludes_timestamp() {
+        let with_options = creation(Some("tenant-a"), Some(1), 100);
+        let later_retry = creation(Some("tenant-a"), Some(1), 200);
+        assert_eq!(
+            with_options.identity_digest(),
+            later_retry.identity_digest()
+        );
+        assert_eq!(
+            to_hex(with_options.identity_digest()),
+            "4b96f5bf492e552fbc205dd5e5a13c1acbb1c0beea2995370651766cfe8f99d0"
+        );
+        assert_eq!(
+            to_hex(creation(None, None, 100).identity_digest()),
+            "828567cbde72aa1a9a8b9ded61f2959910da80fe748f2777f8465bfbdcad769e"
+        );
+    }
+
+    #[test]
+    fn message_identity_digest_has_fixed_role_vectors_and_excludes_timestamp() {
+        let user = A2ATaskMessage::new(
+            key(Some("tenant-a")),
+            A2AMessageId::parse("response-a").unwrap(),
+            A2ATaskMessageRole::User,
+            "response",
+            100,
+        )
+        .unwrap();
+        let agent = A2ATaskMessage::new(
+            key(Some("tenant-a")),
+            A2AMessageId::parse("response-a").unwrap(),
+            A2ATaskMessageRole::Agent,
+            "response",
+            200,
+        )
+        .unwrap();
+        assert_eq!(
+            to_hex(user.identity_digest()),
+            "0e3627e20574b9460ebacf2a4b4f7ca7fb09bd443c349b1252f869b1d1f65844"
+        );
+        assert_eq!(
+            to_hex(agent.identity_digest()),
+            "bb3a678fd93a1f29ee8efd02b04d1658ca300f95c5ad259e34249e969861f690"
+        );
+        let later_agent = A2ATaskMessage::new(
+            key(Some("tenant-a")),
+            A2AMessageId::parse("response-a").unwrap(),
+            A2ATaskMessageRole::Agent,
+            "response",
+            300,
+        )
+        .unwrap();
+        assert_eq!(agent.identity_digest(), later_agent.identity_digest());
+    }
+
+    #[test]
+    fn artifact_identity_digest_has_fixed_completion_vectors_and_excludes_timestamp() {
+        let incomplete = A2ATaskArtifact::new(
+            key(Some("tenant-a")),
+            A2AArtifactId::parse("artifact-a").unwrap(),
+            br#"{"result":"ok"}"#.to_vec(),
+            false,
+            100,
+        )
+        .unwrap();
+        let complete = A2ATaskArtifact::new(
+            key(Some("tenant-a")),
+            A2AArtifactId::parse("artifact-a").unwrap(),
+            br#"{"result":"ok"}"#.to_vec(),
+            true,
+            200,
+        )
+        .unwrap();
+        assert_eq!(
+            to_hex(incomplete.identity_digest()),
+            "28a6b7037a7f01f4f9a7ce42ba0d0beee8f2ecd5360c8eb26fc58e6f68ad3465"
+        );
+        assert_eq!(
+            to_hex(complete.identity_digest()),
+            "1cbc6e625369280feb2cc92d39cc9353087f3c5feba492b07100e9cd9d052b47"
+        );
+        let later_complete = A2ATaskArtifact::new(
+            key(Some("tenant-a")),
+            A2AArtifactId::parse("artifact-a").unwrap(),
+            br#"{"result":"ok"}"#.to_vec(),
+            true,
+            300,
+        )
+        .unwrap();
+        assert_eq!(complete.identity_digest(), later_complete.identity_digest());
+    }
+}

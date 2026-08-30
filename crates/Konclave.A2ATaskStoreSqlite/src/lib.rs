@@ -2,6 +2,8 @@
 #![allow(non_snake_case)]
 
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -15,16 +17,105 @@ use KonclaveA2ATaskStore::{
     StoredA2ATaskMessage, TransitionA2ATaskOutcome,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 const SCHEMA_VERSION: u32 = 1;
+const HARD_MAX_SCHEMA_OBJECT_COUNT: i64 = 16;
+const MAX_SCHEMA_IDENTIFIER_BYTES: i64 = 128;
+const MAX_SCHEMA_SQL_BYTES: i64 = 4_096;
 const MAX_PAGE_SIZE: usize = 256;
 const HARD_MAX_TASKS: usize = 100_000;
 const HARD_MAX_PAYLOAD_BYTES: usize = 1024 * 1024 * 1024;
 const HARD_MAX_RETENTION_MILLISECONDS: u64 = 10 * 365 * 24 * 60 * 60 * 1_000;
 const HARD_MAX_BUSY_TIMEOUT_MILLISECONDS: u64 = 60_000;
 const HARD_MAX_PRUNE_BATCH: usize = 1_024;
+const CREATE_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS a2a_store_meta (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        schema_version INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS a2a_context (
+        agent_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        context_id TEXT NOT NULL,
+        conversation_id BLOB NOT NULL CHECK (length(conversation_id) = 32),
+        target_device_id BLOB NOT NULL CHECK (length(target_device_id) = 32),
+        created_at_unix_milliseconds INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, tenant_id, context_id)
+    );
+    CREATE TABLE IF NOT EXISTS a2a_task (
+        agent_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        context_id TEXT NOT NULL,
+        source_message_id TEXT NOT NULL,
+        conversation_id BLOB NOT NULL CHECK (length(conversation_id) = 32),
+        target_device_id BLOB NOT NULL CHECK (length(target_device_id) = 32),
+        request_message_id BLOB NOT NULL CHECK (length(request_message_id) = 16),
+        identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
+        return_immediately INTEGER NOT NULL CHECK (return_immediately IN (0, 1)),
+        history_length INTEGER,
+        state INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        created_at_unix_milliseconds INTEGER NOT NULL,
+        updated_at_unix_milliseconds INTEGER NOT NULL,
+        terminal_at_unix_milliseconds INTEGER,
+        terminal_reason TEXT,
+        content_pruned INTEGER NOT NULL CHECK (content_pruned IN (0, 1)),
+        content_expires_at_unix_milliseconds INTEGER,
+        tombstone_expires_at_unix_milliseconds INTEGER,
+        request_text_digest BLOB NOT NULL CHECK (length(request_text_digest) = 32),
+        PRIMARY KEY (agent_id, tenant_id, task_id),
+        FOREIGN KEY (agent_id, tenant_id, context_id)
+            REFERENCES a2a_context(agent_id, tenant_id, context_id)
+    );
+    CREATE TABLE IF NOT EXISTS a2a_task_status (
+        agent_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        state INTEGER NOT NULL,
+        terminal_reason TEXT,
+        occurred_at_unix_milliseconds INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, tenant_id, task_id, generation),
+        FOREIGN KEY (agent_id, tenant_id, task_id)
+            REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS a2a_task_message (
+        agent_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        role INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
+        recorded_at_unix_milliseconds INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, tenant_id, task_id, sequence),
+        UNIQUE (agent_id, tenant_id, task_id, message_id),
+        FOREIGN KEY (agent_id, tenant_id, task_id)
+            REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS a2a_task_artifact (
+        agent_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        artifact_id TEXT NOT NULL,
+        content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
+        canonical_bytes BLOB NOT NULL,
+        complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+        identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
+        recorded_at_unix_milliseconds INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, tenant_id, task_id, sequence),
+        UNIQUE (agent_id, tenant_id, task_id, artifact_id),
+        FOREIGN KEY (agent_id, tenant_id, task_id)
+            REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
+    );";
 type ExistingArtifactRow = (i64, Vec<u8>, Vec<u8>, i64, Vec<u8>, i64);
+#[cfg(test)]
+static FAIL_AFTER_TASK_INSERT: AtomicBool = AtomicBool::new(false);
 
 /// Validated capacities and retention windows for one SQLite task store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,20 +196,21 @@ impl A2ASqliteTaskStore {
     ) -> Result<Self, A2ATaskStoreError> {
         let config = config.validate()?;
         let mut connection = Connection::open(path).map_err(|_| A2ATaskStoreError::Storage)?;
+        configure_connection_security(&connection)?;
         connection
             .busy_timeout(Duration::from_millis(config.busy_timeout_milliseconds))
             .map_err(|_| A2ATaskStoreError::Storage)?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(|_| A2ATaskStoreError::Storage)?;
+        initialize_schema(&mut connection)?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
+            .pragma_update(None, "journal_mode", "DELETE")
             .map_err(|_| A2ATaskStoreError::Storage)?;
         connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(|_| A2ATaskStoreError::Storage)?;
         verify_pragmas(&connection, config.busy_timeout_milliseconds)?;
-        initialize_schema(&mut connection)?;
         verify_store_bounds(&connection, config)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -202,6 +294,10 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             .map_err(map_insert_error)?;
         if changed != 1 {
             return Err(A2ATaskStoreError::CorruptData);
+        }
+        #[cfg(test)]
+        if FAIL_AFTER_TASK_INSERT.swap(false, Ordering::SeqCst) {
+            return Err(A2ATaskStoreError::Storage);
         }
         insert_status(
             &transaction,
@@ -442,128 +538,65 @@ impl A2ATaskStore for A2ASqliteTaskStore {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct SchemaObject {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+fn configure_connection_security(connection: &Connection) -> Result<(), A2ATaskStoreError> {
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_WRITABLE_SCHEMA, false)?;
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW, false)?;
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
+    set_db_config(connection, DbConfig::SQLITE_DBCONFIG_DQS_DML, false)
+}
+
+fn set_db_config(
+    connection: &Connection,
+    config: DbConfig,
+    enabled: bool,
+) -> Result<(), A2ATaskStoreError> {
+    let configured = connection
+        .set_db_config(config, enabled)
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    if configured != enabled {
+        return Err(A2ATaskStoreError::Storage);
+    }
+    Ok(())
+}
+
 fn initialize_schema(connection: &mut Connection) -> Result<(), A2ATaskStoreError> {
-    let existing_objects = {
-        let mut statement = connection
-            .prepare(
-                "SELECT name FROM sqlite_schema
-                 WHERE type = 'table' AND name LIKE 'a2a_%'
-                 ORDER BY name
-                 LIMIT 7",
-            )
-            .map_err(|_| A2ATaskStoreError::Storage)?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|_| A2ATaskStoreError::Storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| A2ATaskStoreError::Storage)?
-    };
-    let expected_objects = [
-        "a2a_context",
-        "a2a_store_meta",
-        "a2a_task",
-        "a2a_task_artifact",
-        "a2a_task_message",
-        "a2a_task_status",
-    ];
-    if !existing_objects.is_empty()
-        && existing_objects
-            .iter()
-            .map(String::as_str)
-            .ne(expected_objects)
-    {
+    let expected_objects = expected_schema_objects()?;
+    let existing_objects = schema_objects(connection)?;
+    if !existing_objects.is_empty() && existing_objects != expected_objects {
         return Err(A2ATaskStoreError::CorruptData);
     }
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| A2ATaskStoreError::Storage)?;
-    transaction
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS a2a_store_meta (
-                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
-                schema_version INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS a2a_context (
-                agent_id TEXT NOT NULL,
-                tenant_id TEXT NOT NULL,
-                context_id TEXT NOT NULL,
-                conversation_id BLOB NOT NULL CHECK (length(conversation_id) = 32),
-                target_device_id BLOB NOT NULL CHECK (length(target_device_id) = 32),
-                created_at_unix_milliseconds INTEGER NOT NULL,
-                PRIMARY KEY (agent_id, tenant_id, context_id)
-             );
-             CREATE TABLE IF NOT EXISTS a2a_task (
-                agent_id TEXT NOT NULL,
-                tenant_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                context_id TEXT NOT NULL,
-                source_message_id TEXT NOT NULL,
-                conversation_id BLOB NOT NULL CHECK (length(conversation_id) = 32),
-                target_device_id BLOB NOT NULL CHECK (length(target_device_id) = 32),
-                request_message_id BLOB NOT NULL CHECK (length(request_message_id) = 16),
-                identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
-                return_immediately INTEGER NOT NULL CHECK (return_immediately IN (0, 1)),
-                history_length INTEGER,
-                state INTEGER NOT NULL,
-                generation INTEGER NOT NULL,
-                created_at_unix_milliseconds INTEGER NOT NULL,
-                updated_at_unix_milliseconds INTEGER NOT NULL,
-                terminal_at_unix_milliseconds INTEGER,
-                terminal_reason TEXT,
-                content_pruned INTEGER NOT NULL CHECK (content_pruned IN (0, 1)),
-                content_expires_at_unix_milliseconds INTEGER,
-                tombstone_expires_at_unix_milliseconds INTEGER,
-                request_text_digest BLOB NOT NULL CHECK (length(request_text_digest) = 32),
-                PRIMARY KEY (agent_id, tenant_id, task_id),
-                FOREIGN KEY (agent_id, tenant_id, context_id)
-                    REFERENCES a2a_context(agent_id, tenant_id, context_id)
-             );
-             CREATE TABLE IF NOT EXISTS a2a_task_status (
-                agent_id TEXT NOT NULL,
-                tenant_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                state INTEGER NOT NULL,
-                terminal_reason TEXT,
-                occurred_at_unix_milliseconds INTEGER NOT NULL,
-                PRIMARY KEY (agent_id, tenant_id, task_id, generation),
-                FOREIGN KEY (agent_id, tenant_id, task_id)
-                    REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
-             );
-             CREATE TABLE IF NOT EXISTS a2a_task_message (
-                agent_id TEXT NOT NULL,
-                tenant_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                message_id TEXT NOT NULL,
-                role INTEGER NOT NULL,
-                text TEXT NOT NULL,
-                identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
-                recorded_at_unix_milliseconds INTEGER NOT NULL,
-                PRIMARY KEY (agent_id, tenant_id, task_id, sequence),
-                UNIQUE (agent_id, tenant_id, task_id, message_id),
-                FOREIGN KEY (agent_id, tenant_id, task_id)
-                    REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
-             );
-             CREATE TABLE IF NOT EXISTS a2a_task_artifact (
-                agent_id TEXT NOT NULL,
-                tenant_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                artifact_id TEXT NOT NULL,
-                content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
-                canonical_bytes BLOB NOT NULL,
-                complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
-                identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
-                recorded_at_unix_milliseconds INTEGER NOT NULL,
-                PRIMARY KEY (agent_id, tenant_id, task_id, sequence),
-                UNIQUE (agent_id, tenant_id, task_id, artifact_id),
-                FOREIGN KEY (agent_id, tenant_id, task_id)
-                    REFERENCES a2a_task(agent_id, tenant_id, task_id) ON DELETE CASCADE
-             );",
-        )
-        .map_err(|_| A2ATaskStoreError::Storage)?;
-    let version: Option<i64> = transaction
+    if existing_objects.is_empty() {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        transaction
+            .execute_batch(CREATE_SCHEMA_SQL)
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        transaction
+            .execute(
+                "INSERT INTO a2a_store_meta (singleton_id, schema_version) VALUES (1, ?1)",
+                params![i64::from(SCHEMA_VERSION)],
+            )
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+    }
+    if schema_objects(connection)? != expected_objects {
+        return Err(A2ATaskStoreError::CorruptData);
+    }
+    let version: Option<i64> = connection
         .query_row(
             "SELECT schema_version FROM a2a_store_meta WHERE singleton_id = 1",
             [],
@@ -571,20 +604,80 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), A2ATaskStoreErro
         )
         .optional()
         .map_err(|_| A2ATaskStoreError::Storage)?;
-    match version {
-        Some(version) if version == i64::from(SCHEMA_VERSION) => {}
-        Some(_) => return Err(A2ATaskStoreError::CorruptData),
-        None if existing_objects.is_empty() => {
-            transaction
-                .execute(
-                    "INSERT INTO a2a_store_meta (singleton_id, schema_version) VALUES (1, ?1)",
-                    params![i64::from(SCHEMA_VERSION)],
-                )
-                .map_err(|_| A2ATaskStoreError::Storage)?;
-        }
-        None => return Err(A2ATaskStoreError::CorruptData),
+    if version != Some(i64::from(SCHEMA_VERSION)) {
+        return Err(A2ATaskStoreError::CorruptData);
     }
-    transaction.commit().map_err(|_| A2ATaskStoreError::Storage)
+    Ok(())
+}
+
+fn expected_schema_objects() -> Result<Vec<SchemaObject>, A2ATaskStoreError> {
+    let connection = Connection::open_in_memory().map_err(|_| A2ATaskStoreError::Storage)?;
+    connection
+        .execute_batch(CREATE_SCHEMA_SQL)
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    schema_objects(&connection)
+}
+
+fn schema_objects(connection: &Connection) -> Result<Vec<SchemaObject>, A2ATaskStoreError> {
+    let metrics: (i64, i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(MAX(length(CAST(type AS BLOB))), 0),
+                    COALESCE(MAX(length(CAST(name AS BLOB))), 0),
+                    COALESCE(MAX(length(CAST(tbl_name AS BLOB))), 0),
+                    COALESCE(MAX(length(CAST(sql AS BLOB))), 0)
+             FROM sqlite_schema
+             ",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    if metrics.0 > HARD_MAX_SCHEMA_OBJECT_COUNT
+        || metrics.1 > MAX_SCHEMA_IDENTIFIER_BYTES
+        || metrics.2 > MAX_SCHEMA_IDENTIFIER_BYTES
+        || metrics.3 > MAX_SCHEMA_IDENTIFIER_BYTES
+        || metrics.4 > MAX_SCHEMA_SQL_BYTES
+    {
+        return Err(A2ATaskStoreError::CorruptData);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_schema
+             ORDER BY type, name
+             LIMIT 17",
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|_| A2ATaskStoreError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(SchemaObject {
+                object_type: row.0,
+                name: row.1,
+                table_name: row.2,
+                sql: row.3,
+            })
+        })
+        .collect()
 }
 
 fn verify_pragmas(
@@ -604,7 +697,7 @@ fn verify_pragmas(
         .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
         .map_err(|_| A2ATaskStoreError::Storage)?;
     if foreign_keys != 1
-        || !journal_mode.eq_ignore_ascii_case("wal")
+        || !journal_mode.eq_ignore_ascii_case("delete")
         || synchronous != 2
         || from_sql(busy_timeout)? != expected_busy_timeout_milliseconds
     {
@@ -1868,4 +1961,82 @@ fn map_insert_error(error: rusqlite::Error) -> A2ATaskStoreError {
         }
     }
     A2ATaskStoreError::Storage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use KonclaveA2AContracts::wire::{Message, Part, Role, SendMessageRequest, part};
+    use KonclaveA2AContracts::{A2A_TEXT_MEDIA_TYPE, validate_initial_send_message_request};
+    use KonclaveA2ADomain::{A2AAgentRoute, map_initial_send_message};
+
+    fn creation(created_at: u64) -> A2ATaskCreation {
+        let route = A2AAgentRoute::new(
+            A2AAgentId::parse("agent-a").unwrap(),
+            A2AContextId::parse("context-a").unwrap(),
+            Some(A2ATenantId::parse("tenant-a").unwrap()),
+            ConversationId::from_bytes([4; ConversationId::LENGTH]),
+            DeviceId::from_bytes([5; DeviceId::LENGTH]),
+        );
+        let request = validate_initial_send_message_request(
+            SendMessageRequest {
+                tenant: "tenant-a".to_owned(),
+                message: Some(Message {
+                    message_id: "message-a".to_owned(),
+                    context_id: "context-a".to_owned(),
+                    task_id: String::new(),
+                    role: Role::User as i32,
+                    parts: vec![Part {
+                        content: Some(part::Content::Text("request".to_owned())),
+                        metadata: None,
+                        filename: String::new(),
+                        media_type: A2A_TEXT_MEDIA_TYPE.to_owned(),
+                    }],
+                    metadata: None,
+                    extensions: vec![],
+                    reference_task_ids: vec![],
+                }),
+                configuration: None,
+                metadata: None,
+            },
+            Some("tenant-a"),
+        )
+        .unwrap();
+        A2ATaskCreation::from_mapping(
+            map_initial_send_message(&route, request).unwrap(),
+            created_at,
+        )
+    }
+
+    #[test]
+    fn create_failure_rolls_back_context_task_status_and_message() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tasks.sqlite");
+        let store = A2ASqliteTaskStore::open(&path, A2ASqliteTaskStoreConfig::default()).unwrap();
+        FAIL_AFTER_TASK_INSERT.store(true, Ordering::SeqCst);
+        assert_eq!(
+            store.create_task(creation(100)).err(),
+            Some(A2ATaskStoreError::Storage)
+        );
+        {
+            let connection = store.lock().unwrap();
+            for table in [
+                "a2a_context",
+                "a2a_task",
+                "a2a_task_status",
+                "a2a_task_message",
+            ] {
+                let count: i64 = connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0);
+            }
+        }
+        assert!(matches!(
+            store.create_task(creation(101)).unwrap(),
+            CreateA2ATaskOutcome::Created(_)
+        ));
+    }
 }

@@ -93,8 +93,10 @@ Every task is addressed by:
 
 The immutable task identity also contains the configured context, source A2A message
 identifier, Konclave conversation, exact target device, mapped Konclave request
-message identifier, request body, request options, and creation timestamp. A create
-retry returns the existing task only when every immutable field matches exactly.
+message identifier, request body, and request options. The creation timestamp is
+first-accepted display metadata rather than idempotency identity, so a retry may carry
+a newly sampled timestamp without changing the original stored value. A create retry
+returns the existing task only when every immutable identity field matches exactly.
 Reuse with changed content, route, or options is an idempotency conflict.
 
 The store never accepts a profile alias, relay route, policy digest, generated A2A
@@ -167,7 +169,8 @@ capacity error. Active work is never evicted and success is never fabricated.
 The public SQLite adapter:
 
 - owns its schema version and append-only migrations;
-- enables foreign keys and WAL mode;
+- enables foreign keys and rollback journaling so independent store processes retain
+  SQLite's cross-process locking without relying on WAL reset behavior;
 - uses parameterized statements and `BEGIN IMMEDIATE` for mutating operations;
 - keeps each transaction free of network calls;
 - serializes one connection behind a process-local mutex;
@@ -292,7 +295,8 @@ Continued compliance requires:
   clock;
 - cross-agent and cross-tenant lookup-isolation tests;
 - plaintext-at-rest documentation and checks that no stronger claim is advertised;
-- SQLite foreign-key, WAL, busy-timeout, and transaction-mode verification; and
+- SQLite foreign-key, rollback-journal, busy-timeout, and transaction-mode
+  verification; and
 - the same semantic suite against the managed store before parity is claimed.
 
 ## References

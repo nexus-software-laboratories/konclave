@@ -106,20 +106,21 @@ fn create_is_exact_idempotent_and_survives_restart() {
     assert_eq!(messages[0].role(), A2ATaskMessageRole::User);
     assert_eq!(messages[0].text(), "request");
 
-    assert!(matches!(
-        store
-            .create_task(creation(
-                "agent-a",
-                "tenant-a",
-                4,
-                5,
-                "message-a",
-                "request",
-                200
-            ))
-            .unwrap(),
-        CreateA2ATaskOutcome::Existing(_)
-    ));
+    let retry = store
+        .create_task(creation(
+            "agent-a",
+            "tenant-a",
+            4,
+            5,
+            "message-a",
+            "request",
+            200,
+        ))
+        .unwrap();
+    let CreateA2ATaskOutcome::Existing(retry) = retry else {
+        panic!("timestamp-only retry should return the existing task");
+    };
+    assert_eq!(retry.created_at_unix_milliseconds(), 100);
     assert_eq!(
         store
             .create_task(creation(
@@ -206,62 +207,6 @@ fn restart_recovers_a_response_appended_before_terminal_transition() {
         ))
         .unwrap();
     assert!(matches!(completed, TransitionA2ATaskOutcome::Applied(_)));
-}
-
-#[test]
-fn create_failure_rolls_back_context_task_status_and_message() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("tasks.sqlite");
-    let store = open(&path);
-    let connection = Connection::open(&path).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TRIGGER fail_initial_status
-             BEFORE INSERT ON a2a_task_status
-             BEGIN
-                 SELECT RAISE(FAIL, 'injected status failure');
-             END;",
-        )
-        .unwrap();
-    let task = creation("agent-a", "tenant-a", 4, 5, "message-a", "request", 100);
-    let key = task.key().clone();
-    assert_eq!(
-        store.create_task(task).err(),
-        Some(A2ATaskStoreError::Storage)
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM a2a_context", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM a2a_task", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    connection
-        .execute("DROP TRIGGER fail_initial_status", [])
-        .unwrap();
-    drop(connection);
-    assert!(matches!(
-        store
-            .create_task(creation(
-                "agent-a",
-                "tenant-a",
-                4,
-                5,
-                "message-a",
-                "request",
-                101,
-            ))
-            .unwrap(),
-        CreateA2ATaskOutcome::Created(_)
-    ));
-    assert!(store.get_task(&key).is_ok());
 }
 
 #[test]
@@ -1106,7 +1051,7 @@ fn schema_pragmas_and_corruption_checks_fail_closed() {
             .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
             .unwrap()
             .to_ascii_lowercase(),
-        "wal"
+        "delete"
     );
     assert_eq!(
         connection
@@ -1144,6 +1089,54 @@ fn unsupported_schema_and_status_history_tampering_fail_closed() {
     drop(connection);
     assert_eq!(
         A2ASqliteTaskStore::open(&partial_path, config()).err(),
+        Some(A2ATaskStoreError::CorruptData)
+    );
+
+    let trigger_path = root.path().join("trigger.sqlite");
+    drop(open(&trigger_path));
+    let connection = Connection::open(&trigger_path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER a2a_delete_tasks
+             AFTER INSERT ON a2a_task_message
+             BEGIN
+                 DELETE FROM a2a_task;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        A2ASqliteTaskStore::open(&trigger_path, config()).err(),
+        Some(A2ATaskStoreError::CorruptData)
+    );
+
+    let hidden_index_path = root.path().join("hidden-index.sqlite");
+    drop(open(&hidden_index_path));
+    let connection = Connection::open(&hidden_index_path).unwrap();
+    connection
+        .execute(
+            "CREATE INDEX attacker_index ON a2a_task_message(message_id)",
+            [],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "writable_schema", "ON")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE sqlite_schema
+             SET name = 'sqlite_hidden',
+                 sql = 'CREATE INDEX sqlite_hidden ON a2a_task_message(message_id)'
+             WHERE name = 'attacker_index'",
+            [],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "writable_schema", "OFF")
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        A2ASqliteTaskStore::open(&hidden_index_path, config()).err(),
         Some(A2ATaskStoreError::CorruptData)
     );
 
