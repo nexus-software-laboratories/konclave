@@ -59,11 +59,17 @@ manifest whose release already exists.
 - run the portable A2A task-store contract against SQLite, covering exact create
   retry, context binding, expected-generation transitions, completion evidence,
   terminal immutability, message/artifact idempotency, restart recovery, hard byte
-  and row capacities, retention tombstones, and corruption refusal.
+  and row capacities, retention tombstones, atomic task/message snapshots, and
+  corruption refusal.
 - validate bounded public and extended Agent Cards, exact production or loopback
   interfaces, Bearer/mTLS requirements, public/private visibility,
   authorization-before-lookup, explicit no-scan catalogs, and deterministic OASF
   projection without claiming full OASF server validation.
+- exercise the A2A HTTP+JSON reference router and outbound client over exact tenant
+  paths, preferred media/version headers, bounded status errors, immediate and
+  terminal-wait tasks, ETag revalidation, redirect refusal, no-proxy client
+  construction, response
+  correlation, SQLite restart state, and TLS-or-loopback binding.
 
 ### MLS and cryptographic integration
 

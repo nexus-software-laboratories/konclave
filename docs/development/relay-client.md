@@ -12,7 +12,8 @@ or model-facing APIs.
 parameters, fragments, and unsupported schemes. An explicit base path is preserved
 for reverse-proxy deployments.
 
-HTTP redirects and automatic system/environment proxy discovery are disabled. This
+HTTP redirects and automatic system/environment proxy discovery are disabled through
+the shared `Konclave.ProtectedHttp` client-builder boundary. This
 prevents an authenticated request from forwarding its bearer header to a different
 location or moving a loopback plaintext request through an external proxy. TLS
 validation uses platform trust roots.

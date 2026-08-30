@@ -71,6 +71,29 @@ Protocol Buffer and ProtoJSON request bodies are rejected before decoding when t
 exceed 128 KiB. Generated DTOs may represent the broader A2A schema, but unsupported
 fields never become defaults, flattened text, fetched URLs, or silent truncation.
 
+## HTTP+JSON binding
+
+The reference gateway uses the v1.0.1-preferred media type
+`application/a2a+json` for responses and outbound requests. Inbound request bodies
+also accept compatibility `application/json`. The optional `A2A-Version` header must
+equal `1.0` when present.
+
+The implemented standard routes are:
+
+- `POST /message:send` and `POST /{tenant}/message:send`;
+- `GET /tasks/{id}` and `GET /{tenant}/tasks/{id}`;
+- `GET /extendedAgentCard` and `GET /{tenant}/extendedAgentCard`; and
+- `GET /.well-known/agent-card.json` when explicitly published.
+
+`historyLength` is a camel-case GetTask query parameter. Streaming paths authenticate
+and return the A2A `UNSUPPORTED_OPERATION` reason. Push, list, cancellation,
+subscription, and artifact operations remain outside the initial profile.
+
+Errors use an `application/a2a+json` `google.rpc.Status`-shaped envelope with an A2A
+`ErrorInfo.reason`; validation errors add a bounded field violation. The
+[reference-gateway contract](../development/a2a-reference-gateway.md) owns exact
+authentication, error, cache, task projection, client, and binding behavior.
+
 ## Agent Cards and private discovery
 
 The standard public discovery path is `/.well-known/agent-card.json`. Konclave

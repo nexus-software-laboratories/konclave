@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
+ "KonclaveProtectedHttp",
  "KonclaveProtocolContracts",
  "KonclaveRelayAuthentication",
  "KonclaveSecretStorage",
@@ -17,7 +18,6 @@ dependencies = [
  "log",
  "reqwest",
  "rustix",
- "rustls",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
@@ -46,6 +46,15 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "KonclaveProtectedHttp"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rustls",
+ "thiserror",
 ]
 
 [[package]]

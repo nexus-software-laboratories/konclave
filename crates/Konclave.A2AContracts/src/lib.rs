@@ -5,6 +5,7 @@ mod agent_card;
 mod error;
 mod identifier;
 mod initial_profile;
+mod task_response;
 
 pub use agent_card::{
     InitialA2AAgentCard, InitialA2AAgentSecurity, InitialA2AAgentSecurityKind,
@@ -26,6 +27,12 @@ pub use initial_profile::{
     decode_initial_send_message_protobuf, validate_initial_agent_interface,
     validate_initial_get_extended_agent_card_request, validate_initial_get_task_request,
     validate_initial_send_message_request,
+};
+pub use task_response::{
+    InitialA2ATaskResponse, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    decode_initial_send_message_response_json, decode_initial_send_message_response_protobuf,
+    decode_initial_task_json, decode_initial_task_protobuf, validate_initial_send_message_response,
+    validate_initial_task,
 };
 
 /// Generated A2A v1 Protocol Buffer and ProtoJSON DTOs.

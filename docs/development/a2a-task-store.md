@@ -67,6 +67,11 @@ conflicts.
 Message reads return the most recent bounded window in chronological order, matching
 A2A `history_length` rather than returning the oldest records.
 
+`task_with_messages` returns the task projection and its bounded message window from
+one persistence snapshot. SQLite holds a read transaction across both reads so a
+concurrent retention sweep cannot combine a pre-prune task row with post-prune empty
+history.
+
 The artifact record contains bounded opaque canonical bytes and a verified SHA-256
 digest. No gateway path may call it until the artifact validator introduced by the
 artifact workstream has produced those bytes.

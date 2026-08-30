@@ -52,6 +52,7 @@ This map lists the documentation contributed by the selected project shape.
 - [A2A domain mapping](development/a2a-domain-mapping.md)
 - [A2A task store](development/a2a-task-store.md)
 - [A2A agent discovery](development/a2a-discovery.md)
+- [A2A reference gateway](development/a2a-reference-gateway.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 

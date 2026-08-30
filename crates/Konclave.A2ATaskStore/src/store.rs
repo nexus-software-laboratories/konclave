@@ -111,6 +111,18 @@ pub trait A2ATaskStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<StoredA2ATaskMessage>, A2ATaskStoreError>;
 
+    /// Reads one task and its most recent bounded message window from the same
+    /// persistence snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns bounds, not-found, corruption, or storage errors.
+    fn task_with_messages(
+        &self,
+        key: &A2ATaskKey,
+        limit: usize,
+    ) -> Result<(A2ATaskRecord, Vec<StoredA2ATaskMessage>), A2ATaskStoreError>;
+
     /// Reads a bounded ordered artifact page from sequence zero.
     ///
     /// # Errors

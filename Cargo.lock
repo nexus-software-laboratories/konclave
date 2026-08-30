@@ -46,6 +46,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveA2AGateway"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveA2ADiscovery",
+ "KonclaveA2ADomain",
+ "KonclaveA2ATaskStore",
+ "KonclaveA2ATaskStoreSqlite",
+ "KonclaveBoundedDocuments",
+ "KonclaveDomainCore",
+ "KonclaveProtectedHttp",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "pbjson-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "KonclaveA2ATaskStore"
 version = "0.1.0"
 dependencies = [
@@ -101,6 +129,7 @@ dependencies = [
  "KonclaveCommunityRelay",
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
+ "KonclaveProtectedHttp",
  "KonclaveProtocolContracts",
  "KonclaveRelayAuthentication",
  "KonclaveRelayCore",
@@ -112,7 +141,6 @@ dependencies = [
  "log",
  "reqwest",
  "rustix",
- "rustls",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -283,6 +311,15 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "KonclaveProtectedHttp"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rustls",
+ "thiserror",
 ]
 
 [[package]]

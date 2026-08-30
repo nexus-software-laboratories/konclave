@@ -1,0 +1,32 @@
+[package]
+name = "KonclaveA2AGateway"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+KonclaveA2ADiscovery = { path = "../Konclave.A2ADiscovery" }
+KonclaveA2ADomain = { path = "../Konclave.A2ADomain" }
+KonclaveA2ATaskStore = { path = "../Konclave.A2ATaskStore" }
+KonclaveA2ATaskStoreSqlite = { path = "../Konclave.A2ATaskStoreSqlite" }
+KonclaveBoundedDocuments = { path = "../Konclave.BoundedDocuments" }
+KonclaveDomainCore = { path = "../Konclave.DomainCore" }
+KonclaveProtectedHttp = { path = "../Konclave.ProtectedHttp" }
+async-trait.workspace = true
+axum = { version = "0.8.9", features = ["http1", "json", "matched-path", "tokio"] }
+futures-util.workspace = true
+pbjson-types.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
+tower = { version = "0.5.3", features = ["limit", "util"] }
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
