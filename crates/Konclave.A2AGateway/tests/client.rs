@@ -21,8 +21,8 @@ use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use common::{
-    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock,
-    application_with_publication, artifact, request, request_with_message_id, store,
+    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application_with_publication,
+    artifact, request, request_with_message_id, store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -158,8 +158,12 @@ async fn outbound_client_gets_artifacts_and_lists_them_only_when_requested() {
     )
     .unwrap();
     let access = StaticBearerAccess::new([A2ABearerCredential::parse(TOKEN).unwrap()]).unwrap();
-    let state =
-        A2AHttpState::new(application.clone(), Arc::new(access), A2AHttpConfig::default()).unwrap();
+    let state = A2AHttpState::new(
+        application.clone(),
+        Arc::new(access),
+        A2AHttpConfig::default(),
+    )
+    .unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, a2a_router(state)).await.unwrap();
     });
@@ -183,7 +187,10 @@ async fn outbound_client_gets_artifacts_and_lists_them_only_when_requested() {
             110,
         ))
         .unwrap();
-    application.publish_artifact(&task_id, artifact()).await.unwrap();
+    application
+        .publish_artifact(&task_id, artifact())
+        .await
+        .unwrap();
     store
         .transition_task(A2ATaskTransition::new(
             key,

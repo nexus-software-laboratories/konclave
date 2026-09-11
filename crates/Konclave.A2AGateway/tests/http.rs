@@ -25,8 +25,9 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use common::{
-    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application, artifact,
-    application_with_publication, request, request_wire, request_wire_with_message_id, store,
+    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application,
+    application_with_publication, artifact, request, request_wire, request_wire_with_message_id,
+    store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -513,7 +514,10 @@ async fn list_tasks_paginates_and_cancel_task_is_explicitly_unsupported() {
                 110,
             ))
             .unwrap();
-        application.publish_artifact(&task_id, artifact()).await.unwrap();
+        application
+            .publish_artifact(&task_id, artifact())
+            .await
+            .unwrap();
         store
             .transition_task(A2ATaskTransition::new(
                 key,
