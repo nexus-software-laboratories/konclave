@@ -529,11 +529,13 @@ pub fn parse_initial_encrypted_artifact_reference(
     let plaintext_bytes = size
         .parse::<u64>()
         .map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
+    let ciphertext_digest = decode_lowercase_hex(digest)?;
+    drop(path);
     let mut request_url = url;
     request_url.set_fragment(None);
     Ok(InitialA2AEncryptedArtifactReference {
         request_url: request_url.to_string(),
-        ciphertext_digest: decode_lowercase_hex(digest)?,
+        ciphertext_digest,
         key: Zeroizing::new(
             key.try_into()
                 .map_err(|_| A2AContractError::InvalidInterfaceUrl)?,
@@ -557,8 +559,10 @@ fn decode_base64url(value: &str, expected_bytes: usize) -> Result<Vec<u8>, A2ACo
 
 fn decode_lowercase_hex(value: &str) -> Result<[u8; 32], A2AContractError> {
     let mut output = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    for (index, byte) in output.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = (hex_nibble(value.as_bytes()[offset])? << 4)
+            | hex_nibble(value.as_bytes()[offset + 1])?;
     }
     Ok(output)
 }

@@ -69,8 +69,10 @@ impl A2AArtifactObjectId {
             return Err(A2AArtifactStorageError::InvalidConfiguration);
         }
         let mut bytes = [0_u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            bytes[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let offset = index * 2;
+            *byte = (hex_nibble(value.as_bytes()[offset])? << 4)
+                | hex_nibble(value.as_bytes()[offset + 1])?;
         }
         Ok(Self(bytes))
     }
@@ -158,8 +160,8 @@ impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
         object_id: A2AArtifactObjectId,
         maximum_bytes: usize,
     ) -> Result<Vec<u8>, A2AArtifactStorageError> {
-        if maximum_bytes < AUTHENTICATED_CIPHER_TAG_BYTES
-            || maximum_bytes > MAX_A2A_ARTIFACT_OBJECT_BYTES
+        if !(AUTHENTICATED_CIPHER_TAG_BYTES..=MAX_A2A_ARTIFACT_OBJECT_BYTES)
+            .contains(&maximum_bytes)
         {
             return Err(A2AArtifactStorageError::InvalidConfiguration);
         }
@@ -486,7 +488,7 @@ mod tests {
             Some(A2AArtifactStorageError::InvalidConfiguration)
         );
         let reference =
-            seal_and_store_artifact(&store, "https://objects.example.com", &descriptor, b"secret")
+            seal_and_store_artifact(&store, "https://objects.example.com/", &descriptor, b"secret")
                 .unwrap();
         let url = match reference.part().content.as_ref().unwrap() {
             part::Content::Url(url) => url,
@@ -587,16 +589,13 @@ mod tests {
         )
         .unwrap();
         let first =
-            seal_and_store_artifact(&store, "https://objects.example.com", &descriptor, b"secret")
+            seal_and_store_artifact(&store, "https://objects.example.com/", &descriptor, b"secret")
                 .unwrap();
         let second =
-            seal_and_store_artifact(&store, "https://objects.example.com", &descriptor, b"secret")
+            seal_and_store_artifact(&store, "https://objects.example.com/", &descriptor, b"secret")
                 .unwrap();
         assert_ne!(first.object_id(), second.object_id());
-        assert_ne!(
-            first.part().content.as_ref(),
-            second.part().content.as_ref()
-        );
+        assert!(first.part().content.as_ref() != second.part().content.as_ref());
     }
 
     #[test]
