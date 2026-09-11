@@ -497,6 +497,21 @@ fn transitions_require_generation_terminal_reason_and_completion_evidence() {
     };
     assert_eq!(completed.generation(), 2);
     assert_eq!(completed.terminal_at_unix_milliseconds(), Some(120));
+    let updates = store.status_updates(&key, 0).unwrap();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].generation(), 1);
+    assert_eq!(updates[0].state(), A2ATaskState::Working);
+    assert_eq!(updates[0].occurred_at_unix_milliseconds(), 110);
+    assert_eq!(updates[1].generation(), 2);
+    assert_eq!(updates[1].state(), A2ATaskState::Completed);
+    assert_eq!(updates[1].occurred_at_unix_milliseconds(), 120);
+    assert!(updates[1].terminal_reason().is_none());
+    assert_eq!(store.status_updates(&key, 1).unwrap().len(), 1);
+    assert!(store.status_updates(&key, 2).unwrap().is_empty());
+    assert_eq!(
+        store.status_updates(&key, 3).err(),
+        Some(A2ATaskStoreError::CorruptData)
+    );
     let repeated = store
         .transition_task(A2ATaskTransition::new(
             key.clone(),

@@ -1,16 +1,18 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use KonclaveA2AContracts::wire::TaskState;
 use KonclaveA2AContracts::{
-    InitialA2AAgentCard, InitialA2ATaskListResponse, InitialA2ATaskResponse, InitialGetTaskRequest,
-    InitialListTasksRequest, InitialSendMessageRequest,
+    InitialA2AAgentCard, InitialA2AStreamResponse, InitialA2ATaskListResponse,
+    InitialA2ATaskResponse, InitialGetTaskRequest, InitialListTasksRequest,
+    InitialSendMessageRequest, InitialSubscribeToTaskRequest,
 };
 use KonclaveA2ADiscovery::CompiledA2AAgentPublication;
 use KonclaveA2ADomain::{
     A2AAgentRoute, A2AMessageId, A2ATaskId, map_initial_get_task, map_initial_list_tasks,
-    map_initial_send_message,
+    map_initial_send_message, map_initial_subscribe_to_task,
 };
 use KonclaveA2ATaskStore::{
     A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery, A2ATaskRecord, A2ATaskStore,
@@ -19,10 +21,14 @@ use KonclaveA2ATaskStore::{
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use async_trait::async_trait;
-use tokio::time::{Instant, sleep, timeout_at};
+use futures_util::stream::{self, BoxStream};
+use futures_util::{StreamExt as _, TryStreamExt as _};
+use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
 use crate::A2AGatewayError;
-use crate::projection::{project_get_task, project_list_tasks};
+use crate::projection::{
+    project_get_task, project_list_tasks, project_status_update, project_stream_task,
+};
 
 const MAX_RESPONSE_WAIT: Duration = Duration::from_secs(5 * 60);
 const MAX_RESPONSE_POLL: Duration = Duration::from_secs(1);
@@ -168,6 +174,10 @@ pub trait A2ATaskSubmitter: Send + Sync {
     async fn submit(&self, submission: A2ATaskSubmission) -> Result<(), A2ATaskSubmissionError>;
 }
 
+/// Finite ordered stream of validated A2A task snapshots and status updates.
+pub type A2AGatewayTaskStream =
+    BoxStream<'static, Result<InitialA2AStreamResponse, A2AGatewayError>>;
+
 /// Single-publication application core shared by HTTP handlers and tests.
 #[derive(Clone)]
 pub struct A2AGatewayApplication {
@@ -272,53 +282,51 @@ impl A2AGatewayApplication {
         request: InitialSendMessageRequest,
     ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
         let return_immediately = request.return_immediately();
-        let history_length = request.history_length();
-        let mapping = map_initial_send_message(&self.route, request)
-            .map_err(|_| A2AGatewayError::RouteMismatch)?;
-        let created_at = self
-            .clock
-            .now_unix_milliseconds()
-            .map_err(|_| A2AGatewayError::ClockUnavailable)?;
-        let creation = A2ATaskCreation::from_mapping(mapping, created_at);
-        let store = Arc::clone(&self.store);
-        let outcome = tokio::task::spawn_blocking(move || store.create_task(creation))
-            .await
-            .map_err(|_| A2AGatewayError::StorageUnavailable)?
-            .map_err(map_store_error)?;
-        let record = match outcome {
-            CreateA2ATaskOutcome::Created(record) | CreateA2ATaskOutcome::Existing(record) => {
-                record
-            }
-        };
-        let key = record.key().clone();
-        let deadline = Instant::now() + self.wait.timeout;
-        if matches!(
-            record.state(),
-            KonclaveA2ADomain::A2ATaskState::Submitted | KonclaveA2ADomain::A2ATaskState::Working
-        ) {
-            let submission = submission_from_record(record)?;
-            timeout_at(deadline, self.submitter.submit(submission))
-                .await
-                .map_err(|_| A2AGatewayError::ResponseWaitExpired)?
-                .map_err(|_| A2AGatewayError::SubmissionUnavailable)?;
-        }
+        let prepared = self.prepare_task(request).await?;
         if return_immediately {
-            return timeout_at(deadline, self.project_current(key, history_length))
+            return timeout_at(
+                prepared.deadline,
+                self.project_current(prepared.key, prepared.history_length),
+            )
                 .await
                 .map_err(|_| A2AGatewayError::ResponseWaitExpired)?;
         }
         let wait = async {
             loop {
-                let task = self.project_current(key.clone(), history_length).await?;
+                let task = self
+                    .project_current(prepared.key.clone(), prepared.history_length)
+                    .await?;
                 if response_ready(task.state()) {
                     return Ok(task);
                 }
                 sleep(self.wait.poll_interval).await;
             }
         };
-        timeout_at(deadline, wait)
+        timeout_at(prepared.deadline, wait)
             .await
             .map_err(|_| A2AGatewayError::ResponseWaitExpired)?
+    }
+
+    /// Creates or reconciles one task and returns an ordered finite streaming response.
+    ///
+    /// `returnImmediately` has no effect on streaming behavior, as required by A2A.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed route, storage, conflict, capacity, submission, projection, or
+    /// response-wait failures before the stream begins.
+    pub async fn send_streaming_message(
+        &self,
+        request: InitialSendMessageRequest,
+    ) -> Result<A2AGatewayTaskStream, A2AGatewayError> {
+        let prepared = self.prepare_task(request).await?;
+        self.stream_task(
+            prepared.key,
+            prepared.history_length,
+            prepared.deadline,
+            false,
+        )
+        .await
     }
 
     /// Loads one exact task with the requested initial-profile history window.
@@ -377,6 +385,179 @@ impl A2AGatewayApplication {
         )
     }
 
+    /// Subscribes to one active task with a current Task snapshot as the first event.
+    ///
+    /// # Errors
+    ///
+    /// Returns route, not-found, unsupported-terminal-state, storage, or projection
+    /// failures before the stream begins.
+    pub async fn subscribe_to_task(
+        &self,
+        request: InitialSubscribeToTaskRequest,
+    ) -> Result<A2AGatewayTaskStream, A2AGatewayError> {
+        self.prune_visible_tasks().await?;
+        let lookup = map_initial_subscribe_to_task(&self.route, request)
+            .map_err(|_| A2AGatewayError::RouteMismatch)?;
+        let key = A2ATaskKey::new(
+            lookup.agent_id().clone(),
+            lookup.tenant().cloned(),
+            lookup.task_id().clone(),
+        );
+        self.stream_task(
+            key,
+            Some(1),
+            Instant::now() + self.wait.timeout,
+            true,
+        )
+        .await
+    }
+
+    async fn prepare_task(
+        &self,
+        request: InitialSendMessageRequest,
+    ) -> Result<PreparedTask, A2AGatewayError> {
+        let history_length = request.history_length();
+        let mapping = map_initial_send_message(&self.route, request)
+            .map_err(|_| A2AGatewayError::RouteMismatch)?;
+        let created_at = self
+            .clock
+            .now_unix_milliseconds()
+            .map_err(|_| A2AGatewayError::ClockUnavailable)?;
+        let creation = A2ATaskCreation::from_mapping(mapping, created_at);
+        let store = Arc::clone(&self.store);
+        let outcome = tokio::task::spawn_blocking(move || store.create_task(creation))
+            .await
+            .map_err(|_| A2AGatewayError::StorageUnavailable)?
+            .map_err(map_store_error)?;
+        let record = match outcome {
+            CreateA2ATaskOutcome::Created(record) | CreateA2ATaskOutcome::Existing(record) => {
+                record
+            }
+        };
+        let key = record.key().clone();
+        let deadline = Instant::now() + self.wait.timeout;
+        if matches!(
+            record.state(),
+            KonclaveA2ADomain::A2ATaskState::Submitted | KonclaveA2ADomain::A2ATaskState::Working
+        ) {
+            let submission = submission_from_record(record)?;
+            timeout_at(deadline, self.submitter.submit(submission))
+                .await
+                .map_err(|_| A2AGatewayError::ResponseWaitExpired)?
+                .map_err(|_| A2AGatewayError::SubmissionUnavailable)?;
+        }
+        Ok(PreparedTask {
+            key,
+            history_length,
+            deadline,
+        })
+    }
+
+    async fn stream_task(
+        &self,
+        key: A2ATaskKey,
+        history_length: Option<u32>,
+        deadline: Instant,
+        reject_terminal: bool,
+    ) -> Result<A2AGatewayTaskStream, A2AGatewayError> {
+        let (initial, generation) = self.stream_snapshot(key.clone(), history_length).await?;
+        if reject_terminal && response_ready(initial.state()) {
+            return Err(A2AGatewayError::UnsupportedOperation);
+        }
+        let state = TaskStreamState {
+            application: self.clone(),
+            key,
+            task_id: initial.task_id().to_owned(),
+            context_id: initial.context_id().to_owned(),
+            generation,
+            deadline,
+            finished: response_ready(initial.state()),
+            pending: VecDeque::from([initial]),
+        };
+        Ok(stream::try_unfold(state, |mut state| async move {
+            loop {
+                if let Some(event) = state.pending.pop_front() {
+                    return Ok(Some((event, state)));
+                }
+                if state.finished || Instant::now() >= state.deadline {
+                    return Ok(None);
+                }
+                let next_poll = (Instant::now() + state.application.wait.poll_interval)
+                    .min(state.deadline);
+                sleep_until(next_poll).await;
+                if Instant::now() >= state.deadline {
+                    return Ok(None);
+                }
+                let (updates, messages) = state
+                    .application
+                    .status_updates(state.key.clone(), state.generation)
+                    .await?;
+                for update in updates {
+                    state.generation = update.generation();
+                    let event = project_status_update(
+                        &state.task_id,
+                        &state.context_id,
+                        update,
+                        &messages,
+                    )?;
+                    if response_ready(event.state()) {
+                        state.finished = true;
+                    }
+                    state.pending.push_back(event);
+                }
+            }
+        })
+        .boxed())
+    }
+
+    async fn stream_snapshot(
+        &self,
+        key: A2ATaskKey,
+        history_length: Option<u32>,
+    ) -> Result<(InitialA2AStreamResponse, u64), A2AGatewayError> {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || {
+            let (record, messages) = store.task_with_messages(&key, 2).map_err(map_store_error)?;
+            if record.content_pruned() {
+                return Err(A2AGatewayError::TaskNotFound);
+            }
+            let generation = record.generation();
+            Ok((
+                project_stream_task(record, messages, history_length)?,
+                generation,
+            ))
+        })
+        .await
+        .map_err(|_| A2AGatewayError::StorageUnavailable)?
+    }
+
+    async fn status_updates(
+        &self,
+        key: A2ATaskKey,
+        after_generation: u64,
+    ) -> Result<
+        (
+            Vec<KonclaveA2ATaskStore::StoredA2ATaskStatus>,
+            Vec<KonclaveA2ATaskStore::StoredA2ATaskMessage>,
+        ),
+        A2AGatewayError,
+    > {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || {
+            let updates = store
+                .status_updates(&key, after_generation)
+                .map_err(map_store_error)?;
+            let messages = if updates.iter().any(|update| response_ready(update.state().to_wire())) {
+                store.messages(&key, 2).map_err(map_store_error)?
+            } else {
+                Vec::new()
+            };
+            Ok((updates, messages))
+        })
+        .await
+        .map_err(|_| A2AGatewayError::StorageUnavailable)?
+    }
+
     async fn project_current(
         &self,
         key: A2ATaskKey,
@@ -392,6 +573,23 @@ impl A2AGatewayApplication {
         })
         .await
         .map_err(|_| A2AGatewayError::StorageUnavailable)?
+    }
+
+    struct PreparedTask {
+        key: A2ATaskKey,
+        history_length: Option<u32>,
+        deadline: Instant,
+    }
+
+    struct TaskStreamState {
+        application: A2AGatewayApplication,
+        key: A2ATaskKey,
+        task_id: String,
+        context_id: String,
+        generation: u64,
+        deadline: Instant,
+        finished: bool,
+        pending: VecDeque<InitialA2AStreamResponse>,
     }
 
     async fn prune_visible_tasks(&self) -> Result<(), A2AGatewayError> {

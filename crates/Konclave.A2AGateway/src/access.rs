@@ -18,6 +18,8 @@ const MAX_STATIC_BEARER_CREDENTIALS: usize = 64;
 pub enum A2AHttpAction {
     /// Create or reconcile one task.
     SendMessage,
+    /// Create or reconcile one task and stream its ordered updates.
+    SendStreamingMessage,
     /// Read one exact task.
     GetTask,
     /// Read one page of scoped tasks.
@@ -26,6 +28,8 @@ pub enum A2AHttpAction {
     GetExtendedAgentCard,
     /// Reach the standard cancel-task operation, which remains unsupported.
     CancelTask,
+    /// Subscribe to ordered updates for one active task.
+    SubscribeToTask,
     /// Reach another standard operation excluded from the advertised profile.
     UnsupportedOperation,
 }

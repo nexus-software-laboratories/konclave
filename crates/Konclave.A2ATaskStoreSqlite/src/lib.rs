@@ -17,7 +17,7 @@ use KonclaveA2ATaskStore::{
     A2ATaskListQuery, A2ATaskMessage, A2ATaskMessageRole, A2ATaskPruneOutcome, A2ATaskRecord,
     A2ATaskStore, A2ATaskStoreError, A2ATaskTransition, A2ATerminalReason,
     AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, StoredA2ATaskArtifact, StoredA2ATaskMessage,
-    TransitionA2ATaskOutcome,
+    StoredA2ATaskStatus, TransitionA2ATaskOutcome,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use rusqlite::config::DbConfig;
@@ -481,6 +481,19 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             .commit()
             .map_err(|_| A2ATaskStoreError::Storage)?;
         Ok(TransitionA2ATaskOutcome::Applied(task))
+    }
+
+    fn status_updates(
+        &self,
+        key: &A2ATaskKey,
+        after_generation: u64,
+    ) -> Result<Vec<StoredA2ATaskStatus>, A2ATaskStoreError> {
+        let connection = self.lock()?;
+        let task = load_task(&connection, key)?;
+        if after_generation > task.generation() {
+            return Err(A2ATaskStoreError::CorruptData);
+        }
+        load_status_updates(&connection, key, after_generation)
     }
 
     fn append_message(
@@ -1255,6 +1268,71 @@ fn verify_status_history(
         return Err(A2ATaskStoreError::CorruptData);
     }
     Ok(())
+}
+
+fn load_status_updates(
+    connection: &Connection,
+    key: &A2ATaskKey,
+    after_generation: u64,
+) -> Result<Vec<StoredA2ATaskStatus>, A2ATaskStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT generation, state, terminal_reason, occurred_at_unix_milliseconds
+             FROM a2a_task_status
+             WHERE agent_id = ?1 AND tenant_id = ?2 AND task_id = ?3
+               AND generation > ?4
+             ORDER BY generation
+             LIMIT 3",
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    let rows = statement
+        .query_map(
+            params![
+                key.agent_id().as_str(),
+                tenant_value(key),
+                key.task_id().as_str(),
+                to_sql(after_generation)?
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    let mut expected_generation = after_generation
+        .checked_add(1)
+        .ok_or(A2ATaskStoreError::CorruptData)?;
+    let mut updates = Vec::with_capacity(rows.len());
+    for row in rows {
+        let generation = from_sql(row.0)?;
+        let state = state_from_code(row.1)?;
+        let terminal_reason = row
+            .2
+            .map(A2ATerminalReason::parse)
+            .transpose()
+            .map_err(|_| A2ATaskStoreError::CorruptData)?;
+        let occurred_at = from_sql(row.3)?;
+        if generation != expected_generation || !valid_status_reason(state, terminal_reason.as_ref())
+        {
+            return Err(A2ATaskStoreError::CorruptData);
+        }
+        updates.push(StoredA2ATaskStatus::new(
+            generation,
+            state,
+            terminal_reason,
+            occurred_at,
+        ));
+        expected_generation = expected_generation
+            .checked_add(1)
+            .ok_or(A2ATaskStoreError::CorruptData)?;
+    }
+    Ok(updates)
 }
 
 const fn allowed_state_transition(previous: A2ATaskState, next: A2ATaskState) -> bool {

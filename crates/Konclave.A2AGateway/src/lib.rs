@@ -13,14 +13,15 @@ pub use access::{
     A2AHttpPrincipalId, StaticBearerAccess,
 };
 pub use application::{
-    A2AGatewayApplication, A2AGatewayClock, A2AGatewayClockError, A2AGatewayWaitConfig,
-    A2ATaskSubmission, A2ATaskSubmissionError, A2ATaskSubmitter, SystemA2AGatewayClock,
+    A2AGatewayApplication, A2AGatewayClock, A2AGatewayClockError, A2AGatewayTaskStream,
+    A2AGatewayWaitConfig, A2ATaskSubmission, A2ATaskSubmissionError, A2ATaskSubmitter,
+    SystemA2AGatewayClock,
 };
 pub use client::{
     A2AAgentCardFetchOutcome, A2AHttpClientConfig, A2AHttpJsonClient, fetch_public_agent_card,
 };
 pub use error::A2AGatewayError;
 pub use http::{
-    A2A_JSON_MEDIA_TYPE, A2A_VERSION_HEADER, A2AHttpConfig, A2AHttpState, a2a_router,
-    serve_a2a_until, validate_a2a_binding,
+    A2A_JSON_MEDIA_TYPE, A2A_STREAM_MEDIA_TYPE, A2A_VERSION_HEADER, A2AHttpConfig, A2AHttpState,
+    a2a_router, serve_a2a_until, validate_a2a_binding,
 };

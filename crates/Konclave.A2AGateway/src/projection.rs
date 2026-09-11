@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 
 use KonclaveA2AContracts::wire::{
-    ListTasksResponse, Message, Part, Role, Task, TaskStatus, part, send_message_response,
+    ListTasksResponse, Message, Part, Role, StreamResponse, Task, TaskStatus,
+    TaskStatusUpdateEvent, part, send_message_response, stream_response,
 };
 use KonclaveA2AContracts::{
-    A2A_TEXT_MEDIA_TYPE, INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2ATaskListResponse,
-    InitialA2ATaskResponse, validate_initial_list_tasks_response, validate_initial_task,
+    A2A_TEXT_MEDIA_TYPE, INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2AStreamResponse,
+    InitialA2ATaskListResponse, InitialA2ATaskResponse, validate_initial_list_tasks_response,
+    validate_initial_stream_response, validate_initial_task,
 };
 use KonclaveA2ADomain::A2ATaskState;
 use KonclaveA2ATaskStore::{
     A2ATaskMessageRole, A2ATaskRecord, A2ATerminalReason, StoredA2ATaskMessage,
+    StoredA2ATaskStatus,
 };
 
 use crate::A2AGatewayError;
@@ -42,6 +45,53 @@ pub(crate) fn project_list_tasks(
     };
     validate_initial_list_tasks_response(response)
         .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+}
+
+pub(crate) fn project_stream_task(
+    record: A2ATaskRecord,
+    messages: Vec<StoredA2ATaskMessage>,
+    history_length: Option<u32>,
+) -> Result<InitialA2AStreamResponse, A2AGatewayError> {
+    let task = project_task(record, messages, Some(history_length), true)?;
+    validate_initial_stream_response(StreamResponse {
+        payload: Some(stream_response::Payload::Task(task)),
+    })
+    .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+}
+
+pub(crate) fn project_status_update(
+    task_id: &str,
+    context_id: &str,
+    status: StoredA2ATaskStatus,
+    messages: &[StoredA2ATaskMessage],
+) -> Result<InitialA2AStreamResponse, A2AGatewayError> {
+    let status_message = response_state(status.state())
+        .then(|| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role() == A2ATaskMessageRole::Agent)
+                .map(|message| project_message(message, task_id, context_id))
+        })
+        .flatten();
+    if status.state() == A2ATaskState::Completed && status_message.is_none() {
+        return Err(A2AGatewayError::InvalidTaskProjection);
+    }
+    validate_initial_stream_response(StreamResponse {
+        payload: Some(stream_response::Payload::StatusUpdate(
+            TaskStatusUpdateEvent {
+                task_id: task_id.to_owned(),
+                context_id: context_id.to_owned(),
+                status: Some(TaskStatus {
+                    state: status.state().to_wire() as i32,
+                    message: status_message,
+                    timestamp: Some(timestamp(status.occurred_at_unix_milliseconds())?),
+                }),
+                metadata: terminal_reason_metadata(status.terminal_reason()),
+            },
+        )),
+    })
+    .map_err(|_| A2AGatewayError::InvalidTaskProjection)
 }
 
 fn project_task(

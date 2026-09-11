@@ -29,7 +29,7 @@ fn card() -> AgentCard {
         version: "1.0.0".to_owned(),
         documentation_url: None,
         capabilities: Some(AgentCapabilities {
-            streaming: Some(false),
+            streaming: Some(true),
             push_notifications: Some(false),
             extensions: vec![],
             extended_agent_card: Some(true),
@@ -82,6 +82,7 @@ fn agent_card_protobuf_and_protojson_narrow_to_the_initial_profile() {
     .unwrap();
     assert_eq!(validated.name(), "Contract agent");
     assert_eq!(validated.version(), "1.0.0");
+    assert!(validated.streaming());
     assert!(validated.extended_agent_card());
     assert_eq!(validated.interfaces().len(), 1);
     assert_eq!(validated.skills()[0].id(), "contract-review");
@@ -284,17 +285,6 @@ fn agent_card_rejects_unbounded_duplicate_or_sensitive_metadata() {
     assert!(
         validate_initial_agent_card(
             provider,
-            InitialA2AInterfaceEnvironment::Production,
-            Some("tenant-a")
-        )
-        .is_err()
-    );
-
-    let mut streaming = card();
-    streaming.capabilities.as_mut().unwrap().streaming = Some(true);
-    assert!(
-        validate_initial_agent_card(
-            streaming,
             InitialA2AInterfaceEnvironment::Production,
             Some("tenant-a")
         )

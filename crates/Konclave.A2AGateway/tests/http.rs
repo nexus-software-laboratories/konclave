@@ -5,13 +5,13 @@ use std::sync::Arc;
 use KonclaveA2AContracts::{
     InitialA2AInterfaceEnvironment, decode_initial_agent_card_json,
     decode_initial_list_tasks_response_json, decode_initial_send_message_response_json,
-    decode_initial_task_json,
+    decode_initial_stream_response_json, decode_initial_task_json,
 };
 use KonclaveA2AGateway::{
-    A2A_JSON_MEDIA_TYPE, A2A_VERSION_HEADER, A2ABearerCredential, A2AGatewayApplication,
-    A2AGatewayWaitConfig, A2AHttpAccess, A2AHttpAction, A2AHttpAuthorizationDecision,
-    A2AHttpConfig, A2AHttpPrincipalId, A2AHttpState, StaticBearerAccess, a2a_router,
-    validate_a2a_binding,
+    A2A_JSON_MEDIA_TYPE, A2A_STREAM_MEDIA_TYPE, A2A_VERSION_HEADER, A2ABearerCredential,
+    A2AGatewayApplication, A2AGatewayWaitConfig, A2AHttpAccess, A2AHttpAction,
+    A2AHttpAuthorizationDecision, A2AHttpConfig, A2AHttpPrincipalId, A2AHttpState,
+    StaticBearerAccess, a2a_router, validate_a2a_binding,
 };
 use axum::body::{Body, to_bytes};
 use axum::http::header::{
@@ -88,6 +88,13 @@ async fn body(response: axum::response::Response) -> Vec<u8> {
         .await
         .unwrap()
         .to_vec()
+}
+
+fn sse_data(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.strip_prefix(b"data: "))
+        .collect()
 }
 
 #[tokio::test]
@@ -292,21 +299,50 @@ async fn authentication_precedes_body_parsing_and_route_disclosure() {
 }
 
 #[tokio::test]
-async fn unsupported_streaming_and_denied_authorization_return_bounded_errors() {
+async fn streaming_routes_use_sse_and_denied_authorization_remains_bounded() {
     let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
     let application = application(
-        store(&root),
-        Arc::new(RecordingSubmitter::default()),
+        store.clone(),
+        Arc::new(CompletingSubmitter { store }),
         Arc::new(TestClock::new(100)),
         A2AGatewayWaitConfig::default(),
     );
     let router = a2a_router(state(application.clone()));
     let response = router
+        .clone()
         .oneshot(
             authenticated("/tenant-a/message:stream")
                 .method("POST")
-                .body(Body::empty())
+                .header(CONTENT_TYPE, A2A_JSON_MEDIA_TYPE)
+                .body(Body::from(
+                    serde_json::to_vec(&request_wire("request", true, 1)).unwrap(),
+                ))
                 .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        A2A_STREAM_MEDIA_TYPE
+    );
+    assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
+    let bytes = body(response).await;
+    let events = sse_data(&bytes);
+    assert_eq!(events.len(), 1);
+    let task = decode_initial_stream_response_json(events[0]).unwrap();
+    assert_eq!(task.state(), KonclaveA2AContracts::wire::TaskState::Completed);
+
+    let response = router
+        .clone()
+        .oneshot(
+            authenticated(&format!(
+                "/tenant-a/tasks/{}:subscribe",
+                task.task_id()
+            ))
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -332,6 +368,65 @@ async fn unsupported_streaming_and_denied_authorization_return_bounded_errors() 
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn active_task_subscription_supports_proto_get_and_rest_post_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let application = application(
+        store(&root),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::new(
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap(),
+    );
+    let router = a2a_router(state(application));
+    let response = router
+        .clone()
+        .oneshot(
+            authenticated("/tenant-a/message:send")
+                .method("POST")
+                .header(CONTENT_TYPE, A2A_JSON_MEDIA_TYPE)
+                .body(Body::from(
+                    serde_json::to_vec(&request_wire("request", true, 0)).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let task = decode_initial_send_message_response_json(&body(response).await).unwrap();
+    for method in ["GET", "POST"] {
+        let response = router
+            .clone()
+            .oneshot(
+                authenticated(&format!(
+                    "/tenant-a/tasks/{}:subscribe",
+                    task.task_id()
+                ))
+                .method(method)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            A2A_STREAM_MEDIA_TYPE
+        );
+        let bytes = body(response).await;
+        let events = sse_data(&bytes);
+        assert_eq!(events.len(), 1);
+        let current = decode_initial_stream_response_json(events[0]).unwrap();
+        assert_eq!(current.task_id(), task.task_id());
+        assert_eq!(
+            current.state(),
+            KonclaveA2AContracts::wire::TaskState::Submitted
+        );
+    }
 }
 
 #[tokio::test]

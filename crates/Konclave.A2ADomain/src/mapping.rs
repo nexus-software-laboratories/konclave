@@ -1,5 +1,6 @@
 use KonclaveA2AContracts::{
     InitialGetTaskRequest, InitialListTasksRequest, InitialSendMessageRequest,
+    InitialSubscribeToTaskRequest,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use sha2::{Digest as _, Sha256};
@@ -303,6 +304,24 @@ pub fn map_initial_get_task(
         task_id: A2ATaskId::parse(request.task_id().to_owned())?,
         tenant: route.tenant.clone(),
         history_length: request.history_length(),
+    })
+}
+
+/// Maps a validated `SubscribeToTask` request onto one agent-scoped lookup.
+///
+/// # Errors
+///
+/// Returns a typed error when tenant or task-identifier invariants disagree.
+pub fn map_initial_subscribe_to_task(
+    route: &A2AAgentRoute,
+    request: InitialSubscribeToTaskRequest,
+) -> Result<A2ATaskLookup, A2ADomainError> {
+    require_tenant(route, request.tenant())?;
+    Ok(A2ATaskLookup {
+        agent_id: route.agent_id.clone(),
+        task_id: A2ATaskId::parse(request.task_id().to_owned())?,
+        tenant: route.tenant.clone(),
+        history_length: None,
     })
 }
 

@@ -4,10 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use KonclaveA2AContracts::wire::{GetTaskRequest, ListTasksRequest, TaskState, part};
+use KonclaveA2AContracts::wire::{
+    GetTaskRequest, ListTasksRequest, SubscribeToTaskRequest, TaskState, part,
+};
 use KonclaveA2AContracts::{
     INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2AInterfaceEnvironment,
-    validate_initial_get_task_request, validate_initial_list_tasks_request,
+    InitialA2AStreamResponseKind, validate_initial_get_task_request,
+    validate_initial_list_tasks_request, validate_initial_subscribe_to_task_request,
 };
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
 use KonclaveA2ADomain::{A2AAgentId, A2AArtifactId, A2ATaskId, A2ATaskState, A2ATenantId};
@@ -20,6 +23,7 @@ use KonclaveA2ATaskStore::{
 };
 use KonclaveA2ATaskStoreSqlite::A2ASqliteTaskStoreConfig;
 use async_trait::async_trait;
+use futures_util::StreamExt as _;
 
 use common::{
     CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application, request,
@@ -166,6 +170,136 @@ async fn non_immediate_send_waits_for_terminal_state_and_projects_history() {
             .as_wire()
             .history
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn streaming_send_starts_with_current_task_and_closes_when_terminal() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store.clone(),
+        Arc::new(CompletingSubmitter { store }),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::new(Duration::from_secs(1), Duration::from_millis(1)).unwrap(),
+    );
+    let mut stream = application
+        .send_streaming_message(request("request", true, 1))
+        .await
+        .unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.kind(), InitialA2AStreamResponseKind::Task);
+    assert_eq!(first.state(), TaskState::Completed);
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn subscription_replays_each_durable_status_after_the_initial_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::new(Duration::from_secs(5), Duration::from_millis(1)).unwrap(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        A2ATaskId::parse(task.task_id().to_owned()).unwrap(),
+    );
+    let subscribe = validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task.task_id().to_owned(),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let mut stream = application.subscribe_to_task(subscribe).await.unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.kind(), InitialA2AStreamResponseKind::Task);
+    assert_eq!(first.state(), TaskState::Submitted);
+
+    store
+        .transition_task(A2ATaskTransition::new(
+            key.clone(),
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+    store
+        .append_message(
+            KonclaveA2ATaskStore::A2ATaskMessage::new(
+                key.clone(),
+                KonclaveA2ADomain::A2AMessageId::parse("response-stream").unwrap(),
+                KonclaveA2ATaskStore::A2ATaskMessageRole::Agent,
+                "response",
+                120,
+            )
+            .unwrap(),
+            120,
+        )
+        .unwrap();
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            1,
+            A2ATaskState::Completed,
+            None,
+            130,
+        ))
+        .unwrap();
+
+    let working = stream.next().await.unwrap().unwrap();
+    assert_eq!(working.kind(), InitialA2AStreamResponseKind::StatusUpdate);
+    assert_eq!(working.state(), TaskState::Working);
+    let completed = stream.next().await.unwrap().unwrap();
+    assert_eq!(completed.kind(), InitialA2AStreamResponseKind::StatusUpdate);
+    assert_eq!(completed.state(), TaskState::Completed);
+    assert!(completed
+        .as_wire()
+        .payload
+        .as_ref()
+        .is_some_and(|payload| matches!(
+            payload,
+            KonclaveA2AContracts::wire::stream_response::Payload::StatusUpdate(update)
+                if update.status.as_ref().and_then(|status| status.message.as_ref()).is_some()
+        )));
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn subscription_rejects_terminal_tasks_before_streaming_headers() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store.clone(),
+        Arc::new(CompletingSubmitter { store }),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let task = application
+        .send_message(request("request", false, 0))
+        .await
+        .unwrap();
+    let subscribe = validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task.task_id().to_owned(),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        application.subscribe_to_task(subscribe).await.err(),
+        Some(A2AGatewayError::UnsupportedOperation)
     );
 }
 

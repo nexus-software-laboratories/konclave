@@ -39,6 +39,9 @@ pub enum A2AGatewayError {
     /// A non-immediate request did not reach a response state within the configured bound.
     #[error("A2A gateway response wait expired")]
     ResponseWaitExpired,
+    /// The requested standard operation is not available for the current task state.
+    #[error("A2A gateway operation is unsupported")]
+    UnsupportedOperation,
     /// HTTP authentication is missing or invalid.
     #[error("A2A gateway authentication failed")]
     Unauthenticated,
