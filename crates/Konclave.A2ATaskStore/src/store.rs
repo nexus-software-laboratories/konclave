@@ -383,6 +383,7 @@ pub trait A2ATaskStore: Send + Sync {
     fn list_tasks_with_artifacts(
         &self,
         query: &A2ATaskListQuery,
+        artifact_limit: usize,
     ) -> Result<A2ATaskArtifactListPage, A2ATaskStoreError>;
 
     /// Applies one expected-generation state transition.
@@ -484,6 +485,7 @@ pub trait A2ATaskStore: Send + Sync {
         &self,
         key: &A2ATaskKey,
         message_limit: usize,
+        artifact_limit: usize,
     ) -> Result<A2ATaskSnapshot, A2ATaskStoreError>;
 
     /// Reads status and artifact deltas after durable internal cursors.
@@ -500,6 +502,7 @@ pub trait A2ATaskStore: Send + Sync {
         after_generation: u64,
         after_artifact_sequence: u64,
         message_limit: usize,
+        artifact_limit: usize,
     ) -> Result<A2ATaskStreamUpdates, A2ATaskStoreError>;
 
     /// Reads a bounded ordered artifact page from sequence zero.

@@ -376,7 +376,12 @@ impl A2AGatewayApplication {
         .map_err(|_| A2AGatewayError::InvalidRequest)?;
         let store = Arc::clone(&self.store);
         let (tasks, next_cursor, page_size, total_size) = if lookup.include_artifacts() {
-            let page = tokio::task::spawn_blocking(move || store.list_tasks_with_artifacts(&query))
+            let page = tokio::task::spawn_blocking(move || {
+                store.list_tasks_with_artifacts(
+                    &query,
+                    MAX_A2A_ARTIFACTS_PER_TASK + 1,
+                )
+            })
                 .await
                 .map_err(|_| A2AGatewayError::StorageUnavailable)?
                 .map_err(map_store_error)?;
@@ -579,6 +584,12 @@ impl A2AGatewayApplication {
                     .stream_updates(state.key.clone(), state.generation, state.artifact_sequence)
                     .await?;
                 for artifact in artifact_updates {
+                    if state.artifact_sequence
+                        >= u64::try_from(MAX_A2A_ARTIFACTS_PER_TASK)
+                            .map_err(|_| A2AGatewayError::InvalidConfiguration)?
+                    {
+                        return Err(A2AGatewayError::ResponseTooLarge);
+                    }
                     state.artifact_sequence = artifact.sequence();
                     state.has_complete_artifact = true;
                     state.pending.push_back(project_artifact_update(
@@ -613,7 +624,9 @@ impl A2AGatewayApplication {
     ) -> Result<(InitialA2AStreamResponse, u64, u64), A2AGatewayError> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let snapshot = store.task_snapshot(&key, 2).map_err(map_store_error)?;
+            let snapshot = store
+                .task_snapshot(&key, 2, MAX_A2A_ARTIFACTS_PER_TASK + 1)
+                .map_err(map_store_error)?;
             let (record, messages, artifacts) = snapshot.into_parts();
             if record.content_pruned() {
                 return Err(A2AGatewayError::TaskNotFound);
@@ -646,7 +659,13 @@ impl A2AGatewayApplication {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
             let updates = store
-                .stream_updates(&key, after_generation, after_artifact_sequence, 2)
+                .stream_updates(
+                    &key,
+                    after_generation,
+                    after_artifact_sequence,
+                    2,
+                    MAX_A2A_ARTIFACTS_PER_TASK + 1,
+                )
                 .map_err(map_store_error)?;
             let (task, statuses, artifacts, messages) = updates.into_parts();
             if task.content_pruned() {
@@ -665,7 +684,9 @@ impl A2AGatewayApplication {
     ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let snapshot = store.task_snapshot(&key, 2).map_err(map_store_error)?;
+            let snapshot = store
+                .task_snapshot(&key, 2, MAX_A2A_ARTIFACTS_PER_TASK + 1)
+                .map_err(map_store_error)?;
             let (record, messages, artifacts) = snapshot.into_parts();
             if record.content_pruned() {
                 return Err(A2AGatewayError::TaskNotFound);

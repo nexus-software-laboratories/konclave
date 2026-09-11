@@ -140,6 +140,17 @@ pub struct A2ASqliteTaskStoreConfig {
     pub busy_timeout_milliseconds: u64,
 }
 
+fn validate_artifact_read_limit(
+    limit: usize,
+    configured: usize,
+) -> Result<usize, A2ATaskStoreError> {
+    if limit == 0 || limit > MAX_PAGE_SIZE {
+        Err(A2ATaskStoreError::InvalidConfiguration)
+    } else {
+        Ok(limit.min(configured))
+    }
+}
+
 impl Default for A2ASqliteTaskStoreConfig {
     fn default() -> Self {
         Self {
@@ -410,8 +421,13 @@ impl A2ATaskStore for A2ASqliteTaskStore {
     fn list_tasks_with_artifacts(
         &self,
         query: &A2ATaskListQuery,
+        artifact_limit: usize,
     ) -> Result<A2ATaskArtifactListPage, A2ATaskStoreError> {
         validate_list_page_size(query.page_size())?;
+        let artifact_limit = validate_artifact_read_limit(
+            artifact_limit,
+            self.config.max_artifacts_per_task,
+        )?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -421,7 +437,7 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             .into_iter()
             .map(|task| {
                 let artifacts =
-                    load_artifacts(&transaction, task.key(), self.config.max_artifacts_per_task)?;
+                    load_artifacts(&transaction, task.key(), artifact_limit)?;
                 Ok(A2ATaskWithArtifacts::new(task, artifacts))
             })
             .collect::<Result<Vec<_>, A2ATaskStoreError>>()?;
@@ -648,8 +664,13 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         &self,
         key: &A2ATaskKey,
         message_limit: usize,
+        artifact_limit: usize,
     ) -> Result<A2ATaskSnapshot, A2ATaskStoreError> {
         validate_page_limit(message_limit, self.config.max_messages_per_task)?;
+        let artifact_limit = validate_artifact_read_limit(
+            artifact_limit,
+            self.config.max_artifacts_per_task,
+        )?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -658,9 +679,16 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         let (messages, artifacts) = if task.content_pruned() {
             (Vec::new(), Vec::new())
         } else {
+            let artifact_count = record_count(&transaction, "a2a_task_artifact", key)?;
+            if usize::try_from(after_artifact_sequence)
+                .ok()
+                .is_none_or(|cursor| cursor > artifact_count)
+            {
+                return Err(A2ATaskStoreError::CorruptData);
+            }
             (
                 load_messages(&transaction, key, message_limit)?,
-                load_artifacts(&transaction, key, self.config.max_artifacts_per_task)?,
+                load_artifacts(&transaction, key, artifact_limit)?,
             )
         };
         transaction
@@ -675,8 +703,13 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         after_generation: u64,
         after_artifact_sequence: u64,
         message_limit: usize,
+        artifact_limit: usize,
     ) -> Result<A2ATaskStreamUpdates, A2ATaskStoreError> {
         validate_page_limit(message_limit, self.config.max_messages_per_task)?;
+        let artifact_limit = validate_artifact_read_limit(
+            artifact_limit,
+            self.config.max_artifacts_per_task,
+        )?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -692,14 +725,13 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             }
             (Vec::new(), Vec::new())
         } else {
-            let artifacts = load_artifacts(&transaction, key, self.config.max_artifacts_per_task)?;
-            let artifact_cursor = usize::try_from(after_artifact_sequence)
-                .map_err(|_| A2ATaskStoreError::CorruptData)?;
-            if artifact_cursor > artifacts.len() {
-                return Err(A2ATaskStoreError::CorruptData);
-            }
             (
-                artifacts.into_iter().skip(artifact_cursor).collect(),
+                load_artifacts_after(
+                    &transaction,
+                    key,
+                    after_artifact_sequence,
+                    artifact_limit,
+                )?,
                 load_messages(&transaction, key, message_limit)?,
             )
         };
@@ -1926,6 +1958,84 @@ fn load_artifacts(
             artifact.complete(),
             artifact.recorded_at_unix_milliseconds(),
         ));
+    }
+    Ok(artifacts)
+}
+
+fn load_artifacts_after(
+    connection: &Connection,
+    key: &A2ATaskKey,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<Vec<StoredA2ATaskArtifact>, A2ATaskStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence, artifact_id, content_digest, canonical_bytes,
+                    complete, identity_digest, recorded_at_unix_milliseconds
+             FROM a2a_task_artifact
+             WHERE agent_id = ?1 AND tenant_id = ?2 AND task_id = ?3
+               AND sequence > ?4
+             ORDER BY sequence
+             LIMIT ?5",
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    let rows = statement
+        .query_map(
+            params![
+                key.agent_id().as_str(),
+                tenant_value(key),
+                key.task_id().as_str(),
+                to_sql(after_sequence)?,
+                i64::try_from(limit).map_err(|_| A2ATaskStoreError::InvalidConfiguration)?
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| A2ATaskStoreError::Storage)?;
+    let mut artifacts = Vec::with_capacity(rows.len());
+    let mut expected_sequence = after_sequence
+        .checked_add(1)
+        .ok_or(A2ATaskStoreError::CorruptData)?;
+    for row in rows {
+        let sequence = from_sql(row.0)?;
+        if sequence != expected_sequence {
+            return Err(A2ATaskStoreError::CorruptData);
+        }
+        let artifact = A2ATaskArtifact::new(
+            key.clone(),
+            A2AArtifactId::parse(row.1).map_err(|_| A2ATaskStoreError::CorruptData)?,
+            row.3.clone(),
+            parse_bool(row.4)?,
+            from_sql(row.6)?,
+        )
+        .map_err(|_| A2ATaskStoreError::CorruptData)?;
+        if artifact.content_digest().as_slice() != row.2.as_slice()
+            || artifact.identity_digest().as_slice() != row.5.as_slice()
+        {
+            return Err(A2ATaskStoreError::CorruptData);
+        }
+        artifacts.push(StoredA2ATaskArtifact::new(
+            sequence,
+            artifact.artifact_id().clone(),
+            *artifact.content_digest(),
+            row.3,
+            artifact.complete(),
+            artifact.recorded_at_unix_milliseconds(),
+        ));
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(A2ATaskStoreError::CorruptData)?;
     }
     Ok(artifacts)
 }

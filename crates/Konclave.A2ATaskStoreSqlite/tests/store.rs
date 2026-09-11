@@ -707,7 +707,7 @@ fn task_and_stream_snapshots_keep_artifacts_and_terminal_status_atomic() {
         ))
         .unwrap();
 
-    let snapshot = store.task_snapshot(&key, 2).unwrap();
+    let snapshot = store.task_snapshot(&key, 2, 4).unwrap();
     let (task, messages, artifacts) = snapshot.into_parts();
     assert_eq!(task.generation(), 2);
     assert_eq!(messages.len(), 1);
@@ -715,7 +715,7 @@ fn task_and_stream_snapshots_keep_artifacts_and_terminal_status_atomic() {
     assert_eq!(artifacts[0].sequence(), 1);
     assert_eq!(artifacts[1].sequence(), 2);
 
-    let updates = store.stream_updates(&key, 1, 0, 2).unwrap();
+    let updates = store.stream_updates(&key, 1, 0, 2, 4).unwrap();
     let (task, statuses, artifacts, messages) = updates.into_parts();
     assert_eq!(task.generation(), 2);
     assert_eq!(statuses.len(), 1);
@@ -723,13 +723,13 @@ fn task_and_stream_snapshots_keep_artifacts_and_terminal_status_atomic() {
     assert_eq!(artifacts.len(), 2);
     assert_eq!(messages.len(), 1);
 
-    let updates = store.stream_updates(&key, 2, 1, 2).unwrap();
+    let updates = store.stream_updates(&key, 2, 1, 2, 4).unwrap();
     let (_, statuses, artifacts, _) = updates.into_parts();
     assert!(statuses.is_empty());
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].sequence(), 2);
     assert_eq!(
-        store.stream_updates(&key, 2, 3, 2).err(),
+        store.stream_updates(&key, 2, 3, 2, 4).err(),
         Some(A2ATaskStoreError::CorruptData)
     );
 
@@ -743,6 +743,7 @@ fn task_and_stream_snapshots_keep_artifacts_and_terminal_status_atomic() {
                 None,
             )
             .unwrap(),
+            4,
         )
         .unwrap();
     let (tasks, _, _, _) = page.into_parts();
