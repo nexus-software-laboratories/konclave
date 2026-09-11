@@ -654,10 +654,7 @@ fn authorize(
     authorize_principal(state, principal, action)
 }
 
-fn authenticate(
-    state: &A2AHttpState,
-    parts: &Parts,
-) -> Result<A2AHttpPrincipalId, Box<Response>> {
+fn authenticate(state: &A2AHttpState, parts: &Parts) -> Result<A2AHttpPrincipalId, Box<Response>> {
     let principal = match state.access.authenticate(parts) {
         Ok(principal) => principal,
         Err(A2AGatewayError::Unauthenticated) => {
