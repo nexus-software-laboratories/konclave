@@ -76,6 +76,10 @@ an idempotency conflict rather than creating a second task.
 The mapper moves the validated request body into the directed-request mapping without
 making it `Clone`, `Debug`, or serializable.
 
+`SendStreamingMessage` uses the same mapping after normalizing
+`returnImmediately=false`, because A2A defines that response preference as having no
+effect on streaming operations.
+
 ## Task state separation
 
 `A2ATaskState` represents the A2A states `SUBMITTED`, `WORKING`, `COMPLETED`,

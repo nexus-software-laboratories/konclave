@@ -13,6 +13,6 @@ pub use identifiers::{
 pub use mapping::{
     A2AAgentRoute, A2ADirectedRequestMapping, A2ATaskListLookup, A2ATaskLookup,
     map_initial_get_task, map_initial_list_tasks, map_initial_send_message,
-    map_initial_subscribe_to_task,
+    map_initial_streaming_message, map_initial_subscribe_to_task,
 };
 pub use task_state::A2ATaskState;

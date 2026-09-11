@@ -464,7 +464,7 @@ async fn subscribe_to_task(
     id: String,
     request: Request<Body>,
 ) -> Response {
-    let (parts, _) = request.into_parts();
+    let (parts, body) = request.into_parts();
     if let Err(response) = authorize(&state, &parts, A2AHttpAction::SubscribeToTask) {
         return *response;
     }
@@ -477,6 +477,22 @@ async fn subscribe_to_task(
     if parts.uri.query().is_some() {
         return contract_error_response(A2AContractError::UnsupportedField {
             field: "subscribe_to_task.query",
+        });
+    }
+    let bytes = match read_body(
+        body,
+        &parts.headers,
+        state.config.request_body_timeout,
+        MAX_A2A_ENCODED_REQUEST_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    if !bytes.is_empty() {
+        return contract_error_response(A2AContractError::UnsupportedField {
+            field: "subscribe_to_task.body",
         });
     }
     let request = match validate_initial_subscribe_to_task_request(

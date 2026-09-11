@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
-use KonclaveA2AContracts::wire::AgentInterface;
+use KonclaveA2AContracts::wire::{AgentInterface, TaskState};
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH,
     DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard, InitialA2AAgentSecurityKind,
@@ -597,6 +597,7 @@ fn decode_sse_stream(
             context_id: expected_context_id,
             terminal_seen: false,
             final_snapshot_seen: false,
+            last_state: None,
         },
         eof: false,
     };
@@ -681,6 +682,7 @@ fn sse_frame_end(bytes: &[u8]) -> Option<usize> {
 fn parse_sse_data(frame: &[u8], maximum: usize) -> Result<Option<Vec<u8>>, A2AGatewayError> {
     let frame = std::str::from_utf8(frame).map_err(|_| A2AGatewayError::Contract)?;
     let frame = frame.replace("\r\n", "\n").replace('\r', "\n");
+    let frame = frame.strip_prefix('\u{feff}').unwrap_or(&frame);
     let mut data = String::new();
     let mut found = false;
     for line in frame.split('\n') {
@@ -717,6 +719,7 @@ struct StreamCorrelation {
     context_id: Option<String>,
     terminal_seen: bool,
     final_snapshot_seen: bool,
+    last_state: Option<TaskState>,
 }
 
 impl StreamCorrelation {
@@ -752,19 +755,48 @@ impl StreamCorrelation {
             if event.kind() != InitialA2AStreamResponseKind::Task
                 || !response_state(event.state())
                 || self.final_snapshot_seen
+                || self.last_state != Some(event.state())
             {
                 return Err(A2AGatewayError::Contract);
             }
             self.final_snapshot_seen = true;
-        } else if response_state(event.state()) {
-            self.terminal_seen = true;
+        } else {
+            if self
+                .last_state
+                .is_some_and(|previous| !valid_stream_transition(previous, event.state()))
+            {
+                return Err(A2AGatewayError::Contract);
+            }
+            if response_state(event.state()) {
+                self.terminal_seen = true;
+            }
         }
+        self.last_state = Some(event.state());
         self.first = false;
         Ok(())
     }
 }
 
-fn response_state(state: KonclaveA2AContracts::wire::TaskState) -> bool {
+fn valid_stream_transition(previous: TaskState, next: TaskState) -> bool {
+    if previous == next {
+        return !response_state(previous);
+    }
+    match previous {
+        TaskState::Submitted => {
+            next == TaskState::Working || response_state(next)
+        }
+        TaskState::Working => response_state(next),
+        TaskState::Unspecified
+        | TaskState::Completed
+        | TaskState::Failed
+        | TaskState::Canceled
+        | TaskState::InputRequired
+        | TaskState::Rejected
+        | TaskState::AuthRequired => false,
+    }
+}
+
+fn response_state(state: TaskState) -> bool {
     matches!(
         state,
         KonclaveA2AContracts::wire::TaskState::Completed
@@ -851,6 +883,12 @@ mod tests {
         );
         assert_eq!(&bytes[end..], b"remaining");
         assert_eq!(parse_sse_data(b": keep-alive\n\n", 128).unwrap(), None);
+        assert_eq!(
+            parse_sse_data("\u{feff}data: {}\n\n".as_bytes(), 128)
+                .unwrap()
+                .unwrap(),
+            b"{}"
+        );
         let carriage_return = b"data: {\"task\": {}}\r\rremaining";
         let end = sse_frame_end(carriage_return).unwrap();
         assert_eq!(
@@ -881,6 +919,7 @@ mod tests {
             context_id: None,
             terminal_seen: false,
             final_snapshot_seen: false,
+            last_state: None,
         };
         assert_eq!(
             correlation.validate(&status).err(),
@@ -897,10 +936,20 @@ mod tests {
             context_id: None,
             terminal_seen: false,
             final_snapshot_seen: false,
+            last_state: None,
         };
         correlation.validate(&task).unwrap();
         assert_eq!(
             correlation.validate(&task).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
+
+        let regression = decode_initial_stream_response_json(
+            br#"{"statusUpdate":{"taskId":"00112233445566778899aabbccddeeff","contextId":"context-1","status":{"state":"TASK_STATE_SUBMITTED","timestamp":"1970-01-01T00:00:02Z"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            correlation.validate(&regression).err(),
             Some(crate::A2AGatewayError::Contract)
         );
 

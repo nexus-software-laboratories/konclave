@@ -419,6 +419,19 @@ async fn active_task_subscription_supports_proto_get_and_rest_post_aliases() {
         assert_eq!(current.task_id(), task.task_id());
         assert!(current.state() == KonclaveA2AContracts::wire::TaskState::Submitted);
     }
+    let response = router
+        .oneshot(
+            authenticated(&format!(
+                "/tenant-a/tasks/{}:subscribe",
+                task.task_id()
+            ))
+            .method("POST")
+            .body(Body::from("{}"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

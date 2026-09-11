@@ -12,7 +12,7 @@ use KonclaveA2AContracts::{
 use KonclaveA2ADiscovery::CompiledA2AAgentPublication;
 use KonclaveA2ADomain::{
     A2AAgentRoute, A2AMessageId, A2ATaskId, map_initial_get_task, map_initial_list_tasks,
-    map_initial_send_message, map_initial_subscribe_to_task,
+    map_initial_send_message, map_initial_streaming_message, map_initial_subscribe_to_task,
 };
 use KonclaveA2ATaskStore::{
     A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery, A2ATaskRecord, A2ATaskStore,
@@ -282,7 +282,7 @@ impl A2AGatewayApplication {
         request: InitialSendMessageRequest,
     ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
         let return_immediately = request.return_immediately();
-        let prepared = self.prepare_task(request).await?;
+        let prepared = self.prepare_task(request, false).await?;
         if return_immediately {
             return timeout_at(
                 prepared.deadline,
@@ -319,7 +319,7 @@ impl A2AGatewayApplication {
         &self,
         request: InitialSendMessageRequest,
     ) -> Result<A2AGatewayTaskStream, A2AGatewayError> {
-        let prepared = self.prepare_task(request).await?;
+        let prepared = self.prepare_task(request, true).await?;
         self.stream_task(
             prepared.key,
             prepared.history_length,
@@ -410,10 +410,15 @@ impl A2AGatewayApplication {
     async fn prepare_task(
         &self,
         request: InitialSendMessageRequest,
+        streaming: bool,
     ) -> Result<PreparedTask, A2AGatewayError> {
         let history_length = request.history_length();
-        let mapping = map_initial_send_message(&self.route, request)
-            .map_err(|_| A2AGatewayError::RouteMismatch)?;
+        let mapping = if streaming {
+            map_initial_streaming_message(&self.route, request)
+        } else {
+            map_initial_send_message(&self.route, request)
+        }
+        .map_err(|_| A2AGatewayError::RouteMismatch)?;
         let created_at = self
             .clock
             .now_unix_milliseconds()

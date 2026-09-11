@@ -289,6 +289,23 @@ pub fn map_initial_send_message(
     })
 }
 
+/// Maps a validated streaming message onto one deployment-selected route.
+///
+/// A2A defines `returnImmediately` as having no effect for streaming operations, so
+/// this mapping normalizes that response preference before durable identity checks.
+///
+/// # Errors
+///
+/// Returns a typed error when tenant, context, or identifier invariants disagree.
+pub fn map_initial_streaming_message(
+    route: &A2AAgentRoute,
+    request: InitialSendMessageRequest,
+) -> Result<A2ADirectedRequestMapping, A2ADomainError> {
+    let mut mapping = map_initial_send_message(route, request)?;
+    mapping.return_immediately = false;
+    Ok(mapping)
+}
+
 /// Maps a validated `GetTask` request onto one agent-scoped lookup.
 ///
 /// # Errors

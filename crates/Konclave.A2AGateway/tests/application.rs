@@ -193,6 +193,31 @@ async fn streaming_send_starts_with_current_task_and_closes_when_terminal() {
     assert!(stream.next().await.is_none());
 }
 
+#[tokio::test]
+async fn streaming_send_normalizes_return_immediately_for_exact_retries() {
+    let root = tempfile::tempdir().unwrap();
+    let submitter = Arc::new(RecordingSubmitter::default());
+    let application = application(
+        store(&root),
+        submitter.clone(),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::new(Duration::from_millis(10), Duration::from_millis(1)).unwrap(),
+    );
+    let mut first = application
+        .send_streaming_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let first_task = first.next().await.unwrap().unwrap();
+    drop(first);
+    let mut retry = application
+        .send_streaming_message(request("request", false, 0))
+        .await
+        .unwrap();
+    let retry_task = retry.next().await.unwrap().unwrap();
+    assert_eq!(retry_task.task_id(), first_task.task_id());
+    assert_eq!(submitter.calls.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test(start_paused = true)]
 async fn subscription_replays_each_durable_status_after_the_initial_snapshot() {
     let root = tempfile::tempdir().unwrap();
