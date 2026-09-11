@@ -4,8 +4,9 @@ use KonclaveA2AContracts::wire::{
 };
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE, A2AContractError,
-    DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AInterfaceEnvironment, MAX_A2A_ENCODED_REQUEST_BYTES,
-    MAX_A2A_TEXT_BYTES, decode_initial_get_task_json, decode_initial_get_task_protobuf,
+    DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE, DEFAULT_A2A_LIST_PAGE_SIZE,
+    InitialA2AInterfaceEnvironment, MAX_A2A_ENCODED_REQUEST_BYTES, MAX_A2A_TEXT_BYTES,
+    decode_initial_get_task_json, decode_initial_get_task_protobuf,
     decode_initial_send_message_json, decode_initial_send_message_protobuf,
     decode_initial_subscribe_to_task_json, decode_initial_subscribe_to_task_protobuf,
     validate_initial_agent_interface, validate_initial_list_tasks_request,
@@ -293,11 +294,33 @@ fn list_tasks_request_defaults_and_rejects_unsupported_filters() {
             include_artifacts: None,
         }
     };
-    assert!(
-        validate_initial_list_tasks_request(request, Some("tenant-a"))
-            .unwrap()
-            .include_artifacts()
+    let validated = validate_initial_list_tasks_request(request, Some("tenant-a")).unwrap();
+    assert!(validated.include_artifacts());
+    assert_eq!(
+        validated.page_size(),
+        DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE
     );
+
+    let request = ListTasksRequest {
+        page_size: Some(9),
+        include_artifacts: Some(true),
+        ..ListTasksRequest {
+            tenant: "tenant-a".to_string(),
+            context_id: String::new(),
+            status: TaskState::Unspecified as i32,
+            page_size: None,
+            page_token: String::new(),
+            history_length: None,
+            status_timestamp_after: None,
+            include_artifacts: None,
+        }
+    };
+    assert!(matches!(
+        validate_initial_list_tasks_request(request, Some("tenant-a")),
+        Err(A2AContractError::OutOfRange {
+            field: "list_tasks.page_size"
+        })
+    ));
 
     for request in [
         ListTasksRequest {

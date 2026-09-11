@@ -99,9 +99,10 @@ The implemented standard routes are:
 
 `historyLength` is a camel-case GetTask query parameter. `ListTasks` accepts
 `pageSize`, `pageToken`, and optional `includeArtifacts=true|false`; artifacts are
-omitted by default. `CancelTask` authenticates and authorizes normally but returns
-the A2A `UNSUPPORTED_OPERATION` reason until the bridge can cancel an already
-directed Konclave request.
+omitted by default. Artifact-inclusive pages default to and are capped at `8`.
+`CancelTask` authenticates and authorizes normally but returns the A2A
+`UNSUPPORTED_OPERATION` reason until the bridge can cancel an already directed
+Konclave request.
 
 Streaming uses `text/event-stream`. Every SSE `data` field contains one bounded
 ProtoJSON `StreamResponse`. The first event is a current Task snapshot; later events

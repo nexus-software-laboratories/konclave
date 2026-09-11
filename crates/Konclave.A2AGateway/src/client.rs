@@ -4,9 +4,10 @@ use std::time::Duration;
 use KonclaveA2AContracts::wire::{AgentInterface, TaskState};
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH,
-    DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard, InitialA2AAgentSecurityKind,
-    InitialA2AInterfaceEnvironment, InitialA2AStreamResponse, InitialA2AStreamResponseKind,
-    InitialA2ATaskListResponse, InitialA2ATaskResponse, InitialSendMessageRequest,
+    DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE, DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard,
+    InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment, InitialA2AStreamResponse,
+    InitialA2AStreamResponseKind, InitialA2ATaskListResponse, InitialA2ATaskResponse,
+    InitialSendMessageRequest, MAX_A2A_LIST_ARTIFACT_PAGE_SIZE,
     MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
     decode_initial_agent_card_json, decode_initial_list_tasks_response_json,
     decode_initial_send_message_response_json, decode_initial_stream_response_json,
@@ -337,10 +338,20 @@ impl A2AHttpJsonClient {
         if page_size.is_some_and(|value| value == 0 || value > 256) {
             return Err(A2AGatewayError::InvalidConfiguration);
         }
+        if include_artifacts
+            && page_size.is_some_and(|value| value > MAX_A2A_LIST_ARTIFACT_PAGE_SIZE)
+        {
+            return Err(A2AGatewayError::InvalidConfiguration);
+        }
         let mut url = self.endpoint("tasks")?;
         if let Some(page_size) = page_size {
             url.query_pairs_mut()
                 .append_pair("pageSize", &page_size.to_string());
+        } else if include_artifacts {
+            url.query_pairs_mut().append_pair(
+                "pageSize",
+                &DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE.to_string(),
+            );
         } else if page_token.is_some() {
             url.query_pairs_mut()
                 .append_pair("pageSize", &DEFAULT_A2A_LIST_PAGE_SIZE.to_string());

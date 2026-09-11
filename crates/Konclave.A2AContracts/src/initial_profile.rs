@@ -25,8 +25,12 @@ pub const MAX_A2A_ENCODED_REQUEST_BYTES: usize = 128 * 1024;
 pub const MAX_A2A_TEXT_BYTES: usize = 64 * 1024;
 /// Default page size for `ListTasks`.
 pub const DEFAULT_A2A_LIST_PAGE_SIZE: u32 = 50;
+/// Default page size when `ListTasks` includes artifact content.
+pub const DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE: u32 = 8;
 /// Maximum page size for `ListTasks`.
 pub const MAX_A2A_LIST_PAGE_SIZE: u32 = 256;
+/// Maximum page size when `ListTasks` includes artifact content.
+pub const MAX_A2A_LIST_ARTIFACT_PAGE_SIZE: u32 = 8;
 /// Maximum decoded byte length of one opaque `ListTasks` page token.
 pub const MAX_A2A_LIST_PAGE_TOKEN_BYTES: usize = 128;
 const MAX_A2A_INTERFACE_URL_BYTES: usize = 2 * 1024;
@@ -561,11 +565,21 @@ pub fn validate_initial_list_tasks_request(
             field: "list_tasks.status_timestamp_after",
         });
     }
+    let include_artifacts = request.include_artifacts.unwrap_or(false);
+    let page_size = match request.page_size {
+        None if include_artifacts => DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE,
+        value => validate_page_size(value)?,
+    };
+    if include_artifacts && page_size > MAX_A2A_LIST_ARTIFACT_PAGE_SIZE {
+        return Err(A2AContractError::OutOfRange {
+            field: "list_tasks.page_size",
+        });
+    }
     Ok(InitialListTasksRequest {
         tenant: validate_tenant(request.tenant, expected_tenant)?,
-        page_size: validate_page_size(request.page_size)?,
+        page_size,
         page_token: validate_page_token(request.page_token, "list_tasks.page_token")?,
-        include_artifacts: request.include_artifacts.unwrap_or(false),
+        include_artifacts,
     })
 }
 

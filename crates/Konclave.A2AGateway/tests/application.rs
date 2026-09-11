@@ -427,7 +427,7 @@ async fn artifact_publication_projects_into_task_and_stream_before_completion() 
             tenant: "tenant-a".to_owned(),
             context_id: String::new(),
             status: 0,
-            page_size: Some(50),
+            page_size: Some(8),
             page_token: String::new(),
             history_length: None,
             status_timestamp_after: None,

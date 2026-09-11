@@ -197,7 +197,7 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
             );
             assert_eq!(
                 client
-                    .list_tasks_with_artifacts(Some(50), None, true)
+                    .list_tasks_with_artifacts(Some(8), None, true)
                     .await
                     .unwrap()
                     .as_wire()

@@ -52,7 +52,8 @@ The reference router implements the pinned A2A v1.0.1 HTTP+JSON binding:
 `historyLength` is the only accepted GetTask query parameter and remains limited to
 `0` or `1`. `ListTasks` accepts `pageSize`, `pageToken`, and
 `includeArtifacts=true|false`; the default page size is `50`, the hard maximum is
-`256`, and artifacts are omitted by default. `CancelTask` authenticates and
+`256`, and artifacts are omitted by default. Artifact-inclusive pages default to and
+are capped at `8`. `CancelTask` authenticates and
 authorizes like `GetTask` but returns `UNSUPPORTED_OPERATION`. The optional
 `A2A-Version` header must equal `1.0` when present.
 
