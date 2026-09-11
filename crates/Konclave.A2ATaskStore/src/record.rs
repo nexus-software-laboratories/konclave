@@ -135,7 +135,7 @@ impl A2ATaskRecord {
         self.request_text
     }
 
-    /// Returns whether immediate response was requested.
+    /// Returns the effective non-streaming immediate-response preference.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {
         self.return_immediately
@@ -210,6 +210,56 @@ impl A2ATaskRecord {
             self.history_length,
             self.request_text_digest,
         ) == self.identity_digest
+    }
+}
+
+/// One durable ordered task-status record.
+pub struct StoredA2ATaskStatus {
+    generation: u64,
+    state: A2ATaskState,
+    terminal_reason: Option<A2ATerminalReason>,
+    occurred_at_unix_milliseconds: u64,
+}
+
+impl StoredA2ATaskStatus {
+    /// Creates one persistence-owned status result.
+    #[must_use]
+    pub const fn new(
+        generation: u64,
+        state: A2ATaskState,
+        terminal_reason: Option<A2ATerminalReason>,
+        occurred_at_unix_milliseconds: u64,
+    ) -> Self {
+        Self {
+            generation,
+            state,
+            terminal_reason,
+            occurred_at_unix_milliseconds,
+        }
+    }
+
+    /// Returns the strictly increasing task generation.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the recorded A2A task state.
+    #[must_use]
+    pub const fn state(&self) -> A2ATaskState {
+        self.state
+    }
+
+    /// Returns the immutable terminal reason, when required by the state.
+    #[must_use]
+    pub const fn terminal_reason(&self) -> Option<&A2ATerminalReason> {
+        self.terminal_reason.as_ref()
+    }
+
+    /// Returns the transition timestamp.
+    #[must_use]
+    pub const fn occurred_at_unix_milliseconds(&self) -> u64 {
+        self.occurred_at_unix_milliseconds
     }
 }
 

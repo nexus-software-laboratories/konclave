@@ -148,7 +148,7 @@ impl A2ATaskCreation {
         &self.request_text
     }
 
-    /// Returns whether the caller requested an immediate response.
+    /// Returns the effective non-streaming immediate-response preference.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {
         self.return_immediately

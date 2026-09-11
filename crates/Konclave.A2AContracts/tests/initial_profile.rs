@@ -1,12 +1,13 @@
 use KonclaveA2AContracts::wire::{
     AgentInterface, GetTaskRequest, ListTasksRequest, Message, Part, Role,
-    SendMessageConfiguration, SendMessageRequest, TaskState, part,
+    SendMessageConfiguration, SendMessageRequest, SubscribeToTaskRequest, TaskState, part,
 };
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE, A2AContractError,
     DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AInterfaceEnvironment, MAX_A2A_ENCODED_REQUEST_BYTES,
     MAX_A2A_TEXT_BYTES, decode_initial_get_task_json, decode_initial_get_task_protobuf,
     decode_initial_send_message_json, decode_initial_send_message_protobuf,
+    decode_initial_subscribe_to_task_json, decode_initial_subscribe_to_task_protobuf,
     validate_initial_agent_interface, validate_initial_list_tasks_request,
     validate_initial_send_message_request,
 };
@@ -213,6 +214,30 @@ fn get_task_protobuf_and_protojson_are_tenant_and_history_bound() {
         decode_initial_get_task_protobuf(&unsupported.encode_to_vec(), Some("tenant-a")),
         Err(A2AContractError::OutOfRange { .. })
     ));
+}
+
+#[test]
+fn subscribe_to_task_is_tenant_and_identifier_bound() {
+    let request = SubscribeToTaskRequest {
+        tenant: "tenant-a".to_string(),
+        id: "11".repeat(16),
+    };
+    let protobuf =
+        decode_initial_subscribe_to_task_protobuf(&request.encode_to_vec(), Some("tenant-a"))
+            .unwrap();
+    assert_eq!(protobuf.tenant(), Some("tenant-a"));
+    assert_eq!(protobuf.task_id(), "11111111111111111111111111111111");
+    let json = decode_initial_subscribe_to_task_json(
+        &serde_json::to_vec(&request).unwrap(),
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(json.tenant(), protobuf.tenant());
+    assert_eq!(json.task_id(), protobuf.task_id());
+    assert_eq!(
+        decode_initial_subscribe_to_task_protobuf(&request.encode_to_vec(), Some("tenant-b")).err(),
+        Some(A2AContractError::TenantMismatch)
+    );
 }
 
 #[test]

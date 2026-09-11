@@ -2,7 +2,8 @@
 
 This document is the canonical owner of Konclave's A2A wire provenance, initial
 profile, and compatibility rules. ADR 0013 defines why A2A remains an edge binding
-rather than replacing Konclave transport or the local trust boundary.
+rather than replacing Konclave transport or the local trust boundary. ADR 0016 owns
+the standard streaming projection.
 
 ## Pinned wire source
 
@@ -33,7 +34,8 @@ The initial profile negotiates exactly:
 - binding `HTTP+JSON`;
 - media type `text/plain`;
 - `SendMessage`, `ListTasks`, `GetTask`, `CancelTask` placeholder behavior,
-  `GetExtendedAgentCard`, and bounded Agent Cards.
+  `SendStreamingMessage`, `SubscribeToTask`, `GetExtendedAgentCard`, and bounded
+  Agent Cards.
 
 Production interfaces require an absolute HTTPS URL without credentials, query, or
 fragment. Development mode additionally permits HTTP on `localhost`, `127.0.0.0/8`,
@@ -56,17 +58,20 @@ The initial validator accepts one client message with:
   reference task, push-notification configuration, or alternate output mode; and
 - optional history length `0` or `1`.
 
-The optional `return_immediately` value is preserved for the gateway task layer.
-Semantic task creation, context ownership, idempotency, and Konclave target selection
-belong to the [A2A domain-mapping](../development/a2a-domain-mapping.md) and bridge
-layers.
+The optional `return_immediately` value is preserved for `SendMessage`.
+`SendStreamingMessage` normalizes it because A2A defines it as having no effect on a
+streaming operation. Semantic task creation, context ownership, idempotency, and
+Konclave target selection belong to the
+[A2A domain-mapping](../development/a2a-domain-mapping.md) and bridge layers.
 
-## `GetTask` and encoded bounds
+## Task lookup, subscription, and encoded bounds
 
 `GetTask` requires one canonical task identifier of at most 128 ASCII bytes, the
 exact configured tenant, and optional history length `0` or `1`. `ListTasks`
 requires the same tenant, optional `pageSize` in the range `1..=256`, and an opaque
-gateway page token when continuing pagination.
+gateway page token when continuing pagination. `SubscribeToTask` requires only the
+same exact tenant and task identifier; it has no caller-supplied history or resume
+cursor.
 The gateway domain layer further requires its own task identifiers to be exactly 32
 lowercase hexadecimal characters, matching the mapped Konclave request identifier.
 
@@ -84,8 +89,10 @@ equal `1.0` when present.
 The implemented standard routes are:
 
 - `POST /message:send` and `POST /{tenant}/message:send`;
+- `POST /message:stream` and `POST /{tenant}/message:stream`;
 - `GET /tasks` and `GET /{tenant}/tasks`;
 - `GET /tasks/{id}` and `GET /{tenant}/tasks/{id}`;
+- `GET` or `POST /tasks/{id}:subscribe` and tenant-prefixed equivalents;
 - `POST /tasks/{id}:cancel` and `POST /{tenant}/tasks/{id}:cancel`;
 - `GET /extendedAgentCard` and `GET /{tenant}/extendedAgentCard`; and
 - `GET /.well-known/agent-card.json` when explicitly published.
@@ -93,9 +100,19 @@ The implemented standard routes are:
 `historyLength` is a camel-case GetTask query parameter. `pageSize` and `pageToken`
 are the only accepted `ListTasks` query parameters. `CancelTask` authenticates and
 authorizes normally but returns the A2A `UNSUPPORTED_OPERATION` reason until the
-bridge can cancel an already directed Konclave request. Streaming paths authenticate
-and return `UNSUPPORTED_OPERATION`. Push, subscription, and artifact operations
-remain outside the initial profile.
+bridge can cancel an already directed Konclave request.
+
+Streaming uses `text/event-stream`. Every SSE `data` field contains one bounded
+ProtoJSON `StreamResponse`. The first event is a current Task snapshot; later events
+are ordered `TaskStatusUpdateEvent` values read after an internal durable generation
+cursor. The cursor never appears on the wire. Active streams close at the configured
+finite response deadline and recover through a fresh `SubscribeToTask`; terminal
+streams close after the terminal event. Disconnecting never changes task state.
+
+The pinned v1.0.1 protobuf annotation spells task subscription as `GET`, while its
+prose HTTP+JSON binding spells it as `POST`. The server accepts both and the outbound
+client uses `POST`. Push, artifact, and multi-turn operations remain outside the
+current profile.
 
 Errors use an `application/a2a+json` `google.rpc.Status`-shaped envelope with an A2A
 `ErrorInfo.reason`; validation errors add a bounded field violation. The
@@ -113,7 +130,7 @@ Agent Cards are rejected before decoding when they exceed 256 KiB. ProtoJSON als
 rejects duplicate object keys before generated DTO decoding. The initial
 publication profile permits at most four canonical interfaces, 32 unique skills, and
 one HTTP Bearer or mutual-TLS security declaration with one matching requirement.
-It advertises only HTTP+JSON, `text/plain`, no streaming, no push notifications, and
+It advertises HTTP+JSON, `text/plain`, standard streaming, no push notifications, and
 no arbitrary extension. Provider, documentation, icon, example, metadata, and
 signature fields remain unsupported.
 
@@ -139,7 +156,8 @@ Immutable fixtures live under `fixtures/a2a/v1.0.1/` for:
 set. `scripts/a2a/Test-A2AFixtures.ps1` verifies fixture manifests and prevents
 released fixture replacement. Crate tests prove protobuf and ProtoJSON narrowing,
 unsupported-field rejection, tenant isolation, version/binding negotiation, secure
-interface URLs, and exact fixture round trips.
+interface URLs, exact fixture round trips, streaming event bounds, first-Task
+ordering, and task/context correlation.
 
 An A2A update uses a new versioned source directory and new immutable fixtures. It
 must not rewrite the `v1.0.1` source or reinterpret its validated initial profile.

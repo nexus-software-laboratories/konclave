@@ -15,11 +15,13 @@ use KonclaveA2AGateway::{
 use axum::Router;
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, LOCATION};
-use axum::routing::get;
+use axum::routing::{get, post};
+use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use common::{
-    CompletingSubmitter, PUBLICATION, TestClock, application_with_publication, request, store,
+    CompletingSubmitter, PUBLICATION, TestClock, application_with_publication, request,
+    request_with_message_id, store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -72,6 +74,27 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
     let list = client.list_tasks(Some(50), None).await.unwrap();
     assert_eq!(list.as_wire().tasks.len(), 1);
     assert!(list.as_wire().tasks[0].history.is_empty());
+
+    let mut stream = client
+        .send_streaming_message(request_with_message_id(
+            "message-stream",
+            "request",
+            true,
+            1,
+        ))
+        .await
+        .unwrap();
+    let streamed = stream.next().await.unwrap().unwrap();
+    assert!(streamed.state() == KonclaveA2AContracts::wire::TaskState::Completed);
+    assert!(stream.next().await.is_none());
+    let streamed_task_id = A2ATaskId::parse(streamed.task_id().to_owned()).unwrap();
+    assert_eq!(
+        client.subscribe_to_task(&streamed_task_id).await.err(),
+        Some(A2AGatewayError::Remote {
+            status: 400,
+            reason: Some("UNSUPPORTED_OPERATION".to_owned())
+        })
+    );
 
     let discovery_url = format!("http://{address}/.well-known/agent-card.json");
     let (etag, card_name) = match fetch_public_agent_card(
@@ -221,6 +244,84 @@ async fn outbound_client_bounds_responses_and_rejects_wrong_auth_profile() {
         A2AHttpJsonClient::new(compiled.card(), None, A2AHttpClientConfig::default()).err(),
         Some(A2AGatewayError::UnsupportedAuthentication)
     );
+}
+
+#[tokio::test]
+async fn outbound_stream_rejects_wrong_media_type_and_non_task_first_event() {
+    let wrong_media_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let wrong_media_address = wrong_media_listener.local_addr().unwrap();
+    let wrong_media_server = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/tenant-a/message:stream",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    [(CONTENT_TYPE, "application/a2a+json")],
+                    "{}",
+                )
+            }),
+        );
+        axum::serve(wrong_media_listener, router).await.unwrap();
+    });
+    let publication = local_publication(wrong_media_address, false, false);
+    let compiled = compile_a2a_agent_publication_source(
+        &publication,
+        InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+    )
+    .unwrap();
+    let client = A2AHttpJsonClient::new(
+        compiled.card(),
+        Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+        A2AHttpClientConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        client
+            .send_streaming_message(request("request", true, 0))
+            .await
+            .err(),
+        Some(A2AGatewayError::Contract)
+    );
+    wrong_media_server.abort();
+    let _ = wrong_media_server.await;
+
+    let status_first_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let status_first_address = status_first_listener.local_addr().unwrap();
+    let status_first_server = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/tenant-a/message:stream",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    [(CONTENT_TYPE, "text/event-stream")],
+                    "data: {\"statusUpdate\":{\"taskId\":\"00112233445566778899aabbccddeeff\",\"contextId\":\"context-1\",\"status\":{\"state\":\"TASK_STATE_WORKING\",\"timestamp\":\"1970-01-01T00:00:01Z\"}}}\n\n",
+                )
+            }),
+        );
+        axum::serve(status_first_listener, router).await.unwrap();
+    });
+    let publication = local_publication(status_first_address, false, false);
+    let compiled = compile_a2a_agent_publication_source(
+        &publication,
+        InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+    )
+    .unwrap();
+    let client = A2AHttpJsonClient::new(
+        compiled.card(),
+        Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+        A2AHttpClientConfig::default(),
+    )
+    .unwrap();
+    let mut stream = client
+        .send_streaming_message(request("request", true, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.next().await.unwrap().err(),
+        Some(A2AGatewayError::Contract)
+    );
+    status_first_server.abort();
+    let _ = status_first_server.await;
 }
 
 #[tokio::test]

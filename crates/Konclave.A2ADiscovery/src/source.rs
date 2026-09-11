@@ -188,7 +188,7 @@ fn build_card<S: Borrow<SkillSource>>(
         version: version.to_owned(),
         documentation_url: None,
         capabilities: Some(AgentCapabilities {
-            streaming: Some(false),
+            streaming: Some(true),
             push_notifications: Some(false),
             extensions: vec![],
             extended_agent_card: Some(extended_agent_card),

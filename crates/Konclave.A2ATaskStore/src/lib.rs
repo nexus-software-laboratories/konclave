@@ -12,7 +12,7 @@ pub use model::{
     A2ATaskTransition, A2ATerminalReason, MAX_A2A_STORED_ARTIFACT_BYTES,
     MAX_A2A_TERMINAL_REASON_BYTES,
 };
-pub use record::{A2ATaskRecord, StoredA2ATaskArtifact, StoredA2ATaskMessage};
+pub use record::{A2ATaskRecord, StoredA2ATaskArtifact, StoredA2ATaskMessage, StoredA2ATaskStatus};
 pub use store::{
     A2ATaskListCursor, A2ATaskListPage, A2ATaskListQuery, A2ATaskPruneOutcome, A2ATaskStore,
     AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, TransitionA2ATaskOutcome,

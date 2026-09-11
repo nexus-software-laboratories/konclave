@@ -3,12 +3,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use KonclaveA2AContracts::wire::{GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest};
+use KonclaveA2AContracts::wire::{
+    GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest, SubscribeToTaskRequest,
+};
 use KonclaveA2AContracts::{
     A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH, A2AContractError,
     InitialA2AAgentSecurityKind, MAX_A2A_ENCODED_REQUEST_BYTES, decode_initial_send_message_json,
     validate_initial_get_extended_agent_card_request, validate_initial_get_task_request,
-    validate_initial_list_tasks_request,
+    validate_initial_list_tasks_request, validate_initial_subscribe_to_task_request,
 };
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -18,8 +20,10 @@ use axum::http::header::{
 };
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use futures_util::StreamExt as _;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tokio::time::timeout;
@@ -33,6 +37,8 @@ use crate::{
 
 /// Preferred A2A v1.0.1 HTTP+JSON media type.
 pub const A2A_JSON_MEDIA_TYPE: &str = "application/a2a+json";
+/// Standard media type for A2A HTTP+JSON streaming responses.
+pub const A2A_STREAM_MEDIA_TYPE: &str = "text/event-stream";
 /// Optional protocol-version request header.
 pub const A2A_VERSION_HEADER: &str = "a2a-version";
 const MAX_HTTP_CONCURRENT_REQUESTS: usize = 256;
@@ -139,13 +145,18 @@ impl A2AHttpState {
     }
 }
 
-/// Builds the strict non-streaming A2A HTTP+JSON routes.
+/// Builds the strict A2A HTTP+JSON routes.
 pub fn a2a_router(state: A2AHttpState) -> Router {
     let concurrency = state.config.max_concurrent_requests;
     Router::new()
         .route(A2A_WELL_KNOWN_AGENT_CARD_PATH, get(public_agent_card))
         .route("/message:send", post(send_message_unscoped))
         .route("/{tenant}/message:send", post(send_message_tenant))
+        .route("/message:stream", post(send_streaming_message_unscoped))
+        .route(
+            "/{tenant}/message:stream",
+            post(send_streaming_message_tenant),
+        )
         .route("/tasks", get(list_tasks_unscoped))
         .route("/{tenant}/tasks", get(list_tasks_tenant))
         .route(
@@ -161,8 +172,6 @@ pub fn a2a_router(state: A2AHttpState) -> Router {
             "/{tenant}/extendedAgentCard",
             get(extended_agent_card_tenant),
         )
-        .route("/message:stream", post(unsupported_operation))
-        .route("/{tenant}/message:stream", post(unsupported_operation))
         .with_state(state)
         .layer(ConcurrencyLimitLayer::new(concurrency))
 }
@@ -277,6 +286,60 @@ async fn send_message(
     }
 }
 
+async fn send_streaming_message_unscoped(
+    State(state): State<A2AHttpState>,
+    request: Request<Body>,
+) -> Response {
+    send_streaming_message(state, None, request).await
+}
+
+async fn send_streaming_message_tenant(
+    State(state): State<A2AHttpState>,
+    Path(tenant): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    send_streaming_message(state, Some(tenant), request).await
+}
+
+async fn send_streaming_message(
+    state: A2AHttpState,
+    path_tenant: Option<String>,
+    request: Request<Body>,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    if let Err(response) = authorize(&state, &parts, A2AHttpAction::SendStreamingMessage) {
+        return *response;
+    }
+    if let Err(response) = validate_common_headers(&parts.headers) {
+        return *response;
+    }
+    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
+        return *response;
+    }
+    if let Err(response) = validate_json_content_type(&parts.headers) {
+        return *response;
+    }
+    let bytes = match read_body(
+        body,
+        &parts.headers,
+        state.config.request_body_timeout,
+        MAX_A2A_ENCODED_REQUEST_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_initial_send_message_json(&bytes, state.application.tenant()) {
+        Ok(request) => request,
+        Err(error) => return contract_error_response(error),
+    };
+    match state.application.send_streaming_message(request).await {
+        Ok(stream) => streaming_response(stream),
+        Err(error) => gateway_error_response(error),
+    }
+}
+
 async fn get_task_unscoped(
     State(state): State<A2AHttpState>,
     Path(id): Path<String>,
@@ -358,6 +421,9 @@ async fn get_task(
     id: String,
     request: Request<Body>,
 ) -> Response {
+    if let Some(id) = id.strip_suffix(":subscribe") {
+        return subscribe_to_task(state, path_tenant, id.to_owned(), request).await;
+    }
     let (parts, _) = request.into_parts();
     if let Err(response) = authorize(&state, &parts, A2AHttpAction::GetTask) {
         return *response;
@@ -367,9 +433,6 @@ async fn get_task(
     }
     if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
         return *response;
-    }
-    if id.ends_with(":subscribe") {
-        return unsupported_operation_response();
     }
     let history_length = match parse_history_length(parts.uri.query()) {
         Ok(value) => value,
@@ -391,6 +454,59 @@ async fn get_task(
             Ok(bytes) => json_response(StatusCode::OK, bytes),
             Err(_) => gateway_error_response(A2AGatewayError::InvalidTaskProjection),
         },
+        Err(error) => gateway_error_response(error),
+    }
+}
+
+async fn subscribe_to_task(
+    state: A2AHttpState,
+    path_tenant: Option<String>,
+    id: String,
+    request: Request<Body>,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    if let Err(response) = authorize(&state, &parts, A2AHttpAction::SubscribeToTask) {
+        return *response;
+    }
+    if let Err(response) = validate_common_headers(&parts.headers) {
+        return *response;
+    }
+    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
+        return *response;
+    }
+    if parts.uri.query().is_some() {
+        return contract_error_response(A2AContractError::UnsupportedField {
+            field: "subscribe_to_task.query",
+        });
+    }
+    let request = match validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: state.application.tenant().unwrap_or_default().to_owned(),
+            id,
+        },
+        state.application.tenant(),
+    ) {
+        Ok(request) => request,
+        Err(error) => return contract_error_response(error),
+    };
+    let bytes = match read_body(
+        body,
+        &parts.headers,
+        state.config.request_body_timeout,
+        MAX_A2A_ENCODED_REQUEST_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    if !bytes.is_empty() {
+        return contract_error_response(A2AContractError::UnsupportedField {
+            field: "subscribe_to_task.body",
+        });
+    }
+    match state.application.subscribe_to_task(request).await {
+        Ok(stream) => streaming_response(stream),
         Err(error) => gateway_error_response(error),
     }
 }
@@ -444,20 +560,6 @@ async fn extended_agent_card(
     }
 }
 
-async fn unsupported_operation(
-    State(state): State<A2AHttpState>,
-    request: Request<Body>,
-) -> Response {
-    let (parts, _) = request.into_parts();
-    if let Err(response) = authorize(&state, &parts, A2AHttpAction::UnsupportedOperation) {
-        return *response;
-    }
-    if let Err(response) = validate_common_headers(&parts.headers) {
-        return *response;
-    }
-    unsupported_operation_response()
-}
-
 async fn cancel_task_unscoped(
     State(state): State<A2AHttpState>,
     Path(id): Path<String>,
@@ -480,6 +582,9 @@ async fn cancel_task(
     id: String,
     request: Request<Body>,
 ) -> Response {
+    if let Some(id) = id.strip_suffix(":subscribe") {
+        return subscribe_to_task(state, path_tenant, id.to_owned(), request).await;
+    }
     let (parts, _) = request.into_parts();
     if let Err(response) = authorize(&state, &parts, A2AHttpAction::CancelTask) {
         return *response;
@@ -504,6 +609,30 @@ fn unsupported_operation_response() -> Response {
         "UNSUPPORTED_OPERATION",
         None,
     )
+}
+
+fn streaming_response(stream: crate::A2AGatewayTaskStream) -> Response {
+    let stream = stream.map(|result| {
+        result.and_then(|response| {
+            let bytes = response
+                .deterministic_json()
+                .map_err(|_| A2AGatewayError::InvalidTaskProjection)?;
+            let data =
+                String::from_utf8(bytes).map_err(|_| A2AGatewayError::InvalidTaskProjection)?;
+            Ok(Event::default().data(data))
+        })
+    });
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn authorize(
@@ -777,6 +906,7 @@ fn gateway_error_response(error: A2AGatewayError) -> Response {
             "DEADLINE_EXCEEDED",
             None,
         ),
+        A2AGatewayError::UnsupportedOperation => unsupported_operation_response(),
         A2AGatewayError::ExtendedCardNotConfigured => a2a_error_response(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",

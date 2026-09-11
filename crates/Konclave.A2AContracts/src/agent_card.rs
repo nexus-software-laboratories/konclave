@@ -109,6 +109,7 @@ pub struct InitialA2AAgentCard {
     interfaces: Vec<InitialA2AValidatedInterface>,
     security: Option<InitialA2AAgentSecurity>,
     skills: Vec<InitialA2AAgentSkill>,
+    streaming: bool,
     extended_agent_card: bool,
 }
 
@@ -147,6 +148,12 @@ impl InitialA2AAgentCard {
     #[must_use]
     pub fn skills(&self) -> &[InitialA2AAgentSkill] {
         &self.skills
+    }
+
+    /// Returns whether standard streaming operations are advertised.
+    #[must_use]
+    pub const fn streaming(&self) -> bool {
+        self.streaming
     }
 
     /// Returns whether authenticated extended-card retrieval is advertised.
@@ -267,11 +274,7 @@ pub fn validate_initial_agent_card(
         .ok_or(A2AContractError::MissingField {
             field: "agent_card.capabilities",
         })?;
-    if capabilities.streaming.unwrap_or(false) {
-        return Err(A2AContractError::UnsupportedField {
-            field: "agent_card.capabilities.streaming",
-        });
-    }
+    let streaming = capabilities.streaming.unwrap_or(false);
     if capabilities.push_notifications.unwrap_or(false) {
         return Err(A2AContractError::UnsupportedField {
             field: "agent_card.capabilities.push_notifications",
@@ -322,6 +325,7 @@ pub fn validate_initial_agent_card(
         interfaces,
         security,
         skills,
+        streaming,
         extended_agent_card,
     })
 }

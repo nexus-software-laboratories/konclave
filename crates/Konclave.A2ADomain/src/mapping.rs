@@ -1,5 +1,6 @@
 use KonclaveA2AContracts::{
     InitialGetTaskRequest, InitialListTasksRequest, InitialSendMessageRequest,
+    InitialSubscribeToTaskRequest,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use sha2::{Digest as _, Sha256};
@@ -153,7 +154,7 @@ impl A2ADirectedRequestMapping {
         self.text
     }
 
-    /// Returns whether the caller requested an immediate submitted-task response.
+    /// Returns the effective non-streaming immediate-response preference.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {
         self.return_immediately
@@ -288,6 +289,23 @@ pub fn map_initial_send_message(
     })
 }
 
+/// Maps a validated streaming message onto one deployment-selected route.
+///
+/// A2A defines `returnImmediately` as having no effect for streaming operations, so
+/// this mapping normalizes that response preference before durable identity checks.
+///
+/// # Errors
+///
+/// Returns a typed error when tenant, context, or identifier invariants disagree.
+pub fn map_initial_streaming_message(
+    route: &A2AAgentRoute,
+    request: InitialSendMessageRequest,
+) -> Result<A2ADirectedRequestMapping, A2ADomainError> {
+    let mut mapping = map_initial_send_message(route, request)?;
+    mapping.return_immediately = false;
+    Ok(mapping)
+}
+
 /// Maps a validated `GetTask` request onto one agent-scoped lookup.
 ///
 /// # Errors
@@ -303,6 +321,24 @@ pub fn map_initial_get_task(
         task_id: A2ATaskId::parse(request.task_id().to_owned())?,
         tenant: route.tenant.clone(),
         history_length: request.history_length(),
+    })
+}
+
+/// Maps a validated `SubscribeToTask` request onto one agent-scoped lookup.
+///
+/// # Errors
+///
+/// Returns a typed error when tenant or task-identifier invariants disagree.
+pub fn map_initial_subscribe_to_task(
+    route: &A2AAgentRoute,
+    request: InitialSubscribeToTaskRequest,
+) -> Result<A2ATaskLookup, A2ADomainError> {
+    require_tenant(route, request.tenant())?;
+    Ok(A2ATaskLookup {
+        agent_id: route.agent_id.clone(),
+        task_id: A2ATaskId::parse(request.task_id().to_owned())?,
+        tenant: route.tenant.clone(),
+        history_length: None,
     })
 }
 

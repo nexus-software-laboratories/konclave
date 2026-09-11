@@ -90,6 +90,7 @@ dependencies = [
  "KonclaveLocalServiceTransport",
  "async-trait",
  "axum",
+ "futures-util",
  "log",
  "serde",
  "serde_json",

@@ -6,6 +6,7 @@ mod error;
 mod identifier;
 mod initial_profile;
 mod list_tasks_response;
+mod stream_response;
 mod task_response;
 
 pub use agent_card::{
@@ -22,18 +23,24 @@ pub use initial_profile::{
     A2A_EXTENDED_AGENT_CARD_PATH, A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
     A2A_WELL_KNOWN_AGENT_CARD_PATH, DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AInterfaceEnvironment,
     InitialA2AValidatedInterface, InitialGetExtendedAgentCardRequest, InitialGetTaskRequest,
-    InitialListTasksRequest, InitialSendMessageRequest, MAX_A2A_ENCODED_REQUEST_BYTES,
-    MAX_A2A_LIST_PAGE_SIZE, MAX_A2A_LIST_PAGE_TOKEN_BYTES, MAX_A2A_TEXT_BYTES,
-    decode_initial_get_extended_agent_card_json, decode_initial_get_extended_agent_card_protobuf,
-    decode_initial_get_task_json, decode_initial_get_task_protobuf,
-    decode_initial_send_message_json, decode_initial_send_message_protobuf,
-    validate_initial_agent_interface, validate_initial_get_extended_agent_card_request,
-    validate_initial_get_task_request, validate_initial_list_tasks_request,
-    validate_initial_send_message_request,
+    InitialListTasksRequest, InitialSendMessageRequest, InitialSubscribeToTaskRequest,
+    MAX_A2A_ENCODED_REQUEST_BYTES, MAX_A2A_LIST_PAGE_SIZE, MAX_A2A_LIST_PAGE_TOKEN_BYTES,
+    MAX_A2A_TEXT_BYTES, decode_initial_get_extended_agent_card_json,
+    decode_initial_get_extended_agent_card_protobuf, decode_initial_get_task_json,
+    decode_initial_get_task_protobuf, decode_initial_send_message_json,
+    decode_initial_send_message_protobuf, decode_initial_subscribe_to_task_json,
+    decode_initial_subscribe_to_task_protobuf, validate_initial_agent_interface,
+    validate_initial_get_extended_agent_card_request, validate_initial_get_task_request,
+    validate_initial_list_tasks_request, validate_initial_send_message_request,
+    validate_initial_subscribe_to_task_request,
 };
 pub use list_tasks_response::{
     InitialA2ATaskListResponse, decode_initial_list_tasks_response_json,
     decode_initial_list_tasks_response_protobuf, validate_initial_list_tasks_response,
+};
+pub use stream_response::{
+    InitialA2AStreamResponse, InitialA2AStreamResponseKind, decode_initial_stream_response_json,
+    decode_initial_stream_response_protobuf, validate_initial_stream_response,
 };
 pub use task_response::{
     INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2ATaskResponse, MAX_A2A_ENCODED_RESPONSE_BYTES,

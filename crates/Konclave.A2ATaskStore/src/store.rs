@@ -1,6 +1,6 @@
 use crate::{
     A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskMessage, A2ATaskRecord, A2ATaskStoreError,
-    A2ATaskTransition, StoredA2ATaskArtifact, StoredA2ATaskMessage,
+    A2ATaskTransition, StoredA2ATaskArtifact, StoredA2ATaskMessage, StoredA2ATaskStatus,
 };
 use KonclaveA2ADomain::{A2AAgentId, A2AContextId, A2ATaskId, A2ATenantId};
 
@@ -246,6 +246,20 @@ pub trait A2ATaskStore: Send + Sync {
         &self,
         transition: A2ATaskTransition,
     ) -> Result<TransitionA2ATaskOutcome, A2ATaskStoreError>;
+
+    /// Reads all durable status records after one previously observed generation.
+    ///
+    /// The returned records are consecutive and ordered by generation. An empty
+    /// result means the task has not transitioned since the supplied cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, corruption, or storage errors.
+    fn status_updates(
+        &self,
+        key: &A2ATaskKey,
+        after_generation: u64,
+    ) -> Result<Vec<StoredA2ATaskStatus>, A2ATaskStoreError>;
 
     /// Appends one ordered idempotent task message.
     ///

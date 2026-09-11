@@ -15,9 +15,9 @@ pub const MAX_A2A_ENCODED_RESPONSE_BYTES: usize = 256 * 1024;
 pub const INITIAL_TASK_TERMINAL_REASON_FIELD: &str = "konclave_terminal_reason";
 const MIN_PROTOBUF_TIMESTAMP_SECONDS: i64 = -62_135_596_800;
 const MAX_PROTOBUF_TIMESTAMP_SECONDS: i64 = 253_402_300_799;
-const MAX_A2A_TERMINAL_REASON_BYTES: usize = 64;
+pub(crate) const MAX_A2A_TERMINAL_REASON_BYTES: usize = 64;
 
-/// Validated task returned by the initial non-streaming profile.
+/// Validated task returned by the text-only profile.
 pub struct InitialA2ATaskResponse {
     wire: Task,
     state: TaskState,
@@ -146,7 +146,7 @@ pub fn validate_initial_send_message_response(
     }
 }
 
-/// Narrows one generated Task to the initial non-streaming text-only profile.
+/// Narrows one generated Task to the text-only profile.
 ///
 /// # Errors
 ///
@@ -171,11 +171,11 @@ pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2ACo
         .ok_or(A2AContractError::MissingField {
             field: "task.status.timestamp",
         })?;
-    validate_timestamp(timestamp)?;
+    validate_timestamp(timestamp, "task.status.timestamp")?;
     if let Some(message) = &status.message {
         validate_task_message(message, &task_id, &context_id, Some(Role::Agent))?;
     }
-    validate_terminal_reason_metadata(&task, state)?;
+    validate_terminal_reason_metadata(task.metadata.as_ref(), state, "task.metadata")?;
     if !task.artifacts.is_empty() {
         return Err(A2AContractError::UnsupportedField {
             field: "task.artifacts",
@@ -192,34 +192,27 @@ pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2ACo
     Ok(InitialA2ATaskResponse { wire: task, state })
 }
 
-fn validate_terminal_reason_metadata(
-    task: &Task,
+pub(crate) fn validate_terminal_reason_metadata(
+    metadata: Option<&pbjson_types::Struct>,
     state: TaskState,
+    field: &'static str,
 ) -> Result<(), A2AContractError> {
-    let Some(metadata) = task.metadata.as_ref() else {
+    let Some(metadata) = metadata else {
         return match state {
             TaskState::Failed | TaskState::Rejected | TaskState::Canceled => {
-                Err(A2AContractError::MissingField {
-                    field: "task.metadata",
-                })
+                Err(A2AContractError::MissingField { field })
             }
             _ => Ok(()),
         };
     };
     if metadata.fields.len() != 1 {
-        return Err(A2AContractError::UnsupportedField {
-            field: "task.metadata",
-        });
+        return Err(A2AContractError::UnsupportedField { field });
     }
     let Some(reason) = metadata.fields.get(INITIAL_TASK_TERMINAL_REASON_FIELD) else {
-        return Err(A2AContractError::UnsupportedField {
-            field: "task.metadata",
-        });
+        return Err(A2AContractError::UnsupportedField { field });
     };
     let Some(pbjson_types::value::Kind::StringValue(reason)) = reason.kind.as_ref() else {
-        return Err(A2AContractError::UnsupportedField {
-            field: "task.metadata",
-        });
+        return Err(A2AContractError::UnsupportedField { field });
     };
     if reason.is_empty()
         || reason.len() > MAX_A2A_TERMINAL_REASON_BYTES
@@ -227,19 +220,15 @@ fn validate_terminal_reason_metadata(
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     {
-        return Err(A2AContractError::OutOfRange {
-            field: "task.metadata",
-        });
+        return Err(A2AContractError::OutOfRange { field });
     }
     match state {
         TaskState::Failed | TaskState::Rejected | TaskState::Canceled => Ok(()),
-        _ => Err(A2AContractError::UnsupportedField {
-            field: "task.metadata",
-        }),
+        _ => Err(A2AContractError::UnsupportedField { field }),
     }
 }
 
-fn validate_task_message(
+pub(crate) fn validate_task_message(
     message: &Message,
     task_id: &str,
     context_id: &str,
@@ -313,14 +302,15 @@ fn validate_task_message(
     Ok(())
 }
 
-fn validate_timestamp(timestamp: &pbjson_types::Timestamp) -> Result<(), A2AContractError> {
+pub(crate) fn validate_timestamp(
+    timestamp: &pbjson_types::Timestamp,
+    field: &'static str,
+) -> Result<(), A2AContractError> {
     if !(MIN_PROTOBUF_TIMESTAMP_SECONDS..=MAX_PROTOBUF_TIMESTAMP_SECONDS)
         .contains(&timestamp.seconds)
         || !(0..1_000_000_000).contains(&timestamp.nanos)
     {
-        Err(A2AContractError::OutOfRange {
-            field: "task.status.timestamp",
-        })
+        Err(A2AContractError::OutOfRange { field })
     } else {
         Ok(())
     }

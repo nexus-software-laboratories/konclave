@@ -5,7 +5,7 @@ use url::{Host, Url};
 
 use crate::wire::{
     AgentInterface, GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest, Role,
-    SendMessageRequest, TaskState, part,
+    SendMessageRequest, SubscribeToTaskRequest, TaskState, part,
 };
 use crate::{A2AContractError, A2AIdentifier};
 
@@ -139,6 +139,13 @@ pub struct InitialListTasksRequest {
     page_token: Option<String>,
 }
 
+/// Validated `SubscribeToTask` request accepted by the streaming profile.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InitialSubscribeToTaskRequest {
+    tenant: Option<String>,
+    task_id: String,
+}
+
 /// Validated `GetExtendedAgentCard` request accepted by the initial profile.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InitialGetExtendedAgentCardRequest {
@@ -190,6 +197,20 @@ impl InitialListTasksRequest {
     #[must_use]
     pub fn page_token(&self) -> Option<&str> {
         self.page_token.as_deref()
+    }
+}
+
+impl InitialSubscribeToTaskRequest {
+    /// Returns the deployment-selected tenant, when the published interface uses one.
+    #[must_use]
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+
+    /// Returns the exact gateway-owned task identifier.
+    #[must_use]
+    pub fn task_id(&self) -> &str {
+        &self.task_id
     }
 }
 
@@ -453,6 +474,53 @@ pub fn validate_initial_get_task_request(
         tenant: validate_tenant(request.tenant, expected_tenant)?,
         task_id: validate_identifier(request.id, "get_task.id")?,
         history_length: validate_history_length(request.history_length)?,
+    })
+}
+
+/// Decodes and validates one bounded streaming-profile protobuf
+/// `SubscribeToTask` request.
+///
+/// # Errors
+///
+/// Returns a stable contract error for oversized, malformed, invalid, or
+/// deployment-mismatched input.
+pub fn decode_initial_subscribe_to_task_protobuf(
+    bytes: &[u8],
+    expected_tenant: Option<&str>,
+) -> Result<InitialSubscribeToTaskRequest, A2AContractError> {
+    require_encoded_bound(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
+    let request =
+        SubscribeToTaskRequest::decode(bytes).map_err(|_| A2AContractError::MalformedEncoding)?;
+    validate_initial_subscribe_to_task_request(request, expected_tenant)
+}
+
+/// Decodes and validates one bounded streaming-profile ProtoJSON
+/// `SubscribeToTask` request.
+///
+/// # Errors
+///
+/// Returns a stable contract error for oversized, malformed, invalid, or
+/// deployment-mismatched input.
+pub fn decode_initial_subscribe_to_task_json(
+    bytes: &[u8],
+    expected_tenant: Option<&str>,
+) -> Result<InitialSubscribeToTaskRequest, A2AContractError> {
+    let request = decode_json_bounded(bytes, MAX_A2A_ENCODED_REQUEST_BYTES)?;
+    validate_initial_subscribe_to_task_request(request, expected_tenant)
+}
+
+/// Narrows one generated `SubscribeToTask` DTO to the streaming profile.
+///
+/// # Errors
+///
+/// Returns a stable contract error for invalid task or tenant values.
+pub fn validate_initial_subscribe_to_task_request(
+    request: SubscribeToTaskRequest,
+    expected_tenant: Option<&str>,
+) -> Result<InitialSubscribeToTaskRequest, A2AContractError> {
+    Ok(InitialSubscribeToTaskRequest {
+        tenant: validate_tenant(request.tenant, expected_tenant)?,
+        task_id: validate_identifier(request.id, "subscribe_to_task.id")?,
     })
 }
 
