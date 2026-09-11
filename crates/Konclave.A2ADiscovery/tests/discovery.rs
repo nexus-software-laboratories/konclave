@@ -112,7 +112,7 @@ fn source_generates_compatible_public_extended_and_oasf_views() {
     );
     assert_eq!(
         hex(oasf.agent_card_digest()),
-        "3f5741dcbdfd05a742184d5e9e6d1b3c65d14982b826345cd1b559b427458294"
+        "d0fc84b029e0cd13ea8430851cb5b8a2daebbd1698a77256857af7cc827845dc"
     );
     assert_eq!(
         hex(&Sha256::digest(oasf.bytes()).into()),

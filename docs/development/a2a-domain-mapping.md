@@ -38,9 +38,9 @@ An `A2AAgentRoute` binds:
 
 The caller cannot supply or replace the Konclave values. A validated `SendMessage`
 context may be omitted or must equal the configured context exactly. Its tenant must
-equal the configured tenant exactly. `GetTask` and `ListTasks` lookups remain scoped
-to the same published agent and tenant; the task store later proves task ownership
-and route-local context.
+equal the configured tenant exactly. `GetTask`, `ListTasks`, and `SubscribeToTask`
+lookups remain scoped to the same published agent and tenant; the task store later
+proves task ownership and route-local context.
 
 ## Deterministic task and request identity
 
@@ -100,5 +100,6 @@ Tests require:
 - tenant and context substitution rejection;
 - route-scoped `ListTasks` mapping;
 - agent-scoped `GetTask` mapping;
+- agent-scoped `SubscribeToTask` mapping;
 - explicit zero-based part identity; and
 - complete A2A task-state wire round trips with unspecified-state rejection.

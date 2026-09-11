@@ -160,14 +160,6 @@ pub fn a2a_router(state: A2AHttpState) -> Router {
         .route("/tasks", get(list_tasks_unscoped))
         .route("/{tenant}/tasks", get(list_tasks_tenant))
         .route(
-            "/tasks/{id}:subscribe",
-            get(subscribe_to_task_unscoped).post(subscribe_to_task_unscoped),
-        )
-        .route(
-            "/{tenant}/tasks/{id}:subscribe",
-            get(subscribe_to_task_tenant).post(subscribe_to_task_tenant),
-        )
-        .route(
             "/tasks/{id}",
             get(get_task_unscoped).post(cancel_task_unscoped),
         )
@@ -429,6 +421,9 @@ async fn get_task(
     id: String,
     request: Request<Body>,
 ) -> Response {
+    if let Some(id) = id.strip_suffix(":subscribe") {
+        return subscribe_to_task(state, path_tenant, id.to_owned(), request).await;
+    }
     let (parts, _) = request.into_parts();
     if let Err(response) = authorize(&state, &parts, A2AHttpAction::GetTask) {
         return *response;
@@ -461,22 +456,6 @@ async fn get_task(
         },
         Err(error) => gateway_error_response(error),
     }
-}
-
-async fn subscribe_to_task_unscoped(
-    State(state): State<A2AHttpState>,
-    Path(id): Path<String>,
-    request: Request<Body>,
-) -> Response {
-    subscribe_to_task(state, None, id, request).await
-}
-
-async fn subscribe_to_task_tenant(
-    State(state): State<A2AHttpState>,
-    Path((tenant, id)): Path<(String, String)>,
-    request: Request<Body>,
-) -> Response {
-    subscribe_to_task(state, Some(tenant), id, request).await
 }
 
 async fn subscribe_to_task(
@@ -587,6 +566,9 @@ async fn cancel_task(
     id: String,
     request: Request<Body>,
 ) -> Response {
+    if let Some(id) = id.strip_suffix(":subscribe") {
+        return subscribe_to_task(state, path_tenant, id.to_owned(), request).await;
+    }
     let (parts, _) = request.into_parts();
     if let Err(response) = authorize(&state, &parts, A2AHttpAction::CancelTask) {
         return *response;

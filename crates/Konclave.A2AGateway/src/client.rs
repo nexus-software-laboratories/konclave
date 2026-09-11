@@ -657,29 +657,33 @@ fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
 
 fn sse_frame_end(bytes: &[u8]) -> Option<usize> {
     let mut line_start = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != b'\n' {
-            continue;
-        }
-        let line_end = if index > line_start && bytes[index - 1] == b'\r' {
-            index - 1
-        } else {
-            index
+    let mut index = 0;
+    while index < bytes.len() {
+        let ending_length = match bytes[index] {
+            b'\n' => 1,
+            b'\r' if index + 1 == bytes.len() => return None,
+            b'\r' if bytes[index + 1] == b'\n' => 2,
+            b'\r' => 1,
+            _ => {
+                index += 1;
+                continue;
+            }
         };
-        if line_end == line_start {
-            return Some(index + 1);
+        if index == line_start {
+            return Some(index + ending_length);
         }
-        line_start = index + 1;
+        index += ending_length;
+        line_start = index;
     }
     None
 }
 
 fn parse_sse_data(frame: &[u8], maximum: usize) -> Result<Option<Vec<u8>>, A2AGatewayError> {
     let frame = std::str::from_utf8(frame).map_err(|_| A2AGatewayError::Contract)?;
+    let frame = frame.replace("\r\n", "\n").replace('\r', "\n");
     let mut data = String::new();
     let mut found = false;
-    for line in frame.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
+    for line in frame.split('\n') {
         if line.is_empty() || line.starts_with(':') {
             continue;
         }
@@ -737,6 +741,12 @@ impl StreamCorrelation {
         }
         if self.context_id.is_none() {
             self.context_id = Some(event.context_id().to_owned());
+        }
+        if !self.first
+            && event.kind() == InitialA2AStreamResponseKind::Task
+            && !response_state(event.state())
+        {
+            return Err(A2AGatewayError::Contract);
         }
         if self.terminal_seen {
             if event.kind() != InitialA2AStreamResponseKind::Task
@@ -827,7 +837,9 @@ fn same_origin(left: &Url, right: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sse_data, sse_frame_end};
+    use KonclaveA2AContracts::decode_initial_stream_response_json;
+
+    use super::{StreamCorrelation, parse_sse_data, sse_frame_end};
 
     #[test]
     fn sse_framing_accepts_crlf_comments_and_multiline_data() {
@@ -839,12 +851,65 @@ mod tests {
         );
         assert_eq!(&bytes[end..], b"remaining");
         assert_eq!(parse_sse_data(b": keep-alive\n\n", 128).unwrap(), None);
+        let carriage_return = b"data: {\"task\": {}}\r\rremaining";
+        let end = sse_frame_end(carriage_return).unwrap();
+        assert_eq!(
+            parse_sse_data(&carriage_return[..end], 128)
+                .unwrap()
+                .unwrap(),
+            b"{\"task\": {}}"
+        );
     }
 
     #[test]
     fn sse_data_is_bounded_before_json_decoding() {
         assert_eq!(
             parse_sse_data(b"data: 12345\n\n", 4).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
+    }
+
+    #[test]
+    fn stream_correlation_requires_first_task_and_stable_identity() {
+        let status = decode_initial_stream_response_json(
+            br#"{"statusUpdate":{"taskId":"00112233445566778899aabbccddeeff","contextId":"context-1","status":{"state":"TASK_STATE_WORKING","timestamp":"1970-01-01T00:00:01Z"}}}"#,
+        )
+        .unwrap();
+        let mut correlation = StreamCorrelation {
+            first: true,
+            task_id: None,
+            context_id: None,
+            terminal_seen: false,
+            final_snapshot_seen: false,
+        };
+        assert_eq!(
+            correlation.validate(&status).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
+
+        let task = decode_initial_stream_response_json(
+            br#"{"task":{"id":"00112233445566778899aabbccddeeff","contextId":"context-1","status":{"state":"TASK_STATE_WORKING","timestamp":"1970-01-01T00:00:01Z"}}}"#,
+        )
+        .unwrap();
+        let mut correlation = StreamCorrelation {
+            first: true,
+            task_id: None,
+            context_id: None,
+            terminal_seen: false,
+            final_snapshot_seen: false,
+        };
+        correlation.validate(&task).unwrap();
+        assert_eq!(
+            correlation.validate(&task).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
+
+        let wrong_task = decode_initial_stream_response_json(
+            br#"{"statusUpdate":{"taskId":"ffffffffffffffffffffffffffffffff","contextId":"context-1","status":{"state":"TASK_STATE_WORKING","timestamp":"1970-01-01T00:00:02Z"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            correlation.validate(&wrong_task).err(),
             Some(crate::A2AGatewayError::Contract)
         );
     }

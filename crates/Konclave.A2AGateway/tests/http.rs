@@ -170,6 +170,7 @@ async fn protected_send_get_and_extended_routes_follow_the_http_json_binding() {
     )
     .unwrap();
     assert_eq!(card.skills().len(), 2);
+    assert!(card.streaming());
 }
 
 #[tokio::test]
