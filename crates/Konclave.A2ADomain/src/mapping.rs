@@ -1,4 +1,6 @@
-use KonclaveA2AContracts::{InitialGetTaskRequest, InitialSendMessageRequest};
+use KonclaveA2AContracts::{
+    InitialGetTaskRequest, InitialListTasksRequest, InitialSendMessageRequest,
+};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use sha2::{Digest as _, Sha256};
 
@@ -173,6 +175,48 @@ pub struct A2ATaskLookup {
     history_length: Option<u32>,
 }
 
+/// Task-list lookup scoped to one published agent route.
+#[derive(Clone, PartialEq, Eq)]
+pub struct A2ATaskListLookup {
+    agent_id: A2AAgentId,
+    context_id: A2AContextId,
+    tenant: Option<A2ATenantId>,
+    page_size: u32,
+    page_token: Option<String>,
+}
+
+impl A2ATaskListLookup {
+    /// Returns the selected published agent.
+    #[must_use]
+    pub const fn agent_id(&self) -> &A2AAgentId {
+        &self.agent_id
+    }
+
+    /// Returns the deployment-owned route context.
+    #[must_use]
+    pub const fn context_id(&self) -> &A2AContextId {
+        &self.context_id
+    }
+
+    /// Returns the route tenant.
+    #[must_use]
+    pub const fn tenant(&self) -> Option<&A2ATenantId> {
+        self.tenant.as_ref()
+    }
+
+    /// Returns the bounded requested page size.
+    #[must_use]
+    pub const fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    /// Returns the optional opaque pagination token.
+    #[must_use]
+    pub fn page_token(&self) -> Option<&str> {
+        self.page_token.as_deref()
+    }
+}
+
 impl A2ATaskLookup {
     /// Returns the selected published agent.
     #[must_use]
@@ -259,6 +303,25 @@ pub fn map_initial_get_task(
         task_id: A2ATaskId::parse(request.task_id().to_owned())?,
         tenant: route.tenant.clone(),
         history_length: request.history_length(),
+    })
+}
+
+/// Maps a validated `ListTasks` request onto one route-scoped task query.
+///
+/// # Errors
+///
+/// Returns a typed error when tenant invariants disagree.
+pub fn map_initial_list_tasks(
+    route: &A2AAgentRoute,
+    request: InitialListTasksRequest,
+) -> Result<A2ATaskListLookup, A2ADomainError> {
+    require_tenant(route, request.tenant())?;
+    Ok(A2ATaskListLookup {
+        agent_id: route.agent_id.clone(),
+        context_id: route.context_id.clone(),
+        tenant: route.tenant.clone(),
+        page_size: request.page_size(),
+        page_token: request.page_token().map(str::to_owned),
     })
 }
 

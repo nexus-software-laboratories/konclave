@@ -1,13 +1,14 @@
 use KonclaveA2AContracts::wire::{
-    AgentInterface, GetTaskRequest, Message, Part, Role, SendMessageConfiguration,
-    SendMessageRequest, part,
+    AgentInterface, GetTaskRequest, ListTasksRequest, Message, Part, Role,
+    SendMessageConfiguration, SendMessageRequest, TaskState, part,
 };
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE, A2AContractError,
-    InitialA2AInterfaceEnvironment, MAX_A2A_ENCODED_REQUEST_BYTES, MAX_A2A_TEXT_BYTES,
-    decode_initial_get_task_json, decode_initial_get_task_protobuf,
+    DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AInterfaceEnvironment, MAX_A2A_ENCODED_REQUEST_BYTES,
+    MAX_A2A_TEXT_BYTES, decode_initial_get_task_json, decode_initial_get_task_protobuf,
     decode_initial_send_message_json, decode_initial_send_message_protobuf,
-    validate_initial_agent_interface, validate_initial_send_message_request,
+    validate_initial_agent_interface, validate_initial_list_tasks_request,
+    validate_initial_send_message_request,
 };
 use prost::Message as _;
 
@@ -211,6 +212,140 @@ fn get_task_protobuf_and_protojson_are_tenant_and_history_bound() {
     assert!(matches!(
         decode_initial_get_task_protobuf(&unsupported.encode_to_vec(), Some("tenant-a")),
         Err(A2AContractError::OutOfRange { .. })
+    ));
+}
+
+#[test]
+fn list_tasks_request_defaults_and_rejects_unsupported_filters() {
+    let request = ListTasksRequest {
+        tenant: "tenant-a".to_string(),
+        context_id: String::new(),
+        status: TaskState::Unspecified as i32,
+        page_size: None,
+        page_token: String::new(),
+        history_length: None,
+        status_timestamp_after: None,
+        include_artifacts: None,
+    };
+    let validated = validate_initial_list_tasks_request(request, Some("tenant-a")).unwrap();
+    assert_eq!(validated.tenant(), Some("tenant-a"));
+    assert_eq!(validated.page_size(), DEFAULT_A2A_LIST_PAGE_SIZE);
+    assert_eq!(validated.page_token(), None);
+
+    let request = ListTasksRequest {
+        page_size: Some(2),
+        page_token: "v1.100.00112233445566778899aabbccddeeff".to_string(),
+        ..ListTasksRequest {
+            tenant: "tenant-a".to_string(),
+            context_id: String::new(),
+            status: TaskState::Unspecified as i32,
+            page_size: None,
+            page_token: String::new(),
+            history_length: None,
+            status_timestamp_after: None,
+            include_artifacts: None,
+        }
+    };
+    let validated = validate_initial_list_tasks_request(request, Some("tenant-a")).unwrap();
+    assert_eq!(validated.page_size(), 2);
+    assert_eq!(
+        validated.page_token(),
+        Some("v1.100.00112233445566778899aabbccddeeff")
+    );
+
+    for request in [
+        ListTasksRequest {
+            context_id: "context-1".to_string(),
+            ..ListTasksRequest {
+                tenant: "tenant-a".to_string(),
+                context_id: String::new(),
+                status: TaskState::Unspecified as i32,
+                page_size: None,
+                page_token: String::new(),
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+            }
+        },
+        ListTasksRequest {
+            status: TaskState::Working as i32,
+            ..ListTasksRequest {
+                tenant: "tenant-a".to_string(),
+                context_id: String::new(),
+                status: TaskState::Unspecified as i32,
+                page_size: None,
+                page_token: String::new(),
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+            }
+        },
+        ListTasksRequest {
+            history_length: Some(1),
+            ..ListTasksRequest {
+                tenant: "tenant-a".to_string(),
+                context_id: String::new(),
+                status: TaskState::Unspecified as i32,
+                page_size: None,
+                page_token: String::new(),
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+            }
+        },
+        ListTasksRequest {
+            include_artifacts: Some(false),
+            ..ListTasksRequest {
+                tenant: "tenant-a".to_string(),
+                context_id: String::new(),
+                status: TaskState::Unspecified as i32,
+                page_size: None,
+                page_token: String::new(),
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+            }
+        },
+    ] {
+        assert!(matches!(
+            validate_initial_list_tasks_request(request, Some("tenant-a")),
+            Err(A2AContractError::UnsupportedField { .. })
+        ));
+    }
+
+    assert!(matches!(
+        validate_initial_list_tasks_request(
+            ListTasksRequest {
+                tenant: "tenant-a".to_string(),
+                context_id: String::new(),
+                status: TaskState::Unspecified as i32,
+                page_size: Some(0),
+                page_token: String::new(),
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+            },
+            Some("tenant-a")
+        ),
+        Err(A2AContractError::OutOfRange { field: "page_size" })
+    ));
+    assert!(matches!(
+        validate_initial_list_tasks_request(
+            ListTasksRequest {
+                tenant: "tenant-a".to_string(),
+                context_id: String::new(),
+                status: TaskState::Unspecified as i32,
+                page_size: None,
+                page_token: "INVALID".to_string(),
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+            },
+            Some("tenant-a")
+        ),
+        Err(A2AContractError::OutOfRange {
+            field: "list_tasks.page_token"
+        })
     ));
 }
 

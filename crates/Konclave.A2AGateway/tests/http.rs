@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use KonclaveA2AContracts::{
     InitialA2AInterfaceEnvironment, decode_initial_agent_card_json,
-    decode_initial_send_message_response_json, decode_initial_task_json,
+    decode_initial_list_tasks_response_json, decode_initial_send_message_response_json,
+    decode_initial_task_json,
 };
 use KonclaveA2AGateway::{
     A2A_JSON_MEDIA_TYPE, A2A_VERSION_HEADER, A2ABearerCredential, A2AGatewayApplication,
@@ -23,7 +24,7 @@ use tower::ServiceExt;
 
 use common::{
     CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application,
-    application_with_publication, request_wire, store,
+    application_with_publication, request_wire, request_wire_with_message_id, store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -331,6 +332,97 @@ async fn unsupported_streaming_and_denied_authorization_return_bounded_errors() 
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn list_tasks_paginates_and_cancel_task_is_explicitly_unsupported() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store,
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let router = a2a_router(state(application));
+
+    for message_id in ["message-1", "message-2"] {
+        let response = router
+            .clone()
+            .oneshot(
+                authenticated("/tenant-a/message:send")
+                    .method("POST")
+                    .header(CONTENT_TYPE, A2A_JSON_MEDIA_TYPE)
+                    .body(Body::from(
+                        serde_json::to_vec(&request_wire_with_message_id(
+                            message_id, "request", true, 0,
+                        ))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = router
+        .clone()
+        .oneshot(
+            authenticated("/tenant-a/tasks?pageSize=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = decode_initial_list_tasks_response_json(&body(response).await).unwrap();
+    assert_eq!(page.as_wire().tasks.len(), 1);
+    assert!(!page.as_wire().next_page_token.is_empty());
+    assert!(page.as_wire().tasks[0].history.is_empty());
+
+    let response = router
+        .clone()
+        .oneshot(
+            authenticated(&format!(
+                "/tenant-a/tasks?pageSize=1&pageToken={}",
+                page.as_wire().next_page_token
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = decode_initial_list_tasks_response_json(&body(response).await).unwrap();
+    assert_eq!(page.as_wire().tasks.len(), 1);
+    assert!(page.as_wire().next_page_token.is_empty());
+
+    let response = router
+        .clone()
+        .oneshot(
+            authenticated("/tenant-a/tasks?pageSize=257")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = router
+        .oneshot(
+            authenticated("/tenant-a/tasks/00112233445566778899aabbccddeeff:cancel")
+                .method("POST")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body(response).await).unwrap()["error"]["details"][0]["reason"],
+        "UNSUPPORTED_OPERATION"
+    );
 }
 
 struct DecisionAccess(A2AHttpAuthorizationDecision);

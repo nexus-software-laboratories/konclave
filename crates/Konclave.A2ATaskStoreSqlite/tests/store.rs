@@ -9,9 +9,9 @@ use KonclaveA2ADomain::{
     A2ATenantId, map_initial_send_message,
 };
 use KonclaveA2ATaskStore::{
-    A2ATaskArtifact, A2ATaskCreation, A2ATaskMessage, A2ATaskMessageRole, A2ATaskStore,
-    A2ATaskStoreError, A2ATaskTransition, A2ATerminalReason, AppendA2ATaskRecordOutcome,
-    CreateA2ATaskOutcome, TransitionA2ATaskOutcome,
+    A2ATaskArtifact, A2ATaskCreation, A2ATaskListQuery, A2ATaskMessage, A2ATaskMessageRole,
+    A2ATaskStore, A2ATaskStoreError, A2ATaskTransition, A2ATerminalReason,
+    AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, TransitionA2ATaskOutcome,
 };
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId};
@@ -279,6 +279,129 @@ fn route_and_tenant_scopes_produce_distinct_tasks() {
             .err(),
         Some(A2ATaskStoreError::Conflict)
     );
+}
+
+#[test]
+fn list_tasks_is_paginated_deterministic_and_hides_pruned_tombstones() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("tasks.sqlite"));
+
+    let pruned = created(
+        store
+            .create_task(creation(
+                "agent-a",
+                "tenant-a",
+                4,
+                5,
+                "message-old",
+                "request",
+                90,
+            ))
+            .unwrap(),
+    );
+    store
+        .append_message(
+            A2ATaskMessage::new(
+                pruned.key().clone(),
+                A2AMessageId::parse("response-old").unwrap(),
+                A2ATaskMessageRole::Agent,
+                "done",
+                91,
+            )
+            .unwrap(),
+            91,
+        )
+        .unwrap();
+    store
+        .transition_task(A2ATaskTransition::new(
+            pruned.key().clone(),
+            0,
+            A2ATaskState::Completed,
+            None,
+            110,
+        ))
+        .unwrap();
+    assert_eq!(store.prune(120).unwrap().pruned_task_payloads, 1);
+
+    let first = created(
+        store
+            .create_task(creation(
+                "agent-a",
+                "tenant-a",
+                4,
+                5,
+                "message-a",
+                "request",
+                100,
+            ))
+            .unwrap(),
+    );
+    let second = created(
+        store
+            .create_task(creation(
+                "agent-a",
+                "tenant-a",
+                4,
+                5,
+                "message-b",
+                "request",
+                101,
+            ))
+            .unwrap(),
+    );
+    created(
+        store
+            .create_task(creation(
+                "agent-b",
+                "tenant-a",
+                4,
+                5,
+                "message-c",
+                "request",
+                102,
+            ))
+            .unwrap(),
+    );
+
+    let page = store
+        .list_tasks(
+            &A2ATaskListQuery::new(
+                A2AAgentId::parse("agent-a").unwrap(),
+                Some(A2ATenantId::parse("tenant-a").unwrap()),
+                A2AContextId::parse("context-a").unwrap(),
+                1,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(page.total_size(), 2);
+    assert_eq!(page.tasks().len(), 1);
+    assert_eq!(
+        page.tasks()[0].key().task_id().as_str(),
+        second.key().task_id().as_str()
+    );
+    let cursor = page.next_cursor().cloned().unwrap();
+
+    let page = store
+        .list_tasks(
+            &A2ATaskListQuery::new(
+                A2AAgentId::parse("agent-a").unwrap(),
+                Some(A2ATenantId::parse("tenant-a").unwrap()),
+                A2AContextId::parse("context-a").unwrap(),
+                1,
+                Some(cursor),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(page.total_size(), 2);
+    assert_eq!(page.tasks().len(), 1);
+    assert_eq!(
+        page.tasks()[0].key().task_id().as_str(),
+        first.key().task_id().as_str()
+    );
+    assert!(page.next_cursor().is_none());
 }
 
 #[test]

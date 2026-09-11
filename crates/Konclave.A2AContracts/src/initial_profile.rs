@@ -4,7 +4,8 @@ use serde::de::DeserializeOwned;
 use url::{Host, Url};
 
 use crate::wire::{
-    AgentInterface, GetExtendedAgentCardRequest, GetTaskRequest, Role, SendMessageRequest, part,
+    AgentInterface, GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest, Role,
+    SendMessageRequest, TaskState, part,
 };
 use crate::{A2AContractError, A2AIdentifier};
 
@@ -22,6 +23,12 @@ pub const A2A_EXTENDED_AGENT_CARD_PATH: &str = "/extendedAgentCard";
 pub const MAX_A2A_ENCODED_REQUEST_BYTES: usize = 128 * 1024;
 /// Maximum UTF-8 byte length of an initial-profile text part.
 pub const MAX_A2A_TEXT_BYTES: usize = 64 * 1024;
+/// Default page size for `ListTasks`.
+pub const DEFAULT_A2A_LIST_PAGE_SIZE: u32 = 50;
+/// Maximum page size for `ListTasks`.
+pub const MAX_A2A_LIST_PAGE_SIZE: u32 = 256;
+/// Maximum decoded byte length of one opaque `ListTasks` page token.
+pub const MAX_A2A_LIST_PAGE_TOKEN_BYTES: usize = 128;
 const MAX_A2A_INTERFACE_URL_BYTES: usize = 2 * 1024;
 const MAX_A2A_HISTORY_LENGTH: i32 = 1;
 
@@ -124,6 +131,14 @@ pub struct InitialGetTaskRequest {
     history_length: Option<u32>,
 }
 
+/// Validated `ListTasks` request accepted by the initial profile.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InitialListTasksRequest {
+    tenant: Option<String>,
+    page_size: u32,
+    page_token: Option<String>,
+}
+
 /// Validated `GetExtendedAgentCard` request accepted by the initial profile.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InitialGetExtendedAgentCardRequest {
@@ -155,6 +170,26 @@ impl InitialGetTaskRequest {
     #[must_use]
     pub const fn history_length(&self) -> Option<u32> {
         self.history_length
+    }
+}
+
+impl InitialListTasksRequest {
+    /// Returns the deployment-selected tenant, when the published interface uses one.
+    #[must_use]
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+
+    /// Returns the bounded requested page size.
+    #[must_use]
+    pub const fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    /// Returns the optional opaque pagination token.
+    #[must_use]
+    pub fn page_token(&self) -> Option<&str> {
+        self.page_token.as_deref()
     }
 }
 
@@ -421,6 +456,48 @@ pub fn validate_initial_get_task_request(
     })
 }
 
+/// Narrows one generated `ListTasks` DTO to the initial profile.
+///
+/// # Errors
+///
+/// Returns a stable contract error for unsupported filters, invalid tenant, or
+/// invalid pagination values.
+pub fn validate_initial_list_tasks_request(
+    request: ListTasksRequest,
+    expected_tenant: Option<&str>,
+) -> Result<InitialListTasksRequest, A2AContractError> {
+    if !request.context_id.is_empty() {
+        return Err(A2AContractError::UnsupportedField {
+            field: "list_tasks.context_id",
+        });
+    }
+    if TaskState::try_from(request.status).ok() != Some(TaskState::Unspecified) {
+        return Err(A2AContractError::UnsupportedField {
+            field: "list_tasks.status",
+        });
+    }
+    if request.history_length.is_some() {
+        return Err(A2AContractError::UnsupportedField {
+            field: "list_tasks.history_length",
+        });
+    }
+    if request.status_timestamp_after.is_some() {
+        return Err(A2AContractError::UnsupportedField {
+            field: "list_tasks.status_timestamp_after",
+        });
+    }
+    if request.include_artifacts.is_some() {
+        return Err(A2AContractError::UnsupportedField {
+            field: "list_tasks.include_artifacts",
+        });
+    }
+    Ok(InitialListTasksRequest {
+        tenant: validate_tenant(request.tenant, expected_tenant)?,
+        page_size: validate_page_size(request.page_size)?,
+        page_token: validate_page_token(request.page_token, "list_tasks.page_token")?,
+    })
+}
+
 /// Validates one Agent Card interface against the initial HTTP+JSON profile.
 ///
 /// # Errors
@@ -555,6 +632,37 @@ fn validate_history_length(value: Option<i32>) -> Result<Option<u32>, A2AContrac
             field: "history_length",
         }),
     }
+}
+
+fn validate_page_size(value: Option<i32>) -> Result<u32, A2AContractError> {
+    match value {
+        None => Ok(DEFAULT_A2A_LIST_PAGE_SIZE),
+        Some(value)
+            if (1..=i32::try_from(MAX_A2A_LIST_PAGE_SIZE)
+                .expect("page size bound fits in i32"))
+                .contains(&value) =>
+        {
+            u32::try_from(value).map_err(|_| A2AContractError::OutOfRange { field: "page_size" })
+        }
+        Some(_) => Err(A2AContractError::OutOfRange { field: "page_size" }),
+    }
+}
+
+pub(crate) fn validate_page_token(
+    value: String,
+    field: &'static str,
+) -> Result<Option<String>, A2AContractError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MAX_A2A_LIST_PAGE_TOKEN_BYTES
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+    {
+        return Err(A2AContractError::OutOfRange { field });
+    }
+    Ok(Some(value))
 }
 
 pub(crate) fn require_empty_struct(

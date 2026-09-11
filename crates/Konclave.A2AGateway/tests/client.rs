@@ -69,6 +69,9 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
             .len(),
         2
     );
+    let list = client.list_tasks(Some(50), None).await.unwrap();
+    assert_eq!(list.as_wire().tasks.len(), 1);
+    assert!(list.as_wire().tasks[0].history.is_empty());
 
     let discovery_url = format!("http://{address}/.well-known/agent-card.json");
     let (etag, card_name) = match fetch_public_agent_card(

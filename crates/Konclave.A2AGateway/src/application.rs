@@ -4,15 +4,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use KonclaveA2AContracts::wire::TaskState;
 use KonclaveA2AContracts::{
-    InitialA2AAgentCard, InitialA2ATaskResponse, InitialGetTaskRequest, InitialSendMessageRequest,
+    InitialA2AAgentCard, InitialA2ATaskListResponse, InitialA2ATaskResponse, InitialGetTaskRequest,
+    InitialListTasksRequest, InitialSendMessageRequest,
 };
 use KonclaveA2ADiscovery::CompiledA2AAgentPublication;
 use KonclaveA2ADomain::{
-    A2AAgentRoute, A2AMessageId, map_initial_get_task, map_initial_send_message,
+    A2AAgentRoute, A2AMessageId, A2ATaskId, map_initial_get_task, map_initial_list_tasks,
+    map_initial_send_message,
 };
 use KonclaveA2ATaskStore::{
-    A2ATaskCreation, A2ATaskKey, A2ATaskRecord, A2ATaskStore, A2ATaskStoreError,
-    CreateA2ATaskOutcome,
+    A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery, A2ATaskRecord, A2ATaskStore,
+    A2ATaskStoreError, CreateA2ATaskOutcome,
 };
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
@@ -20,10 +22,11 @@ use async_trait::async_trait;
 use tokio::time::{Instant, sleep, timeout_at};
 
 use crate::A2AGatewayError;
-use crate::projection::project_task;
+use crate::projection::{project_get_task, project_list_tasks};
 
 const MAX_RESPONSE_WAIT: Duration = Duration::from_secs(5 * 60);
 const MAX_RESPONSE_POLL: Duration = Duration::from_secs(1);
+const PAGE_TOKEN_PREFIX: &str = "v1";
 
 /// Bounded wait behavior for non-immediate `SendMessage` requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +330,7 @@ impl A2AGatewayApplication {
         &self,
         request: InitialGetTaskRequest,
     ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
+        self.prune_visible_tasks().await?;
         let lookup = map_initial_get_task(&self.route, request)
             .map_err(|_| A2AGatewayError::RouteMismatch)?;
         let history_length = lookup.history_length();
@@ -338,6 +342,41 @@ impl A2AGatewayApplication {
         self.project_current(key, history_length).await
     }
 
+    /// Lists visible tasks in the configured route scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns route, invalid-request, storage, or projection failures.
+    pub async fn list_tasks(
+        &self,
+        request: InitialListTasksRequest,
+    ) -> Result<InitialA2ATaskListResponse, A2AGatewayError> {
+        self.prune_visible_tasks().await?;
+        let lookup = map_initial_list_tasks(&self.route, request)
+            .map_err(|_| A2AGatewayError::RouteMismatch)?;
+        let cursor = decode_page_token(lookup.page_token())?;
+        let query = A2ATaskListQuery::new(
+            lookup.agent_id().clone(),
+            lookup.tenant().cloned(),
+            lookup.context_id().clone(),
+            usize::try_from(lookup.page_size()).map_err(|_| A2AGatewayError::InvalidRequest)?,
+            cursor,
+        )
+        .map_err(|_| A2AGatewayError::InvalidRequest)?;
+        let store = Arc::clone(&self.store);
+        let page = tokio::task::spawn_blocking(move || store.list_tasks(&query))
+            .await
+            .map_err(|_| A2AGatewayError::StorageUnavailable)?
+            .map_err(map_store_error)?;
+        let (tasks, next_cursor, page_size, total_size) = page.into_parts();
+        project_list_tasks(
+            tasks,
+            next_cursor.as_ref().map(encode_page_token),
+            page_size,
+            total_size,
+        )
+    }
+
     async fn project_current(
         &self,
         key: A2ATaskKey,
@@ -346,10 +385,26 @@ impl A2AGatewayApplication {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
             let (record, messages) = store.task_with_messages(&key, 2).map_err(map_store_error)?;
-            project_task(record, messages, history_length)
+            if record.content_pruned() {
+                return Err(A2AGatewayError::TaskNotFound);
+            }
+            project_get_task(record, messages, history_length)
         })
         .await
         .map_err(|_| A2AGatewayError::StorageUnavailable)?
+    }
+
+    async fn prune_visible_tasks(&self) -> Result<(), A2AGatewayError> {
+        let now = self
+            .clock
+            .now_unix_milliseconds()
+            .map_err(|_| A2AGatewayError::ClockUnavailable)?;
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.prune(now))
+            .await
+            .map_err(|_| A2AGatewayError::StorageUnavailable)?
+            .map_err(map_store_error)?;
+        Ok(())
     }
 }
 
@@ -384,11 +439,46 @@ fn response_ready(state: TaskState) -> bool {
     )
 }
 
+fn encode_page_token(cursor: &A2ATaskListCursor) -> String {
+    format!(
+        "{PAGE_TOKEN_PREFIX}.{}.{}",
+        cursor.created_at_unix_milliseconds(),
+        cursor.task_id().as_str()
+    )
+}
+
+fn decode_page_token(value: Option<&str>) -> Result<Option<A2ATaskListCursor>, A2AGatewayError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mut segments = value.split('.');
+    let Some(prefix) = segments.next() else {
+        return Err(A2AGatewayError::InvalidRequest);
+    };
+    if prefix != PAGE_TOKEN_PREFIX {
+        return Err(A2AGatewayError::InvalidRequest);
+    }
+    let Some(created_at) = segments.next() else {
+        return Err(A2AGatewayError::InvalidRequest);
+    };
+    let Some(task_id) = segments.next() else {
+        return Err(A2AGatewayError::InvalidRequest);
+    };
+    if segments.next().is_some() {
+        return Err(A2AGatewayError::InvalidRequest);
+    }
+    Ok(Some(A2ATaskListCursor::new(
+        created_at
+            .parse::<u64>()
+            .map_err(|_| A2AGatewayError::InvalidRequest)?,
+        A2ATaskId::parse(task_id.to_owned()).map_err(|_| A2AGatewayError::InvalidRequest)?,
+    )))
+}
+
 fn map_store_error(error: A2ATaskStoreError) -> A2AGatewayError {
     match error {
-        A2ATaskStoreError::InvalidConfiguration | A2ATaskStoreError::InvalidTransition => {
-            A2AGatewayError::InvalidTaskProjection
-        }
+        A2ATaskStoreError::InvalidConfiguration => A2AGatewayError::InvalidConfiguration,
+        A2ATaskStoreError::InvalidTransition => A2AGatewayError::InvalidTaskProjection,
         A2ATaskStoreError::NotFound => A2AGatewayError::TaskNotFound,
         A2ATaskStoreError::Conflict => A2AGatewayError::Conflict,
         A2ATaskStoreError::CapacityExceeded => A2AGatewayError::CapacityExceeded,

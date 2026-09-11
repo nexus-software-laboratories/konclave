@@ -30,8 +30,17 @@ pub fn request(
     return_immediately: bool,
     history_length: i32,
 ) -> InitialSendMessageRequest {
+    request_with_message_id("message-1", text, return_immediately, history_length)
+}
+
+pub fn request_with_message_id(
+    message_id: &str,
+    text: &str,
+    return_immediately: bool,
+    history_length: i32,
+) -> InitialSendMessageRequest {
     validate_initial_send_message_request(
-        request_wire(text, return_immediately, history_length),
+        request_wire_with_message_id(message_id, text, return_immediately, history_length),
         Some("tenant-a"),
     )
     .unwrap()
@@ -42,10 +51,19 @@ pub fn request_wire(
     return_immediately: bool,
     history_length: i32,
 ) -> SendMessageRequest {
+    request_wire_with_message_id("message-1", text, return_immediately, history_length)
+}
+
+pub fn request_wire_with_message_id(
+    message_id: &str,
+    text: &str,
+    return_immediately: bool,
+    history_length: i32,
+) -> SendMessageRequest {
     SendMessageRequest {
         tenant: "tenant-a".to_owned(),
         message: Some(Message {
-            message_id: "message-1".to_owned(),
+            message_id: message_id.to_owned(),
             context_id: "context-1".to_owned(),
             task_id: String::new(),
             role: Role::User as i32,

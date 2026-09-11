@@ -13,10 +13,11 @@ use KonclaveA2ADomain::{
     A2AAgentId, A2AArtifactId, A2AContextId, A2AMessageId, A2ATaskId, A2ATaskState, A2ATenantId,
 };
 use KonclaveA2ATaskStore::{
-    A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskMessage, A2ATaskMessageRole,
-    A2ATaskPruneOutcome, A2ATaskRecord, A2ATaskStore, A2ATaskStoreError, A2ATaskTransition,
-    A2ATerminalReason, AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, StoredA2ATaskArtifact,
-    StoredA2ATaskMessage, TransitionA2ATaskOutcome,
+    A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListPage,
+    A2ATaskListQuery, A2ATaskMessage, A2ATaskMessageRole, A2ATaskPruneOutcome, A2ATaskRecord,
+    A2ATaskStore, A2ATaskStoreError, A2ATaskTransition, A2ATerminalReason,
+    AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, StoredA2ATaskArtifact, StoredA2ATaskMessage,
+    TransitionA2ATaskOutcome,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use rusqlite::config::DbConfig;
@@ -334,6 +335,59 @@ impl A2ATaskStore for A2ASqliteTaskStore {
     fn get_task(&self, key: &A2ATaskKey) -> Result<A2ATaskRecord, A2ATaskStoreError> {
         let connection = self.lock()?;
         load_task(&connection, key)
+    }
+
+    fn list_tasks(&self, query: &A2ATaskListQuery) -> Result<A2ATaskListPage, A2ATaskStoreError> {
+        validate_list_page_size(query.page_size())?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        let total_size: i64 = transaction
+            .query_row(
+                "SELECT count(*)
+                 FROM a2a_task
+                 WHERE agent_id = ?1 AND tenant_id = ?2 AND context_id = ?3
+                   AND content_pruned = 0",
+                params![
+                    query.agent_id().as_str(),
+                    query.tenant().map_or("", A2ATenantId::as_str),
+                    query.context_id().as_str()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        let mut rows = load_task_page_rows(&transaction, query)?;
+        let has_more = rows.len() > query.page_size();
+        rows.truncate(query.page_size());
+        let mut tasks = Vec::with_capacity(rows.len());
+        for (task_id, _) in &rows {
+            let key = A2ATaskKey::new(
+                query.agent_id().clone(),
+                query.tenant().cloned(),
+                A2ATaskId::parse(task_id.clone()).map_err(|_| A2ATaskStoreError::CorruptData)?,
+            );
+            tasks.push(load_task(&transaction, &key)?);
+        }
+        let next_cursor = if has_more {
+            tasks.last().map(|task| {
+                A2ATaskListCursor::new(
+                    task.created_at_unix_milliseconds(),
+                    task.key().task_id().clone(),
+                )
+            })
+        } else {
+            None
+        };
+        transaction
+            .commit()
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        Ok(A2ATaskListPage::new(
+            tasks,
+            next_cursor,
+            query.page_size(),
+            usize::try_from(total_size).map_err(|_| A2ATaskStoreError::CorruptData)?,
+        ))
     }
 
     fn transition_task(
@@ -1896,6 +1950,85 @@ fn validate_page_limit(limit: usize, configured: usize) -> Result<(), A2ATaskSto
     } else {
         Ok(())
     }
+}
+
+fn validate_list_page_size(limit: usize) -> Result<(), A2ATaskStoreError> {
+    if limit == 0 || limit > MAX_PAGE_SIZE {
+        Err(A2ATaskStoreError::InvalidConfiguration)
+    } else {
+        Ok(())
+    }
+}
+
+fn load_task_page_rows(
+    connection: &Connection,
+    query: &A2ATaskListQuery,
+) -> Result<Vec<(String, u64)>, A2ATaskStoreError> {
+    let limit = i64::try_from(
+        query
+            .page_size()
+            .checked_add(1)
+            .ok_or(A2ATaskStoreError::InvalidConfiguration)?,
+    )
+    .map_err(|_| A2ATaskStoreError::InvalidConfiguration)?;
+    let rows = if let Some(cursor) = query.cursor() {
+        let mut statement = connection
+            .prepare(
+                "SELECT task_id, created_at_unix_milliseconds
+                 FROM a2a_task
+                 WHERE agent_id = ?1 AND tenant_id = ?2 AND context_id = ?3
+                   AND content_pruned = 0
+                   AND (
+                        created_at_unix_milliseconds < ?4
+                        OR (created_at_unix_milliseconds = ?4 AND task_id < ?5)
+                   )
+                 ORDER BY created_at_unix_milliseconds DESC, task_id DESC
+                 LIMIT ?6",
+            )
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        statement
+            .query_map(
+                params![
+                    query.agent_id().as_str(),
+                    query.tenant().map_or("", A2ATenantId::as_str),
+                    query.context_id().as_str(),
+                    to_sql(cursor.created_at_unix_milliseconds())?,
+                    cursor.task_id().as_str(),
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|_| A2ATaskStoreError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| A2ATaskStoreError::Storage)?
+    } else {
+        let mut statement = connection
+            .prepare(
+                "SELECT task_id, created_at_unix_milliseconds
+                 FROM a2a_task
+                 WHERE agent_id = ?1 AND tenant_id = ?2 AND context_id = ?3
+                   AND content_pruned = 0
+                 ORDER BY created_at_unix_milliseconds DESC, task_id DESC
+                 LIMIT ?4",
+            )
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        statement
+            .query_map(
+                params![
+                    query.agent_id().as_str(),
+                    query.tenant().map_or("", A2ATenantId::as_str),
+                    query.context_id().as_str(),
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|_| A2ATaskStoreError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| A2ATaskStoreError::Storage)?
+    };
+    rows.into_iter()
+        .map(|(task_id, created_at)| Ok((task_id, from_sql(created_at)?)))
+        .collect()
 }
 
 fn tenant_value(key: &A2ATaskKey) -> &str {

@@ -1,11 +1,13 @@
 use KonclaveA2AContracts::wire::{
-    Artifact, Message, Part, Role, SendMessageResponse, Task, TaskState, TaskStatus, part,
-    send_message_response,
+    Artifact, ListTasksResponse, Message, Part, Role, SendMessageResponse, Task, TaskState,
+    TaskStatus, part, send_message_response,
 };
 use KonclaveA2AContracts::{
-    A2A_TEXT_MEDIA_TYPE, A2AContractError, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    A2A_TEXT_MEDIA_TYPE, A2AContractError, INITIAL_TASK_TERMINAL_REASON_FIELD,
+    MAX_A2A_ENCODED_RESPONSE_BYTES, decode_initial_list_tasks_response_json,
     decode_initial_send_message_response_json, decode_initial_send_message_response_protobuf,
-    decode_initial_task_json, decode_initial_task_protobuf, validate_initial_task,
+    decode_initial_task_json, decode_initial_task_protobuf, validate_initial_list_tasks_response,
+    validate_initial_task,
 };
 use prost::Message as _;
 
@@ -157,4 +159,57 @@ fn task_response_rejects_direct_message_duplicate_json_and_oversize() {
             actual: MAX_A2A_ENCODED_RESPONSE_BYTES + 1,
         })
     );
+}
+
+#[test]
+fn terminal_reason_metadata_and_list_responses_are_strict() {
+    let mut failed = task();
+    failed.status.as_mut().unwrap().state = TaskState::Failed as i32;
+    failed.status.as_mut().unwrap().message = None;
+    failed.history.clear();
+    failed.metadata = Some(
+        serde_json::from_str(&format!(
+            r#"{{"{INITIAL_TASK_TERMINAL_REASON_FIELD}":"konclave_request_rejected"}}"#
+        ))
+        .unwrap(),
+    );
+    assert!(validate_initial_task(failed.clone()).is_ok());
+
+    let mut missing_reason = failed.clone();
+    missing_reason.metadata = None;
+    assert!(matches!(
+        validate_initial_task(missing_reason),
+        Err(A2AContractError::MissingField {
+            field: "task.metadata"
+        })
+    ));
+
+    let list = ListTasksResponse {
+        tasks: vec![failed],
+        next_page_token: "v1.100.00112233445566778899aabbccddeeff".to_owned(),
+        page_size: 50,
+        total_size: 1,
+    };
+    assert_eq!(
+        decode_initial_list_tasks_response_json(&serde_json::to_vec(&list).unwrap())
+            .unwrap()
+            .as_wire()
+            .total_size,
+        1
+    );
+
+    let mut invalid_task = task();
+    invalid_task.history.clear();
+    let list = ListTasksResponse {
+        tasks: vec![invalid_task],
+        next_page_token: String::new(),
+        page_size: 50,
+        total_size: 1,
+    };
+    assert!(matches!(
+        validate_initial_list_tasks_response(list),
+        Err(A2AContractError::UnsupportedField {
+            field: "list_tasks_response.tasks"
+        })
+    ));
 }

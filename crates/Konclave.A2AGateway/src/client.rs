@@ -3,9 +3,10 @@ use std::time::Duration;
 use KonclaveA2AContracts::wire::AgentInterface;
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH,
-    InitialA2AAgentCard, InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment,
-    InitialA2ATaskResponse, InitialSendMessageRequest, MAX_A2A_ENCODED_AGENT_CARD_BYTES,
-    MAX_A2A_ENCODED_RESPONSE_BYTES, decode_initial_agent_card_json,
+    DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard, InitialA2AAgentSecurityKind,
+    InitialA2AInterfaceEnvironment, InitialA2ATaskListResponse, InitialA2ATaskResponse,
+    InitialSendMessageRequest, MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    decode_initial_agent_card_json, decode_initial_list_tasks_response_json,
     decode_initial_send_message_response_json, decode_initial_task_json,
     validate_initial_agent_interface,
 };
@@ -225,6 +226,40 @@ impl A2AHttpJsonClient {
             return Err(A2AGatewayError::Contract);
         }
         Ok(task)
+    }
+
+    /// Loads one visible page of tasks through `GET /tasks`.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, transport, remote, response-bound, or response-contract
+    /// failures.
+    pub async fn list_tasks(
+        &self,
+        page_size: Option<u32>,
+        page_token: Option<&str>,
+    ) -> Result<InitialA2ATaskListResponse, A2AGatewayError> {
+        if page_size.is_some_and(|value| value == 0 || value > 256) {
+            return Err(A2AGatewayError::InvalidConfiguration);
+        }
+        let mut url = self.endpoint("tasks")?;
+        if let Some(page_size) = page_size {
+            url.query_pairs_mut()
+                .append_pair("pageSize", &page_size.to_string());
+        } else if page_token.is_some() {
+            url.query_pairs_mut()
+                .append_pair("pageSize", &DEFAULT_A2A_LIST_PAGE_SIZE.to_string());
+        }
+        if let Some(page_token) = page_token {
+            url.query_pairs_mut().append_pair("pageToken", page_token);
+        }
+        let response = self
+            .apply_headers(self.client.get(url))?
+            .send()
+            .await
+            .map_err(|_| A2AGatewayError::Transport)?;
+        let bytes = self.success_bytes(response).await?;
+        decode_initial_list_tasks_response_json(&bytes).map_err(|_| A2AGatewayError::Contract)
     }
 
     /// Retrieves the authenticated extended Agent Card.

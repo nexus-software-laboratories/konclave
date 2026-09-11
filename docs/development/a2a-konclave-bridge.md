@@ -120,6 +120,11 @@ idempotency contract and avoids adding a task-store scan or daemon-storage
 dependency. Startup-driven recovery can be added later through a bounded portable
 store query without changing message identity or response authority.
 
+`ListTasks` and `GetTask` observe only the bridge-owned A2A task projection. They do
+not expose daemon cursors, watch handles, or any broader local-service history scan.
+Listing hides content-pruned tombstones even though the bridge still retains those
+internal rows for idempotent retry detection.
+
 ## Local-service grant behavior
 
 `Konclave.LocalServiceClient::LocalServiceJsonClient` authenticates the expected

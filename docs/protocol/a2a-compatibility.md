@@ -32,7 +32,8 @@ The initial profile negotiates exactly:
 - protocol version `1.0`;
 - binding `HTTP+JSON`;
 - media type `text/plain`;
-- `SendMessage`, `GetTask`, `GetExtendedAgentCard`, and bounded Agent Cards.
+- `SendMessage`, `ListTasks`, `GetTask`, `CancelTask` placeholder behavior,
+  `GetExtendedAgentCard`, and bounded Agent Cards.
 
 Production interfaces require an absolute HTTPS URL without credentials, query, or
 fragment. Development mode additionally permits HTTP on `localhost`, `127.0.0.0/8`,
@@ -63,7 +64,9 @@ layers.
 ## `GetTask` and encoded bounds
 
 `GetTask` requires one canonical task identifier of at most 128 ASCII bytes, the
-exact configured tenant, and optional history length `0` or `1`.
+exact configured tenant, and optional history length `0` or `1`. `ListTasks`
+requires the same tenant, optional `pageSize` in the range `1..=256`, and an opaque
+gateway page token when continuing pagination.
 The gateway domain layer further requires its own task identifiers to be exactly 32
 lowercase hexadecimal characters, matching the mapped Konclave request identifier.
 
@@ -81,13 +84,18 @@ equal `1.0` when present.
 The implemented standard routes are:
 
 - `POST /message:send` and `POST /{tenant}/message:send`;
+- `GET /tasks` and `GET /{tenant}/tasks`;
 - `GET /tasks/{id}` and `GET /{tenant}/tasks/{id}`;
+- `POST /tasks/{id}:cancel` and `POST /{tenant}/tasks/{id}:cancel`;
 - `GET /extendedAgentCard` and `GET /{tenant}/extendedAgentCard`; and
 - `GET /.well-known/agent-card.json` when explicitly published.
 
-`historyLength` is a camel-case GetTask query parameter. Streaming paths authenticate
-and return the A2A `UNSUPPORTED_OPERATION` reason. Push, list, cancellation,
-subscription, and artifact operations remain outside the initial profile.
+`historyLength` is a camel-case GetTask query parameter. `pageSize` and `pageToken`
+are the only accepted `ListTasks` query parameters. `CancelTask` authenticates and
+authorizes normally but returns the A2A `UNSUPPORTED_OPERATION` reason until the
+bridge can cancel an already directed Konclave request. Streaming paths authenticate
+and return `UNSUPPORTED_OPERATION`. Push, subscription, and artifact operations
+remain outside the initial profile.
 
 Errors use an `application/a2a+json` `google.rpc.Status`-shaped envelope with an A2A
 `ErrorInfo.reason`; validation errors add a bounded field violation. The

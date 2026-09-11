@@ -41,19 +41,24 @@ The reference router implements the pinned A2A v1.0.1 HTTP+JSON binding:
 |---|---|---|
 | Public Agent Card | `GET /.well-known/agent-card.json` | Not tenant-prefixed |
 | SendMessage | `POST /message:send` | `POST /{tenant}/message:send` |
+| ListTasks | `GET /tasks` | `GET /{tenant}/tasks` |
 | GetTask | `GET /tasks/{id}` | `GET /{tenant}/tasks/{id}` |
+| CancelTask | `POST /tasks/{id}:cancel` | `POST /{tenant}/tasks/{id}:cancel` |
 | GetExtendedAgentCard | `GET /extendedAgentCard` | `GET /{tenant}/extendedAgentCard` |
 
 `historyLength` is the only accepted GetTask query parameter and remains limited to
-`0` or `1`. The optional `A2A-Version` header must equal `1.0` when present.
+`0` or `1`. `ListTasks` accepts only `pageSize` and `pageToken`; the default page
+size is `50` and the hard maximum is `256`. `CancelTask` authenticates and
+authorizes like `GetTask` but returns `UNSUPPORTED_OPERATION`. The optional
+`A2A-Version` header must equal `1.0` when present.
 
 Request bodies accept `application/a2a+json` and compatibility
 `application/json`, with an optional UTF-8 charset parameter. Every JSON response
 uses the v1.0.1-preferred `application/a2a+json` media type.
 
 Streaming message and task-subscription paths authenticate first and return
-`UNSUPPORTED_OPERATION`. Push notification, list, cancellation, artifact, and other
-task-lifecycle operations remain outside this initial profile.
+`UNSUPPORTED_OPERATION`. Push notification, artifact, and other task-lifecycle
+operations remain outside this initial profile.
 
 ## Authentication and authorization
 
@@ -64,7 +69,9 @@ validating a tenant path, parsing task identity, or consulting durable state.
 an opaque 32-byte principal identifier. It then decides one exact action:
 
 - `SendMessage`;
+- `ListTasks`;
 - `GetTask`;
+- `CancelTask`;
 - `GetExtendedAgentCard`; or
 - `UnsupportedOperation`.
 
@@ -108,9 +115,8 @@ state after submission. Otherwise it polls the portable store until the task rea
 - `COMPLETED`;
 - `FAILED`;
 - `CANCELED`;
-- `REJECTED`;
-- `INPUT_REQUIRED`; or
-- `AUTH_REQUIRED`.
+- `REJECTED`; or
+- `WORKING` timeout at the caller's HTTP deadline.
 
 The default response deadline is 30 seconds with a 250-millisecond poll interval. The
 deadline begins before downstream submission and covers submission plus durable-state
@@ -123,16 +129,22 @@ changing or fabricating task state. A retry can continue from the same durable t
 The gateway projects task-store records back into bounded pinned wire DTOs and
 revalidates the generated Task through `Konclave.A2AContracts`.
 
-The initial projection:
+The initial `GetTask` projection:
 
 - uses the exact 32-hex task identifier and configured context;
 - maps only the separate A2A task-state enum;
 - emits an exact millisecond-derived protobuf timestamp;
-- emits no task metadata or artifacts;
+- emits only one gateway-owned metadata field, `konclave_terminal_reason`, for
+  `FAILED`, `REJECTED`, or `CANCELED` tasks;
+- emits no artifacts;
 - returns at most one most-recent history message;
 - omits history when `historyLength=0`; and
-- includes the most-recent agent message in status only for terminal or interrupted
-  response states.
+- includes the most-recent agent message in status only for terminal response states
+  that actually produced agent text.
+
+`ListTasks` reuses the same bounded Task shape but suppresses all message bodies:
+every listed task has empty `history`, no `status.message`, current state, the same
+timestamp semantics, and the same terminal-reason metadata when terminal.
 
 A retained non-pruned `COMPLETED` task must contain an agent text message. Artifact-only
 completion is valid in the broader portable store but fails this text-only gateway
@@ -140,7 +152,8 @@ projection instead of reporting success without a response.
 
 Task and SendMessageResponse decoders reject oversized bodies, duplicate JSON keys,
 missing status or timestamps, unspecified states, mismatched task/context identity,
-unsupported parts, metadata, artifacts, and history beyond the initial bound.
+unsupported artifacts, history beyond the initial bound, and metadata other than the
+single terminal-reason field.
 Validated task wrappers do not implement `Clone` or `Debug` because they may contain
 message plaintext.
 
@@ -262,10 +275,11 @@ Focused tests cover:
 - public-card opt-in, ETag, and cache behavior;
 - extended-card authorization and private caching;
 - unsupported streaming and bounded error envelopes;
-- end-to-end client SendMessage, GetTask, extended-card, and conditional discovery;
+- end-to-end client SendMessage, ListTasks, GetTask, extended-card, and conditional discovery;
 - redirect refusal with credentials;
 - shared protected-client construction with ambient proxy discovery disabled;
-- response byte bounds and task/context correlation; and
+- response byte bounds, terminal-reason metadata, task/context correlation, and
+  cursor pagination; and
 - TLS-or-loopback binding policy.
 
 The A2A-to-Konclave bridge test suite runs the application and authenticated
