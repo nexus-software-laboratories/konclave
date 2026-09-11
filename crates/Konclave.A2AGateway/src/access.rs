@@ -24,6 +24,8 @@ pub enum A2AHttpAction {
     GetTask,
     /// Read one page of scoped tasks.
     ListTasks,
+    /// Read one page of scoped tasks including artifact content and reference keys.
+    ListTasksWithArtifacts,
     /// Read the configured authenticated extended card.
     GetExtendedAgentCard,
     /// Reach the standard cancel-task operation, which remains unsupported.

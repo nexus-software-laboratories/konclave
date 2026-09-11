@@ -369,13 +369,11 @@ async fn list_tasks(
     request: Request<Body>,
 ) -> Response {
     let (parts, _) = request.into_parts();
-    if let Err(response) = authorize(&state, &parts, A2AHttpAction::ListTasks) {
-        return *response;
-    }
+    let principal = match authenticate(&state, &parts) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
     if let Err(response) = validate_common_headers(&parts.headers) {
-        return *response;
-    }
-    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
         return *response;
     }
     let (page_size, page_token, include_artifacts) = match parse_list_tasks_query(parts.uri.query())
@@ -383,6 +381,17 @@ async fn list_tasks(
         Ok(value) => value,
         Err(response) => return *response,
     };
+    let action = if include_artifacts == Some(true) {
+        A2AHttpAction::ListTasksWithArtifacts
+    } else {
+        A2AHttpAction::ListTasks
+    };
+    if let Err(response) = authorize_principal(&state, principal, action) {
+        return *response;
+    }
+    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
+        return *response;
+    }
     let request = match validate_initial_list_tasks_request(
         ListTasksRequest {
             tenant: state.application.tenant().unwrap_or_default().to_owned(),
@@ -641,6 +650,14 @@ fn authorize(
     parts: &Parts,
     action: A2AHttpAction,
 ) -> Result<(), Box<Response>> {
+    let principal = authenticate(state, parts)?;
+    authorize_principal(state, principal, action)
+}
+
+fn authenticate(
+    state: &A2AHttpState,
+    parts: &Parts,
+) -> Result<A2AHttpPrincipalId, Box<Response>> {
     let principal = match state.access.authenticate(parts) {
         Ok(principal) => principal,
         Err(A2AGatewayError::Unauthenticated) => {
@@ -650,6 +667,14 @@ fn authorize(
         }
         Err(error) => return Err(Box::new(gateway_error_response(error))),
     };
+    Ok(principal)
+}
+
+fn authorize_principal(
+    state: &A2AHttpState,
+    principal: A2AHttpPrincipalId,
+    action: A2AHttpAction,
+) -> Result<(), Box<Response>> {
     match state.access.authorize(principal, action) {
         A2AHttpAuthorizationDecision::Allow => Ok(()),
         A2AHttpAuthorizationDecision::Deny => {

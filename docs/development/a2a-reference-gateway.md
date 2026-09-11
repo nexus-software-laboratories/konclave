@@ -77,6 +77,7 @@ an opaque 32-byte principal identifier. It then decides one exact action:
 - `SendMessage`;
 - `SendStreamingMessage`;
 - `ListTasks`;
+- `ListTasksWithArtifacts`;
 - `GetTask`;
 - `SubscribeToTask`;
 - `CancelTask`;
@@ -93,6 +94,10 @@ authorization dependency returns `503` with `Retry-After`.
 - stores only a domain-separated SHA-256 principal derived from each token;
 - requires exactly one case-insensitive Bearer authorization header; and
 - authorizes every protected operation for a configured principal.
+
+`ListTasks` is metadata-only authorization. An explicit
+`includeArtifacts=true` request requires the separate `ListTasksWithArtifacts`
+action before any artifact bytes or encrypted-reference key fragments are loaded.
 
 The publication's advertised authentication kind must equal the configured access
 adapter. A deployment may implement `A2AHttpAccess` for mutual TLS by consuming
@@ -192,6 +197,11 @@ There is no proprietary resume token or SSE event ID. A caller reconnects with
 `SubscribeToTask`; the required first Task snapshot reconciles state accepted while
 the caller was disconnected. A closed or dropped HTTP stream never cancels or
 otherwise mutates the durable task.
+
+The outbound stream client binds every artifact identifier to the SHA-256 of its
+canonical artifact bytes. Duplicate or conflicting updates, more than eight aggregate
+artifacts, and a final Task snapshot that does not exactly reconcile the observed
+artifact set fail the stream contract.
 
 `publish_artifact` is the route-scoped application boundary for one complete
 validated artifact. It requires an existing `WORKING` task, appends deterministic

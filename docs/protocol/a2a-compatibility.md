@@ -100,7 +100,8 @@ The implemented standard routes are:
 `historyLength` is a camel-case GetTask query parameter. `ListTasks` accepts
 `pageSize`, `pageToken`, and optional `includeArtifacts=true|false`; artifacts are
 omitted by default. Artifact-inclusive pages default to and are capped at `8`.
-`CancelTask` authenticates and authorizes normally but returns the A2A
+Artifact-inclusive listing uses a separate authorization action from metadata-only
+listing. `CancelTask` authenticates and authorizes normally but returns the A2A
 `UNSUPPORTED_OPERATION` reason until the bridge can cancel an already directed
 Konclave request.
 
@@ -130,6 +131,10 @@ Text Parts use canonical lowercase `text/*` media types and default to `text/pla
 Structured data is finite canonical JSON with media type `application/json`. Raw
 bytes require an explicit canonical lowercase media type. Filenames are bounded safe
 basenames. Artifact and Part metadata and extension URIs remain unsupported.
+
+Artifact identifiers are unique within each Task. Streaming binds each identifier to
+one canonical artifact digest; duplicate or conflicting updates and unreconciled
+final Task snapshots are rejected.
 
 URL Parts accept only the versioned encrypted content-addressed HTTPS reference from
 ADR 0017. Arbitrary URLs are rejected and no validation, persistence, task, list, or

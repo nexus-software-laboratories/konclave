@@ -377,14 +377,11 @@ impl A2AGatewayApplication {
         let store = Arc::clone(&self.store);
         let (tasks, next_cursor, page_size, total_size) = if lookup.include_artifacts() {
             let page = tokio::task::spawn_blocking(move || {
-                store.list_tasks_with_artifacts(
-                    &query,
-                    MAX_A2A_ARTIFACTS_PER_TASK + 1,
-                )
+                store.list_tasks_with_artifacts(&query, MAX_A2A_ARTIFACTS_PER_TASK + 1)
             })
-                .await
-                .map_err(|_| A2AGatewayError::StorageUnavailable)?
-                .map_err(map_store_error)?;
+            .await
+            .map_err(|_| A2AGatewayError::StorageUnavailable)?
+            .map_err(map_store_error)?;
             let (tasks, next_cursor, page_size, total_size) = page.into_parts();
             (
                 tasks

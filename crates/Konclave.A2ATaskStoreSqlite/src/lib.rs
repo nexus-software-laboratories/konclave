@@ -424,10 +424,8 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         artifact_limit: usize,
     ) -> Result<A2ATaskArtifactListPage, A2ATaskStoreError> {
         validate_list_page_size(query.page_size())?;
-        let artifact_limit = validate_artifact_read_limit(
-            artifact_limit,
-            self.config.max_artifacts_per_task,
-        )?;
+        let artifact_limit =
+            validate_artifact_read_limit(artifact_limit, self.config.max_artifacts_per_task)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -436,8 +434,7 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         let tasks = tasks
             .into_iter()
             .map(|task| {
-                let artifacts =
-                    load_artifacts(&transaction, task.key(), artifact_limit)?;
+                let artifacts = load_artifacts(&transaction, task.key(), artifact_limit)?;
                 Ok(A2ATaskWithArtifacts::new(task, artifacts))
             })
             .collect::<Result<Vec<_>, A2ATaskStoreError>>()?;
@@ -667,10 +664,8 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         artifact_limit: usize,
     ) -> Result<A2ATaskSnapshot, A2ATaskStoreError> {
         validate_page_limit(message_limit, self.config.max_messages_per_task)?;
-        let artifact_limit = validate_artifact_read_limit(
-            artifact_limit,
-            self.config.max_artifacts_per_task,
-        )?;
+        let artifact_limit =
+            validate_artifact_read_limit(artifact_limit, self.config.max_artifacts_per_task)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -679,13 +674,6 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         let (messages, artifacts) = if task.content_pruned() {
             (Vec::new(), Vec::new())
         } else {
-            let artifact_count = record_count(&transaction, "a2a_task_artifact", key)?;
-            if usize::try_from(after_artifact_sequence)
-                .ok()
-                .is_none_or(|cursor| cursor > artifact_count)
-            {
-                return Err(A2ATaskStoreError::CorruptData);
-            }
             (
                 load_messages(&transaction, key, message_limit)?,
                 load_artifacts(&transaction, key, artifact_limit)?,
@@ -706,10 +694,8 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         artifact_limit: usize,
     ) -> Result<A2ATaskStreamUpdates, A2ATaskStoreError> {
         validate_page_limit(message_limit, self.config.max_messages_per_task)?;
-        let artifact_limit = validate_artifact_read_limit(
-            artifact_limit,
-            self.config.max_artifacts_per_task,
-        )?;
+        let artifact_limit =
+            validate_artifact_read_limit(artifact_limit, self.config.max_artifacts_per_task)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -725,13 +711,15 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             }
             (Vec::new(), Vec::new())
         } else {
+            let artifact_count = record_count(&transaction, "a2a_task_artifact", key)?;
+            if usize::try_from(after_artifact_sequence)
+                .ok()
+                .is_none_or(|cursor| cursor > artifact_count)
+            {
+                return Err(A2ATaskStoreError::CorruptData);
+            }
             (
-                load_artifacts_after(
-                    &transaction,
-                    key,
-                    after_artifact_sequence,
-                    artifact_limit,
-                )?,
+                load_artifacts_after(&transaction, key, after_artifact_sequence, artifact_limit)?,
                 load_messages(&transaction, key, message_limit)?,
             )
         };

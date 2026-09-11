@@ -586,6 +586,12 @@ async fn get_and_explicit_list_project_bounded_artifacts() {
             120,
         ))
         .unwrap();
+    let artifact_restricted = A2AHttpState::new(
+        application.clone(),
+        Arc::new(ArtifactListAccess),
+        A2AHttpConfig::default(),
+    )
+    .unwrap();
     let router = a2a_router(state(application));
 
     let response = router
@@ -641,9 +647,57 @@ async fn get_and_explicit_list_project_bounded_artifacts() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let restricted = a2a_router(artifact_restricted);
+    let response = restricted
+        .clone()
+        .oneshot(
+            authenticated("/tenant-a/tasks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = restricted
+        .oneshot(
+            authenticated("/tenant-a/tasks?includeArtifacts=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 struct DecisionAccess(A2AHttpAuthorizationDecision);
+
+struct ArtifactListAccess;
+
+impl A2AHttpAccess for ArtifactListAccess {
+    fn authentication_kind(&self) -> Option<KonclaveA2AContracts::InitialA2AAgentSecurityKind> {
+        Some(KonclaveA2AContracts::InitialA2AAgentSecurityKind::Bearer)
+    }
+
+    fn authenticate(
+        &self,
+        _request: &Parts,
+    ) -> Result<A2AHttpPrincipalId, KonclaveA2AGateway::A2AGatewayError> {
+        Ok(A2AHttpPrincipalId::from_bytes([8; 32]))
+    }
+
+    fn authorize(
+        &self,
+        _principal: A2AHttpPrincipalId,
+        action: A2AHttpAction,
+    ) -> A2AHttpAuthorizationDecision {
+        if action == A2AHttpAction::ListTasksWithArtifacts {
+            A2AHttpAuthorizationDecision::Deny
+        } else {
+            A2AHttpAuthorizationDecision::Allow
+        }
+    }
+}
 
 impl A2AHttpAccess for DecisionAccess {
     fn authentication_kind(&self) -> Option<KonclaveA2AContracts::InitialA2AAgentSecurityKind> {

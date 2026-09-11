@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use prost::Message as _;
 
 use crate::initial_profile::{
@@ -181,8 +183,15 @@ pub fn validate_initial_task(mut task: Task) -> Result<InitialA2ATaskResponse, A
             field: "task.artifacts",
         });
     }
+    let mut artifact_ids = BTreeSet::new();
     for artifact in &mut task.artifacts {
-        *artifact = validate_initial_artifact(std::mem::take(artifact))?.into_wire();
+        let validated = validate_initial_artifact(std::mem::take(artifact))?;
+        if !artifact_ids.insert(validated.artifact_id().to_owned()) {
+            return Err(A2AContractError::DuplicateValue {
+                field: "task.artifact.artifact_id",
+            });
+        }
+        *artifact = validated.into_wire();
     }
     if task.history.len() > 1 {
         return Err(A2AContractError::OutOfRange {
