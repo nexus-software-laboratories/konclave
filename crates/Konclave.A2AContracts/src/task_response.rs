@@ -1,6 +1,7 @@
+use std::collections::BTreeSet;
+
 use prost::Message as _;
 
-use crate::A2AContractError;
 use crate::initial_profile::{
     A2A_TEXT_MEDIA_TYPE, decode_json_bounded, require_empty_struct, require_encoded_bound,
     validate_identifier, validate_text,
@@ -8,6 +9,7 @@ use crate::initial_profile::{
 use crate::wire::{
     Message, Role, SendMessageResponse, Task, TaskState, part, send_message_response,
 };
+use crate::{A2AContractError, MAX_A2A_ARTIFACTS_PER_TASK, validate_initial_artifact};
 
 /// Maximum encoded protobuf or ProtoJSON task response accepted before decoding.
 pub const MAX_A2A_ENCODED_RESPONSE_BYTES: usize = 256 * 1024;
@@ -153,7 +155,7 @@ pub fn validate_initial_send_message_response(
 /// Returns a stable contract error for missing identity or status, invalid state or
 /// timestamps, unsupported artifacts or metadata, excessive history, or inconsistent
 /// message identity.
-pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2AContractError> {
+pub fn validate_initial_task(mut task: Task) -> Result<InitialA2ATaskResponse, A2AContractError> {
     let task_id = validate_identifier(task.id.clone(), "task.id")?;
     let context_id = validate_identifier(task.context_id.clone(), "task.context_id")?;
     let status = task.status.as_ref().ok_or(A2AContractError::MissingField {
@@ -176,10 +178,20 @@ pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2ACo
         validate_task_message(message, &task_id, &context_id, Some(Role::Agent))?;
     }
     validate_terminal_reason_metadata(task.metadata.as_ref(), state, "task.metadata")?;
-    if !task.artifacts.is_empty() {
-        return Err(A2AContractError::UnsupportedField {
+    if task.artifacts.len() > MAX_A2A_ARTIFACTS_PER_TASK {
+        return Err(A2AContractError::OutOfRange {
             field: "task.artifacts",
         });
+    }
+    let mut artifact_ids = BTreeSet::new();
+    for artifact in &mut task.artifacts {
+        let validated = validate_initial_artifact(std::mem::take(artifact))?;
+        if !artifact_ids.insert(validated.artifact_id().to_owned()) {
+            return Err(A2AContractError::DuplicateValue {
+                field: "task.artifact.artifact_id",
+            });
+        }
+        *artifact = validated.into_wire();
     }
     if task.history.len() > 1 {
         return Err(A2AContractError::OutOfRange {
@@ -189,6 +201,8 @@ pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2ACo
     for message in &task.history {
         validate_task_message(message, &task_id, &context_id, None)?;
     }
+    let bytes = serde_json::to_vec(&task).map_err(|_| A2AContractError::MalformedEncoding)?;
+    require_encoded_bound(&bytes, MAX_A2A_ENCODED_RESPONSE_BYTES)?;
     Ok(InitialA2ATaskResponse { wire: task, state })
 }
 

@@ -5,18 +5,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use KonclaveA2AContracts::wire::TaskState;
 use KonclaveA2AContracts::{
-    InitialA2AAgentCard, InitialA2AStreamResponse, InitialA2ATaskListResponse,
+    InitialA2AAgentCard, InitialA2AArtifact, InitialA2AStreamResponse, InitialA2ATaskListResponse,
     InitialA2ATaskResponse, InitialGetTaskRequest, InitialListTasksRequest,
-    InitialSendMessageRequest, InitialSubscribeToTaskRequest,
+    InitialSendMessageRequest, InitialSubscribeToTaskRequest, MAX_A2A_ARTIFACTS_PER_TASK,
 };
 use KonclaveA2ADiscovery::CompiledA2AAgentPublication;
 use KonclaveA2ADomain::{
-    A2AAgentRoute, A2AMessageId, A2ATaskId, map_initial_get_task, map_initial_list_tasks,
-    map_initial_send_message, map_initial_streaming_message, map_initial_subscribe_to_task,
+    A2AAgentRoute, A2AArtifactId, A2AMessageId, A2ATaskId, A2ATaskState, map_initial_get_task,
+    map_initial_list_tasks, map_initial_send_message, map_initial_streaming_message,
+    map_initial_subscribe_to_task,
 };
 use KonclaveA2ATaskStore::{
-    A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery, A2ATaskRecord, A2ATaskStore,
-    A2ATaskStoreError, CreateA2ATaskOutcome,
+    A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery,
+    A2ATaskRecord, A2ATaskStore, A2ATaskStoreError, AppendA2ATaskRecordOutcome,
+    CreateA2ATaskOutcome,
 };
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
@@ -27,7 +29,8 @@ use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
 use crate::A2AGatewayError;
 use crate::projection::{
-    project_get_task, project_list_tasks, project_status_update, project_stream_task,
+    project_artifact_update, project_get_task, project_list_tasks, project_status_update,
+    project_stream_task,
 };
 
 const MAX_RESPONSE_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -372,11 +375,36 @@ impl A2AGatewayApplication {
         )
         .map_err(|_| A2AGatewayError::InvalidRequest)?;
         let store = Arc::clone(&self.store);
-        let page = tokio::task::spawn_blocking(move || store.list_tasks(&query))
+        let (tasks, next_cursor, page_size, total_size) = if lookup.include_artifacts() {
+            let page = tokio::task::spawn_blocking(move || {
+                store.list_tasks_with_artifacts(&query, MAX_A2A_ARTIFACTS_PER_TASK + 1)
+            })
             .await
             .map_err(|_| A2AGatewayError::StorageUnavailable)?
             .map_err(map_store_error)?;
-        let (tasks, next_cursor, page_size, total_size) = page.into_parts();
+            let (tasks, next_cursor, page_size, total_size) = page.into_parts();
+            (
+                tasks
+                    .into_iter()
+                    .map(KonclaveA2ATaskStore::A2ATaskWithArtifacts::into_parts)
+                    .collect(),
+                next_cursor,
+                page_size,
+                total_size,
+            )
+        } else {
+            let page = tokio::task::spawn_blocking(move || store.list_tasks(&query))
+                .await
+                .map_err(|_| A2AGatewayError::StorageUnavailable)?
+                .map_err(map_store_error)?;
+            let (tasks, next_cursor, page_size, total_size) = page.into_parts();
+            (
+                tasks.into_iter().map(|task| (task, Vec::new())).collect(),
+                next_cursor,
+                page_size,
+                total_size,
+            )
+        };
         project_list_tasks(
             tasks,
             next_cursor.as_ref().map(encode_page_token),
@@ -405,6 +433,53 @@ impl A2AGatewayApplication {
         );
         self.stream_task(key, Some(1), Instant::now() + self.wait.timeout, true)
             .await
+    }
+
+    /// Publishes one complete validated artifact for an active task.
+    ///
+    /// The task must already be `WORKING`. This operation does not transition task
+    /// state; orchestration publishes terminal state separately after all outputs are
+    /// durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns route, task-state, storage, capacity, conflict, or clock failures.
+    pub async fn publish_artifact(
+        &self,
+        task_id: &A2ATaskId,
+        artifact: InitialA2AArtifact,
+    ) -> Result<(), A2AGatewayError> {
+        let key = A2ATaskKey::new(
+            self.route.agent_id().clone(),
+            self.route.tenant().cloned(),
+            task_id.clone(),
+        );
+        let artifact_id = A2AArtifactId::parse(artifact.artifact_id().to_owned())
+            .map_err(|_| A2AGatewayError::InvalidRequest)?;
+        let recorded_at = self
+            .clock
+            .now_unix_milliseconds()
+            .map_err(|_| A2AGatewayError::ClockUnavailable)?;
+        let artifact = A2ATaskArtifact::new(
+            key.clone(),
+            artifact_id,
+            artifact.into_canonical_json(),
+            true,
+            recorded_at,
+        )
+        .map_err(map_store_error)?;
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || {
+            match store
+                .append_working_artifact(artifact, recorded_at, MAX_A2A_ARTIFACTS_PER_TASK)
+                .map_err(map_store_error)?
+            {
+                AppendA2ATaskRecordOutcome::Appended { .. }
+                | AppendA2ATaskRecordOutcome::Existing { .. } => Ok(()),
+            }
+        })
+        .await
+        .map_err(|_| A2AGatewayError::StorageUnavailable)?
     }
 
     async fn prepare_task(
@@ -438,7 +513,7 @@ impl A2AGatewayApplication {
         let deadline = Instant::now() + self.wait.timeout;
         if matches!(
             record.state(),
-            KonclaveA2ADomain::A2ATaskState::Submitted | KonclaveA2ADomain::A2ATaskState::Working
+            A2ATaskState::Submitted | A2ATaskState::Working
         ) {
             let submission = submission_from_record(record)?;
             timeout_at(deadline, self.submitter.submit(submission))
@@ -460,7 +535,8 @@ impl A2AGatewayApplication {
         deadline: Instant,
         reject_terminal: bool,
     ) -> Result<A2AGatewayTaskStream, A2AGatewayError> {
-        let (initial, generation) = self.stream_snapshot(key.clone(), history_length).await?;
+        let (initial, generation, artifact_sequence) =
+            self.stream_snapshot(key.clone(), history_length).await?;
         if reject_terminal && terminal_state(initial.state()) {
             return Err(A2AGatewayError::UnsupportedOperation);
         }
@@ -470,6 +546,18 @@ impl A2AGatewayApplication {
             task_id: initial.task_id().to_owned(),
             context_id: initial.context_id().to_owned(),
             generation,
+            artifact_sequence,
+            has_complete_artifact: initial
+                .as_wire()
+                .payload
+                .as_ref()
+                .and_then(|payload| match payload {
+                    KonclaveA2AContracts::wire::stream_response::Payload::Task(task) => {
+                        Some(!task.artifacts.is_empty())
+                    }
+                    _ => None,
+                })
+                .unwrap_or(false),
             deadline,
             finished: response_ready(initial.state()),
             pending: VecDeque::from([initial]),
@@ -488,17 +576,33 @@ impl A2AGatewayApplication {
                 if Instant::now() >= state.deadline {
                     return Ok(None);
                 }
-                let (updates, messages) = state
+                let (status_updates, artifact_updates, messages) = state
                     .application
-                    .status_updates(state.key.clone(), state.generation)
+                    .stream_updates(state.key.clone(), state.generation, state.artifact_sequence)
                     .await?;
-                for update in updates {
+                for artifact in artifact_updates {
+                    if state.artifact_sequence
+                        >= u64::try_from(MAX_A2A_ARTIFACTS_PER_TASK)
+                            .map_err(|_| A2AGatewayError::InvalidConfiguration)?
+                    {
+                        return Err(A2AGatewayError::ResponseTooLarge);
+                    }
+                    state.artifact_sequence = artifact.sequence();
+                    state.has_complete_artifact = true;
+                    state.pending.push_back(project_artifact_update(
+                        &state.task_id,
+                        &state.context_id,
+                        artifact,
+                    )?);
+                }
+                for update in status_updates {
                     state.generation = update.generation();
                     let event = project_status_update(
                         &state.task_id,
                         &state.context_id,
                         update,
                         &messages,
+                        state.has_complete_artifact,
                     )?;
                     if response_ready(event.state()) {
                         state.finished = true;
@@ -514,30 +618,37 @@ impl A2AGatewayApplication {
         &self,
         key: A2ATaskKey,
         history_length: Option<u32>,
-    ) -> Result<(InitialA2AStreamResponse, u64), A2AGatewayError> {
+    ) -> Result<(InitialA2AStreamResponse, u64, u64), A2AGatewayError> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let (record, messages) = store.task_with_messages(&key, 2).map_err(map_store_error)?;
+            let snapshot = store
+                .task_snapshot(&key, 2, MAX_A2A_ARTIFACTS_PER_TASK + 1)
+                .map_err(map_store_error)?;
+            let (record, messages, artifacts) = snapshot.into_parts();
             if record.content_pruned() {
                 return Err(A2AGatewayError::TaskNotFound);
             }
             let generation = record.generation();
+            let artifact_sequence = artifacts.last().map_or(0, |artifact| artifact.sequence());
             Ok((
-                project_stream_task(record, messages, history_length)?,
+                project_stream_task(record, messages, artifacts, history_length)?,
                 generation,
+                artifact_sequence,
             ))
         })
         .await
         .map_err(|_| A2AGatewayError::StorageUnavailable)?
     }
 
-    async fn status_updates(
+    async fn stream_updates(
         &self,
         key: A2ATaskKey,
         after_generation: u64,
+        after_artifact_sequence: u64,
     ) -> Result<
         (
             Vec<KonclaveA2ATaskStore::StoredA2ATaskStatus>,
+            Vec<KonclaveA2ATaskStore::StoredA2ATaskArtifact>,
             Vec<KonclaveA2ATaskStore::StoredA2ATaskMessage>,
         ),
         A2AGatewayError,
@@ -545,17 +656,19 @@ impl A2AGatewayApplication {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
             let updates = store
-                .status_updates(&key, after_generation)
+                .stream_updates(
+                    &key,
+                    after_generation,
+                    after_artifact_sequence,
+                    2,
+                    MAX_A2A_ARTIFACTS_PER_TASK + 1,
+                )
                 .map_err(map_store_error)?;
-            let messages = if updates
-                .iter()
-                .any(|update| response_ready(update.state().to_wire()))
-            {
-                store.messages(&key, 2).map_err(map_store_error)?
-            } else {
-                Vec::new()
-            };
-            Ok((updates, messages))
+            let (task, statuses, artifacts, messages) = updates.into_parts();
+            if task.content_pruned() {
+                return Err(A2AGatewayError::TaskNotFound);
+            }
+            Ok((statuses, artifacts, messages))
         })
         .await
         .map_err(|_| A2AGatewayError::StorageUnavailable)?
@@ -568,11 +681,14 @@ impl A2AGatewayApplication {
     ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let (record, messages) = store.task_with_messages(&key, 2).map_err(map_store_error)?;
+            let snapshot = store
+                .task_snapshot(&key, 2, MAX_A2A_ARTIFACTS_PER_TASK + 1)
+                .map_err(map_store_error)?;
+            let (record, messages, artifacts) = snapshot.into_parts();
             if record.content_pruned() {
                 return Err(A2AGatewayError::TaskNotFound);
             }
-            project_get_task(record, messages, history_length)
+            project_get_task(record, messages, artifacts, history_length)
         })
         .await
         .map_err(|_| A2AGatewayError::StorageUnavailable)?
@@ -604,6 +720,8 @@ struct TaskStreamState {
     task_id: String,
     context_id: String,
     generation: u64,
+    artifact_sequence: u64,
+    has_complete_artifact: bool,
     deadline: Instant,
     finished: bool,
     pending: VecDeque<InitialA2AStreamResponse>,

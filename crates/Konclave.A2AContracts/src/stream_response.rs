@@ -6,7 +6,7 @@ use crate::task_response::{
     validate_timestamp,
 };
 use crate::wire::{Role, StreamResponse, TaskState, stream_response};
-use crate::{A2AContractError, validate_initial_task};
+use crate::{A2AContractError, validate_initial_artifact, validate_initial_task};
 
 /// Streaming payload shape admitted by Konclave's text-only A2A profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +15,8 @@ pub enum InitialA2AStreamResponseKind {
     Task,
     /// Ordered task-status update.
     StatusUpdate,
+    /// Complete immutable task artifact update.
+    ArtifactUpdate,
 }
 
 /// Validated `StreamResponse` admitted by the text-only streaming profile.
@@ -23,7 +25,7 @@ pub struct InitialA2AStreamResponse {
     kind: InitialA2AStreamResponseKind,
     task_id: String,
     context_id: String,
-    state: TaskState,
+    state: Option<TaskState>,
 }
 
 impl InitialA2AStreamResponse {
@@ -46,8 +48,20 @@ impl InitialA2AStreamResponse {
     }
 
     /// Returns the validated current or updated task state.
+    ///
+    /// Artifact updates return `TASK_STATE_UNSPECIFIED`; callers that need to
+    /// distinguish absence should use [`Self::task_state`].
     #[must_use]
     pub const fn state(&self) -> TaskState {
+        match self.state {
+            Some(state) => state,
+            None => TaskState::Unspecified,
+        }
+    }
+
+    /// Returns task state for Task and status-update payloads.
+    #[must_use]
+    pub const fn task_state(&self) -> Option<TaskState> {
         self.state
     }
 
@@ -129,7 +143,7 @@ pub fn validate_initial_stream_response(
                 kind: InitialA2AStreamResponseKind::Task,
                 task_id,
                 context_id,
-                state,
+                state: Some(state),
             })
         }
         Some(stream_response::Payload::StatusUpdate(update)) => {
@@ -175,15 +189,46 @@ pub fn validate_initial_stream_response(
                 kind: InitialA2AStreamResponseKind::StatusUpdate,
                 task_id,
                 context_id,
-                state,
+                state: Some(state),
             })
         }
         Some(stream_response::Payload::Message(_)) => Err(A2AContractError::UnsupportedField {
             field: "stream_response.message",
         }),
-        Some(stream_response::Payload::ArtifactUpdate(_)) => {
-            Err(A2AContractError::UnsupportedField {
-                field: "stream_response.artifact_update",
+        Some(stream_response::Payload::ArtifactUpdate(mut update)) => {
+            let task_id = validate_identifier(
+                update.task_id.clone(),
+                "stream_response.artifact_update.task_id",
+            )?;
+            let context_id = validate_identifier(
+                update.context_id.clone(),
+                "stream_response.artifact_update.context_id",
+            )?;
+            let artifact = update
+                .artifact
+                .take()
+                .ok_or(A2AContractError::MissingField {
+                    field: "stream_response.artifact_update.artifact",
+                })?;
+            update.artifact = Some(validate_initial_artifact(artifact)?.into_wire());
+            if update.append || !update.last_chunk {
+                return Err(A2AContractError::UnsupportedField {
+                    field: "stream_response.artifact_update.chunking",
+                });
+            }
+            crate::initial_profile::require_empty_struct(
+                update.metadata.clone(),
+                "stream_response.artifact_update.metadata",
+            )?;
+            update.metadata = None;
+            Ok(InitialA2AStreamResponse {
+                wire: StreamResponse {
+                    payload: Some(stream_response::Payload::ArtifactUpdate(update)),
+                },
+                kind: InitialA2AStreamResponseKind::ArtifactUpdate,
+                task_id,
+                context_id,
+                state: None,
             })
         }
         None => Err(A2AContractError::MissingField {

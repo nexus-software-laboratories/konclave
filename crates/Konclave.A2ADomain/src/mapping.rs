@@ -184,6 +184,7 @@ pub struct A2ATaskListLookup {
     tenant: Option<A2ATenantId>,
     page_size: u32,
     page_token: Option<String>,
+    include_artifacts: bool,
 }
 
 impl A2ATaskListLookup {
@@ -215,6 +216,12 @@ impl A2ATaskListLookup {
     #[must_use]
     pub fn page_token(&self) -> Option<&str> {
         self.page_token.as_deref()
+    }
+
+    /// Returns whether bounded artifacts were explicitly requested.
+    #[must_use]
+    pub const fn include_artifacts(&self) -> bool {
+        self.include_artifacts
     }
 }
 
@@ -358,6 +365,7 @@ pub fn map_initial_list_tasks(
         tenant: route.tenant.clone(),
         page_size: request.page_size(),
         page_token: request.page_token().map(str::to_owned),
+        include_artifacts: request.include_artifacts(),
     })
 }
 

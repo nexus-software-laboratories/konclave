@@ -1,16 +1,18 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::time::Duration;
 
 use KonclaveA2AContracts::wire::{AgentInterface, TaskState};
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH,
-    DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard, InitialA2AAgentSecurityKind,
-    InitialA2AInterfaceEnvironment, InitialA2AStreamResponse, InitialA2AStreamResponseKind,
-    InitialA2ATaskListResponse, InitialA2ATaskResponse, InitialSendMessageRequest,
-    MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE, DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard,
+    InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment, InitialA2AStreamResponse,
+    InitialA2AStreamResponseKind, InitialA2ATaskListResponse, InitialA2ATaskResponse,
+    InitialSendMessageRequest, MAX_A2A_ARTIFACTS_PER_TASK, MAX_A2A_ENCODED_AGENT_CARD_BYTES,
+    MAX_A2A_ENCODED_RESPONSE_BYTES, MAX_A2A_LIST_ARTIFACT_PAGE_SIZE,
     decode_initial_agent_card_json, decode_initial_list_tasks_response_json,
     decode_initial_send_message_response_json, decode_initial_stream_response_json,
-    decode_initial_task_json, validate_initial_agent_interface,
+    decode_initial_task_json, validate_initial_agent_interface, validate_initial_artifact,
 };
 use KonclaveA2ADomain::A2ATaskId;
 use KonclaveBoundedDocuments::deserialize_strict;
@@ -23,6 +25,7 @@ use reqwest::header::{
 };
 use reqwest::{Response, StatusCode};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -318,19 +321,47 @@ impl A2AHttpJsonClient {
         page_size: Option<u32>,
         page_token: Option<&str>,
     ) -> Result<InitialA2ATaskListResponse, A2AGatewayError> {
+        self.list_tasks_with_artifacts(page_size, page_token, false)
+            .await
+    }
+
+    /// Loads one visible page of tasks and optionally includes bounded artifacts.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, transport, remote, response-bound, or response-contract
+    /// failures.
+    pub async fn list_tasks_with_artifacts(
+        &self,
+        page_size: Option<u32>,
+        page_token: Option<&str>,
+        include_artifacts: bool,
+    ) -> Result<InitialA2ATaskListResponse, A2AGatewayError> {
         if page_size.is_some_and(|value| value == 0 || value > 256) {
+            return Err(A2AGatewayError::InvalidConfiguration);
+        }
+        if include_artifacts
+            && page_size.is_some_and(|value| value > MAX_A2A_LIST_ARTIFACT_PAGE_SIZE)
+        {
             return Err(A2AGatewayError::InvalidConfiguration);
         }
         let mut url = self.endpoint("tasks")?;
         if let Some(page_size) = page_size {
             url.query_pairs_mut()
                 .append_pair("pageSize", &page_size.to_string());
+        } else if include_artifacts {
+            url.query_pairs_mut()
+                .append_pair("pageSize", &DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE.to_string());
         } else if page_token.is_some() {
             url.query_pairs_mut()
                 .append_pair("pageSize", &DEFAULT_A2A_LIST_PAGE_SIZE.to_string());
         }
         if let Some(page_token) = page_token {
             url.query_pairs_mut().append_pair("pageToken", page_token);
+        }
+        if include_artifacts {
+            url.query_pairs_mut()
+                .append_pair("includeArtifacts", "true");
         }
         let response = self
             .apply_headers(self.client.get(url), A2A_JSON_MEDIA_TYPE)?
@@ -600,6 +631,7 @@ fn decode_sse_stream(
             terminal_seen: false,
             final_snapshot_seen: false,
             last_state: None,
+            artifacts: BTreeMap::new(),
         },
         eof: false,
     };
@@ -734,10 +766,16 @@ struct StreamCorrelation {
     terminal_seen: bool,
     final_snapshot_seen: bool,
     last_state: Option<TaskState>,
+    artifacts: BTreeMap<String, [u8; 32]>,
 }
 
 impl StreamCorrelation {
     fn validate(&mut self, event: &InitialA2AStreamResponse) -> Result<(), A2AGatewayError> {
+        let task_artifacts = if event.kind() == InitialA2AStreamResponseKind::Task {
+            Some(stream_task_artifacts(event)?)
+        } else {
+            None
+        };
         if self.first && event.kind() != InitialA2AStreamResponseKind::Task {
             return Err(A2AGatewayError::Contract);
         }
@@ -759,12 +797,35 @@ impl StreamCorrelation {
         if self.context_id.is_none() {
             self.context_id = Some(event.context_id().to_owned());
         }
+        if self.first {
+            self.artifacts = task_artifacts.clone().ok_or(A2AGatewayError::Contract)?;
+        }
+        if event.kind() == InitialA2AStreamResponseKind::ArtifactUpdate {
+            if self.first || self.terminal_seen {
+                return Err(A2AGatewayError::Contract);
+            }
+            let (artifact_id, digest) = stream_artifact_update(event)?;
+            if self.artifacts.len() == MAX_A2A_ARTIFACTS_PER_TASK
+                || self.artifacts.contains_key(&artifact_id)
+            {
+                return Err(A2AGatewayError::Contract);
+            }
+            self.artifacts.insert(artifact_id, digest);
+            return Ok(());
+        }
+        if !self.first
+            && event.kind() == InitialA2AStreamResponseKind::Task
+            && task_artifacts.as_ref() != Some(&self.artifacts)
+        {
+            return Err(A2AGatewayError::Contract);
+        }
         if !self.first
             && event.kind() == InitialA2AStreamResponseKind::Task
             && !response_state(event.state())
         {
             return Err(A2AGatewayError::Contract);
         }
+
         if self.terminal_seen {
             if event.kind() != InitialA2AStreamResponseKind::Task
                 || !response_state(event.state())
@@ -789,6 +850,42 @@ impl StreamCorrelation {
         self.first = false;
         Ok(())
     }
+}
+
+fn stream_task_artifacts(
+    event: &InitialA2AStreamResponse,
+) -> Result<BTreeMap<String, [u8; 32]>, A2AGatewayError> {
+    let Some(KonclaveA2AContracts::wire::stream_response::Payload::Task(task)) =
+        event.as_wire().payload.as_ref()
+    else {
+        return Err(A2AGatewayError::Contract);
+    };
+    task.artifacts
+        .iter()
+        .map(artifact_identity)
+        .collect::<Result<BTreeMap<_, _>, _>>()
+}
+
+fn stream_artifact_update(
+    event: &InitialA2AStreamResponse,
+) -> Result<(String, [u8; 32]), A2AGatewayError> {
+    let Some(KonclaveA2AContracts::wire::stream_response::Payload::ArtifactUpdate(update)) =
+        event.as_wire().payload.as_ref()
+    else {
+        return Err(A2AGatewayError::Contract);
+    };
+    artifact_identity(update.artifact.as_ref().ok_or(A2AGatewayError::Contract)?)
+}
+
+fn artifact_identity(
+    artifact: &KonclaveA2AContracts::wire::Artifact,
+) -> Result<(String, [u8; 32]), A2AGatewayError> {
+    let artifact =
+        validate_initial_artifact(artifact.clone()).map_err(|_| A2AGatewayError::Contract)?;
+    Ok((
+        artifact.artifact_id().to_owned(),
+        Sha256::digest(artifact.canonical_json()).into(),
+    ))
 }
 
 fn valid_stream_transition(previous: TaskState, next: TaskState) -> bool {
@@ -881,6 +978,8 @@ fn same_origin(left: &Url, right: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use KonclaveA2AContracts::decode_initial_stream_response_json;
 
     use super::{StreamCorrelation, parse_sse_data, sse_frame_end};
@@ -932,6 +1031,7 @@ mod tests {
             terminal_seen: false,
             final_snapshot_seen: false,
             last_state: None,
+            artifacts: BTreeMap::new(),
         };
         assert_eq!(
             correlation.validate(&status).err(),
@@ -949,8 +1049,24 @@ mod tests {
             terminal_seen: false,
             final_snapshot_seen: false,
             last_state: None,
+            artifacts: BTreeMap::new(),
         };
         correlation.validate(&task).unwrap();
+
+        let artifact = decode_initial_stream_response_json(
+            br#"{"artifactUpdate":{"taskId":"00112233445566778899aabbccddeeff","contextId":"context-1","artifact":{"artifactId":"artifact-1","parts":[{"text":"result"}]},"lastChunk":true}}"#,
+        )
+        .unwrap();
+        correlation.validate(&artifact).unwrap();
+
+        let conflicting_artifact = decode_initial_stream_response_json(
+            br#"{"artifactUpdate":{"taskId":"00112233445566778899aabbccddeeff","contextId":"context-1","artifact":{"artifactId":"artifact-1","parts":[{"text":"changed"}]},"lastChunk":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            correlation.validate(&conflicting_artifact).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
         assert_eq!(
             correlation.validate(&task).err(),
             Some(crate::A2AGatewayError::Contract)
@@ -971,6 +1087,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             correlation.validate(&wrong_task).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
+
+        let completed = decode_initial_stream_response_json(
+            br#"{"statusUpdate":{"taskId":"00112233445566778899aabbccddeeff","contextId":"context-1","status":{"state":"TASK_STATE_COMPLETED","timestamp":"1970-01-01T00:00:03Z"}}}"#,
+        )
+        .unwrap();
+        correlation.validate(&completed).unwrap();
+        let incomplete_final = decode_initial_stream_response_json(
+            br#"{"task":{"id":"00112233445566778899aabbccddeeff","contextId":"context-1","status":{"state":"TASK_STATE_COMPLETED","timestamp":"1970-01-01T00:00:03Z"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            correlation.validate(&incomplete_final).err(),
             Some(crate::A2AGatewayError::Contract)
         );
     }

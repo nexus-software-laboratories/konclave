@@ -128,6 +128,51 @@ fn task_response_rejects_unsupported_or_inconsistent_content() {
         extensions: vec![],
     });
     assert!(validate_initial_task(artifact).is_err());
+
+    let mut artifact = task();
+    artifact.artifacts.push(Artifact {
+        artifact_id: "artifact-1".to_owned(),
+        name: "Result".to_owned(),
+        description: String::new(),
+        parts: vec![KonclaveA2AContracts::wire::Part {
+            content: Some(part::Content::Text("artifact response".to_owned())),
+            metadata: None,
+            filename: "result.txt".to_owned(),
+            media_type: String::new(),
+        }],
+        metadata: None,
+        extensions: vec![],
+    });
+    let artifact = validate_initial_task(artifact).unwrap();
+    assert_eq!(artifact.as_wire().artifacts.len(), 1);
+    assert_eq!(
+        artifact.as_wire().artifacts[0].parts[0].media_type,
+        A2A_TEXT_MEDIA_TYPE
+    );
+
+    let mut duplicate = task();
+    let first = Artifact {
+        artifact_id: "artifact-1".to_owned(),
+        name: String::new(),
+        description: String::new(),
+        parts: vec![Part {
+            content: Some(part::Content::Text("first".to_owned())),
+            metadata: None,
+            filename: String::new(),
+            media_type: String::new(),
+        }],
+        metadata: None,
+        extensions: vec![],
+    };
+    let mut second = first.clone();
+    second.parts[0].content = Some(part::Content::Text("second".to_owned()));
+    duplicate.artifacts = vec![first, second];
+    assert!(matches!(
+        validate_initial_task(duplicate),
+        Err(A2AContractError::DuplicateValue {
+            field: "task.artifact.artifact_id"
+        })
+    ));
 }
 
 #[test]

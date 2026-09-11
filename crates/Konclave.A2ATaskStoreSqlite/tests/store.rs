@@ -653,6 +653,105 @@ fn message_and_artifact_appends_are_ordered_idempotent_and_conflict_checked() {
 }
 
 #[test]
+fn task_and_stream_snapshots_keep_artifacts_and_terminal_status_atomic() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("tasks.sqlite"));
+    let task = created(
+        store
+            .create_task(creation(
+                "agent-a",
+                "tenant-a",
+                4,
+                5,
+                "message-snapshot",
+                "request",
+                100,
+            ))
+            .unwrap(),
+    );
+    let key = task.key().clone();
+    store
+        .transition_task(A2ATaskTransition::new(
+            key.clone(),
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+    for (id, bytes, timestamp) in [
+        ("artifact-one", vec![1, 2], 120),
+        ("artifact-two", vec![3, 4], 130),
+    ] {
+        store
+            .append_artifact(
+                A2ATaskArtifact::new(
+                    key.clone(),
+                    A2AArtifactId::parse(id).unwrap(),
+                    bytes,
+                    true,
+                    timestamp,
+                )
+                .unwrap(),
+                timestamp,
+            )
+            .unwrap();
+    }
+    store
+        .transition_task(A2ATaskTransition::new(
+            key.clone(),
+            1,
+            A2ATaskState::Completed,
+            None,
+            140,
+        ))
+        .unwrap();
+
+    let snapshot = store.task_snapshot(&key, 2, 4).unwrap();
+    let (task, messages, artifacts) = snapshot.into_parts();
+    assert_eq!(task.generation(), 2);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts[0].sequence(), 1);
+    assert_eq!(artifacts[1].sequence(), 2);
+
+    let updates = store.stream_updates(&key, 1, 0, 2, 4).unwrap();
+    let (task, statuses, artifacts, messages) = updates.into_parts();
+    assert_eq!(task.generation(), 2);
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].state(), A2ATaskState::Completed);
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(messages.len(), 1);
+
+    let updates = store.stream_updates(&key, 2, 1, 2, 4).unwrap();
+    let (_, statuses, artifacts, _) = updates.into_parts();
+    assert!(statuses.is_empty());
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].sequence(), 2);
+    assert_eq!(
+        store.stream_updates(&key, 2, 3, 2, 4).err(),
+        Some(A2ATaskStoreError::CorruptData)
+    );
+
+    let page = store
+        .list_tasks_with_artifacts(
+            &A2ATaskListQuery::new(
+                A2AAgentId::parse("agent-a").unwrap(),
+                Some(A2ATenantId::parse("tenant-a").unwrap()),
+                A2AContextId::parse("context-a").unwrap(),
+                50,
+                None,
+            )
+            .unwrap(),
+            4,
+        )
+        .unwrap();
+    let (tasks, _, _, _) = page.into_parts();
+    let (_, artifacts) = tasks.into_iter().next().unwrap().into_parts();
+    assert_eq!(artifacts.len(), 2);
+}
+
+#[test]
 fn cancellation_and_failure_reasons_are_terminal() {
     let root = tempfile::tempdir().unwrap();
     let store = open(&root.path().join("tasks.sqlite"));

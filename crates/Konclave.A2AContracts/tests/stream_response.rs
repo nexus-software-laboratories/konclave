@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use KonclaveA2AContracts::wire::{
-    Message, Part, Role, StreamResponse, Task, TaskState, TaskStatus, TaskStatusUpdateEvent, part,
-    stream_response,
+    Artifact, Message, Part, Role, StreamResponse, Task, TaskArtifactUpdateEvent, TaskState,
+    TaskStatus, TaskStatusUpdateEvent, part, stream_response,
 };
 use KonclaveA2AContracts::{
     A2A_TEXT_MEDIA_TYPE, A2AContractError, INITIAL_TASK_TERMINAL_REASON_FIELD,
@@ -81,6 +81,29 @@ fn terminal_metadata(state: TaskState) -> Option<pbjson_types::Struct> {
     })
 }
 
+fn artifact_update() -> TaskArtifactUpdateEvent {
+    TaskArtifactUpdateEvent {
+        task_id: "00112233445566778899aabbccddeeff".to_owned(),
+        context_id: "context-1".to_owned(),
+        artifact: Some(Artifact {
+            artifact_id: "artifact-1".to_owned(),
+            name: "Result".to_owned(),
+            description: String::new(),
+            parts: vec![Part {
+                content: Some(part::Content::Text("artifact response".to_owned())),
+                metadata: None,
+                filename: "result.txt".to_owned(),
+                media_type: String::new(),
+            }],
+            metadata: None,
+            extensions: vec![],
+        }),
+        append: false,
+        last_chunk: true,
+        metadata: None,
+    }
+}
+
 #[test]
 fn task_and_status_update_round_trip_both_encodings() {
     for (response, kind, state) in [
@@ -111,6 +134,35 @@ fn task_and_status_update_round_trip_both_encodings() {
         assert_eq!(json.kind(), kind);
         assert!(json.state() == state);
     }
+}
+
+#[test]
+fn complete_artifact_update_round_trips_and_chunk_mutation_is_rejected() {
+    let response = StreamResponse {
+        payload: Some(stream_response::Payload::ArtifactUpdate(artifact_update())),
+    };
+    let artifact = decode_initial_stream_response_protobuf(&response.encode_to_vec()).unwrap();
+    assert_eq!(
+        artifact.kind(),
+        InitialA2AStreamResponseKind::ArtifactUpdate
+    );
+    assert!(artifact.task_state().is_none());
+    let json = artifact.deterministic_json().unwrap();
+    assert_eq!(
+        decode_initial_stream_response_json(&json).unwrap().kind(),
+        InitialA2AStreamResponseKind::ArtifactUpdate
+    );
+
+    let mut chunked = artifact_update();
+    chunked.append = true;
+    assert!(matches!(
+        validate_initial_stream_response(StreamResponse {
+            payload: Some(stream_response::Payload::ArtifactUpdate(chunked)),
+        }),
+        Err(A2AContractError::UnsupportedField {
+            field: "stream_response.artifact_update.chunking"
+        })
+    ));
 }
 
 #[test]

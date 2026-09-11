@@ -3,7 +3,7 @@
 This document is the canonical owner of Konclave's A2A wire provenance, initial
 profile, and compatibility rules. ADR 0013 defines why A2A remains an edge binding
 rather than replacing Konclave transport or the local trust boundary. ADR 0016 owns
-the standard streaming projection.
+the standard streaming projection, and ADR 0017 owns bounded artifact content.
 
 ## Pinned wire source
 
@@ -97,22 +97,50 @@ The implemented standard routes are:
 - `GET /extendedAgentCard` and `GET /{tenant}/extendedAgentCard`; and
 - `GET /.well-known/agent-card.json` when explicitly published.
 
-`historyLength` is a camel-case GetTask query parameter. `pageSize` and `pageToken`
-are the only accepted `ListTasks` query parameters. `CancelTask` authenticates and
-authorizes normally but returns the A2A `UNSUPPORTED_OPERATION` reason until the
-bridge can cancel an already directed Konclave request.
+`historyLength` is a camel-case GetTask query parameter. `ListTasks` accepts
+`pageSize`, `pageToken`, and optional `includeArtifacts=true|false`; artifacts are
+omitted by default. Artifact-inclusive pages default to and are capped at `8`.
+Artifact-inclusive listing uses a separate authorization action from metadata-only
+listing. `CancelTask` authenticates and authorizes normally but returns the A2A
+`UNSUPPORTED_OPERATION` reason until the bridge can cancel an already directed
+Konclave request.
 
 Streaming uses `text/event-stream`. Every SSE `data` field contains one bounded
 ProtoJSON `StreamResponse`. The first event is a current Task snapshot; later events
-are ordered `TaskStatusUpdateEvent` values read after an internal durable generation
-cursor. The cursor never appears on the wire. Active streams close at the configured
-finite response deadline and recover through a fresh `SubscribeToTask`; terminal
-streams close after the terminal event. Disconnecting never changes task state.
+are complete immutable `TaskArtifactUpdateEvent` values and ordered
+`TaskStatusUpdateEvent` values read from one durable snapshot. Internal artifact
+sequence and status-generation cursors never appear on the wire. Active streams close
+at the configured finite response deadline and recover through a fresh
+`SubscribeToTask`; terminal streams close after the terminal event. Disconnecting
+never changes task state.
 
 The pinned v1.0.1 protobuf annotation spells task subscription as `GET`, while its
 prose HTTP+JSON binding spells it as `POST`. The server accepts both and the outbound
-client uses `POST`. Push, artifact, and multi-turn operations remain outside the
-current profile.
+client uses `POST`. Push and multi-turn operations remain outside the current
+profile.
+
+## Artifact profile
+
+Artifacts are task outputs; A2A request messages remain one bounded text part. One
+artifact contains one to eight canonical Parts and at most 64 KiB of aggregate inline
+text, structured JSON, or raw bytes. The complete canonical artifact document is at
+most 192 KiB, and one Task contains at most eight artifacts within the existing
+256 KiB response bound.
+
+Text Parts use canonical lowercase `text/*` media types and default to `text/plain`.
+Structured data is finite canonical JSON with media type `application/json`. Raw
+bytes require an explicit canonical lowercase media type. Filenames are bounded safe
+basenames. Artifact and Part metadata and extension URIs remain unsupported.
+
+Artifact identifiers are unique within each Task. Streaming binds each identifier to
+one canonical artifact digest; duplicate or conflicting updates and unreconciled
+final Task snapshots are rejected.
+
+URL Parts accept only the versioned encrypted content-addressed HTTPS reference from
+ADR 0017. Arbitrary URLs are rejected and no validation, persistence, task, list, or
+stream operation performs DNS resolution or network retrieval. Referenced content is
+fetched only through the explicit bounded client operation delivered with the public
+object-store layer.
 
 Errors use an `application/a2a+json` `google.rpc.Status`-shaped envelope with an A2A
 `ErrorInfo.reason`; validation errors add a bounded field violation. The
@@ -157,7 +185,8 @@ set. `scripts/a2a/Test-A2AFixtures.ps1` verifies fixture manifests and prevents
 released fixture replacement. Crate tests prove protobuf and ProtoJSON narrowing,
 unsupported-field rejection, tenant isolation, version/binding negotiation, secure
 interface URLs, exact fixture round trips, streaming event bounds, first-Task
-ordering, and task/context correlation.
+ordering, task/context correlation, deterministic artifact canonicalization, media
+types, JSON limits, inline byte limits, filenames, and encrypted-reference shape.
 
 An A2A update uses a new versioned source directory and new immutable fixtures. It
 must not rewrite the `v1.0.1` source or reinterpret its validated initial profile.

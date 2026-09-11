@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 
 mod agent_card;
+mod artifact;
 mod error;
 mod identifier;
 mod initial_profile;
@@ -17,14 +18,22 @@ pub use agent_card::{
     MAX_A2A_ENCODED_AGENT_CARD_BYTES, decode_initial_agent_card_json,
     decode_initial_agent_card_protobuf, validate_initial_agent_card,
 };
+pub use artifact::{
+    InitialA2AArtifact, MAX_A2A_ARTIFACT_DESCRIPTION_BYTES, MAX_A2A_ARTIFACT_FILENAME_BYTES,
+    MAX_A2A_ARTIFACT_INLINE_BYTES, MAX_A2A_ARTIFACT_MEDIA_TYPE_BYTES, MAX_A2A_ARTIFACT_NAME_BYTES,
+    MAX_A2A_ARTIFACT_PARTS, MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES, MAX_A2A_ARTIFACTS_PER_TASK,
+    MAX_A2A_CANONICAL_ARTIFACT_BYTES, decode_initial_artifact_json,
+    decode_initial_artifact_protobuf, validate_initial_artifact,
+};
 pub use error::A2AContractError;
 pub use identifier::{A2AIdentifier, MAX_A2A_IDENTIFIER_BYTES};
 pub use initial_profile::{
     A2A_EXTENDED_AGENT_CARD_PATH, A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
-    A2A_WELL_KNOWN_AGENT_CARD_PATH, DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AInterfaceEnvironment,
-    InitialA2AValidatedInterface, InitialGetExtendedAgentCardRequest, InitialGetTaskRequest,
-    InitialListTasksRequest, InitialSendMessageRequest, InitialSubscribeToTaskRequest,
-    MAX_A2A_ENCODED_REQUEST_BYTES, MAX_A2A_LIST_PAGE_SIZE, MAX_A2A_LIST_PAGE_TOKEN_BYTES,
+    A2A_WELL_KNOWN_AGENT_CARD_PATH, DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE,
+    DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AInterfaceEnvironment, InitialA2AValidatedInterface,
+    InitialGetExtendedAgentCardRequest, InitialGetTaskRequest, InitialListTasksRequest,
+    InitialSendMessageRequest, InitialSubscribeToTaskRequest, MAX_A2A_ENCODED_REQUEST_BYTES,
+    MAX_A2A_LIST_ARTIFACT_PAGE_SIZE, MAX_A2A_LIST_PAGE_SIZE, MAX_A2A_LIST_PAGE_TOKEN_BYTES,
     MAX_A2A_TEXT_BYTES, decode_initial_get_extended_agent_card_json,
     decode_initial_get_extended_agent_card_protobuf, decode_initial_get_task_json,
     decode_initial_get_task_protobuf, decode_initial_send_message_json,

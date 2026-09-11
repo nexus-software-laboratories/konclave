@@ -5,11 +5,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use KonclaveA2AContracts::wire::{
-    GetTaskRequest, ListTasksRequest, SubscribeToTaskRequest, TaskState, part,
+    Artifact, GetTaskRequest, ListTasksRequest, Part, SubscribeToTaskRequest, TaskState, part,
 };
 use KonclaveA2AContracts::{
     INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2AInterfaceEnvironment,
-    InitialA2AStreamResponseKind, validate_initial_get_task_request,
+    InitialA2AStreamResponseKind, validate_initial_artifact, validate_initial_get_task_request,
     validate_initial_list_tasks_request, validate_initial_subscribe_to_task_request,
 };
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
@@ -26,8 +26,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 
 use common::{
-    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application, request,
-    request_with_message_id, route, store,
+    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application,
+    artifact_with_text, request, request_with_message_id, route, store,
 };
 
 #[test]
@@ -300,6 +300,219 @@ async fn subscription_replays_each_durable_status_after_the_initial_snapshot() {
             ))
     );
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn artifact_publication_projects_into_task_and_stream_before_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let clock = Arc::new(TestClock::new(100));
+    let application = application(
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        clock.clone(),
+        A2AGatewayWaitConfig::new(Duration::from_secs(5), Duration::from_millis(1)).unwrap(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        task_id.clone(),
+    );
+    assert_eq!(
+        application
+            .publish_artifact(&task_id, common::artifact())
+            .await
+            .err(),
+        Some(A2AGatewayError::InvalidTaskProjection)
+    );
+    store
+        .transition_task(A2ATaskTransition::new(
+            key.clone(),
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+    let subscribe = validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task_id.as_str().to_owned(),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let mut stream = application.subscribe_to_task(subscribe).await.unwrap();
+    let initial = stream.next().await.unwrap().unwrap();
+    assert_eq!(initial.kind(), InitialA2AStreamResponseKind::Task);
+    assert!(initial.as_wire().payload.as_ref().is_some_and(|payload| {
+        matches!(
+            payload,
+            KonclaveA2AContracts::wire::stream_response::Payload::Task(task)
+                if task.artifacts.is_empty()
+        )
+    }));
+
+    clock.value.store(120, Ordering::SeqCst);
+    application
+        .publish_artifact(
+            &task_id,
+            validate_initial_artifact(Artifact {
+                artifact_id: "artifact-1".to_owned(),
+                name: "Result".to_owned(),
+                description: String::new(),
+                parts: vec![Part {
+                    content: Some(part::Content::Text("artifact response".to_owned())),
+                    metadata: None,
+                    filename: "result.txt".to_owned(),
+                    media_type: String::new(),
+                }],
+                metadata: None,
+                extensions: vec![],
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            1,
+            A2ATaskState::Completed,
+            None,
+            130,
+        ))
+        .unwrap();
+    clock.value.store(130, Ordering::SeqCst);
+
+    let artifact = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        artifact.kind(),
+        InitialA2AStreamResponseKind::ArtifactUpdate
+    );
+    assert!(artifact.task_state().is_none());
+    let completed = stream.next().await.unwrap().unwrap();
+    assert_eq!(completed.kind(), InitialA2AStreamResponseKind::StatusUpdate);
+    assert!(completed.state() == TaskState::Completed);
+    assert!(stream.next().await.is_none());
+
+    let get = validate_initial_get_task_request(
+        GetTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task_id.as_str().to_owned(),
+            history_length: Some(0),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let projected = application.get_task(get).await.unwrap();
+    assert_eq!(projected.as_wire().artifacts.len(), 1);
+    assert_eq!(projected.as_wire().artifacts[0].artifact_id, "artifact-1");
+    assert!(
+        projected
+            .as_wire()
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .is_none()
+    );
+    let list = validate_initial_list_tasks_request(
+        ListTasksRequest {
+            tenant: "tenant-a".to_owned(),
+            context_id: String::new(),
+            status: 0,
+            page_size: Some(8),
+            page_token: String::new(),
+            history_length: None,
+            status_timestamp_after: None,
+            include_artifacts: Some(true),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let listed = application.list_tasks(list).await.unwrap();
+    assert_eq!(listed.as_wire().tasks.len(), 1);
+    assert_eq!(listed.as_wire().tasks[0].artifacts.len(), 1);
+    application
+        .publish_artifact(&task_id, common::artifact())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_projection_fails_explicitly_when_the_response_bound_is_exceeded() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        task_id.clone(),
+    );
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+    let text = "x".repeat(60 * 1_024);
+    for index in 0..5 {
+        application
+            .publish_artifact(
+                &task_id,
+                artifact_with_text(&format!("artifact-{index}"), &text),
+            )
+            .await
+            .unwrap();
+    }
+    let get = validate_initial_get_task_request(
+        GetTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task_id.as_str().to_owned(),
+            history_length: Some(0),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        application.get_task(get).await.err(),
+        Some(A2AGatewayError::ResponseTooLarge)
+    );
+    for index in 5..8 {
+        application
+            .publish_artifact(
+                &task_id,
+                artifact_with_text(&format!("artifact-{index}"), "small"),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        application
+            .publish_artifact(&task_id, artifact_with_text("artifact-8", "small"))
+            .await
+            .err(),
+        Some(A2AGatewayError::CapacityExceeded)
+    );
 }
 
 #[tokio::test]

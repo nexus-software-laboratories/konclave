@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use KonclaveA2AContracts::wire::{
-    Message, Part, Role, SendMessageConfiguration, SendMessageRequest, part,
+    Artifact, Message, Part, Role, SendMessageConfiguration, SendMessageRequest, part,
 };
 use KonclaveA2AContracts::{
-    A2A_TEXT_MEDIA_TYPE, InitialA2AInterfaceEnvironment, InitialSendMessageRequest,
-    validate_initial_send_message_request,
+    A2A_TEXT_MEDIA_TYPE, InitialA2AArtifact, InitialA2AInterfaceEnvironment,
+    InitialSendMessageRequest, validate_initial_artifact, validate_initial_send_message_request,
 };
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
 use KonclaveA2ADomain::{
@@ -85,6 +85,27 @@ pub fn request_wire_with_message_id(
         }),
         metadata: None,
     }
+}
+
+pub fn artifact() -> InitialA2AArtifact {
+    artifact_with_text("artifact-1", "artifact response")
+}
+
+pub fn artifact_with_text(artifact_id: &str, text: &str) -> InitialA2AArtifact {
+    validate_initial_artifact(Artifact {
+        artifact_id: artifact_id.to_owned(),
+        name: "Result".to_owned(),
+        description: String::new(),
+        parts: vec![Part {
+            content: Some(part::Content::Text(text.to_owned())),
+            metadata: None,
+            filename: "result.txt".to_owned(),
+            media_type: String::new(),
+        }],
+        metadata: None,
+        extensions: vec![],
+    })
+    .unwrap()
 }
 
 pub fn route() -> A2AAgentRoute {
