@@ -3,7 +3,8 @@
 This document is the canonical implementation contract for Konclave's public
 single-publication A2A HTTP+JSON gateway and outbound client. ADR 0013 owns the
 network-edge trust boundary, ADR 0014 owns durable task-store semantics, ADR 0015
-owns publication and discovery visibility, and ADR 0016 owns streaming behavior.
+owns publication and discovery visibility, ADR 0016 owns streaming behavior, and ADR
+0017 owns artifact content.
 
 ## Crate boundaries
 
@@ -49,8 +50,9 @@ The reference router implements the pinned A2A v1.0.1 HTTP+JSON binding:
 | GetExtendedAgentCard | `GET /extendedAgentCard` | `GET /{tenant}/extendedAgentCard` |
 
 `historyLength` is the only accepted GetTask query parameter and remains limited to
-`0` or `1`. `ListTasks` accepts only `pageSize` and `pageToken`; the default page
-size is `50` and the hard maximum is `256`. `CancelTask` authenticates and
+`0` or `1`. `ListTasks` accepts `pageSize`, `pageToken`, and
+`includeArtifacts=true|false`; the default page size is `50`, the hard maximum is
+`256`, and artifacts are omitted by default. `CancelTask` authenticates and
 authorizes like `GetTask` but returns `UNSUPPORTED_OPERATION`. The optional
 `A2A-Version` header must equal `1.0` when present.
 
@@ -60,8 +62,8 @@ uses the v1.0.1-preferred `application/a2a+json` media type.
 
 Streaming message and task-subscription responses use `text/event-stream`. The
 server accepts both subscribe verbs because the pinned v1.0.1 schema annotation and
-prose HTTP+JSON binding disagree. Push notification, artifact, and other
-task-lifecycle operations remain outside this profile.
+prose HTTP+JSON binding disagree. Push notification and other task-lifecycle
+operations remain outside this profile.
 
 ## Authentication and authorization
 
@@ -141,7 +143,7 @@ The initial `GetTask` projection:
 - emits an exact millisecond-derived protobuf timestamp;
 - emits only one gateway-owned metadata field, `konclave_terminal_reason`, for
   `FAILED`, `REJECTED`, or `CANCELED` tasks;
-- emits no artifacts;
+- emits up to eight complete retained canonical artifacts within the response bound;
 - returns at most one most-recent history message;
 - omits history when `historyLength=0`; and
 - includes the most-recent agent message in status only for terminal response states
@@ -149,15 +151,15 @@ The initial `GetTask` projection:
 
 `ListTasks` reuses the same bounded Task shape but suppresses all message bodies:
 every listed task has empty `history`, no `status.message`, current state, the same
-timestamp semantics, and the same terminal-reason metadata when terminal.
+timestamp semantics, and the same terminal-reason metadata when terminal. It includes
+artifacts only when `includeArtifacts=true`.
 
-A retained non-pruned `COMPLETED` task must contain an agent text message. Artifact-only
-completion is valid in the broader portable store but fails this text-only gateway
-projection instead of reporting success without a response.
+A retained non-pruned `COMPLETED` task must contain an agent text message or one
+complete validated artifact. Artifact-only completion has no `status.message`.
 
 Task and SendMessageResponse decoders reject oversized bodies, duplicate JSON keys,
 missing status or timestamps, unspecified states, mismatched task/context identity,
-unsupported artifacts, history beyond the initial bound, and metadata other than the
+invalid artifacts, history beyond the initial bound, and metadata other than the
 single terminal-reason field.
 Validated task wrappers do not implement `Clone` or `Debug` because they may contain
 message plaintext.
@@ -171,21 +173,31 @@ submission as `SendMessage`. `returnImmediately` has no effect on the stream.
 Every stream:
 
 1. emits one current Task snapshot;
-2. records that snapshot's task generation as its internal cursor;
-3. reads every later durable status record in generation order;
-4. emits one `TaskStatusUpdateEvent` per record; and
-5. closes after a terminal or interrupted event, or when the finite response deadline
+2. records that snapshot's artifact sequence and task generation as internal cursors;
+3. reads later artifacts and statuses from one durable snapshot;
+4. emits complete immutable `TaskArtifactUpdateEvent` values in artifact order before
+   any terminal status in that snapshot;
+5. emits one `TaskStatusUpdateEvent` per status record; and
+6. closes after a terminal or interrupted event, or when the finite response deadline
    expires.
 
-The text-only stream emits no direct Message or artifact-update payloads. Completed
-status updates carry the exact agent response in `TaskStatus.message`. Failed,
-rejected, and canceled updates use the same bounded `konclave_terminal_reason`
-metadata as GetTask.
+The stream emits no direct Message payloads and does not support artifact chunk
+mutation: `append=false` and `lastChunk=true`. Completed status updates carry the
+exact agent response in `TaskStatus.message` when completion is text-backed; an
+artifact-backed completion has no status message. Failed, rejected, and canceled
+updates use the same bounded `konclave_terminal_reason` metadata as GetTask.
 
 There is no proprietary resume token or SSE event ID. A caller reconnects with
 `SubscribeToTask`; the required first Task snapshot reconciles state accepted while
 the caller was disconnected. A closed or dropped HTTP stream never cancels or
 otherwise mutates the durable task.
+
+`publish_artifact` is the route-scoped application boundary for one complete
+validated artifact. It requires an existing `WORKING` task, appends deterministic
+canonical bytes idempotently, and leaves terminal transition to orchestration.
+Current Konclave directed responses remain text-only; the explicit agent publication
+operation is delivered separately rather than interpreting arbitrary response text
+as an artifact.
 
 ## Error responses
 

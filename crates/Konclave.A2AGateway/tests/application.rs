@@ -323,6 +323,13 @@ async fn artifact_publication_projects_into_task_and_stream_before_completion() 
         Some(A2ATenantId::parse("tenant-a").unwrap()),
         task_id.clone(),
     );
+    assert_eq!(
+        application
+            .publish_artifact(&task_id, common::artifact())
+            .await
+            .err(),
+        Some(A2AGatewayError::InvalidTaskProjection)
+    );
     store
         .transition_task(A2ATaskTransition::new(
             key.clone(),
@@ -432,6 +439,10 @@ async fn artifact_publication_projects_into_task_and_stream_before_completion() 
     let listed = application.list_tasks(list).await.unwrap();
     assert_eq!(listed.as_wire().tasks.len(), 1);
     assert_eq!(listed.as_wire().tasks[0].artifacts.len(), 1);
+    application
+        .publish_artifact(&task_id, common::artifact())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

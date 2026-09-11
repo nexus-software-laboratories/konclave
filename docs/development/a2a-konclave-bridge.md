@@ -132,6 +132,12 @@ a fresh current Task snapshot without changing Konclave send or response identit
 Dropping the HTTP stream stops only that store observer; the bridge continues its
 bounded authoritative-response observation.
 
+Current directed responses remain ordinary text and do not implicitly become
+artifacts. Artifact publication uses a separate explicit route-scoped operation so a
+message body, filename-like text, or URL cannot silently gain file or network
+semantics. The bridge workstream later supplies that operation without changing the
+existing directed-request send or response correlation identity.
+
 ## Local-service grant behavior
 
 `Konclave.LocalServiceClient::LocalServiceJsonClient` authenticates the expected

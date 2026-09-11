@@ -468,12 +468,8 @@ impl A2AGatewayApplication {
         .map_err(map_store_error)?;
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let task = store.get_task(&key).map_err(map_store_error)?;
-            if task.state() != A2ATaskState::Working || task.content_pruned() {
-                return Err(A2AGatewayError::InvalidTaskProjection);
-            }
             match store
-                .append_artifact(artifact, recorded_at)
+                .append_working_artifact(artifact, recorded_at)
                 .map_err(map_store_error)?
             {
                 AppendA2ATaskRecordOutcome::Appended { .. }
@@ -515,7 +511,7 @@ impl A2AGatewayApplication {
         let deadline = Instant::now() + self.wait.timeout;
         if matches!(
             record.state(),
-            KonclaveA2ADomain::A2ATaskState::Submitted | KonclaveA2ADomain::A2ATaskState::Working
+            A2ATaskState::Submitted | A2ATaskState::Working
         ) {
             let submission = submission_from_record(record)?;
             timeout_at(deadline, self.submitter.submit(submission))

@@ -237,6 +237,52 @@ impl A2ASqliteTaskStore {
             .lock()
             .map_err(|_| A2ATaskStoreError::Storage)
     }
+
+    fn append_artifact_in_state(
+        &self,
+        artifact: A2ATaskArtifact,
+        now_unix_milliseconds: u64,
+        require_working: bool,
+    ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
+        let digest = artifact.identity_digest();
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        prune_in(&transaction, self.config, now_unix_milliseconds)?;
+        let task = load_task(&transaction, artifact.key())?;
+        if let Some((sequence, existing_digest)) =
+            existing_artifact(&transaction, artifact.key(), artifact.artifact_id())?
+        {
+            if existing_digest == digest {
+                transaction
+                    .commit()
+                    .map_err(|_| A2ATaskStoreError::Storage)?;
+                return Ok(AppendA2ATaskRecordOutcome::Existing { sequence });
+            }
+            return Err(A2ATaskStoreError::Conflict);
+        }
+        if is_terminal(task.state())
+            || task.content_pruned()
+            || (require_working && task.state() != A2ATaskState::Working)
+        {
+            return Err(A2ATaskStoreError::InvalidTransition);
+        }
+        let count = record_count(&transaction, "a2a_task_artifact", artifact.key())?;
+        if count >= self.config.max_artifacts_per_task {
+            return Err(A2ATaskStoreError::CapacityExceeded);
+        }
+        require_payload_capacity(&transaction, self.config, artifact.canonical_bytes().len())?;
+        let sequence = u64::try_from(count)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or(A2ATaskStoreError::CorruptData)?;
+        insert_artifact(&transaction, &artifact, sequence)?;
+        transaction
+            .commit()
+            .map_err(|_| A2ATaskStoreError::Storage)?;
+        Ok(AppendA2ATaskRecordOutcome::Appended { sequence })
+    }
 }
 
 impl A2ATaskStore for A2ASqliteTaskStore {
@@ -538,41 +584,15 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         artifact: A2ATaskArtifact,
         now_unix_milliseconds: u64,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
-        let digest = artifact.identity_digest();
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| A2ATaskStoreError::Storage)?;
-        prune_in(&transaction, self.config, now_unix_milliseconds)?;
-        let task = load_task(&transaction, artifact.key())?;
-        if let Some((sequence, existing_digest)) =
-            existing_artifact(&transaction, artifact.key(), artifact.artifact_id())?
-        {
-            if existing_digest == digest {
-                transaction
-                    .commit()
-                    .map_err(|_| A2ATaskStoreError::Storage)?;
-                return Ok(AppendA2ATaskRecordOutcome::Existing { sequence });
-            }
-            return Err(A2ATaskStoreError::Conflict);
-        }
-        if is_terminal(task.state()) || task.content_pruned() {
-            return Err(A2ATaskStoreError::InvalidTransition);
-        }
-        let count = record_count(&transaction, "a2a_task_artifact", artifact.key())?;
-        if count >= self.config.max_artifacts_per_task {
-            return Err(A2ATaskStoreError::CapacityExceeded);
-        }
-        require_payload_capacity(&transaction, self.config, artifact.canonical_bytes().len())?;
-        let sequence = u64::try_from(count)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or(A2ATaskStoreError::CorruptData)?;
-        insert_artifact(&transaction, &artifact, sequence)?;
-        transaction
-            .commit()
-            .map_err(|_| A2ATaskStoreError::Storage)?;
-        Ok(AppendA2ATaskRecordOutcome::Appended { sequence })
+        self.append_artifact_in_state(artifact, now_unix_milliseconds, false)
+    }
+
+    fn append_working_artifact(
+        &self,
+        artifact: A2ATaskArtifact,
+        now_unix_milliseconds: u64,
+    ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
+        self.append_artifact_in_state(artifact, now_unix_milliseconds, true)
     }
 
     fn messages(

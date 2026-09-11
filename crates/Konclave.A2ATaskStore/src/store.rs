@@ -437,6 +437,20 @@ pub trait A2ATaskStore: Send + Sync {
         now_unix_milliseconds: u64,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError>;
 
+    /// Appends one artifact only when new content targets a `WORKING` task.
+    ///
+    /// An exact existing artifact remains idempotent after terminal transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, invalid-transition, conflict, capacity, corruption, or
+    /// storage errors.
+    fn append_working_artifact(
+        &self,
+        artifact: A2ATaskArtifact,
+        now_unix_milliseconds: u64,
+    ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError>;
+
     /// Reads the most recent bounded message window in chronological order.
     ///
     /// # Errors
