@@ -61,10 +61,7 @@ fn artifact_forms_round_trip_to_deterministic_canonical_json() {
     let validated = validate_initial_artifact(artifact()).unwrap();
     assert_eq!(validated.artifact_id(), "artifact-1");
     assert_eq!(validated.as_wire().parts[0].media_type, "text/plain");
-    assert_eq!(
-        validated.as_wire().parts[1].media_type,
-        "application/json"
-    );
+    assert_eq!(validated.as_wire().parts[1].media_type, "application/json");
     let json = validated.canonical_json().to_vec();
     assert_eq!(
         decode_initial_artifact_json(&json)
