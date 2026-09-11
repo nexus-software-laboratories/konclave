@@ -271,6 +271,25 @@ async fn authentication_precedes_body_parsing_and_route_disclosure() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(response.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
 
+    for path in [
+        "/tenant-a/message:stream",
+        "/tenant-a/tasks/00112233445566778899aabbccddeeff:subscribe",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(CONTENT_TYPE, "text/plain")
+                    .body(Body::from(vec![0_u8; 256 * 1024]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     let response = router
         .clone()
         .oneshot(
