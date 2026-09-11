@@ -13,6 +13,36 @@ pub const AUTHENTICATED_CIPHER_NONCE_BYTES: usize = 12;
 /// Byte length of the authentication tag appended to ciphertext.
 pub const AUTHENTICATED_CIPHER_TAG_BYTES: usize = 16;
 
+/// Zeroizing AES-256-GCM key material for one domain-owned ciphertext format.
+pub struct AuthenticatedCipherKey(Zeroizing<[u8; AUTHENTICATED_CIPHER_KEY_BYTES]>);
+
+impl AuthenticatedCipherKey {
+    /// Generates one key from the operating-system secure random source.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when secure randomness is unavailable.
+    pub fn generate() -> Result<Self, SecretStorageError> {
+        let mut bytes = Zeroizing::new([0_u8; AUTHENTICATED_CIPHER_KEY_BYTES]);
+        SystemRandom::new()
+            .fill(&mut *bytes)
+            .map_err(|_| SecretStorageError::RandomGenerationFailed)?;
+        Ok(Self(bytes))
+    }
+
+    /// Takes ownership of exactly one AES-256 key.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; AUTHENTICATED_CIPHER_KEY_BYTES]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Exposes key bytes to the domain-owned reference encoder or cipher.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; AUTHENTICATED_CIPHER_KEY_BYTES] {
+        &self.0
+    }
+}
+
 /// Authenticated ciphertext plus the nonce required to open it.
 ///
 /// The caller owns format and compatibility. This type deliberately carries no
@@ -79,6 +109,12 @@ pub struct AuthenticatedCipher {
 }
 
 impl AuthenticatedCipher {
+    /// Builds a cipher from zeroizing key ownership retained by the caller.
+    #[must_use]
+    pub fn from_key(key: &AuthenticatedCipherKey) -> Self {
+        Self::new(key.as_bytes())
+    }
+
     /// Copies exactly one AES-256 key into zeroizing ownership.
     ///
     /// The caller retains ownership of the source. Secret-bearing callers should keep
@@ -230,6 +266,20 @@ mod tests {
     use super::*;
 
     const MAXIMUM: usize = 64;
+
+    #[test]
+    fn generated_key_builds_a_working_cipher() {
+        let key = AuthenticatedCipherKey::generate().unwrap();
+        let cipher = AuthenticatedCipher::from_key(&key);
+        let ciphertext = cipher.seal(b"domain", b"secret", MAXIMUM).unwrap();
+        assert_eq!(
+            cipher
+                .open(b"domain", &ciphertext, MAXIMUM)
+                .unwrap()
+                .as_slice(),
+            b"secret"
+        );
+    }
 
     #[test]
     fn round_trip_and_context_binding() {

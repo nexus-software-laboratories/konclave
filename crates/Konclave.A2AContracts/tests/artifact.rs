@@ -2,8 +2,10 @@ use std::collections::HashMap;
 
 use KonclaveA2AContracts::wire::{Artifact, Part, part};
 use KonclaveA2AContracts::{
-    A2AContractError, MAX_A2A_ARTIFACT_INLINE_BYTES, decode_initial_artifact_json,
-    decode_initial_artifact_protobuf, validate_initial_artifact,
+    A2A_ARTIFACT_OBJECT_AAD_DOMAIN, A2AContractError, InitialA2AArtifactReferenceDescriptor,
+    MAX_A2A_ARTIFACT_INLINE_BYTES, decode_initial_artifact_json,
+    decode_initial_artifact_protobuf, parse_initial_encrypted_artifact_reference,
+    validate_initial_artifact,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -93,6 +95,36 @@ fn artifact_forms_round_trip_to_deterministic_canonical_json() {
             .canonical_json(),
         json
     );
+}
+
+#[test]
+fn encrypted_reference_parser_strips_secret_fragment_and_builds_bound_aad() {
+    let reference = parse_initial_encrypted_artifact_reference(&encrypted_reference()).unwrap();
+    assert_eq!(
+        reference.request_url(),
+        format!(
+            "https://objects.example.com/a2a/sha256/{}",
+            "ab".repeat(32)
+        )
+    );
+    assert_eq!(reference.ciphertext_digest(), &[0xab; 32]);
+    assert_eq!(reference.key(), &[1; 32]);
+    assert_eq!(reference.nonce(), &[2; 12]);
+    assert_eq!(reference.plaintext_bytes(), 64);
+
+    let descriptor = InitialA2AArtifactReferenceDescriptor::new(
+        "artifact-1",
+        3,
+        "application/octet-stream",
+        "large.bin",
+        64,
+    )
+    .unwrap();
+    let aad = descriptor.associated_data().unwrap();
+    assert!(aad.starts_with(A2A_ARTIFACT_OBJECT_AAD_DOMAIN));
+    assert!(aad.ends_with(&64_u64.to_be_bytes()));
+    assert_eq!(descriptor.artifact_id(), "artifact-1");
+    assert_eq!(descriptor.part_index(), 3);
 }
 
 #[test]

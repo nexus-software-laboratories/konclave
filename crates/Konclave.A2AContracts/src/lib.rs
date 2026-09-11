@@ -19,11 +19,16 @@ pub use agent_card::{
     decode_initial_agent_card_protobuf, validate_initial_agent_card,
 };
 pub use artifact::{
-    InitialA2AArtifact, MAX_A2A_ARTIFACT_DESCRIPTION_BYTES, MAX_A2A_ARTIFACT_FILENAME_BYTES,
-    MAX_A2A_ARTIFACT_INLINE_BYTES, MAX_A2A_ARTIFACT_MEDIA_TYPE_BYTES, MAX_A2A_ARTIFACT_NAME_BYTES,
-    MAX_A2A_ARTIFACT_PARTS, MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES, MAX_A2A_ARTIFACTS_PER_TASK,
+    A2A_ARTIFACT_OBJECT_AAD_DOMAIN, A2A_ENCRYPTED_ARTIFACT_KEY_BYTES,
+    A2A_ENCRYPTED_ARTIFACT_NONCE_BYTES, A2A_ENCRYPTED_ARTIFACT_REFERENCE_PREFIX,
+    InitialA2AArtifact, InitialA2AArtifactReferenceDescriptor,
+    InitialA2AEncryptedArtifactReference, MAX_A2A_ARTIFACT_DESCRIPTION_BYTES,
+    MAX_A2A_ARTIFACT_FILENAME_BYTES, MAX_A2A_ARTIFACT_INLINE_BYTES,
+    MAX_A2A_ARTIFACT_MEDIA_TYPE_BYTES, MAX_A2A_ARTIFACT_NAME_BYTES, MAX_A2A_ARTIFACT_PARTS,
+    MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES, MAX_A2A_ARTIFACTS_PER_TASK,
     MAX_A2A_CANONICAL_ARTIFACT_BYTES, decode_initial_artifact_json,
-    decode_initial_artifact_protobuf, validate_initial_artifact,
+    decode_initial_artifact_protobuf, parse_initial_encrypted_artifact_reference,
+    validate_initial_artifact,
 };
 pub use error::A2AContractError;
 pub use identifier::{A2AIdentifier, MAX_A2A_IDENTIFIER_BYTES};

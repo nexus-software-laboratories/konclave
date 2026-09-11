@@ -14,7 +14,8 @@ mod sqlite;
 
 pub use authenticated_cipher::{
     AUTHENTICATED_CIPHER_KEY_BYTES, AUTHENTICATED_CIPHER_NONCE_BYTES,
-    AUTHENTICATED_CIPHER_TAG_BYTES, AuthenticatedCipher, AuthenticatedCiphertext,
+    AUTHENTICATED_CIPHER_TAG_BYTES, AuthenticatedCipher, AuthenticatedCipherKey,
+    AuthenticatedCiphertext,
 };
 pub use error::SecretStorageError;
 pub use key::{ExternalWrappingKeyProvider, WrappingKeyProvider};
