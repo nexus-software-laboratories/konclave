@@ -421,13 +421,10 @@ async fn active_task_subscription_supports_proto_get_and_rest_post_aliases() {
     }
     let response = router
         .oneshot(
-            authenticated(&format!(
-                "/tenant-a/tasks/{}:subscribe",
-                task.task_id()
-            ))
-            .method("POST")
-            .body(Body::from("{}"))
-            .unwrap(),
+            authenticated(&format!("/tenant-a/tasks/{}:subscribe", task.task_id()))
+                .method("POST")
+                .body(Body::from("{}"))
+                .unwrap(),
         )
         .await
         .unwrap();

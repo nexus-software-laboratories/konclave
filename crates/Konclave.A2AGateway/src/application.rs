@@ -461,7 +461,7 @@ impl A2AGatewayApplication {
         reject_terminal: bool,
     ) -> Result<A2AGatewayTaskStream, A2AGatewayError> {
         let (initial, generation) = self.stream_snapshot(key.clone(), history_length).await?;
-        if reject_terminal && response_ready(initial.state()) {
+        if reject_terminal && terminal_state(initial.state()) {
             return Err(A2AGatewayError::UnsupportedOperation);
         }
         let state = TaskStreamState {
@@ -637,6 +637,13 @@ fn response_ready(state: TaskState) -> bool {
             | TaskState::InputRequired
             | TaskState::Rejected
             | TaskState::AuthRequired
+    )
+}
+
+fn terminal_state(state: TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::Completed | TaskState::Failed | TaskState::Canceled | TaskState::Rejected
     )
 }
 

@@ -331,6 +331,69 @@ async fn subscription_rejects_terminal_tasks_before_streaming_headers() {
 }
 
 #[tokio::test]
+async fn dropping_a_subscription_does_not_cancel_the_durable_task() {
+    let root = tempfile::tempdir().unwrap();
+    let application = application(
+        store(&root),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let subscribe = validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task.task_id().to_owned(),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let mut stream = application.subscribe_to_task(subscribe).await.unwrap();
+    assert!(stream.next().await.is_some());
+    drop(stream);
+
+    let get = validate_initial_get_task_request(
+        GetTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task.task_id().to_owned(),
+            history_length: Some(0),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert!(application.get_task(get).await.unwrap().state() == TaskState::Submitted);
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_subscription_closes_at_the_finite_response_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let application = application(
+        store(&root),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::new(Duration::from_millis(5), Duration::from_millis(1)).unwrap(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let subscribe = validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task.task_id().to_owned(),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let mut stream = application.subscribe_to_task(subscribe).await.unwrap();
+    assert!(stream.next().await.is_some());
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
 async fn non_immediate_send_expires_without_fabricating_completion() {
     let root = tempfile::tempdir().unwrap();
     let store = store(&root);

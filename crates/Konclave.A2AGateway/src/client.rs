@@ -34,6 +34,7 @@ use crate::{
 const MAX_REMOTE_ERROR_BYTES: usize = 64 * 1024;
 const MAX_ETAG_BYTES: usize = 256;
 const MAX_CACHE_CONTROL_BYTES: usize = 256;
+const MAX_SSE_BUFFERED_EVENTS: usize = 4;
 
 /// Bounded outbound HTTP behavior for the initial A2A client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub struct A2AHttpClientConfig {
 }
 
 impl A2AHttpClientConfig {
-    /// Creates finite outbound request and response bounds.
+    /// Creates finite outbound request, non-stream response, and SSE event bounds.
     ///
     /// # Errors
     ///
@@ -66,7 +67,7 @@ impl A2AHttpClientConfig {
 impl Default for A2AHttpClientConfig {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(60),
             maximum_response_bytes: MAX_A2A_ENCODED_RESPONSE_BYTES,
         }
     }
@@ -591,6 +592,7 @@ fn decode_sse_stream(
         chunks,
         buffer: Vec::new(),
         maximum_event_bytes,
+        maximum_buffer_bytes: maximum_event_bytes * MAX_SSE_BUFFERED_EVENTS,
         correlation: StreamCorrelation {
             first: true,
             task_id: expected_task_id,
@@ -635,11 +637,23 @@ fn decode_sse_stream(
                 return Err(A2AGatewayError::Contract);
             }
             match state.chunks.next().await {
-                Some(Ok(chunk)) => state.buffer.extend_from_slice(&chunk),
+                Some(Ok(chunk)) => {
+                    if chunk.len() > state.maximum_buffer_bytes
+                        || state
+                            .buffer
+                            .len()
+                            .checked_add(chunk.len())
+                            .is_none_or(|length| length > state.maximum_buffer_bytes)
+                    {
+                        return Err(A2AGatewayError::Contract);
+                    }
+                    state.buffer.extend_from_slice(&chunk);
+                }
                 Some(Err(error)) => return Err(error),
                 None => state.eof = true,
             }
-            if state.buffer.len() > state.maximum_event_bytes && !contains_sse_frame(&state.buffer)
+            if state.buffer.len() > state.maximum_event_bytes
+                && !contains_sse_frame(&state.buffer)
             {
                 return Err(A2AGatewayError::Contract);
             }
@@ -709,6 +723,7 @@ struct SseDecodeState {
     chunks: BoxStream<'static, Result<Vec<u8>, A2AGatewayError>>,
     buffer: Vec<u8>,
     maximum_event_bytes: usize,
+    maximum_buffer_bytes: usize,
     correlation: StreamCorrelation,
     eof: bool,
 }
@@ -782,9 +797,7 @@ fn valid_stream_transition(previous: TaskState, next: TaskState) -> bool {
         return !response_state(previous);
     }
     match previous {
-        TaskState::Submitted => {
-            next == TaskState::Working || response_state(next)
-        }
+        TaskState::Submitted => next == TaskState::Working || response_state(next),
         TaskState::Working => response_state(next),
         TaskState::Unspecified
         | TaskState::Completed

@@ -273,6 +273,11 @@ Cache-Control values so the caller can apply its cache policy. The preferred
 interface must remain on the discovery origin; intentional cross-origin agents use
 direct trusted configuration instead of unauthenticated discovery.
 
+The built-in default client timeout is 60 seconds, leaving headroom above the
+gateway's default 30-second stream window. Custom client timeouts remain total
+request bounds and should exceed the expected remote stream window when clean EOF is
+important.
+
 ## Network binding
 
 `serve_a2a_until` is the inbound network-edge host. It accepts loopback binding
@@ -287,6 +292,7 @@ modified by this gateway.
 | Request body | 128 KiB |
 | Task/Card response | 256 KiB |
 | SSE data event | 256 KiB |
+| Buffered SSE input | 1 MiB |
 | Remote error body | 64 KiB |
 | Query string | 256 bytes |
 | Request-body timeout | 60 seconds |
