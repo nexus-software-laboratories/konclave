@@ -479,6 +479,16 @@ async fn subscribe_to_task(
             field: "subscribe_to_task.query",
         });
     }
+    let request = match validate_initial_subscribe_to_task_request(
+        SubscribeToTaskRequest {
+            tenant: state.application.tenant().unwrap_or_default().to_owned(),
+            id,
+        },
+        state.application.tenant(),
+    ) {
+        Ok(request) => request,
+        Err(error) => return contract_error_response(error),
+    };
     let bytes = match read_body(
         body,
         &parts.headers,
@@ -495,16 +505,6 @@ async fn subscribe_to_task(
             field: "subscribe_to_task.body",
         });
     }
-    let request = match validate_initial_subscribe_to_task_request(
-        SubscribeToTaskRequest {
-            tenant: state.application.tenant().unwrap_or_default().to_owned(),
-            id,
-        },
-        state.application.tenant(),
-    ) {
-        Ok(request) => request,
-        Err(error) => return contract_error_response(error),
-    };
     match state.application.subscribe_to_task(request).await {
         Ok(stream) => streaming_response(stream),
         Err(error) => gateway_error_response(error),

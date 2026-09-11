@@ -7,8 +7,8 @@ use KonclaveA2AContracts::wire::{
     Message, Part, Role, SendMessageConfiguration, SendMessageRequest, TaskState, part,
 };
 use KonclaveA2AContracts::{
-    A2A_TEXT_MEDIA_TYPE, InitialA2AInterfaceEnvironment, InitialSendMessageRequest,
-    MAX_A2A_TEXT_BYTES, decode_initial_send_message_response_json,
+    A2A_TEXT_MEDIA_TYPE, InitialA2AInterfaceEnvironment, InitialA2AStreamResponseKind,
+    InitialSendMessageRequest, MAX_A2A_TEXT_BYTES, decode_initial_send_message_response_json,
     validate_initial_send_message_request,
 };
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Request, StatusCode};
+use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -257,6 +258,39 @@ async fn authenticated_http_send_uses_the_real_bridge_submitter() {
     let bytes = to_bytes(response.into_body(), 512 * 1024).await.unwrap();
     let task = decode_initial_send_message_response_json(&bytes).unwrap();
     assert!(task.state() == TaskState::Completed);
+}
+
+#[tokio::test]
+async fn streaming_submission_uses_the_real_bridge_and_durable_statuses() {
+    let fixture = Fixture::new(EMPTY_MODE, &[]);
+    let mut stream = fixture
+        .application(false)
+        .send_streaming_message(request("request", true))
+        .await
+        .unwrap();
+    let initial = stream.next().await.unwrap().unwrap();
+    assert_eq!(initial.kind(), InitialA2AStreamResponseKind::Task);
+    assert!(initial.state() == TaskState::Working);
+
+    fixture.local.mode.store(EXACT_MODE, Ordering::SeqCst);
+    let completed = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        completed.kind(),
+        InitialA2AStreamResponseKind::StatusUpdate
+    );
+    assert!(completed.state() == TaskState::Completed);
+    assert!(stream.next().await.is_none());
+    assert_eq!(
+        fixture
+            .local
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.operation == "send_directed_request")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
