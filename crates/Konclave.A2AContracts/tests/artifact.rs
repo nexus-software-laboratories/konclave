@@ -79,6 +79,20 @@ fn artifact_forms_round_trip_to_deterministic_canonical_json() {
     let text = std::str::from_utf8(&json).unwrap();
     assert!(text.find("\"a\"").unwrap() < text.find("\"z\"").unwrap());
     assert!(text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap());
+
+    let mut empty_metadata = artifact();
+    empty_metadata.metadata = Some(pbjson_types::Struct {
+        fields: HashMap::new(),
+    });
+    empty_metadata.parts[0].metadata = Some(pbjson_types::Struct {
+        fields: HashMap::new(),
+    });
+    assert_eq!(
+        validate_initial_artifact(empty_metadata)
+            .unwrap()
+            .canonical_json(),
+        json
+    );
 }
 
 #[test]

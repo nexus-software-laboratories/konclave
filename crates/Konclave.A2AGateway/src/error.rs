@@ -27,6 +27,9 @@ pub enum A2AGatewayError {
     /// Durable task data or a generated response violates required invariants.
     #[error("A2A gateway task projection is invalid")]
     InvalidTaskProjection,
+    /// A valid task projection cannot fit the bounded A2A response profile.
+    #[error("A2A gateway response exceeds its bound")]
+    ResponseTooLarge,
     /// Durable task storage is unavailable.
     #[error("A2A gateway task storage is unavailable")]
     StorageUnavailable,

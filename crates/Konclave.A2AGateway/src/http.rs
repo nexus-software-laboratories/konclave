@@ -911,6 +911,13 @@ fn gateway_error_response(error: A2AGatewayError) -> Response {
         A2AGatewayError::CapacityExceeded => {
             unavailable_response("A2A task capacity is exhausted", "RESOURCE_EXHAUSTED")
         }
+        A2AGatewayError::ResponseTooLarge => a2a_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RESOURCE_EXHAUSTED",
+            "A2A response exceeds its bound",
+            "RESPONSE_TOO_LARGE",
+            None,
+        ),
         A2AGatewayError::StorageUnavailable
         | A2AGatewayError::SubmissionUnavailable
         | A2AGatewayError::AuthorizationUnavailable => {

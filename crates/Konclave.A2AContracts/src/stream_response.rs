@@ -220,6 +220,7 @@ pub fn validate_initial_stream_response(
                 update.metadata.clone(),
                 "stream_response.artifact_update.metadata",
             )?;
+            update.metadata = None;
             Ok(InitialA2AStreamResponse {
                 wire: StreamResponse {
                     payload: Some(stream_response::Payload::ArtifactUpdate(update)),

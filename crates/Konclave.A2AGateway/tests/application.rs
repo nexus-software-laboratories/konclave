@@ -26,8 +26,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 
 use common::{
-    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application, request,
-    request_with_message_id, route, store,
+    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application,
+    artifact_with_text, request, request_with_message_id, route, store,
 };
 
 #[test]
@@ -443,6 +443,60 @@ async fn artifact_publication_projects_into_task_and_stream_before_completion() 
         .publish_artifact(&task_id, common::artifact())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_projection_fails_explicitly_when_the_response_bound_is_exceeded() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application(
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        task_id.clone(),
+    );
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+    let text = "x".repeat(60 * 1_024);
+    for index in 0..5 {
+        application
+            .publish_artifact(
+                &task_id,
+                artifact_with_text(&format!("artifact-{index}"), &text),
+            )
+            .await
+            .unwrap();
+    }
+    let get = validate_initial_get_task_request(
+        GetTaskRequest {
+            tenant: "tenant-a".to_owned(),
+            id: task_id.as_str().to_owned(),
+            history_length: Some(0),
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        application.get_task(get).await.err(),
+        Some(A2AGatewayError::ResponseTooLarge)
+    );
 }
 
 #[tokio::test]

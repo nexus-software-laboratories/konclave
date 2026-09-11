@@ -5,10 +5,10 @@ use KonclaveA2AContracts::wire::{
     TaskStatus, TaskStatusUpdateEvent, part, send_message_response, stream_response,
 };
 use KonclaveA2AContracts::{
-    A2A_TEXT_MEDIA_TYPE, INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2AStreamResponse,
-    InitialA2ATaskListResponse, InitialA2ATaskResponse, MAX_A2A_ARTIFACTS_PER_TASK,
-    decode_initial_artifact_json, validate_initial_list_tasks_response,
-    validate_initial_stream_response, validate_initial_task,
+    A2A_TEXT_MEDIA_TYPE, A2AContractError, INITIAL_TASK_TERMINAL_REASON_FIELD,
+    InitialA2AStreamResponse, InitialA2ATaskListResponse, InitialA2ATaskResponse,
+    MAX_A2A_ARTIFACTS_PER_TASK, decode_initial_artifact_json,
+    validate_initial_list_tasks_response, validate_initial_stream_response, validate_initial_task,
 };
 use KonclaveA2ADomain::A2ATaskState;
 use KonclaveA2ATaskStore::{
@@ -25,7 +25,14 @@ pub(crate) fn project_get_task(
     history_length: Option<u32>,
 ) -> Result<InitialA2ATaskResponse, A2AGatewayError> {
     let task = project_task(record, messages, artifacts, Some(history_length), true)?;
-    validate_initial_task(task).map_err(|_| A2AGatewayError::InvalidTaskProjection)
+    validate_initial_task(task).map_err(map_projection_error)
+}
+
+fn map_projection_error(error: A2AContractError) -> A2AGatewayError {
+    match error {
+        A2AContractError::EncodedMessageTooLarge { .. } => A2AGatewayError::ResponseTooLarge,
+        _ => A2AGatewayError::InvalidTaskProjection,
+    }
 }
 
 pub(crate) fn project_list_tasks(
@@ -45,8 +52,11 @@ pub(crate) fn project_list_tasks(
         total_size: i32::try_from(total_size)
             .map_err(|_| A2AGatewayError::InvalidTaskProjection)?,
     };
-    validate_initial_list_tasks_response(response)
-        .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+    let response = validate_initial_list_tasks_response(response).map_err(map_projection_error)?;
+    response
+        .deterministic_json()
+        .map_err(map_projection_error)?;
+    Ok(response)
 }
 
 pub(crate) fn project_stream_task(
@@ -59,7 +69,7 @@ pub(crate) fn project_stream_task(
     validate_initial_stream_response(StreamResponse {
         payload: Some(stream_response::Payload::Task(task)),
     })
-    .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+    .map_err(map_projection_error)
 }
 
 pub(crate) fn project_status_update(
@@ -98,7 +108,7 @@ pub(crate) fn project_status_update(
             },
         )),
     })
-    .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+    .map_err(map_projection_error)
 }
 
 pub(crate) fn project_artifact_update(
@@ -121,7 +131,7 @@ pub(crate) fn project_artifact_update(
             },
         )),
     })
-    .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+    .map_err(map_projection_error)
 }
 
 fn project_task(
@@ -205,7 +215,7 @@ fn project_artifacts(
             }
             decode_initial_artifact_json(artifact.canonical_bytes())
                 .map(|artifact| artifact.into_wire())
-                .map_err(|_| A2AGatewayError::InvalidTaskProjection)
+                .map_err(map_projection_error)
         })
         .collect()
 }

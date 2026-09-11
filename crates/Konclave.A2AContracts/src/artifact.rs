@@ -130,6 +130,7 @@ pub fn validate_initial_artifact(
         });
     }
     require_empty_struct(artifact.metadata.clone(), "artifact.metadata")?;
+    artifact.metadata = None;
     if !artifact.extensions.is_empty() {
         return Err(A2AContractError::UnsupportedField {
             field: "artifact.extensions",
@@ -156,6 +157,7 @@ pub fn validate_initial_artifact(
 
 fn validate_part(part: &mut Part, inline_bytes: &mut usize) -> Result<(), A2AContractError> {
     require_empty_struct(part.metadata.clone(), "artifact.part.metadata")?;
+    part.metadata = None;
     validate_filename(&part.filename)?;
     match part.content.as_mut() {
         Some(part::Content::Text(text)) => {
