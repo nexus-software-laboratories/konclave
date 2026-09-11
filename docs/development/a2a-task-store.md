@@ -151,9 +151,11 @@ The SQLite suite covers:
 - context, agent, tenant, conversation, and target isolation;
 - generation races and exact transition retries;
 - consecutive status reads and exact generation-cursor resume;
+- atomic task/message/artifact snapshots and combined stream deltas;
 - terminal reasons, cancellation, completion evidence, and terminal immutability;
 - deterministic task listing, cursor pagination, and hidden pruned tombstones;
 - ordered message and artifact idempotency/conflicts;
+- `WORKING`-only new artifact publication with terminal exact-retry recovery;
 - UTF-8 byte, row, task, and artifact capacity;
 - response-before-transition restart recovery;
 - payload pruning, tombstone retry, tombstone expiry, and active-task preservation;

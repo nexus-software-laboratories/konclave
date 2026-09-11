@@ -272,6 +272,8 @@ The built-in client:
 - parses SSE incrementally with a per-event bound and task/context correlation;
 - sends streaming messages and resubscribes only when the Agent Card advertises
   streaming;
+- validates encrypted content-addressed artifact references but never retrieves them
+  during task, list, or stream processing;
 - validates response media type and full Task or Agent Card shape;
 - correlates GetTask response identity and SendMessage context;
 - requires extended cards to retain the base agent name, version, interfaces, and
@@ -305,6 +307,11 @@ modified by this gateway.
 | Task/Card response | 256 KiB |
 | SSE data event | 256 KiB |
 | Buffered SSE input | 1 MiB |
+| Artifacts per Task | 8 |
+| Artifact Parts | 8 |
+| Aggregate inline artifact content | 64 KiB |
+| Canonical artifact document | 192 KiB |
+| Encrypted reference plaintext | 64 MiB |
 | Remote error body | 64 KiB |
 | Query string | 256 bytes |
 | Request-body timeout | 60 seconds |
@@ -336,6 +343,8 @@ Focused tests cover:
 - response byte bounds, terminal-reason metadata, task/context correlation, and
   cursor pagination;
 - incremental SSE parsing, event bounds, CRLF/comments, and stream correlation; and
+- canonical artifact forms, explicit ListTasks inclusion, artifact-backed completion,
+  and no automatic URL retrieval; and
 - TLS-or-loopback binding policy.
 
 The A2A-to-Konclave bridge test suite runs the application and authenticated

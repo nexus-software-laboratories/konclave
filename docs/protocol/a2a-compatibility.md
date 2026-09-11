@@ -179,7 +179,8 @@ set. `scripts/a2a/Test-A2AFixtures.ps1` verifies fixture manifests and prevents
 released fixture replacement. Crate tests prove protobuf and ProtoJSON narrowing,
 unsupported-field rejection, tenant isolation, version/binding negotiation, secure
 interface URLs, exact fixture round trips, streaming event bounds, first-Task
-ordering, and task/context correlation.
+ordering, task/context correlation, deterministic artifact canonicalization, media
+types, JSON limits, inline byte limits, filenames, and encrypted-reference shape.
 
 An A2A update uses a new versioned source directory and new immutable fixtures. It
 must not rewrite the `v1.0.1` source or reinterpret its validated initial profile.
