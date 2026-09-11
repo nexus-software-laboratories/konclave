@@ -153,15 +153,6 @@ impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
             .map_err(map_owner_storage_error)
     }
 
-    fn map_owner_storage_error(error: SecretStorageError) -> A2AArtifactStorageError {
-        match error {
-            SecretStorageError::OwnerProtectedStorageConflict => {
-                A2AArtifactStorageError::ObjectConflict
-            }
-            _ => A2AArtifactStorageError::StorageUnavailable,
-        }
-    }
-
     fn get(
         &self,
         object_id: A2AArtifactObjectId,
@@ -188,6 +179,15 @@ impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
             return Err(A2AArtifactStorageError::DigestMismatch);
         }
         Ok(bytes)
+    }
+}
+
+fn map_owner_storage_error(error: SecretStorageError) -> A2AArtifactStorageError {
+    match error {
+        SecretStorageError::OwnerProtectedStorageConflict => {
+            A2AArtifactStorageError::ObjectConflict
+        }
+        _ => A2AArtifactStorageError::StorageUnavailable,
     }
 }
 
