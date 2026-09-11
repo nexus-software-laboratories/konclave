@@ -128,6 +128,20 @@ fn encrypted_reference_parser_strips_secret_fragment_and_builds_bound_aad() {
 }
 
 #[test]
+fn encrypted_reference_descriptor_uses_network_byte_order() {
+    let descriptor =
+        InitialA2AArtifactReferenceDescriptor::new("a", 1, "text/plain", "", 258).unwrap();
+    let mut expected = b"konclave-a2a-artifact-object-v1\0".to_vec();
+    expected.extend_from_slice(&[0, 1, b'a']);
+    expected.extend_from_slice(&[0, 1]);
+    expected.extend_from_slice(&[0, 10]);
+    expected.extend_from_slice(b"text/plain");
+    expected.extend_from_slice(&[0, 0]);
+    expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 1, 2]);
+    assert_eq!(descriptor.associated_data().unwrap(), expected);
+}
+
+#[test]
 fn artifact_rejects_unsafe_media_filename_metadata_and_urls() {
     let mut uppercase_media = artifact();
     uppercase_media.parts[2].media_type = "Application/Octet-Stream".to_owned();
