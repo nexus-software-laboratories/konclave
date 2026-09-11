@@ -497,6 +497,22 @@ async fn artifact_projection_fails_explicitly_when_the_response_bound_is_exceede
         application.get_task(get).await.err(),
         Some(A2AGatewayError::ResponseTooLarge)
     );
+    for index in 5..8 {
+        application
+            .publish_artifact(
+                &task_id,
+                artifact_with_text(&format!("artifact-{index}"), "small"),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        application
+            .publish_artifact(&task_id, artifact_with_text("artifact-8", "small"))
+            .await
+            .err(),
+        Some(A2AGatewayError::CapacityExceeded)
+    );
 }
 
 #[tokio::test]

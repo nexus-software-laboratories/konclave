@@ -253,7 +253,7 @@ fn list_task_mapping_remains_route_scoped() {
             page_token: "v1.100.11111111111111111111111111111111".to_string(),
             history_length: None,
             status_timestamp_after: None,
-            include_artifacts: None,
+            include_artifacts: Some(true),
         },
         Some("tenant-a"),
     )
@@ -267,7 +267,7 @@ fn list_task_mapping_remains_route_scoped() {
         lookup.page_token(),
         Some("v1.100.11111111111111111111111111111111")
     );
-    assert!(!lookup.include_artifacts());
+    assert!(lookup.include_artifacts());
 }
 
 #[test]

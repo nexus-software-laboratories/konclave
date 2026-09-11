@@ -243,7 +243,12 @@ impl A2ASqliteTaskStore {
         artifact: A2ATaskArtifact,
         now_unix_milliseconds: u64,
         require_working: bool,
+        maximum_artifacts: usize,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
+        if maximum_artifacts == 0 || maximum_artifacts > MAX_PAGE_SIZE {
+            return Err(A2ATaskStoreError::InvalidConfiguration);
+        }
+        let maximum_artifacts = maximum_artifacts.min(self.config.max_artifacts_per_task);
         let digest = artifact.identity_digest();
         let mut connection = self.lock()?;
         let transaction = connection
@@ -269,7 +274,7 @@ impl A2ASqliteTaskStore {
             return Err(A2ATaskStoreError::InvalidTransition);
         }
         let count = record_count(&transaction, "a2a_task_artifact", artifact.key())?;
-        if count >= self.config.max_artifacts_per_task {
+        if count >= maximum_artifacts {
             return Err(A2ATaskStoreError::CapacityExceeded);
         }
         require_payload_capacity(&transaction, self.config, artifact.canonical_bytes().len())?;
@@ -584,15 +589,26 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         artifact: A2ATaskArtifact,
         now_unix_milliseconds: u64,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
-        self.append_artifact_in_state(artifact, now_unix_milliseconds, false)
+        self.append_artifact_in_state(
+            artifact,
+            now_unix_milliseconds,
+            false,
+            self.config.max_artifacts_per_task,
+        )
     }
 
     fn append_working_artifact(
         &self,
         artifact: A2ATaskArtifact,
         now_unix_milliseconds: u64,
+        maximum_artifacts: usize,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
-        self.append_artifact_in_state(artifact, now_unix_milliseconds, true)
+        self.append_artifact_in_state(
+            artifact,
+            now_unix_milliseconds,
+            true,
+            maximum_artifacts,
+        )
     }
 
     fn messages(

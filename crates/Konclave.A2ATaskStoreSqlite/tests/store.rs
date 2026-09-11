@@ -732,6 +732,22 @@ fn task_and_stream_snapshots_keep_artifacts_and_terminal_status_atomic() {
         store.stream_updates(&key, 2, 3, 2).err(),
         Some(A2ATaskStoreError::CorruptData)
     );
+
+    let page = store
+        .list_tasks_with_artifacts(
+            &A2ATaskListQuery::new(
+                A2AAgentId::parse("agent-a").unwrap(),
+                Some(A2ATenantId::parse("tenant-a").unwrap()),
+                A2AContextId::parse("context-a").unwrap(),
+                50,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let (tasks, _, _, _) = page.into_parts();
+    let (_, artifacts) = tasks.into_iter().next().unwrap().into_parts();
+    assert_eq!(artifacts.len(), 2);
 }
 
 #[test]

@@ -449,6 +449,7 @@ pub trait A2ATaskStore: Send + Sync {
         &self,
         artifact: A2ATaskArtifact,
         now_unix_milliseconds: u64,
+        maximum_artifacts: usize,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError>;
 
     /// Reads the most recent bounded message window in chronological order.

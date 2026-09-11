@@ -7,7 +7,7 @@ use KonclaveA2AContracts::wire::TaskState;
 use KonclaveA2AContracts::{
     InitialA2AAgentCard, InitialA2AArtifact, InitialA2AStreamResponse, InitialA2ATaskListResponse,
     InitialA2ATaskResponse, InitialGetTaskRequest, InitialListTasksRequest,
-    InitialSendMessageRequest, InitialSubscribeToTaskRequest,
+    InitialSendMessageRequest, InitialSubscribeToTaskRequest, MAX_A2A_ARTIFACTS_PER_TASK,
 };
 use KonclaveA2ADiscovery::CompiledA2AAgentPublication;
 use KonclaveA2ADomain::{
@@ -469,7 +469,11 @@ impl A2AGatewayApplication {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
             match store
-                .append_working_artifact(artifact, recorded_at)
+                .append_working_artifact(
+                    artifact,
+                    recorded_at,
+                    MAX_A2A_ARTIFACTS_PER_TASK,
+                )
                 .map_err(map_store_error)?
             {
                 AppendA2ATaskRecordOutcome::Appended { .. }

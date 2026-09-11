@@ -242,9 +242,8 @@ fn validate_optional_display(
     field: &'static str,
 ) -> Result<(), A2AContractError> {
     if value.len() > maximum
-        || value
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        || (!value.is_empty() && value.trim() != value)
+        || value.chars().any(char::is_control)
     {
         return Err(A2AContractError::InvalidText { field });
     }
