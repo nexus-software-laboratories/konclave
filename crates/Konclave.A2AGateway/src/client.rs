@@ -7,11 +7,11 @@ use KonclaveA2AContracts::{
     DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE, DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard,
     InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment, InitialA2AStreamResponse,
     InitialA2AStreamResponseKind, InitialA2ATaskListResponse, InitialA2ATaskResponse,
-    InitialSendMessageRequest, MAX_A2A_LIST_ARTIFACT_PAGE_SIZE,
-    MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
-    decode_initial_agent_card_json, decode_initial_list_tasks_response_json,
-    decode_initial_send_message_response_json, decode_initial_stream_response_json,
-    decode_initial_task_json, validate_initial_agent_interface,
+    InitialSendMessageRequest, MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    MAX_A2A_LIST_ARTIFACT_PAGE_SIZE, decode_initial_agent_card_json,
+    decode_initial_list_tasks_response_json, decode_initial_send_message_response_json,
+    decode_initial_stream_response_json, decode_initial_task_json,
+    validate_initial_agent_interface,
 };
 use KonclaveA2ADomain::A2ATaskId;
 use KonclaveBoundedDocuments::deserialize_strict;
@@ -348,10 +348,8 @@ impl A2AHttpJsonClient {
             url.query_pairs_mut()
                 .append_pair("pageSize", &page_size.to_string());
         } else if include_artifacts {
-            url.query_pairs_mut().append_pair(
-                "pageSize",
-                &DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE.to_string(),
-            );
+            url.query_pairs_mut()
+                .append_pair("pageSize", &DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE.to_string());
         } else if page_token.is_some() {
             url.query_pairs_mut()
                 .append_pair("pageSize", &DEFAULT_A2A_LIST_PAGE_SIZE.to_string());

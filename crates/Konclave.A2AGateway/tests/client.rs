@@ -116,100 +116,6 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
             assert_eq!(cache_control.as_deref(), Some("public, max-age=3600"));
             (etag.unwrap(), card.name().to_owned())
         }
-
-        #[tokio::test]
-        async fn outbound_client_gets_artifacts_and_lists_them_only_when_requested() {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let publication = local_publication(address, false, false);
-            let root = tempfile::tempdir().unwrap();
-            let store = store(&root);
-            let application = application_with_publication(
-                &publication,
-                InitialA2AInterfaceEnvironment::LoopbackDevelopment,
-                store.clone(),
-                Arc::new(RecordingSubmitter::default()),
-                Arc::new(TestClock::new(100)),
-                A2AGatewayWaitConfig::default(),
-            );
-            let client = A2AHttpJsonClient::new(
-                application.card(),
-                Some(A2ABearerCredential::parse(TOKEN).unwrap()),
-                A2AHttpClientConfig::default(),
-            )
-            .unwrap();
-            let access = StaticBearerAccess::new([A2ABearerCredential::parse(TOKEN).unwrap()]).unwrap();
-            let state =
-                A2AHttpState::new(application.clone(), Arc::new(access), A2AHttpConfig::default()).unwrap();
-            let server = tokio::spawn(async move {
-                axum::serve(listener, a2a_router(state)).await.unwrap();
-            });
-
-            let task = client
-                .send_message(request("request", true, 0))
-                .await
-                .unwrap();
-            let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
-            let key = A2ATaskKey::new(
-                A2AAgentId::parse("contract-agent").unwrap(),
-                Some(A2ATenantId::parse("tenant-a").unwrap()),
-                task_id.clone(),
-            );
-            store
-                .transition_task(A2ATaskTransition::new(
-                    key.clone(),
-                    0,
-                    A2ATaskState::Working,
-                    None,
-                    110,
-                ))
-                .unwrap();
-            application.publish_artifact(&task_id, artifact()).await.unwrap();
-            store
-                .transition_task(A2ATaskTransition::new(
-                    key,
-                    1,
-                    A2ATaskState::Completed,
-                    None,
-                    120,
-                ))
-                .unwrap();
-
-            assert_eq!(
-                client
-                    .get_task(&task_id, Some(0))
-                    .await
-                    .unwrap()
-                    .as_wire()
-                    .artifacts
-                    .len(),
-                1
-            );
-            assert!(
-                client
-                    .list_tasks(Some(50), None)
-                    .await
-                    .unwrap()
-                    .as_wire()
-                    .tasks[0]
-                    .artifacts
-                    .is_empty()
-            );
-            assert_eq!(
-                client
-                    .list_tasks_with_artifacts(Some(8), None, true)
-                    .await
-                    .unwrap()
-                    .as_wire()
-                    .tasks[0]
-                    .artifacts
-                    .len(),
-                1
-            );
-
-            server.abort();
-            let _ = server.await;
-        }
         A2AAgentCardFetchOutcome::NotModified => panic!("first fetch must return a card"),
     };
     assert_eq!(card_name, "Contract agent");
@@ -225,6 +131,100 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
         .unwrap(),
         A2AAgentCardFetchOutcome::NotModified
     ));
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn outbound_client_gets_artifacts_and_lists_them_only_when_requested() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let publication = local_publication(address, false, false);
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let application = application_with_publication(
+        &publication,
+        InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    );
+    let client = A2AHttpJsonClient::new(
+        application.card(),
+        Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+        A2AHttpClientConfig::default(),
+    )
+    .unwrap();
+    let access = StaticBearerAccess::new([A2ABearerCredential::parse(TOKEN).unwrap()]).unwrap();
+    let state =
+        A2AHttpState::new(application.clone(), Arc::new(access), A2AHttpConfig::default()).unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, a2a_router(state)).await.unwrap();
+    });
+
+    let task = client
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        task_id.clone(),
+    );
+    store
+        .transition_task(A2ATaskTransition::new(
+            key.clone(),
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+    application.publish_artifact(&task_id, artifact()).await.unwrap();
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            1,
+            A2ATaskState::Completed,
+            None,
+            120,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        client
+            .get_task(&task_id, Some(0))
+            .await
+            .unwrap()
+            .as_wire()
+            .artifacts
+            .len(),
+        1
+    );
+    assert!(
+        client
+            .list_tasks(Some(50), None)
+            .await
+            .unwrap()
+            .as_wire()
+            .tasks[0]
+            .artifacts
+            .is_empty()
+    );
+    assert_eq!(
+        client
+            .list_tasks_with_artifacts(Some(8), None, true)
+            .await
+            .unwrap()
+            .as_wire()
+            .tasks[0]
+            .artifacts
+            .len(),
+        1
+    );
 
     server.abort();
     let _ = server.await;

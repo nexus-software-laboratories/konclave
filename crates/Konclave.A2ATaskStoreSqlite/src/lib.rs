@@ -603,12 +603,7 @@ impl A2ATaskStore for A2ASqliteTaskStore {
         now_unix_milliseconds: u64,
         maximum_artifacts: usize,
     ) -> Result<AppendA2ATaskRecordOutcome, A2ATaskStoreError> {
-        self.append_artifact_in_state(
-            artifact,
-            now_unix_milliseconds,
-            true,
-            maximum_artifacts,
-        )
+        self.append_artifact_in_state(artifact, now_unix_milliseconds, true, maximum_artifacts)
     }
 
     fn messages(

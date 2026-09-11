@@ -387,23 +387,6 @@ fn canonicalize_json(
         });
     }
 
-    fn sort_json(value: serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Array(values) => {
-                serde_json::Value::Array(values.into_iter().map(sort_json).collect())
-            }
-            serde_json::Value::Object(values) => {
-                let sorted = values.into_iter().collect::<BTreeMap<_, _>>();
-                serde_json::Value::Object(
-                    sorted
-                        .into_iter()
-                        .map(|(key, value)| (key, sort_json(value)))
-                        .collect(),
-                )
-            }
-            value => value,
-        }
-    }
     *count = count.checked_add(1).ok_or(A2AContractError::OutOfRange {
         field: "artifact.part.data",
     })?;
@@ -427,5 +410,23 @@ fn canonicalize_json(
             Ok(serde_json::Value::Object(object))
         }
         value => Ok(value),
+    }
+}
+
+fn sort_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(sort_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let sorted = values.into_iter().collect::<BTreeMap<_, _>>();
+            serde_json::Value::Object(
+                sorted
+                    .into_iter()
+                    .map(|(key, value)| (key, sort_json(value)))
+                    .collect(),
+            )
+        }
+        value => value,
     }
 }

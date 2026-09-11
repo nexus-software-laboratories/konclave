@@ -296,10 +296,7 @@ fn list_tasks_request_defaults_and_rejects_unsupported_filters() {
     };
     let validated = validate_initial_list_tasks_request(request, Some("tenant-a")).unwrap();
     assert!(validated.include_artifacts());
-    assert_eq!(
-        validated.page_size(),
-        DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE
-    );
+    assert_eq!(validated.page_size(), DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE);
 
     let request = ListTasksRequest {
         page_size: Some(9),

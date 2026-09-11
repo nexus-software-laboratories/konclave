@@ -469,11 +469,7 @@ impl A2AGatewayApplication {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
             match store
-                .append_working_artifact(
-                    artifact,
-                    recorded_at,
-                    MAX_A2A_ARTIFACTS_PER_TASK,
-                )
+                .append_working_artifact(artifact, recorded_at, MAX_A2A_ARTIFACTS_PER_TASK)
                 .map_err(map_store_error)?
             {
                 AppendA2ATaskRecordOutcome::Appended { .. }

@@ -7,8 +7,8 @@ use KonclaveA2AContracts::wire::{
 use KonclaveA2AContracts::{
     A2A_TEXT_MEDIA_TYPE, A2AContractError, INITIAL_TASK_TERMINAL_REASON_FIELD,
     InitialA2AStreamResponse, InitialA2ATaskListResponse, InitialA2ATaskResponse,
-    MAX_A2A_ARTIFACTS_PER_TASK, decode_initial_artifact_json,
-    validate_initial_list_tasks_response, validate_initial_stream_response, validate_initial_task,
+    MAX_A2A_ARTIFACTS_PER_TASK, decode_initial_artifact_json, validate_initial_list_tasks_response,
+    validate_initial_stream_response, validate_initial_task,
 };
 use KonclaveA2ADomain::A2ATaskState;
 use KonclaveA2ATaskStore::{
