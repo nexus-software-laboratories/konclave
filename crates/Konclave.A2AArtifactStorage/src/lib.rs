@@ -4,15 +4,7 @@
 use std::fs::File;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use axum::Router;
-use axum::body::Body;
-use axum::extract::{Path as AxumPath, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG};
-use axum::http::{HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use KonclaveA2AContracts::wire::{Part, part};
@@ -28,13 +20,10 @@ use KonclaveSecretStorage::{
 use sha2::{Digest as _, Sha256};
 use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
-use tower::limit::ConcurrencyLimitLayer;
 
 /// Maximum ciphertext bytes retained for one encrypted artifact object.
 pub const MAX_A2A_ARTIFACT_OBJECT_BYTES: usize =
     64 * 1_024 * 1_024 + AUTHENTICATED_CIPHER_TAG_BYTES;
-const MAX_ARTIFACT_OBJECT_HTTP_REQUESTS: usize = 64;
-const X_CONTENT_TYPE_OPTIONS: &str = "x-content-type-options";
 
 /// Stable failures from encrypted artifact object storage and opening.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -187,66 +176,6 @@ impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
             return Err(A2AArtifactStorageError::DigestMismatch);
         }
         Ok(bytes)
-    }
-}
-
-/// Builds an unauthenticated ciphertext-only HTTP router.
-///
-/// Mount this router at the operator-selected HTTPS artifact base path. Confidential
-/// key material remains in the client-side URL fragment and never reaches this
-/// endpoint.
-pub fn artifact_object_router(store: Arc<dyn A2AArtifactObjectStore>) -> Router {
-    Router::new()
-        .route("/sha256/{object_id}", get(get_artifact_object))
-        .with_state(store)
-        .layer(ConcurrencyLimitLayer::new(
-            MAX_ARTIFACT_OBJECT_HTTP_REQUESTS,
-        ))
-}
-
-async fn get_artifact_object(
-    State(store): State<Arc<dyn A2AArtifactObjectStore>>,
-    AxumPath(object_id): AxumPath<String>,
-) -> Response {
-    let object_id = match A2AArtifactObjectId::parse(&object_id) {
-        Ok(object_id) => object_id,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let store_for_read = Arc::clone(&store);
-    let bytes = match tokio::task::spawn_blocking(move || {
-        store_for_read.get(object_id, MAX_A2A_ARTIFACT_OBJECT_BYTES)
-    })
-    .await
-    {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(A2AArtifactStorageError::ObjectNotFound)) => {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Ok(Err(_)) | Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    if A2AArtifactObjectId::from_ciphertext(&bytes) != object_id {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    let mut response = Body::from(bytes).into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=31536000, immutable"),
-    );
-    response.headers_mut().insert(
-        X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    let etag = HeaderValue::from_str(&format!("\"{}\"", object_id.to_hex()));
-    match etag {
-        Ok(etag) => {
-            response.headers_mut().insert(ETAG, etag);
-            response
-        }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -428,7 +357,16 @@ fn read_bounded(mut file: File, maximum: usize) -> Result<Vec<u8>, A2AArtifactSt
     let capacity = maximum
         .checked_add(1)
         .ok_or(A2AArtifactStorageError::InvalidConfiguration)?;
-    let mut bytes = Vec::new();
+    let file_length = usize::try_from(
+        file.metadata()
+            .map_err(|_| A2AArtifactStorageError::StorageUnavailable)?
+            .len(),
+    )
+    .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?;
+    if file_length > maximum {
+        return Err(A2AArtifactStorageError::InvalidConfiguration);
+    }
+    let mut bytes = Vec::with_capacity(file_length);
     file.by_ref()
         .take(capacity as u64)
         .read_to_end(&mut bytes)
@@ -460,10 +398,6 @@ fn lowercase_hex(bytes: &[u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{Body, to_bytes};
-    use axum::http::Request;
-    use tower::ServiceExt as _;
-
     use super::*;
 
     struct StaticObjectStore {
@@ -653,58 +587,15 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn ciphertext_router_serves_only_exact_content_addresses() {
-        let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            FileA2AArtifactObjectStore::open(root.path().join("objects")).unwrap(),
-        );
-        let descriptor = InitialA2AArtifactReferenceDescriptor::new(
-            "artifact-1",
-            0,
-            "application/octet-stream",
-            "result.bin",
-            6,
-        )
-        .unwrap();
-        let reference = seal_and_store_artifact(
-            store.as_ref(),
-            "https://objects.example.com/a2a",
-            &descriptor,
-            b"secret",
-        )
-        .unwrap();
-        let response = artifact_object_router(store.clone())
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/sha256/{}", reference.object_id().to_hex()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(CONTENT_TYPE).unwrap(),
-            "application/octet-stream"
-        );
-        let bytes = to_bytes(response.into_body(), MAX_A2A_ARTIFACT_OBJECT_BYTES)
-            .await
+    #[test]
+    fn oversized_files_are_rejected_before_reading() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len((MAX_A2A_ARTIFACT_OBJECT_BYTES + 1) as u64)
             .unwrap();
         assert_eq!(
-            A2AArtifactObjectId::from_ciphertext(&bytes),
-            reference.object_id()
+            read_bounded(file, MAX_A2A_ARTIFACT_OBJECT_BYTES).err(),
+            Some(A2AArtifactStorageError::InvalidConfiguration)
         );
-
-        let response = artifact_object_router(store)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/sha256/{}", "00".repeat(32)))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+
 }

@@ -8,13 +8,10 @@ version = "0.1.0"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveSecretStorage",
- "axum",
  "base64 0.22.1",
  "sha2",
  "tempfile",
  "thiserror",
- "tokio",
- "tower",
  "url",
  "zeroize",
 ]

@@ -8,15 +8,11 @@ rust-version = "1.88"
 [dependencies]
 KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
 KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }
-axum = { version = "0.8.9", features = ["http1", "tokio"] }
 base64.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.53.1", features = ["macros", "rt"] }
-tower = { version = "0.5.3", features = ["limit"] }
 url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tower = { version = "0.5.3", features = ["limit", "util"] }
