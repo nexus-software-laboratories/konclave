@@ -3,11 +3,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use KonclaveA2AContracts::wire::{GetExtendedAgentCardRequest, GetTaskRequest};
+use KonclaveA2AContracts::wire::{GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest};
 use KonclaveA2AContracts::{
     A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH, A2AContractError,
     InitialA2AAgentSecurityKind, MAX_A2A_ENCODED_REQUEST_BYTES, decode_initial_send_message_json,
     validate_initial_get_extended_agent_card_request, validate_initial_get_task_request,
+    validate_initial_list_tasks_request,
 };
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -145,8 +146,16 @@ pub fn a2a_router(state: A2AHttpState) -> Router {
         .route(A2A_WELL_KNOWN_AGENT_CARD_PATH, get(public_agent_card))
         .route("/message:send", post(send_message_unscoped))
         .route("/{tenant}/message:send", post(send_message_tenant))
-        .route("/tasks/{id}", get(get_task_unscoped))
-        .route("/{tenant}/tasks/{id}", get(get_task_tenant))
+        .route("/tasks", get(list_tasks_unscoped))
+        .route("/{tenant}/tasks", get(list_tasks_tenant))
+        .route(
+            "/tasks/{id}",
+            get(get_task_unscoped).post(cancel_task_unscoped),
+        )
+        .route(
+            "/{tenant}/tasks/{id}",
+            get(get_task_tenant).post(cancel_task_tenant),
+        )
         .route("/extendedAgentCard", get(extended_agent_card_unscoped))
         .route(
             "/{tenant}/extendedAgentCard",
@@ -276,6 +285,65 @@ async fn get_task_unscoped(
     get_task(state, None, id, request).await
 }
 
+async fn list_tasks_unscoped(
+    State(state): State<A2AHttpState>,
+    request: Request<Body>,
+) -> Response {
+    list_tasks(state, None, request).await
+}
+
+async fn list_tasks_tenant(
+    State(state): State<A2AHttpState>,
+    Path(tenant): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    list_tasks(state, Some(tenant), request).await
+}
+
+async fn list_tasks(
+    state: A2AHttpState,
+    path_tenant: Option<String>,
+    request: Request<Body>,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    if let Err(response) = authorize(&state, &parts, A2AHttpAction::ListTasks) {
+        return *response;
+    }
+    if let Err(response) = validate_common_headers(&parts.headers) {
+        return *response;
+    }
+    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
+        return *response;
+    }
+    let (page_size, page_token) = match parse_list_tasks_query(parts.uri.query()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let request = match validate_initial_list_tasks_request(
+        ListTasksRequest {
+            tenant: state.application.tenant().unwrap_or_default().to_owned(),
+            context_id: String::new(),
+            status: 0,
+            page_size,
+            page_token,
+            history_length: None,
+            status_timestamp_after: None,
+            include_artifacts: None,
+        },
+        state.application.tenant(),
+    ) {
+        Ok(request) => request,
+        Err(error) => return contract_error_response(error),
+    };
+    match state.application.list_tasks(request).await {
+        Ok(tasks) => match tasks.deterministic_json() {
+            Ok(bytes) => json_response(StatusCode::OK, bytes),
+            Err(_) => gateway_error_response(A2AGatewayError::InvalidTaskProjection),
+        },
+        Err(error) => gateway_error_response(error),
+    }
+}
+
 async fn get_task_tenant(
     State(state): State<A2AHttpState>,
     Path((tenant, id)): Path<(String, String)>,
@@ -386,6 +454,44 @@ async fn unsupported_operation(
     }
     if let Err(response) = validate_common_headers(&parts.headers) {
         return *response;
+    }
+    unsupported_operation_response()
+}
+
+async fn cancel_task_unscoped(
+    State(state): State<A2AHttpState>,
+    Path(id): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    cancel_task(state, None, id, request).await
+}
+
+async fn cancel_task_tenant(
+    State(state): State<A2AHttpState>,
+    Path((tenant, id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Response {
+    cancel_task(state, Some(tenant), id, request).await
+}
+
+async fn cancel_task(
+    state: A2AHttpState,
+    path_tenant: Option<String>,
+    id: String,
+    request: Request<Body>,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    if let Err(response) = authorize(&state, &parts, A2AHttpAction::CancelTask) {
+        return *response;
+    }
+    if let Err(response) = validate_common_headers(&parts.headers) {
+        return *response;
+    }
+    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
+        return *response;
+    }
+    if !id.ends_with(":cancel") {
+        return gateway_error_response(A2AGatewayError::TaskNotFound);
     }
     unsupported_operation_response()
 }
@@ -566,6 +672,43 @@ fn parse_history_length(query: Option<&str>) -> Result<Option<i32>, Box<Response
     Ok(history_length)
 }
 
+fn parse_list_tasks_query(query: Option<&str>) -> Result<(Option<i32>, String), Box<Response>> {
+    let Some(query) = query else {
+        return Ok((None, String::new()));
+    };
+    if query.len() > MAX_QUERY_BYTES {
+        return Err(Box::new(contract_error_response(
+            A2AContractError::OutOfRange {
+                field: "list_tasks.query",
+            },
+        )));
+    }
+    let mut page_size = None;
+    let mut page_token = None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "pageSize" if page_size.is_none() => {
+                page_size = Some(value.parse::<i32>().map_err(|_| {
+                    Box::new(contract_error_response(A2AContractError::OutOfRange {
+                        field: "page_size",
+                    }))
+                })?);
+            }
+            "pageToken" if page_token.is_none() => {
+                page_token = Some(value.into_owned());
+            }
+            _ => {
+                return Err(Box::new(contract_error_response(
+                    A2AContractError::UnsupportedField {
+                        field: "list_tasks.query",
+                    },
+                )));
+            }
+        }
+    }
+    Ok((page_size, page_token.unwrap_or_default()))
+}
+
 fn contract_error_response(error: A2AContractError) -> Response {
     let field = match &error {
         A2AContractError::MissingField { field }
@@ -591,6 +734,13 @@ fn contract_error_response(error: A2AContractError) -> Response {
 fn gateway_error_response(error: A2AGatewayError) -> Response {
     match error {
         A2AGatewayError::Unauthenticated => authentication_error_response(None),
+        A2AGatewayError::InvalidRequest => a2a_error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "A2A request is invalid",
+            "INVALID_REQUEST",
+            None,
+        ),
         A2AGatewayError::Forbidden => a2a_error_response(
             StatusCode::FORBIDDEN,
             "PERMISSION_DENIED",

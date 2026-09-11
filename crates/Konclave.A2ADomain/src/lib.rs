@@ -11,7 +11,7 @@ pub use identifiers::{
     A2AAgentId, A2AArtifactId, A2AContextId, A2AMessageId, A2APartIndex, A2ATaskId, A2ATenantId,
 };
 pub use mapping::{
-    A2AAgentRoute, A2ADirectedRequestMapping, A2ATaskLookup, map_initial_get_task,
-    map_initial_send_message,
+    A2AAgentRoute, A2ADirectedRequestMapping, A2ATaskListLookup, A2ATaskLookup,
+    map_initial_get_task, map_initial_list_tasks, map_initial_send_message,
 };
 pub use task_state::A2ATaskState;

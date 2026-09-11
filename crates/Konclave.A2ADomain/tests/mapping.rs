@@ -1,13 +1,14 @@
 use KonclaveA2AContracts::wire::{
-    GetTaskRequest, Message, Part, Role, SendMessageRequest, TaskState, part,
+    GetTaskRequest, ListTasksRequest, Message, Part, Role, SendMessageRequest, TaskState, part,
 };
 use KonclaveA2AContracts::{
-    A2A_TEXT_MEDIA_TYPE, validate_initial_get_task_request, validate_initial_send_message_request,
+    A2A_TEXT_MEDIA_TYPE, validate_initial_get_task_request, validate_initial_list_tasks_request,
+    validate_initial_send_message_request,
 };
 use KonclaveA2ADomain::{
     A2AAgentId, A2AAgentRoute, A2AArtifactId, A2AContextId, A2ADomainError, A2AMessageId,
     A2APartIndex, A2ATaskId, A2ATaskState, A2ATenantId, map_initial_get_task,
-    map_initial_send_message,
+    map_initial_list_tasks, map_initial_send_message,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId};
 
@@ -218,6 +219,33 @@ fn get_task_mapping_remains_agent_and_tenant_scoped() {
     );
     assert_eq!(lookup.tenant().map(A2ATenantId::as_str), Some("tenant-a"));
     assert_eq!(lookup.history_length(), Some(1));
+}
+
+#[test]
+fn list_task_mapping_remains_route_scoped() {
+    let request = validate_initial_list_tasks_request(
+        ListTasksRequest {
+            tenant: "tenant-a".to_string(),
+            context_id: String::new(),
+            status: TaskState::Unspecified as i32,
+            page_size: Some(2),
+            page_token: "v1.100.11111111111111111111111111111111".to_string(),
+            history_length: None,
+            status_timestamp_after: None,
+            include_artifacts: None,
+        },
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let lookup = map_initial_list_tasks(&route(), request).unwrap();
+    assert_eq!(lookup.agent_id().as_str(), "agent-a");
+    assert_eq!(lookup.context_id().as_str(), "context-a");
+    assert_eq!(lookup.tenant().map(A2ATenantId::as_str), Some("tenant-a"));
+    assert_eq!(lookup.page_size(), 2);
+    assert_eq!(
+        lookup.page_token(),
+        Some("v1.100.11111111111111111111111111111111")
+    );
 }
 
 #[test]

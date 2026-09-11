@@ -2,6 +2,7 @@ use crate::{
     A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskMessage, A2ATaskRecord, A2ATaskStoreError,
     A2ATaskTransition, StoredA2ATaskArtifact, StoredA2ATaskMessage,
 };
+use KonclaveA2ADomain::{A2AAgentId, A2AContextId, A2ATaskId, A2ATenantId};
 
 /// Outcome of creating one deterministic task.
 pub enum CreateA2ATaskOutcome {
@@ -43,6 +44,170 @@ pub struct A2ATaskPruneOutcome {
     pub removed_tombstones: usize,
 }
 
+/// Opaque cursor for deterministic task pagination.
+#[derive(Clone, PartialEq, Eq)]
+pub struct A2ATaskListCursor {
+    created_at_unix_milliseconds: u64,
+    task_id: A2ATaskId,
+}
+
+impl A2ATaskListCursor {
+    /// Creates one cursor from the last visible task on a page.
+    #[must_use]
+    pub const fn new(created_at_unix_milliseconds: u64, task_id: A2ATaskId) -> Self {
+        Self {
+            created_at_unix_milliseconds,
+            task_id,
+        }
+    }
+
+    /// Returns the anchor creation timestamp.
+    #[must_use]
+    pub const fn created_at_unix_milliseconds(&self) -> u64 {
+        self.created_at_unix_milliseconds
+    }
+
+    /// Returns the anchor task identifier.
+    #[must_use]
+    pub const fn task_id(&self) -> &A2ATaskId {
+        &self.task_id
+    }
+}
+
+/// Exact scoped task-list query.
+#[derive(Clone, PartialEq, Eq)]
+pub struct A2ATaskListQuery {
+    agent_id: A2AAgentId,
+    tenant: Option<A2ATenantId>,
+    context_id: A2AContextId,
+    page_size: usize,
+    cursor: Option<A2ATaskListCursor>,
+}
+
+impl A2ATaskListQuery {
+    /// Creates one exact route-scoped task-list query.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when `page_size` is zero or exceeds the store
+    /// hard bound.
+    pub fn new(
+        agent_id: A2AAgentId,
+        tenant: Option<A2ATenantId>,
+        context_id: A2AContextId,
+        page_size: usize,
+        cursor: Option<A2ATaskListCursor>,
+    ) -> Result<Self, A2ATaskStoreError> {
+        if page_size == 0 || page_size > 256 {
+            return Err(A2ATaskStoreError::InvalidConfiguration);
+        }
+        Ok(Self {
+            agent_id,
+            tenant,
+            context_id,
+            page_size,
+            cursor,
+        })
+    }
+
+    /// Returns the scoped published agent.
+    #[must_use]
+    pub const fn agent_id(&self) -> &A2AAgentId {
+        &self.agent_id
+    }
+
+    /// Returns the scoped tenant.
+    #[must_use]
+    pub const fn tenant(&self) -> Option<&A2ATenantId> {
+        self.tenant.as_ref()
+    }
+
+    /// Returns the scoped public context.
+    #[must_use]
+    pub const fn context_id(&self) -> &A2AContextId {
+        &self.context_id
+    }
+
+    /// Returns the bounded requested page size.
+    #[must_use]
+    pub const fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// Returns the optional pagination cursor.
+    #[must_use]
+    pub const fn cursor(&self) -> Option<&A2ATaskListCursor> {
+        self.cursor.as_ref()
+    }
+}
+
+/// One deterministic visible task page.
+pub struct A2ATaskListPage {
+    tasks: Vec<A2ATaskRecord>,
+    next_cursor: Option<A2ATaskListCursor>,
+    page_size: usize,
+    total_size: usize,
+}
+
+impl A2ATaskListPage {
+    /// Creates one visible page.
+    #[must_use]
+    pub fn new(
+        tasks: Vec<A2ATaskRecord>,
+        next_cursor: Option<A2ATaskListCursor>,
+        page_size: usize,
+        total_size: usize,
+    ) -> Self {
+        Self {
+            tasks,
+            next_cursor,
+            page_size,
+            total_size,
+        }
+    }
+
+    /// Returns the visible tasks.
+    #[must_use]
+    pub fn tasks(&self) -> &[A2ATaskRecord] {
+        &self.tasks
+    }
+
+    /// Returns the next cursor, when another page exists.
+    #[must_use]
+    pub const fn next_cursor(&self) -> Option<&A2ATaskListCursor> {
+        self.next_cursor.as_ref()
+    }
+
+    /// Returns the effective page size.
+    #[must_use]
+    pub const fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// Returns the number of visible tasks in this scope before pagination.
+    #[must_use]
+    pub const fn total_size(&self) -> usize {
+        self.total_size
+    }
+
+    /// Consumes the page and returns its tasks.
+    #[must_use]
+    pub fn into_tasks(self) -> Vec<A2ATaskRecord> {
+        self.tasks
+    }
+
+    /// Consumes the page and returns every owned component.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<A2ATaskRecord>, Option<A2ATaskListCursor>, usize, usize) {
+        (
+            self.tasks,
+            self.next_cursor,
+            self.page_size,
+            self.total_size,
+        )
+    }
+}
+
 /// Portable semantic contract implemented by public and managed A2A task stores.
 pub trait A2ATaskStore: Send + Sync {
     /// Creates one deterministic task or reconciles an exact retry.
@@ -61,6 +226,16 @@ pub trait A2ATaskStore: Send + Sync {
     ///
     /// Returns not-found, corruption, or storage errors.
     fn get_task(&self, key: &A2ATaskKey) -> Result<A2ATaskRecord, A2ATaskStoreError>;
+
+    /// Lists visible tasks for one exact agent, tenant, and context scope.
+    ///
+    /// Content-pruned tombstones remain internal idempotency state and are therefore
+    /// excluded from the caller-visible page.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-query, corruption, or storage errors.
+    fn list_tasks(&self, query: &A2ATaskListQuery) -> Result<A2ATaskListPage, A2ATaskStoreError>;
 
     /// Applies one expected-generation state transition.
     ///

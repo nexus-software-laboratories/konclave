@@ -20,9 +20,13 @@ pub enum A2AHttpAction {
     SendMessage,
     /// Read one exact task.
     GetTask,
+    /// Read one page of scoped tasks.
+    ListTasks,
     /// Read the configured authenticated extended card.
     GetExtendedAgentCard,
-    /// Reach a standard operation excluded from the advertised profile.
+    /// Reach the standard cancel-task operation, which remains unsupported.
+    CancelTask,
+    /// Reach another standard operation excluded from the advertised profile.
     UnsupportedOperation,
 }
 

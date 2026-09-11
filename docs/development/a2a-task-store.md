@@ -72,6 +72,11 @@ one persistence snapshot. SQLite holds a read transaction across both reads so a
 concurrent retention sweep cannot combine a pre-prune task row with post-prune empty
 history.
 
+`list_tasks` returns only non-pruned tasks for one exact agent, tenant, and public
+context. Ordering is deterministic by `(created_at_unix_milliseconds DESC, task_id
+DESC)`, and the returned cursor is derived from the last visible task on the page so
+HTTP pagination remains stable without exposing SQLite row identifiers.
+
 The artifact record contains bounded opaque canonical bytes and a verified SHA-256
 digest. No gateway path may call it until the artifact validator introduced by the
 artifact workstream has produced those bytes.
@@ -130,6 +135,7 @@ The SQLite suite covers:
 - context, agent, tenant, conversation, and target isolation;
 - generation races and exact transition retries;
 - terminal reasons, cancellation, completion evidence, and terminal immutability;
+- deterministic task listing, cursor pagination, and hidden pruned tombstones;
 - ordered message and artifact idempotency/conflicts;
 - UTF-8 byte, row, task, and artifact capacity;
 - response-before-transition restart recovery;

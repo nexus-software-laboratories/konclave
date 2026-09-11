@@ -11,8 +11,11 @@ use crate::wire::{
 
 /// Maximum encoded protobuf or ProtoJSON task response accepted before decoding.
 pub const MAX_A2A_ENCODED_RESPONSE_BYTES: usize = 256 * 1024;
+/// Metadata key used to expose one immutable terminal reason.
+pub const INITIAL_TASK_TERMINAL_REASON_FIELD: &str = "konclave_terminal_reason";
 const MIN_PROTOBUF_TIMESTAMP_SECONDS: i64 = -62_135_596_800;
 const MAX_PROTOBUF_TIMESTAMP_SECONDS: i64 = 253_402_300_799;
+const MAX_A2A_TERMINAL_REASON_BYTES: usize = 64;
 
 /// Validated task returned by the initial non-streaming profile.
 pub struct InitialA2ATaskResponse {
@@ -172,6 +175,7 @@ pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2ACo
     if let Some(message) = &status.message {
         validate_task_message(message, &task_id, &context_id, Some(Role::Agent))?;
     }
+    validate_terminal_reason_metadata(&task, state)?;
     if !task.artifacts.is_empty() {
         return Err(A2AContractError::UnsupportedField {
             field: "task.artifacts",
@@ -185,8 +189,54 @@ pub fn validate_initial_task(task: Task) -> Result<InitialA2ATaskResponse, A2ACo
     for message in &task.history {
         validate_task_message(message, &task_id, &context_id, None)?;
     }
-    require_empty_struct(task.metadata.clone(), "task.metadata")?;
     Ok(InitialA2ATaskResponse { wire: task, state })
+}
+
+fn validate_terminal_reason_metadata(
+    task: &Task,
+    state: TaskState,
+) -> Result<(), A2AContractError> {
+    let Some(metadata) = task.metadata.as_ref() else {
+        return match state {
+            TaskState::Failed | TaskState::Rejected | TaskState::Canceled => {
+                Err(A2AContractError::MissingField {
+                    field: "task.metadata",
+                })
+            }
+            _ => Ok(()),
+        };
+    };
+    if metadata.fields.len() != 1 {
+        return Err(A2AContractError::UnsupportedField {
+            field: "task.metadata",
+        });
+    }
+    let Some(reason) = metadata.fields.get(INITIAL_TASK_TERMINAL_REASON_FIELD) else {
+        return Err(A2AContractError::UnsupportedField {
+            field: "task.metadata",
+        });
+    };
+    let Some(pbjson_types::value::Kind::StringValue(reason)) = reason.kind.as_ref() else {
+        return Err(A2AContractError::UnsupportedField {
+            field: "task.metadata",
+        });
+    };
+    if reason.is_empty()
+        || reason.len() > MAX_A2A_TERMINAL_REASON_BYTES
+        || !reason
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(A2AContractError::OutOfRange {
+            field: "task.metadata",
+        });
+    }
+    match state {
+        TaskState::Failed | TaskState::Rejected | TaskState::Canceled => Ok(()),
+        _ => Err(A2AContractError::UnsupportedField {
+            field: "task.metadata",
+        }),
+    }
 }
 
 fn validate_task_message(

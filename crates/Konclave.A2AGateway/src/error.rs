@@ -12,6 +12,9 @@ pub enum A2AGatewayError {
     /// A request does not match the configured agent route.
     #[error("A2A gateway route does not match the request")]
     RouteMismatch,
+    /// A request is structurally valid but violates a gateway-owned query contract.
+    #[error("A2A gateway request is invalid")]
+    InvalidRequest,
     /// No exact task exists for the configured publication.
     #[error("A2A gateway task was not found")]
     TaskNotFound,

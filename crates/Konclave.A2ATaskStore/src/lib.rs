@@ -14,6 +14,6 @@ pub use model::{
 };
 pub use record::{A2ATaskRecord, StoredA2ATaskArtifact, StoredA2ATaskMessage};
 pub use store::{
-    A2ATaskPruneOutcome, A2ATaskStore, AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome,
-    TransitionA2ATaskOutcome,
+    A2ATaskListCursor, A2ATaskListPage, A2ATaskListQuery, A2ATaskPruneOutcome, A2ATaskStore,
+    AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, TransitionA2ATaskOutcome,
 };
