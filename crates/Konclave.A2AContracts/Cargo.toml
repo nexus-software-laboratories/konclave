@@ -7,6 +7,7 @@ rust-version = "1.85"
 
 [dependencies]
 KonclaveBoundedDocuments = { path = "../Konclave.BoundedDocuments" }
+base64.workspace = true
 pbjson.workspace = true
 pbjson-types.workspace = true
 prost.workspace = true

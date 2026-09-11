@@ -7,6 +7,7 @@ name = "KonclaveA2AContracts"
 version = "0.1.0"
 dependencies = [
  "KonclaveBoundedDocuments",
+ "base64",
  "pbjson",
  "pbjson-build",
  "pbjson-types",

@@ -759,6 +759,12 @@ impl StreamCorrelation {
         if self.context_id.is_none() {
             self.context_id = Some(event.context_id().to_owned());
         }
+        if event.kind() == InitialA2AStreamResponseKind::ArtifactUpdate {
+            if self.first || self.terminal_seen {
+                return Err(A2AGatewayError::Contract);
+            }
+            return Ok(());
+        }
         if !self.first
             && event.kind() == InitialA2AStreamResponseKind::Task
             && !response_state(event.state())
