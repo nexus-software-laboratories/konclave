@@ -58,18 +58,21 @@ fn artifact() -> Artifact {
 
 #[test]
 fn artifact_forms_round_trip_to_deterministic_canonical_json() {
-    let artifact = validate_initial_artifact(artifact()).unwrap();
-    assert_eq!(artifact.artifact_id(), "artifact-1");
-    assert_eq!(artifact.as_wire().parts[0].media_type, "text/plain");
-    assert_eq!(artifact.as_wire().parts[1].media_type, "application/json");
-    let json = artifact.canonical_json().to_vec();
+    let validated = validate_initial_artifact(artifact()).unwrap();
+    assert_eq!(validated.artifact_id(), "artifact-1");
+    assert_eq!(validated.as_wire().parts[0].media_type, "text/plain");
+    assert_eq!(
+        validated.as_wire().parts[1].media_type,
+        "application/json"
+    );
+    let json = validated.canonical_json().to_vec();
     assert_eq!(
         decode_initial_artifact_json(&json)
             .unwrap()
             .canonical_json(),
         json
     );
-    let protobuf = artifact.as_wire().encode_to_vec();
+    let protobuf = validated.as_wire().encode_to_vec();
     assert_eq!(
         decode_initial_artifact_protobuf(&protobuf)
             .unwrap()
