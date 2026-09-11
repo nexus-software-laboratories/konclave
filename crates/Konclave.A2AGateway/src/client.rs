@@ -978,6 +978,8 @@ fn same_origin(left: &Url, right: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use KonclaveA2AContracts::decode_initial_stream_response_json;
 
     use super::{StreamCorrelation, parse_sse_data, sse_frame_end};

@@ -32,7 +32,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use crate::projection::send_message_response;
 use crate::{
     A2AGatewayApplication, A2AGatewayError, A2AHttpAccess, A2AHttpAction,
-    A2AHttpAuthorizationDecision,
+    A2AHttpAuthorizationDecision, A2AHttpPrincipalId,
 };
 
 /// Preferred A2A v1.0.1 HTTP+JSON media type.
