@@ -72,7 +72,7 @@ pub fn decode_initial_list_tasks_response_json(
 /// # Errors
 ///
 /// Returns a stable contract error for invalid pagination metadata or any task that
-/// includes message bodies, artifacts, or unsupported metadata.
+/// includes message bodies or unsupported metadata.
 pub fn validate_initial_list_tasks_response(
     response: ListTasksResponse,
 ) -> Result<InitialA2ATaskListResponse, A2AContractError> {

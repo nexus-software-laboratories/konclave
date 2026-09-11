@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use KonclaveA2AContracts::InitialA2AInterfaceEnvironment;
 use KonclaveA2AContracts::wire::{Task, TaskState, TaskStatus};
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
-use KonclaveA2ADomain::A2ATaskId;
+use KonclaveA2ADomain::{A2AAgentId, A2ATaskId, A2ATaskState, A2ATenantId};
 use KonclaveA2AGateway::{
     A2AAgentCardFetchOutcome, A2ABearerCredential, A2AGatewayError, A2AGatewayWaitConfig,
     A2AHttpClientConfig, A2AHttpConfig, A2AHttpJsonClient, A2AHttpState, StaticBearerAccess,
     a2a_router, fetch_public_agent_card,
 };
+use KonclaveA2ATaskStore::{A2ATaskKey, A2ATaskStore, A2ATaskTransition};
 use axum::Router;
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, LOCATION};
@@ -20,8 +21,8 @@ use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use common::{
-    CompletingSubmitter, PUBLICATION, TestClock, application_with_publication, request,
-    request_with_message_id, store,
+    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock,
+    application_with_publication, artifact, request, request_with_message_id, store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -114,6 +115,100 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
         } => {
             assert_eq!(cache_control.as_deref(), Some("public, max-age=3600"));
             (etag.unwrap(), card.name().to_owned())
+        }
+
+        #[tokio::test]
+        async fn outbound_client_gets_artifacts_and_lists_them_only_when_requested() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let publication = local_publication(address, false, false);
+            let root = tempfile::tempdir().unwrap();
+            let store = store(&root);
+            let application = application_with_publication(
+                &publication,
+                InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+                store.clone(),
+                Arc::new(RecordingSubmitter::default()),
+                Arc::new(TestClock::new(100)),
+                A2AGatewayWaitConfig::default(),
+            );
+            let client = A2AHttpJsonClient::new(
+                application.card(),
+                Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+                A2AHttpClientConfig::default(),
+            )
+            .unwrap();
+            let access = StaticBearerAccess::new([A2ABearerCredential::parse(TOKEN).unwrap()]).unwrap();
+            let state =
+                A2AHttpState::new(application.clone(), Arc::new(access), A2AHttpConfig::default()).unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, a2a_router(state)).await.unwrap();
+            });
+
+            let task = client
+                .send_message(request("request", true, 0))
+                .await
+                .unwrap();
+            let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+            let key = A2ATaskKey::new(
+                A2AAgentId::parse("contract-agent").unwrap(),
+                Some(A2ATenantId::parse("tenant-a").unwrap()),
+                task_id.clone(),
+            );
+            store
+                .transition_task(A2ATaskTransition::new(
+                    key.clone(),
+                    0,
+                    A2ATaskState::Working,
+                    None,
+                    110,
+                ))
+                .unwrap();
+            application.publish_artifact(&task_id, artifact()).await.unwrap();
+            store
+                .transition_task(A2ATaskTransition::new(
+                    key,
+                    1,
+                    A2ATaskState::Completed,
+                    None,
+                    120,
+                ))
+                .unwrap();
+
+            assert_eq!(
+                client
+                    .get_task(&task_id, Some(0))
+                    .await
+                    .unwrap()
+                    .as_wire()
+                    .artifacts
+                    .len(),
+                1
+            );
+            assert!(
+                client
+                    .list_tasks(Some(50), None)
+                    .await
+                    .unwrap()
+                    .as_wire()
+                    .tasks[0]
+                    .artifacts
+                    .is_empty()
+            );
+            assert_eq!(
+                client
+                    .list_tasks_with_artifacts(Some(50), None, true)
+                    .await
+                    .unwrap()
+                    .as_wire()
+                    .tasks[0]
+                    .artifacts
+                    .len(),
+                1
+            );
+
+            server.abort();
+            let _ = server.await;
         }
         A2AAgentCardFetchOutcome::NotModified => panic!("first fetch must return a card"),
     };

@@ -7,12 +7,14 @@ use KonclaveA2AContracts::{
     decode_initial_list_tasks_response_json, decode_initial_send_message_response_json,
     decode_initial_stream_response_json, decode_initial_task_json,
 };
+use KonclaveA2ADomain::{A2AAgentId, A2ATaskId, A2ATaskState, A2ATenantId};
 use KonclaveA2AGateway::{
     A2A_JSON_MEDIA_TYPE, A2A_STREAM_MEDIA_TYPE, A2A_VERSION_HEADER, A2ABearerCredential,
     A2AGatewayApplication, A2AGatewayWaitConfig, A2AHttpAccess, A2AHttpAction,
     A2AHttpAuthorizationDecision, A2AHttpConfig, A2AHttpPrincipalId, A2AHttpState,
     StaticBearerAccess, a2a_router, validate_a2a_binding,
 };
+use KonclaveA2ATaskStore::{A2ATaskKey, A2ATaskStore, A2ATaskTransition};
 use axum::body::{Body, to_bytes};
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH, WWW_AUTHENTICATE,
@@ -23,8 +25,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use common::{
-    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application,
-    application_with_publication, request_wire, request_wire_with_message_id, store,
+    CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application, artifact,
+    application_with_publication, request, request_wire, request_wire_with_message_id, store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -480,6 +482,102 @@ async fn list_tasks_paginates_and_cancel_task_is_explicitly_unsupported() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_and_explicit_list_project_bounded_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(&root);
+        let application = application(
+            store.clone(),
+            Arc::new(RecordingSubmitter::default()),
+            Arc::new(TestClock::new(100)),
+            A2AGatewayWaitConfig::default(),
+        );
+        let task = application
+            .send_message(request("request", true, 0))
+            .await
+            .unwrap();
+        let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+        let key = A2ATaskKey::new(
+            A2AAgentId::parse("contract-agent").unwrap(),
+            Some(A2ATenantId::parse("tenant-a").unwrap()),
+            task_id.clone(),
+        );
+        store
+            .transition_task(A2ATaskTransition::new(
+                key.clone(),
+                0,
+                A2ATaskState::Working,
+                None,
+                110,
+            ))
+            .unwrap();
+        application.publish_artifact(&task_id, artifact()).await.unwrap();
+        store
+            .transition_task(A2ATaskTransition::new(
+                key,
+                1,
+                A2ATaskState::Completed,
+                None,
+                120,
+            ))
+            .unwrap();
+        let router = a2a_router(state(application));
+
+        let response = router
+            .clone()
+            .oneshot(
+                authenticated(&format!("/tenant-a/tasks/{}", task_id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            decode_initial_task_json(&body(response).await)
+                .unwrap()
+                .as_wire()
+                .artifacts
+                .len(),
+            1
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                authenticated("/tenant-a/tasks?includeArtifacts=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let tasks = decode_initial_list_tasks_response_json(&body(response).await).unwrap();
+        assert_eq!(tasks.as_wire().tasks[0].artifacts.len(), 1);
+
+        let response = router
+            .clone()
+            .oneshot(
+                authenticated("/tenant-a/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tasks = decode_initial_list_tasks_response_json(&body(response).await).unwrap();
+        assert!(tasks.as_wire().tasks[0].artifacts.is_empty());
+
+        let response = router
+            .oneshot(
+                authenticated("/tenant-a/tasks?includeArtifacts=yes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     let response = router
