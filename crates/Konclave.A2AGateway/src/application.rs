@@ -21,8 +21,8 @@ use KonclaveA2ATaskStore::{
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use async_trait::async_trait;
+use futures_util::StreamExt as _;
 use futures_util::stream::{self, BoxStream};
-use futures_util::{StreamExt as _, TryStreamExt as _};
 use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
 use crate::A2AGatewayError;
@@ -288,8 +288,8 @@ impl A2AGatewayApplication {
                 prepared.deadline,
                 self.project_current(prepared.key, prepared.history_length),
             )
-                .await
-                .map_err(|_| A2AGatewayError::ResponseWaitExpired)?;
+            .await
+            .map_err(|_| A2AGatewayError::ResponseWaitExpired)?;
         }
         let wait = async {
             loop {
@@ -403,13 +403,8 @@ impl A2AGatewayApplication {
             lookup.tenant().cloned(),
             lookup.task_id().clone(),
         );
-        self.stream_task(
-            key,
-            Some(1),
-            Instant::now() + self.wait.timeout,
-            true,
-        )
-        .await
+        self.stream_task(key, Some(1), Instant::now() + self.wait.timeout, true)
+            .await
     }
 
     async fn prepare_task(
@@ -482,8 +477,8 @@ impl A2AGatewayApplication {
                 if state.finished || Instant::now() >= state.deadline {
                     return Ok(None);
                 }
-                let next_poll = (Instant::now() + state.application.wait.poll_interval)
-                    .min(state.deadline);
+                let next_poll =
+                    (Instant::now() + state.application.wait.poll_interval).min(state.deadline);
                 sleep_until(next_poll).await;
                 if Instant::now() >= state.deadline {
                     return Ok(None);
@@ -547,7 +542,10 @@ impl A2AGatewayApplication {
             let updates = store
                 .status_updates(&key, after_generation)
                 .map_err(map_store_error)?;
-            let messages = if updates.iter().any(|update| response_ready(update.state().to_wire())) {
+            let messages = if updates
+                .iter()
+                .any(|update| response_ready(update.state().to_wire()))
+            {
                 store.messages(&key, 2).map_err(map_store_error)?
             } else {
                 Vec::new()
@@ -575,23 +573,6 @@ impl A2AGatewayApplication {
         .map_err(|_| A2AGatewayError::StorageUnavailable)?
     }
 
-    struct PreparedTask {
-        key: A2ATaskKey,
-        history_length: Option<u32>,
-        deadline: Instant,
-    }
-
-    struct TaskStreamState {
-        application: A2AGatewayApplication,
-        key: A2ATaskKey,
-        task_id: String,
-        context_id: String,
-        generation: u64,
-        deadline: Instant,
-        finished: bool,
-        pending: VecDeque<InitialA2AStreamResponse>,
-    }
-
     async fn prune_visible_tasks(&self) -> Result<(), A2AGatewayError> {
         let now = self
             .clock
@@ -604,6 +585,23 @@ impl A2AGatewayApplication {
             .map_err(map_store_error)?;
         Ok(())
     }
+}
+
+struct PreparedTask {
+    key: A2ATaskKey,
+    history_length: Option<u32>,
+    deadline: Instant,
+}
+
+struct TaskStreamState {
+    application: A2AGatewayApplication,
+    key: A2ATaskKey,
+    task_id: String,
+    context_id: String,
+    generation: u64,
+    deadline: Instant,
+    finished: bool,
+    pending: VecDeque<InitialA2AStreamResponse>,
 }
 
 fn submission_from_record(record: A2ATaskRecord) -> Result<A2ATaskSubmission, A2AGatewayError> {

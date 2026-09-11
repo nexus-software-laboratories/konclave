@@ -18,7 +18,8 @@ pub use application::{
     SystemA2AGatewayClock,
 };
 pub use client::{
-    A2AAgentCardFetchOutcome, A2AHttpClientConfig, A2AHttpJsonClient, fetch_public_agent_card,
+    A2AAgentCardFetchOutcome, A2AHttpClientConfig, A2AHttpEventStream, A2AHttpJsonClient,
+    fetch_public_agent_card,
 };
 pub use error::A2AGatewayError;
 pub use http::{

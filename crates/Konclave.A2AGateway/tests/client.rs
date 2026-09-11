@@ -16,10 +16,12 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::routing::get;
+use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use common::{
-    CompletingSubmitter, PUBLICATION, TestClock, application_with_publication, request, store,
+    CompletingSubmitter, PUBLICATION, TestClock, application_with_publication, request,
+    request_with_message_id, store,
 };
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -72,6 +74,30 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
     let list = client.list_tasks(Some(50), None).await.unwrap();
     assert_eq!(list.as_wire().tasks.len(), 1);
     assert!(list.as_wire().tasks[0].history.is_empty());
+
+    let mut stream = client
+        .send_streaming_message(request_with_message_id(
+            "message-stream",
+            "request",
+            true,
+            1,
+        ))
+        .await
+        .unwrap();
+    let streamed = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        streamed.state(),
+        KonclaveA2AContracts::wire::TaskState::Completed
+    );
+    assert!(stream.next().await.is_none());
+    let streamed_task_id = A2ATaskId::parse(streamed.task_id().to_owned()).unwrap();
+    assert_eq!(
+        client.subscribe_to_task(&streamed_task_id).await.err(),
+        Some(A2AGatewayError::Remote {
+            status: 400,
+            reason: Some("UNSUPPORTED_OPERATION".to_owned())
+        })
+    );
 
     let discovery_url = format!("http://{address}/.well-known/agent-card.json");
     let (etag, card_name) = match fetch_public_agent_card(

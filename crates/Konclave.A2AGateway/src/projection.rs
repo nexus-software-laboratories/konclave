@@ -11,8 +11,7 @@ use KonclaveA2AContracts::{
 };
 use KonclaveA2ADomain::A2ATaskState;
 use KonclaveA2ATaskStore::{
-    A2ATaskMessageRole, A2ATaskRecord, A2ATerminalReason, StoredA2ATaskMessage,
-    StoredA2ATaskStatus,
+    A2ATaskMessageRole, A2ATaskRecord, A2ATerminalReason, StoredA2ATaskMessage, StoredA2ATaskStatus,
 };
 
 use crate::A2AGatewayError;

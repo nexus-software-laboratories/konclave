@@ -1318,7 +1318,8 @@ fn load_status_updates(
             .transpose()
             .map_err(|_| A2ATaskStoreError::CorruptData)?;
         let occurred_at = from_sql(row.3)?;
-        if generation != expected_generation || !valid_status_reason(state, terminal_reason.as_ref())
+        if generation != expected_generation
+            || !valid_status_reason(state, terminal_reason.as_ref())
         {
             return Err(A2ATaskStoreError::CorruptData);
         }

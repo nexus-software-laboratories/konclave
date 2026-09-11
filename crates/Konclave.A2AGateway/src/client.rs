@@ -1,19 +1,22 @@
+use std::pin::Pin;
 use std::time::Duration;
 
 use KonclaveA2AContracts::wire::AgentInterface;
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH,
     DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard, InitialA2AAgentSecurityKind,
-    InitialA2AInterfaceEnvironment, InitialA2ATaskListResponse, InitialA2ATaskResponse,
-    InitialSendMessageRequest, MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    InitialA2AInterfaceEnvironment, InitialA2AStreamResponse, InitialA2AStreamResponseKind,
+    InitialA2ATaskListResponse, InitialA2ATaskResponse, InitialSendMessageRequest,
+    MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
     decode_initial_agent_card_json, decode_initial_list_tasks_response_json,
-    decode_initial_send_message_response_json, decode_initial_task_json,
-    validate_initial_agent_interface,
+    decode_initial_send_message_response_json, decode_initial_stream_response_json,
+    decode_initial_task_json, validate_initial_agent_interface,
 };
 use KonclaveA2ADomain::A2ATaskId;
 use KonclaveBoundedDocuments::deserialize_strict;
 use KonclaveProtectedHttp::protected_http_client_builder;
-use futures_util::StreamExt as _;
+use futures_util::stream::{self, BoxStream};
+use futures_util::{Stream, StreamExt as _};
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap,
     HeaderValue, IF_NONE_MATCH,
@@ -23,7 +26,10 @@ use serde_json::Value;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::{A2A_JSON_MEDIA_TYPE, A2A_VERSION_HEADER, A2ABearerCredential, A2AGatewayError};
+use crate::{
+    A2A_JSON_MEDIA_TYPE, A2A_STREAM_MEDIA_TYPE, A2A_VERSION_HEADER, A2ABearerCredential,
+    A2AGatewayError,
+};
 
 const MAX_REMOTE_ERROR_BYTES: usize = 64 * 1024;
 const MAX_ETAG_BYTES: usize = 256;
@@ -81,6 +87,10 @@ pub enum A2AAgentCardFetchOutcome {
     NotModified,
 }
 
+/// Incremental validated responses from one finite A2A SSE request.
+pub type A2AHttpEventStream =
+    Pin<Box<dyn Stream<Item = Result<InitialA2AStreamResponse, A2AGatewayError>> + Send>>;
+
 /// Outbound-only client for the strict A2A HTTP+JSON profile.
 pub struct A2AHttpJsonClient {
     client: reqwest::Client,
@@ -88,6 +98,7 @@ pub struct A2AHttpJsonClient {
     tenant: Option<String>,
     bearer_token: Option<Zeroizing<String>>,
     maximum_response_bytes: usize,
+    streaming: bool,
     agent_name: String,
     agent_version: String,
     extended_agent_card: bool,
@@ -136,6 +147,7 @@ impl A2AHttpJsonClient {
             tenant: interface.tenant().map(str::to_owned),
             bearer_token,
             maximum_response_bytes: config.maximum_response_bytes,
+            streaming: card.streaming(),
             agent_name: card.name().to_owned(),
             agent_version: card.version().to_owned(),
             extended_agent_card: card.extended_agent_card(),
@@ -179,6 +191,7 @@ impl A2AHttpJsonClient {
                     .post(self.endpoint("message:send")?)
                     .header(CONTENT_TYPE, A2A_JSON_MEDIA_TYPE)
                     .body(body),
+                A2A_JSON_MEDIA_TYPE,
             )?
             .send()
             .await
@@ -194,6 +207,42 @@ impl A2AHttpJsonClient {
             return Err(A2AGatewayError::Contract);
         }
         Ok(task)
+    }
+
+    /// Sends one validated task-creating request and yields its ordered SSE responses.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, transport, remote, media-type, or initial stream
+    /// contract failures.
+    pub async fn send_streaming_message(
+        &self,
+        request: InitialSendMessageRequest,
+    ) -> Result<A2AHttpEventStream, A2AGatewayError> {
+        if !self.streaming {
+            return Err(A2AGatewayError::UnsupportedOperation);
+        }
+        if request.tenant() != self.tenant.as_deref() {
+            return Err(A2AGatewayError::RouteMismatch);
+        }
+        let requested_context = request.context_id().map(str::to_owned);
+        let body =
+            serde_json::to_vec(&request.into_wire()).map_err(|_| A2AGatewayError::Contract)?;
+        if body.len() > KonclaveA2AContracts::MAX_A2A_ENCODED_REQUEST_BYTES {
+            return Err(A2AGatewayError::Contract);
+        }
+        let response = self
+            .apply_headers(
+                self.client
+                    .post(self.endpoint("message:stream")?)
+                    .header(CONTENT_TYPE, A2A_JSON_MEDIA_TYPE)
+                    .body(body),
+                A2A_STREAM_MEDIA_TYPE,
+            )?
+            .send()
+            .await
+            .map_err(|_| A2AGatewayError::Transport)?;
+        self.success_stream(response, None, requested_context).await
     }
 
     /// Loads one exact task through `GET /tasks/{id}`.
@@ -216,7 +265,7 @@ impl A2AHttpJsonClient {
                 .append_pair("historyLength", &history_length.to_string());
         }
         let response = self
-            .apply_headers(self.client.get(url))?
+            .apply_headers(self.client.get(url), A2A_JSON_MEDIA_TYPE)?
             .send()
             .await
             .map_err(|_| A2AGatewayError::Transport)?;
@@ -226,6 +275,35 @@ impl A2AHttpJsonClient {
             return Err(A2AGatewayError::Contract);
         }
         Ok(task)
+    }
+
+    /// Subscribes to ordered updates for one active task.
+    ///
+    /// The client uses the v1.0 prose HTTP+JSON `POST` binding. The reference server
+    /// also accepts the vendored protobuf annotation's `GET` spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, transport, remote, media-type, or stream-contract
+    /// failures.
+    pub async fn subscribe_to_task(
+        &self,
+        task_id: &A2ATaskId,
+    ) -> Result<A2AHttpEventStream, A2AGatewayError> {
+        if !self.streaming {
+            return Err(A2AGatewayError::UnsupportedOperation);
+        }
+        let response = self
+            .apply_headers(
+                self.client
+                    .post(self.endpoint(&format!("tasks/{}:subscribe", task_id.as_str()))?),
+                A2A_STREAM_MEDIA_TYPE,
+            )?
+            .send()
+            .await
+            .map_err(|_| A2AGatewayError::Transport)?;
+        self.success_stream(response, Some(task_id.as_str().to_owned()), None)
+            .await
     }
 
     /// Loads one visible page of tasks through `GET /tasks`.
@@ -254,7 +332,7 @@ impl A2AHttpJsonClient {
             url.query_pairs_mut().append_pair("pageToken", page_token);
         }
         let response = self
-            .apply_headers(self.client.get(url))?
+            .apply_headers(self.client.get(url), A2A_JSON_MEDIA_TYPE)?
             .send()
             .await
             .map_err(|_| A2AGatewayError::Transport)?;
@@ -275,7 +353,10 @@ impl A2AHttpJsonClient {
             return Err(A2AGatewayError::ExtendedCardNotConfigured);
         }
         let response = self
-            .apply_headers(self.client.get(self.endpoint("extendedAgentCard")?))?
+            .apply_headers(
+                self.client.get(self.endpoint("extendedAgentCard")?),
+                A2A_JSON_MEDIA_TYPE,
+            )?
             .send()
             .await
             .map_err(|_| A2AGatewayError::Transport)?;
@@ -321,9 +402,10 @@ impl A2AHttpJsonClient {
     fn apply_headers(
         &self,
         request: reqwest::RequestBuilder,
+        accept: &'static str,
     ) -> Result<reqwest::RequestBuilder, A2AGatewayError> {
         let request = request
-            .header(ACCEPT, A2A_JSON_MEDIA_TYPE)
+            .header(ACCEPT, accept)
             .header(A2A_VERSION_HEADER, A2A_PROTOCOL_VERSION);
         let Some(token) = &self.bearer_token else {
             return Ok(request);
@@ -342,6 +424,25 @@ impl A2AHttpJsonClient {
         }
         require_json_content_type(response.headers())?;
         read_response_bytes(response, self.maximum_response_bytes).await
+    }
+
+    async fn success_stream(
+        &self,
+        response: Response,
+        expected_task_id: Option<String>,
+        expected_context_id: Option<String>,
+    ) -> Result<A2AHttpEventStream, A2AGatewayError> {
+        let status = response.status();
+        if !status.is_success() {
+            return Err(remote_error(response).await);
+        }
+        require_stream_content_type(response.headers())?;
+        Ok(decode_sse_stream(
+            response,
+            self.maximum_response_bytes,
+            expected_task_id,
+            expected_context_id,
+        ))
     }
 }
 
@@ -472,6 +573,199 @@ async fn read_response_bytes(
     Ok(bytes)
 }
 
+fn decode_sse_stream(
+    response: Response,
+    maximum_event_bytes: usize,
+    expected_task_id: Option<String>,
+    expected_context_id: Option<String>,
+) -> A2AHttpEventStream {
+    let chunks: BoxStream<'static, Result<Vec<u8>, A2AGatewayError>> = response
+        .bytes_stream()
+        .map(|chunk| {
+            chunk
+                .map(|bytes| bytes.to_vec())
+                .map_err(|_| A2AGatewayError::Transport)
+        })
+        .boxed();
+    let state = SseDecodeState {
+        chunks,
+        buffer: Vec::new(),
+        maximum_event_bytes,
+        correlation: StreamCorrelation {
+            first: true,
+            task_id: expected_task_id,
+            context_id: expected_context_id,
+            terminal_seen: false,
+            final_snapshot_seen: false,
+        },
+        eof: false,
+    };
+    Box::pin(stream::try_unfold(state, |mut state| async move {
+        loop {
+            if let Some(frame) = take_sse_frame(&mut state.buffer) {
+                if frame.len() > state.maximum_event_bytes {
+                    return Err(A2AGatewayError::Contract);
+                }
+                let Some(data) = parse_sse_data(&frame, state.maximum_event_bytes)? else {
+                    continue;
+                };
+                let event = decode_initial_stream_response_json(&data)
+                    .map_err(|_| A2AGatewayError::Contract)?;
+                state.correlation.validate(&event)?;
+                return Ok(Some((event, state)));
+            }
+            if state.eof {
+                if state.buffer.is_empty() {
+                    return Ok(None);
+                }
+                let frame = std::mem::take(&mut state.buffer);
+                if frame.len() > state.maximum_event_bytes {
+                    return Err(A2AGatewayError::Contract);
+                }
+                let Some(data) = parse_sse_data(&frame, state.maximum_event_bytes)? else {
+                    return Ok(None);
+                };
+                let event = decode_initial_stream_response_json(&data)
+                    .map_err(|_| A2AGatewayError::Contract)?;
+                state.correlation.validate(&event)?;
+                return Ok(Some((event, state)));
+            }
+            if state.buffer.len() > state.maximum_event_bytes {
+                return Err(A2AGatewayError::Contract);
+            }
+            match state.chunks.next().await {
+                Some(Ok(chunk)) => state.buffer.extend_from_slice(&chunk),
+                Some(Err(error)) => return Err(error),
+                None => state.eof = true,
+            }
+            if state.buffer.len() > state.maximum_event_bytes && !contains_sse_frame(&state.buffer)
+            {
+                return Err(A2AGatewayError::Contract);
+            }
+        }
+    }))
+}
+
+fn contains_sse_frame(bytes: &[u8]) -> bool {
+    sse_frame_end(bytes).is_some()
+}
+
+fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let end = sse_frame_end(buffer)?;
+    Some(buffer.drain(..end).collect())
+}
+
+fn sse_frame_end(bytes: &[u8]) -> Option<usize> {
+    let mut line_start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let line_end = if index > line_start && bytes[index - 1] == b'\r' {
+            index - 1
+        } else {
+            index
+        };
+        if line_end == line_start {
+            return Some(index + 1);
+        }
+        line_start = index + 1;
+    }
+    None
+}
+
+fn parse_sse_data(frame: &[u8], maximum: usize) -> Result<Option<Vec<u8>>, A2AGatewayError> {
+    let frame = std::str::from_utf8(frame).map_err(|_| A2AGatewayError::Contract)?;
+    let mut data = String::new();
+    let mut found = false;
+    for line in frame.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        if field != "data" {
+            continue;
+        }
+        if found {
+            data.push('\n');
+        }
+        data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        found = true;
+        if data.len() > maximum {
+            return Err(A2AGatewayError::Contract);
+        }
+    }
+    Ok(found.then(|| data.into_bytes()))
+}
+
+struct SseDecodeState {
+    chunks: BoxStream<'static, Result<Vec<u8>, A2AGatewayError>>,
+    buffer: Vec<u8>,
+    maximum_event_bytes: usize,
+    correlation: StreamCorrelation,
+    eof: bool,
+}
+
+struct StreamCorrelation {
+    first: bool,
+    task_id: Option<String>,
+    context_id: Option<String>,
+    terminal_seen: bool,
+    final_snapshot_seen: bool,
+}
+
+impl StreamCorrelation {
+    fn validate(&mut self, event: &InitialA2AStreamResponse) -> Result<(), A2AGatewayError> {
+        if self.first && event.kind() != InitialA2AStreamResponseKind::Task {
+            return Err(A2AGatewayError::Contract);
+        }
+        if self
+            .task_id
+            .as_deref()
+            .is_some_and(|task_id| task_id != event.task_id())
+            || self
+                .context_id
+                .as_deref()
+                .is_some_and(|context_id| context_id != event.context_id())
+        {
+            return Err(A2AGatewayError::Contract);
+        }
+        if self.task_id.is_none() {
+            A2ATaskId::parse(event.task_id().to_owned()).map_err(|_| A2AGatewayError::Contract)?;
+            self.task_id = Some(event.task_id().to_owned());
+        }
+        if self.context_id.is_none() {
+            self.context_id = Some(event.context_id().to_owned());
+        }
+        if self.terminal_seen {
+            if event.kind() != InitialA2AStreamResponseKind::Task
+                || !response_state(event.state())
+                || self.final_snapshot_seen
+            {
+                return Err(A2AGatewayError::Contract);
+            }
+            self.final_snapshot_seen = true;
+        } else if response_state(event.state()) {
+            self.terminal_seen = true;
+        }
+        self.first = false;
+        Ok(())
+    }
+}
+
+fn response_state(state: KonclaveA2AContracts::wire::TaskState) -> bool {
+    matches!(
+        state,
+        KonclaveA2AContracts::wire::TaskState::Completed
+            | KonclaveA2AContracts::wire::TaskState::Failed
+            | KonclaveA2AContracts::wire::TaskState::Canceled
+            | KonclaveA2AContracts::wire::TaskState::InputRequired
+            | KonclaveA2AContracts::wire::TaskState::Rejected
+            | KonclaveA2AContracts::wire::TaskState::AuthRequired
+    )
+}
+
 async fn remote_error(response: Response) -> A2AGatewayError {
     let status = response.status().as_u16();
     let reason = read_response_bytes(response, MAX_REMOTE_ERROR_BYTES)
@@ -509,6 +803,19 @@ fn require_json_content_type(headers: &HeaderMap) -> Result<(), A2AGatewayError>
     }
 }
 
+fn require_stream_content_type(headers: &HeaderMap) -> Result<(), A2AGatewayError> {
+    let value = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(A2AGatewayError::Contract)?;
+    let media_type = value.split(';').next().unwrap_or_default().trim();
+    if media_type.eq_ignore_ascii_case(A2A_STREAM_MEDIA_TYPE) {
+        Ok(())
+    } else {
+        Err(A2AGatewayError::Contract)
+    }
+}
+
 fn same_origin(left: &Url, right: &Url) -> bool {
     left.scheme() == right.scheme()
         && left
@@ -516,4 +823,29 @@ fn same_origin(left: &Url, right: &Url) -> bool {
             .zip(right.host_str())
             .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
         && left.port_or_known_default() == right.port_or_known_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_sse_data, sse_frame_end};
+
+    #[test]
+    fn sse_framing_accepts_crlf_comments_and_multiline_data() {
+        let bytes = b": keep-alive\r\ndata: {\"task\":\r\ndata: {}}\r\n\r\nremaining";
+        let end = sse_frame_end(bytes).unwrap();
+        assert_eq!(
+            parse_sse_data(&bytes[..end], 128).unwrap().unwrap(),
+            b"{\"task\":\n{}}"
+        );
+        assert_eq!(&bytes[end..], b"remaining");
+        assert_eq!(parse_sse_data(b": keep-alive\n\n", 128).unwrap(), None);
+    }
+
+    #[test]
+    fn sse_data_is_bounded_before_json_decoding() {
+        assert_eq!(
+            parse_sse_data(b"data: 12345\n\n", 4).err(),
+            Some(crate::A2AGatewayError::Contract)
+        );
+    }
 }

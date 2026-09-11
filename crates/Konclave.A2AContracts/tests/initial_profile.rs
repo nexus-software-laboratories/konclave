@@ -222,11 +222,9 @@ fn subscribe_to_task_is_tenant_and_identifier_bound() {
         tenant: "tenant-a".to_string(),
         id: "11".repeat(16),
     };
-    let protobuf = decode_initial_subscribe_to_task_protobuf(
-        &request.encode_to_vec(),
-        Some("tenant-a"),
-    )
-    .unwrap();
+    let protobuf =
+        decode_initial_subscribe_to_task_protobuf(&request.encode_to_vec(), Some("tenant-a"))
+            .unwrap();
     assert_eq!(protobuf.tenant(), Some("tenant-a"));
     assert_eq!(protobuf.task_id(), "11111111111111111111111111111111");
     let json = decode_initial_subscribe_to_task_json(
@@ -237,11 +235,7 @@ fn subscribe_to_task_is_tenant_and_identifier_bound() {
     assert_eq!(json.tenant(), protobuf.tenant());
     assert_eq!(json.task_id(), protobuf.task_id());
     assert_eq!(
-        decode_initial_subscribe_to_task_protobuf(
-            &request.encode_to_vec(),
-            Some("tenant-b")
-        )
-        .err(),
+        decode_initial_subscribe_to_task_protobuf(&request.encode_to_vec(), Some("tenant-b")).err(),
         Some(A2AContractError::TenantMismatch)
     );
 }

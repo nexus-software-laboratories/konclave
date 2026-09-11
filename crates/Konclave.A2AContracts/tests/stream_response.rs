@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use KonclaveA2AContracts::wire::{
-    Message, Part, Role, StreamResponse, Task, TaskStatus, TaskStatusUpdateEvent, TaskState, part,
+    Message, Part, Role, StreamResponse, Task, TaskState, TaskStatus, TaskStatusUpdateEvent, part,
     stream_response,
 };
 use KonclaveA2AContracts::{
-    A2AContractError, A2A_TEXT_MEDIA_TYPE, INITIAL_TASK_TERMINAL_REASON_FIELD,
+    A2A_TEXT_MEDIA_TYPE, A2AContractError, INITIAL_TASK_TERMINAL_REASON_FIELD,
     InitialA2AStreamResponseKind, decode_initial_stream_response_json,
     decode_initial_stream_response_protobuf, validate_initial_stream_response,
 };
@@ -104,10 +104,7 @@ fn task_and_status_update_round_trip_both_encodings() {
         let protobuf = decode_initial_stream_response_protobuf(&response.encode_to_vec()).unwrap();
         assert_eq!(protobuf.kind(), kind);
         assert_eq!(protobuf.state(), state);
-        assert_eq!(
-            protobuf.task_id(),
-            "00112233445566778899aabbccddeeff"
-        );
+        assert_eq!(protobuf.task_id(), "00112233445566778899aabbccddeeff");
         assert_eq!(protobuf.context_id(), "context-1");
         let json = protobuf.deterministic_json().unwrap();
         let json = decode_initial_stream_response_json(&json).unwrap();
@@ -140,8 +137,14 @@ fn stream_response_rejects_unsupported_payloads_and_invalid_status() {
     ));
 
     let mut wrong_task = status_update(TaskState::Completed);
-    wrong_task.status.as_mut().unwrap().message.as_mut().unwrap().task_id =
-        "ffffffffffffffffffffffffffffffff".to_owned();
+    wrong_task
+        .status
+        .as_mut()
+        .unwrap()
+        .message
+        .as_mut()
+        .unwrap()
+        .task_id = "ffffffffffffffffffffffffffffffff".to_owned();
     assert!(matches!(
         validate_initial_stream_response(StreamResponse {
             payload: Some(stream_response::Payload::StatusUpdate(wrong_task)),

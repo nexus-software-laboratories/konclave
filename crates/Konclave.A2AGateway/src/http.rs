@@ -565,20 +565,6 @@ async fn extended_agent_card(
     }
 }
 
-async fn unsupported_operation(
-    State(state): State<A2AHttpState>,
-    request: Request<Body>,
-) -> Response {
-    let (parts, _) = request.into_parts();
-    if let Err(response) = authorize(&state, &parts, A2AHttpAction::UnsupportedOperation) {
-        return *response;
-    }
-    if let Err(response) = validate_common_headers(&parts.headers) {
-        return *response;
-    }
-    unsupported_operation_response()
-}
-
 async fn cancel_task_unscoped(
     State(state): State<A2AHttpState>,
     Path(id): Path<String>,

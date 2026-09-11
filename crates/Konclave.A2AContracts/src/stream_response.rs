@@ -1,15 +1,11 @@
 use prost::Message as _;
 
-use crate::initial_profile::{
-    decode_json_bounded, require_encoded_bound, validate_identifier,
-};
+use crate::initial_profile::{decode_json_bounded, require_encoded_bound, validate_identifier};
 use crate::task_response::{
     MAX_A2A_ENCODED_RESPONSE_BYTES, validate_task_message, validate_terminal_reason_metadata,
     validate_timestamp,
 };
-use crate::wire::{
-    Role, StreamResponse, TaskState, stream_response,
-};
+use crate::wire::{Role, StreamResponse, TaskState, stream_response};
 use crate::{A2AContractError, validate_initial_task};
 
 /// Streaming payload shape admitted by Konclave's text-only A2A profile.
@@ -145,26 +141,25 @@ pub fn validate_initial_stream_response(
                 update.context_id.clone(),
                 "stream_response.status_update.context_id",
             )?;
-            let status = update.status.as_ref().ok_or(A2AContractError::MissingField {
-                field: "stream_response.status_update.status",
-            })?;
+            let status = update
+                .status
+                .as_ref()
+                .ok_or(A2AContractError::MissingField {
+                    field: "stream_response.status_update.status",
+                })?;
             let state = TaskState::try_from(status.state)
                 .ok()
                 .filter(|state| *state != TaskState::Unspecified)
                 .ok_or(A2AContractError::UnsupportedField {
                     field: "stream_response.status_update.status.state",
                 })?;
-            let timestamp =
-                status
-                    .timestamp
-                    .as_ref()
-                    .ok_or(A2AContractError::MissingField {
-                        field: "stream_response.status_update.status.timestamp",
-                    })?;
-            validate_timestamp(
-                timestamp,
-                "stream_response.status_update.status.timestamp",
-            )?;
+            let timestamp = status
+                .timestamp
+                .as_ref()
+                .ok_or(A2AContractError::MissingField {
+                    field: "stream_response.status_update.status.timestamp",
+                })?;
+            validate_timestamp(timestamp, "stream_response.status_update.status.timestamp")?;
             if let Some(message) = &status.message {
                 validate_task_message(message, &task_id, &context_id, Some(Role::Agent))?;
             }
@@ -183,11 +178,9 @@ pub fn validate_initial_stream_response(
                 state,
             })
         }
-        Some(stream_response::Payload::Message(_)) => {
-            Err(A2AContractError::UnsupportedField {
-                field: "stream_response.message",
-            })
-        }
+        Some(stream_response::Payload::Message(_)) => Err(A2AContractError::UnsupportedField {
+            field: "stream_response.message",
+        }),
         Some(stream_response::Payload::ArtifactUpdate(_)) => {
             Err(A2AContractError::UnsupportedField {
                 field: "stream_response.artifact_update",

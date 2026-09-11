@@ -332,17 +332,17 @@ async fn streaming_routes_use_sse_and_denied_authorization_remains_bounded() {
     let events = sse_data(&bytes);
     assert_eq!(events.len(), 1);
     let task = decode_initial_stream_response_json(events[0]).unwrap();
-    assert_eq!(task.state(), KonclaveA2AContracts::wire::TaskState::Completed);
+    assert_eq!(
+        task.state(),
+        KonclaveA2AContracts::wire::TaskState::Completed
+    );
 
     let response = router
         .clone()
         .oneshot(
-            authenticated(&format!(
-                "/tenant-a/tasks/{}:subscribe",
-                task.task_id()
-            ))
-            .body(Body::empty())
-            .unwrap(),
+            authenticated(&format!("/tenant-a/tasks/{}:subscribe", task.task_id()))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -402,13 +402,10 @@ async fn active_task_subscription_supports_proto_get_and_rest_post_aliases() {
         let response = router
             .clone()
             .oneshot(
-                authenticated(&format!(
-                    "/tenant-a/tasks/{}:subscribe",
-                    task.task_id()
-                ))
-                .method(method)
-                .body(Body::empty())
-                .unwrap(),
+                authenticated(&format!("/tenant-a/tasks/{}:subscribe", task.task_id()))
+                    .method(method)
+                    .body(Body::empty())
+                    .unwrap(),
             )
             .await
             .unwrap();

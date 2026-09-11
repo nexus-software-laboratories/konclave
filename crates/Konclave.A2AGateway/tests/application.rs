@@ -263,15 +263,17 @@ async fn subscription_replays_each_durable_status_after_the_initial_snapshot() {
     let completed = stream.next().await.unwrap().unwrap();
     assert_eq!(completed.kind(), InitialA2AStreamResponseKind::StatusUpdate);
     assert_eq!(completed.state(), TaskState::Completed);
-    assert!(completed
-        .as_wire()
-        .payload
-        .as_ref()
-        .is_some_and(|payload| matches!(
-            payload,
-            KonclaveA2AContracts::wire::stream_response::Payload::StatusUpdate(update)
-                if update.status.as_ref().and_then(|status| status.message.as_ref()).is_some()
-        )));
+    assert!(
+        completed
+            .as_wire()
+            .payload
+            .as_ref()
+            .is_some_and(|payload| matches!(
+                payload,
+                KonclaveA2AContracts::wire::stream_response::Payload::StatusUpdate(update)
+                    if update.status.as_ref().and_then(|status| status.message.as_ref()).is_some()
+            ))
+    );
     assert!(stream.next().await.is_none());
 }
 
