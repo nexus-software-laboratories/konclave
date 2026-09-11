@@ -103,13 +103,13 @@ fn task_and_status_update_round_trip_both_encodings() {
     ] {
         let protobuf = decode_initial_stream_response_protobuf(&response.encode_to_vec()).unwrap();
         assert_eq!(protobuf.kind(), kind);
-        assert_eq!(protobuf.state(), state);
+        assert!(protobuf.state() == state);
         assert_eq!(protobuf.task_id(), "00112233445566778899aabbccddeeff");
         assert_eq!(protobuf.context_id(), "context-1");
         let json = protobuf.deterministic_json().unwrap();
         let json = decode_initial_stream_response_json(&json).unwrap();
         assert_eq!(json.kind(), kind);
-        assert_eq!(json.state(), state);
+        assert!(json.state() == state);
     }
 }
 

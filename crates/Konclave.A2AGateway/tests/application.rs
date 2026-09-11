@@ -189,7 +189,7 @@ async fn streaming_send_starts_with_current_task_and_closes_when_terminal() {
         .unwrap();
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.kind(), InitialA2AStreamResponseKind::Task);
-    assert_eq!(first.state(), TaskState::Completed);
+    assert!(first.state() == TaskState::Completed);
     assert!(stream.next().await.is_none());
 }
 
@@ -223,7 +223,7 @@ async fn subscription_replays_each_durable_status_after_the_initial_snapshot() {
     let mut stream = application.subscribe_to_task(subscribe).await.unwrap();
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.kind(), InitialA2AStreamResponseKind::Task);
-    assert_eq!(first.state(), TaskState::Submitted);
+    assert!(first.state() == TaskState::Submitted);
 
     store
         .transition_task(A2ATaskTransition::new(
@@ -259,10 +259,10 @@ async fn subscription_replays_each_durable_status_after_the_initial_snapshot() {
 
     let working = stream.next().await.unwrap().unwrap();
     assert_eq!(working.kind(), InitialA2AStreamResponseKind::StatusUpdate);
-    assert_eq!(working.state(), TaskState::Working);
+    assert!(working.state() == TaskState::Working);
     let completed = stream.next().await.unwrap().unwrap();
     assert_eq!(completed.kind(), InitialA2AStreamResponseKind::StatusUpdate);
-    assert_eq!(completed.state(), TaskState::Completed);
+    assert!(completed.state() == TaskState::Completed);
     assert!(
         completed
             .as_wire()

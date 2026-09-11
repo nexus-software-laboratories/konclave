@@ -72,6 +72,11 @@ one persistence snapshot. SQLite holds a read transaction across both reads so a
 concurrent retention sweep cannot combine a pre-prune task row with post-prune empty
 history.
 
+`status_updates` accepts one previously observed generation and returns every later
+status record in consecutive generation order. The generation is an internal durable
+stream cursor, not an A2A wire field. A cursor ahead of current state is corruption;
+the current generation returns an empty page.
+
 `list_tasks` returns only non-pruned tasks for one exact agent, tenant, and public
 context. Ordering is deterministic by `(created_at_unix_milliseconds DESC, task_id
 DESC)`, and the returned cursor is derived from the last visible task on the page so
@@ -134,6 +139,7 @@ The SQLite suite covers:
 - exact create retry, changed-content conflict, and process reopen;
 - context, agent, tenant, conversation, and target isolation;
 - generation races and exact transition retries;
+- consecutive status reads and exact generation-cursor resume;
 - terminal reasons, cancellation, completion evidence, and terminal immutability;
 - deterministic task listing, cursor pagination, and hidden pruned tombstones;
 - ordered message and artifact idempotency/conflicts;

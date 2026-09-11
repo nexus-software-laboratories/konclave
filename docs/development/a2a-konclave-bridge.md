@@ -125,6 +125,13 @@ not expose daemon cursors, watch handles, or any broader local-service history s
 Listing hides content-pruned tombstones even though the bridge still retains those
 internal rows for idempotent retry detection.
 
+`SendStreamingMessage` and `SubscribeToTask` observe the same portable task store.
+They do not start another local-service observer or expose the bridge's relay cursor.
+The HTTP stream reads durable A2A status generations, so a reconnect can resume from
+a fresh current Task snapshot without changing Konclave send or response identity.
+Dropping the HTTP stream stops only that store observer; the bridge continues its
+bounded authoritative-response observation.
+
 ## Local-service grant behavior
 
 `Konclave.LocalServiceClient::LocalServiceJsonClient` authenticates the expected
@@ -161,4 +168,7 @@ Focused tests cover:
 - owned observer cancellation and bounded join on shutdown;
 - `WORKING` task recovery after bridge restart;
 - replacement-grant ledger identity; and
-- authenticated A2A HTTP+JSON submission through the real bridge and SQLite store.
+- authenticated A2A HTTP+JSON submission through the real bridge and SQLite store;
+  and
+- streaming submission and resubscription through durable task status history without
+  duplicate Konclave sends or observers.

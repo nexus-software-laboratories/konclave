@@ -85,10 +85,7 @@ async fn outbound_client_round_trips_server_tasks_cards_and_etags() {
         .await
         .unwrap();
     let streamed = stream.next().await.unwrap().unwrap();
-    assert_eq!(
-        streamed.state(),
-        KonclaveA2AContracts::wire::TaskState::Completed
-    );
+    assert!(streamed.state() == KonclaveA2AContracts::wire::TaskState::Completed);
     assert!(stream.next().await.is_none());
     let streamed_task_id = A2ATaskId::parse(streamed.task_id().to_owned()).unwrap();
     assert_eq!(

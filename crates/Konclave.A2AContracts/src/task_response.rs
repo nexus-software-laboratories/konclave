@@ -17,7 +17,7 @@ const MIN_PROTOBUF_TIMESTAMP_SECONDS: i64 = -62_135_596_800;
 const MAX_PROTOBUF_TIMESTAMP_SECONDS: i64 = 253_402_300_799;
 pub(crate) const MAX_A2A_TERMINAL_REASON_BYTES: usize = 64;
 
-/// Validated task returned by the initial non-streaming profile.
+/// Validated task returned by the text-only profile.
 pub struct InitialA2ATaskResponse {
     wire: Task,
     state: TaskState,
@@ -146,7 +146,7 @@ pub fn validate_initial_send_message_response(
     }
 }
 
-/// Narrows one generated Task to the initial non-streaming text-only profile.
+/// Narrows one generated Task to the text-only profile.
 ///
 /// # Errors
 ///

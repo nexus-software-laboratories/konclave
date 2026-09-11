@@ -2,8 +2,8 @@
 
 This document is the canonical implementation contract for Konclave's public
 single-publication A2A HTTP+JSON gateway and outbound client. ADR 0013 owns the
-network-edge trust boundary, ADR 0014 owns durable task-store semantics, and ADR 0015
-owns publication and discovery visibility.
+network-edge trust boundary, ADR 0014 owns durable task-store semantics, ADR 0015
+owns publication and discovery visibility, and ADR 0016 owns streaming behavior.
 
 ## Crate boundaries
 
@@ -41,8 +41,10 @@ The reference router implements the pinned A2A v1.0.1 HTTP+JSON binding:
 |---|---|---|
 | Public Agent Card | `GET /.well-known/agent-card.json` | Not tenant-prefixed |
 | SendMessage | `POST /message:send` | `POST /{tenant}/message:send` |
+| SendStreamingMessage | `POST /message:stream` | `POST /{tenant}/message:stream` |
 | ListTasks | `GET /tasks` | `GET /{tenant}/tasks` |
 | GetTask | `GET /tasks/{id}` | `GET /{tenant}/tasks/{id}` |
+| SubscribeToTask | `GET` or `POST /tasks/{id}:subscribe` | `GET` or `POST /{tenant}/tasks/{id}:subscribe` |
 | CancelTask | `POST /tasks/{id}:cancel` | `POST /{tenant}/tasks/{id}:cancel` |
 | GetExtendedAgentCard | `GET /extendedAgentCard` | `GET /{tenant}/extendedAgentCard` |
 
@@ -56,9 +58,10 @@ Request bodies accept `application/a2a+json` and compatibility
 `application/json`, with an optional UTF-8 charset parameter. Every JSON response
 uses the v1.0.1-preferred `application/a2a+json` media type.
 
-Streaming message and task-subscription paths authenticate first and return
-`UNSUPPORTED_OPERATION`. Push notification, artifact, and other task-lifecycle
-operations remain outside this initial profile.
+Streaming message and task-subscription responses use `text/event-stream`. The
+server accepts both subscribe verbs because the pinned v1.0.1 schema annotation and
+prose HTTP+JSON binding disagree. Push notification, artifact, and other
+task-lifecycle operations remain outside this profile.
 
 ## Authentication and authorization
 
@@ -69,8 +72,10 @@ validating a tenant path, parsing task identity, or consulting durable state.
 an opaque 32-byte principal identifier. It then decides one exact action:
 
 - `SendMessage`;
+- `SendStreamingMessage`;
 - `ListTasks`;
 - `GetTask`;
+- `SubscribeToTask`;
 - `CancelTask`;
 - `GetExtendedAgentCard`; or
 - `UnsupportedOperation`.
@@ -157,6 +162,31 @@ single terminal-reason field.
 Validated task wrappers do not implement `Clone` or `Debug` because they may contain
 message plaintext.
 
+## Streaming projection
+
+`SendStreamingMessage` performs the same durable create/reconcile and idempotent
+submission as `SendMessage`. `returnImmediately` has no effect on the stream.
+`SubscribeToTask` rejects an already terminal task before streaming headers.
+
+Every stream:
+
+1. emits one current Task snapshot;
+2. records that snapshot's task generation as its internal cursor;
+3. reads every later durable status record in generation order;
+4. emits one `TaskStatusUpdateEvent` per record; and
+5. closes after a terminal or interrupted event, or when the finite response deadline
+   expires.
+
+The text-only stream emits no direct Message or artifact-update payloads. Completed
+status updates carry the exact agent response in `TaskStatus.message`. Failed,
+rejected, and canceled updates use the same bounded `konclave_terminal_reason`
+metadata as GetTask.
+
+There is no proprietary resume token or SSE event ID. A caller reconnects with
+`SubscribeToTask`; the required first Task snapshot reconciles state accepted while
+the caller was disconnected. A closed or dropped HTTP stream never cancels or
+otherwise mutates the durable task.
+
 ## Error responses
 
 HTTP failures use a bounded A2A `google.rpc.Status`-shaped JSON envelope:
@@ -219,13 +249,17 @@ deployment-specific client adapter.
 The built-in client:
 
 - preserves the interface base path and adds the exact optional tenant prefix;
-- sends `Content-Type` and `Accept` as `application/a2a+json`;
+- sends `application/a2a+json` for request and non-stream response content and
+  `text/event-stream` as the streaming accept type;
 - sends `A2A-Version: 1.0`;
 - marks Bearer headers sensitive;
 - validates request tenant before transmission;
 - disables redirects and automatic system/environment proxies;
 - uses normal trusted-CA TLS verification;
-- enforces a finite total timeout and bounded streamed response accumulation;
+- enforces a finite total timeout and bounded non-stream response accumulation;
+- parses SSE incrementally with a per-event bound and task/context correlation;
+- sends streaming messages and resubscribes only when the Agent Card advertises
+  streaming;
 - validates response media type and full Task or Agent Card shape;
 - correlates GetTask response identity and SendMessage context;
 - requires extended cards to retain the base agent name, version, interfaces, and
@@ -252,12 +286,14 @@ modified by this gateway.
 |---|---:|
 | Request body | 128 KiB |
 | Task/Card response | 256 KiB |
+| SSE data event | 256 KiB |
 | Remote error body | 64 KiB |
 | Query string | 256 bytes |
 | Request-body timeout | 60 seconds |
 | Client total timeout | 60 seconds |
 | Concurrent HTTP requests | 256 |
 | Response wait | 5 minutes |
+| SSE connection | 5 minutes |
 | Response poll interval | 1 second |
 | Static Bearer credentials | 64 |
 | Bearer credential | 32-512 visible ASCII bytes |
@@ -274,12 +310,14 @@ Focused tests cover:
 - authentication before body parsing and route disclosure;
 - public-card opt-in, ETag, and cache behavior;
 - extended-card authorization and private caching;
-- unsupported streaming and bounded error envelopes;
+- first-Task SSE ordering, consecutive status updates, terminal closure, finite
+  resubscription windows, and both v1.0.1 subscribe verbs;
 - end-to-end client SendMessage, ListTasks, GetTask, extended-card, and conditional discovery;
 - redirect refusal with credentials;
 - shared protected-client construction with ambient proxy discovery disabled;
 - response byte bounds, terminal-reason metadata, task/context correlation, and
-  cursor pagination; and
+  cursor pagination;
+- incremental SSE parsing, event bounds, CRLF/comments, and stream correlation; and
 - TLS-or-loopback binding policy.
 
 The A2A-to-Konclave bridge test suite runs the application and authenticated

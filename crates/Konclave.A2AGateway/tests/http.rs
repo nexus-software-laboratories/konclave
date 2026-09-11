@@ -332,10 +332,7 @@ async fn streaming_routes_use_sse_and_denied_authorization_remains_bounded() {
     let events = sse_data(&bytes);
     assert_eq!(events.len(), 1);
     let task = decode_initial_stream_response_json(events[0]).unwrap();
-    assert_eq!(
-        task.state(),
-        KonclaveA2AContracts::wire::TaskState::Completed
-    );
+    assert!(task.state() == KonclaveA2AContracts::wire::TaskState::Completed);
 
     let response = router
         .clone()
@@ -419,10 +416,7 @@ async fn active_task_subscription_supports_proto_get_and_rest_post_aliases() {
         assert_eq!(events.len(), 1);
         let current = decode_initial_stream_response_json(events[0]).unwrap();
         assert_eq!(current.task_id(), task.task_id());
-        assert_eq!(
-            current.state(),
-            KonclaveA2AContracts::wire::TaskState::Submitted
-        );
+        assert!(current.state() == KonclaveA2AContracts::wire::TaskState::Submitted);
     }
 }
 
