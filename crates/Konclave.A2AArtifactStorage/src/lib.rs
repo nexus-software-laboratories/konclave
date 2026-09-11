@@ -14,7 +14,7 @@ use KonclaveA2AContracts::{
 };
 use KonclaveSecretStorage::{
     AUTHENTICATED_CIPHER_TAG_BYTES, AuthenticatedCipher, AuthenticatedCipherKey,
-    AuthenticatedCiphertext, create_or_verify_owner_protected_file,
+    AuthenticatedCiphertext, SecretStorageError, create_or_verify_owner_protected_file,
     ensure_owner_protected_directory, open_owner_protected_file,
 };
 use sha2::{Digest as _, Sha256};
@@ -40,6 +40,9 @@ pub enum A2AArtifactStorageError {
     /// No exact ciphertext object exists.
     #[error("A2A artifact object does not exist")]
     ObjectNotFound,
+    /// Existing bytes conflict with an object's content address.
+    #[error("A2A artifact object conflicts with stored content")]
+    ObjectConflict,
     /// Encryption, authentication, or secure randomness failed.
     #[error("A2A artifact object cryptography failed")]
     Cryptography,
@@ -147,7 +150,16 @@ impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
             return Err(A2AArtifactStorageError::DigestMismatch);
         }
         create_or_verify_owner_protected_file(&self.path(object_id), ciphertext)
-            .map_err(|_| A2AArtifactStorageError::StorageUnavailable)
+            .map_err(map_owner_storage_error)
+    }
+
+    fn map_owner_storage_error(error: SecretStorageError) -> A2AArtifactStorageError {
+        match error {
+            SecretStorageError::OwnerProtectedStorageConflict => {
+                A2AArtifactStorageError::ObjectConflict
+            }
+            _ => A2AArtifactStorageError::StorageUnavailable,
+        }
     }
 
     fn get(
@@ -584,6 +596,23 @@ mod tests {
         assert_ne!(
             first.part().content.as_ref(),
             second.part().content.as_ref()
+        );
+    }
+
+    #[test]
+    fn existing_conflicting_object_fails_explicitly() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FileA2AArtifactObjectStore::open(root.path().join("objects")).unwrap();
+        let ciphertext = b"0123456789abcdef";
+        let object_id = A2AArtifactObjectId::from_ciphertext(ciphertext);
+        create_or_verify_owner_protected_file(
+            &store.path(object_id),
+            b"fedcba9876543210",
+        )
+        .unwrap();
+        assert_eq!(
+            store.put(object_id, ciphertext).err(),
+            Some(A2AArtifactStorageError::ObjectConflict)
         );
     }
 
