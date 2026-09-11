@@ -267,6 +267,7 @@ fn list_task_mapping_remains_route_scoped() {
         lookup.page_token(),
         Some("v1.100.11111111111111111111111111111111")
     );
+    assert!(!lookup.include_artifacts());
 }
 
 #[test]

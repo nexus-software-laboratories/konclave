@@ -44,6 +44,80 @@ pub struct A2ATaskPruneOutcome {
     pub removed_tombstones: usize,
 }
 
+/// One task, message window, and artifact page read from one persistence snapshot.
+pub struct A2ATaskSnapshot {
+    task: A2ATaskRecord,
+    messages: Vec<StoredA2ATaskMessage>,
+    artifacts: Vec<StoredA2ATaskArtifact>,
+}
+
+impl A2ATaskSnapshot {
+    /// Creates one persistence-owned snapshot.
+    #[must_use]
+    pub fn new(
+        task: A2ATaskRecord,
+        messages: Vec<StoredA2ATaskMessage>,
+        artifacts: Vec<StoredA2ATaskArtifact>,
+    ) -> Self {
+        Self {
+            task,
+            messages,
+            artifacts,
+        }
+    }
+
+    /// Consumes the snapshot into its task, messages, and artifacts.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        A2ATaskRecord,
+        Vec<StoredA2ATaskMessage>,
+        Vec<StoredA2ATaskArtifact>,
+    ) {
+        (self.task, self.messages, self.artifacts)
+    }
+}
+
+/// Ordered stream deltas observed from one persistence snapshot.
+pub struct A2ATaskStreamUpdates {
+    task: A2ATaskRecord,
+    statuses: Vec<StoredA2ATaskStatus>,
+    artifacts: Vec<StoredA2ATaskArtifact>,
+    messages: Vec<StoredA2ATaskMessage>,
+}
+
+impl A2ATaskStreamUpdates {
+    /// Creates one persistence-owned stream update set.
+    #[must_use]
+    pub fn new(
+        task: A2ATaskRecord,
+        statuses: Vec<StoredA2ATaskStatus>,
+        artifacts: Vec<StoredA2ATaskArtifact>,
+        messages: Vec<StoredA2ATaskMessage>,
+    ) -> Self {
+        Self {
+            task,
+            statuses,
+            artifacts,
+            messages,
+        }
+    }
+
+    /// Consumes the update set into its current task and ordered deltas.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        A2ATaskRecord,
+        Vec<StoredA2ATaskStatus>,
+        Vec<StoredA2ATaskArtifact>,
+        Vec<StoredA2ATaskMessage>,
+    ) {
+        (self.task, self.statuses, self.artifacts, self.messages)
+    }
+}
+
 /// Opaque cursor for deterministic task pagination.
 #[derive(Clone, PartialEq, Eq)]
 pub struct A2ATaskListCursor {
@@ -149,6 +223,70 @@ pub struct A2ATaskListPage {
     total_size: usize,
 }
 
+/// One listed task and its complete retained artifact set.
+pub struct A2ATaskWithArtifacts {
+    task: A2ATaskRecord,
+    artifacts: Vec<StoredA2ATaskArtifact>,
+}
+
+impl A2ATaskWithArtifacts {
+    /// Creates one persistence-owned listed task projection.
+    #[must_use]
+    pub fn new(task: A2ATaskRecord, artifacts: Vec<StoredA2ATaskArtifact>) -> Self {
+        Self { task, artifacts }
+    }
+
+    /// Consumes the projection into its task and artifacts.
+    #[must_use]
+    pub fn into_parts(self) -> (A2ATaskRecord, Vec<StoredA2ATaskArtifact>) {
+        (self.task, self.artifacts)
+    }
+}
+
+/// Deterministic task page with atomically observed artifacts.
+pub struct A2ATaskArtifactListPage {
+    tasks: Vec<A2ATaskWithArtifacts>,
+    next_cursor: Option<A2ATaskListCursor>,
+    page_size: usize,
+    total_size: usize,
+}
+
+impl A2ATaskArtifactListPage {
+    /// Creates one persistence-owned artifact-inclusive page.
+    #[must_use]
+    pub fn new(
+        tasks: Vec<A2ATaskWithArtifacts>,
+        next_cursor: Option<A2ATaskListCursor>,
+        page_size: usize,
+        total_size: usize,
+    ) -> Self {
+        Self {
+            tasks,
+            next_cursor,
+            page_size,
+            total_size,
+        }
+    }
+
+    /// Consumes the page into its records and pagination metadata.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<A2ATaskWithArtifacts>,
+        Option<A2ATaskListCursor>,
+        usize,
+        usize,
+    ) {
+        (
+            self.tasks,
+            self.next_cursor,
+            self.page_size,
+            self.total_size,
+        )
+    }
+}
+
 impl A2ATaskListPage {
     /// Creates one visible page.
     #[must_use]
@@ -237,6 +375,16 @@ pub trait A2ATaskStore: Send + Sync {
     /// Returns invalid-query, corruption, or storage errors.
     fn list_tasks(&self, query: &A2ATaskListQuery) -> Result<A2ATaskListPage, A2ATaskStoreError>;
 
+    /// Lists visible tasks with each retained artifact set from one snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-query, corruption, or storage errors.
+    fn list_tasks_with_artifacts(
+        &self,
+        query: &A2ATaskListQuery,
+    ) -> Result<A2ATaskArtifactListPage, A2ATaskStoreError>;
+
     /// Applies one expected-generation state transition.
     ///
     /// # Errors
@@ -311,6 +459,33 @@ pub trait A2ATaskStore: Send + Sync {
         key: &A2ATaskKey,
         limit: usize,
     ) -> Result<(A2ATaskRecord, Vec<StoredA2ATaskMessage>), A2ATaskStoreError>;
+
+    /// Reads one task, message window, and artifact page from the same snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns bounds, not-found, corruption, or storage errors.
+    fn task_snapshot(
+        &self,
+        key: &A2ATaskKey,
+        message_limit: usize,
+    ) -> Result<A2ATaskSnapshot, A2ATaskStoreError>;
+
+    /// Reads status and artifact deltas after durable internal cursors.
+    ///
+    /// Artifacts precede terminal status transitions within the returned snapshot
+    /// because terminal tasks reject later artifact appends.
+    ///
+    /// # Errors
+    ///
+    /// Returns bounds, not-found, corruption, or storage errors.
+    fn stream_updates(
+        &self,
+        key: &A2ATaskKey,
+        after_generation: u64,
+        after_artifact_sequence: u64,
+        message_limit: usize,
+    ) -> Result<A2ATaskStreamUpdates, A2ATaskStoreError>;
 
     /// Reads a bounded ordered artifact page from sequence zero.
     ///

@@ -318,6 +318,22 @@ impl A2AHttpJsonClient {
         page_size: Option<u32>,
         page_token: Option<&str>,
     ) -> Result<InitialA2ATaskListResponse, A2AGatewayError> {
+        self.list_tasks_with_artifacts(page_size, page_token, false)
+            .await
+    }
+
+    /// Loads one visible page of tasks and optionally includes bounded artifacts.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, transport, remote, response-bound, or response-contract
+    /// failures.
+    pub async fn list_tasks_with_artifacts(
+        &self,
+        page_size: Option<u32>,
+        page_token: Option<&str>,
+        include_artifacts: bool,
+    ) -> Result<InitialA2ATaskListResponse, A2AGatewayError> {
         if page_size.is_some_and(|value| value == 0 || value > 256) {
             return Err(A2AGatewayError::InvalidConfiguration);
         }
@@ -331,6 +347,10 @@ impl A2AHttpJsonClient {
         }
         if let Some(page_token) = page_token {
             url.query_pairs_mut().append_pair("pageToken", page_token);
+        }
+        if include_artifacts {
+            url.query_pairs_mut()
+                .append_pair("includeArtifacts", "true");
         }
         let response = self
             .apply_headers(self.client.get(url), A2A_JSON_MEDIA_TYPE)?
@@ -957,6 +977,12 @@ mod tests {
             last_state: None,
         };
         correlation.validate(&task).unwrap();
+
+        let artifact = decode_initial_stream_response_json(
+            br#"{"artifactUpdate":{"taskId":"00112233445566778899aabbccddeeff","contextId":"context-1","artifact":{"artifactId":"artifact-1","parts":[{"text":"result"}]},"lastChunk":true}}"#,
+        )
+        .unwrap();
+        correlation.validate(&artifact).unwrap();
         assert_eq!(
             correlation.validate(&task).err(),
             Some(crate::A2AGatewayError::Contract)

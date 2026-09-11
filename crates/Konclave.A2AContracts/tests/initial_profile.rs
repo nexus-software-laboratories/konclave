@@ -256,6 +256,7 @@ fn list_tasks_request_defaults_and_rejects_unsupported_filters() {
     assert_eq!(validated.tenant(), Some("tenant-a"));
     assert_eq!(validated.page_size(), DEFAULT_A2A_LIST_PAGE_SIZE);
     assert_eq!(validated.page_token(), None);
+    assert!(!validated.include_artifacts());
 
     let request = ListTasksRequest {
         page_size: Some(2),
@@ -276,6 +277,26 @@ fn list_tasks_request_defaults_and_rejects_unsupported_filters() {
     assert_eq!(
         validated.page_token(),
         Some("v1.100.00112233445566778899aabbccddeeff")
+    );
+    assert!(!validated.include_artifacts());
+
+    let request = ListTasksRequest {
+        include_artifacts: Some(true),
+        ..ListTasksRequest {
+            tenant: "tenant-a".to_string(),
+            context_id: String::new(),
+            status: TaskState::Unspecified as i32,
+            page_size: None,
+            page_token: String::new(),
+            history_length: None,
+            status_timestamp_after: None,
+            include_artifacts: None,
+        }
+    };
+    assert!(
+        validate_initial_list_tasks_request(request, Some("tenant-a"))
+            .unwrap()
+            .include_artifacts()
     );
 
     for request in [
@@ -307,19 +328,6 @@ fn list_tasks_request_defaults_and_rejects_unsupported_filters() {
         },
         ListTasksRequest {
             history_length: Some(1),
-            ..ListTasksRequest {
-                tenant: "tenant-a".to_string(),
-                context_id: String::new(),
-                status: TaskState::Unspecified as i32,
-                page_size: None,
-                page_token: String::new(),
-                history_length: None,
-                status_timestamp_after: None,
-                include_artifacts: None,
-            }
-        },
-        ListTasksRequest {
-            include_artifacts: Some(false),
             ..ListTasksRequest {
                 tenant: "tenant-a".to_string(),
                 context_id: String::new(),

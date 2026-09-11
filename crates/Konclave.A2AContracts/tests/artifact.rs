@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use KonclaveA2AContracts::wire::{Artifact, Part, part};
 use KonclaveA2AContracts::{
     A2AContractError, MAX_A2A_ARTIFACT_INLINE_BYTES, decode_initial_artifact_json,
     decode_initial_artifact_protobuf, validate_initial_artifact,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use prost::Message as _;
 
 fn encrypted_reference() -> String {
@@ -78,9 +78,7 @@ fn artifact_forms_round_trip_to_deterministic_canonical_json() {
     );
     let text = std::str::from_utf8(&json).unwrap();
     assert!(text.find("\"a\"").unwrap() < text.find("\"z\"").unwrap());
-    assert!(
-        text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap()
-    );
+    assert!(text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap());
 }
 
 #[test]
@@ -152,9 +150,7 @@ fn artifact_rejects_inline_and_structured_data_bounds() {
     }
     let mut deep = artifact();
     deep.parts = vec![Part {
-        content: Some(part::Content::Data(
-            serde_json::from_value(nested).unwrap(),
-        )),
+        content: Some(part::Content::Data(serde_json::from_value(nested).unwrap())),
         metadata: None,
         filename: "deep.json".to_owned(),
         media_type: "application/json".to_owned(),

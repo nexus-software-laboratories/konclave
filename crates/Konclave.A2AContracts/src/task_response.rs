@@ -1,6 +1,5 @@
 use prost::Message as _;
 
-use crate::{A2AContractError, MAX_A2A_ARTIFACTS_PER_TASK, validate_initial_artifact};
 use crate::initial_profile::{
     A2A_TEXT_MEDIA_TYPE, decode_json_bounded, require_empty_struct, require_encoded_bound,
     validate_identifier, validate_text,
@@ -8,6 +7,7 @@ use crate::initial_profile::{
 use crate::wire::{
     Message, Role, SendMessageResponse, Task, TaskState, part, send_message_response,
 };
+use crate::{A2AContractError, MAX_A2A_ARTIFACTS_PER_TASK, validate_initial_artifact};
 
 /// Maximum encoded protobuf or ProtoJSON task response accepted before decoding.
 pub const MAX_A2A_ENCODED_RESPONSE_BYTES: usize = 256 * 1024;

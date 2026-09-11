@@ -5,12 +5,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use prost::Message as _;
 use url::Url;
 
+use crate::A2AContractError;
 use crate::initial_profile::{
     A2A_TEXT_MEDIA_TYPE, decode_json_bounded, require_empty_struct, require_encoded_bound,
     validate_identifier,
 };
 use crate::wire::{Artifact, Part, part};
-use crate::A2AContractError;
 
 /// Maximum UTF-8 byte length of an artifact name.
 pub const MAX_A2A_ARTIFACT_NAME_BYTES: usize = 128;
@@ -98,9 +98,7 @@ pub fn decode_initial_artifact_protobuf(
 ///
 /// Returns a stable contract error for malformed, oversized, unsupported, or
 /// noncanonical artifact content.
-pub fn decode_initial_artifact_json(
-    bytes: &[u8],
-) -> Result<InitialA2AArtifact, A2AContractError> {
+pub fn decode_initial_artifact_json(bytes: &[u8]) -> Result<InitialA2AArtifact, A2AContractError> {
     let artifact = decode_json_bounded(bytes, MAX_A2A_CANONICAL_ARTIFACT_BYTES)?;
     validate_initial_artifact(artifact)
 }
@@ -115,11 +113,7 @@ pub fn validate_initial_artifact(
     mut artifact: Artifact,
 ) -> Result<InitialA2AArtifact, A2AContractError> {
     validate_identifier(artifact.artifact_id.clone(), "artifact.artifact_id")?;
-    validate_optional_display(
-        &artifact.name,
-        MAX_A2A_ARTIFACT_NAME_BYTES,
-        "artifact.name",
-    )?;
+    validate_optional_display(&artifact.name, MAX_A2A_ARTIFACT_NAME_BYTES, "artifact.name")?;
     validate_optional_display(
         &artifact.description,
         MAX_A2A_ARTIFACT_DESCRIPTION_BYTES,
@@ -152,8 +146,8 @@ pub fn validate_initial_artifact(
     let canonical_json =
         serde_json::to_vec(&canonical_value).map_err(|_| A2AContractError::MalformedEncoding)?;
     require_encoded_bound(&canonical_json, MAX_A2A_CANONICAL_ARTIFACT_BYTES)?;
-    let wire = serde_json::from_slice(&canonical_json)
-        .map_err(|_| A2AContractError::MalformedEncoding)?;
+    let wire =
+        serde_json::from_slice(&canonical_json).map_err(|_| A2AContractError::MalformedEncoding)?;
     Ok(InitialA2AArtifact {
         wire,
         canonical_json,
@@ -306,11 +300,17 @@ fn validate_media_type(value: &str, field: &'static str) -> Result<(), A2AContra
 fn media_type_token(byte: u8) -> bool {
     byte.is_ascii_lowercase()
         || byte.is_ascii_digit()
-        || matches!(byte, b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-')
+        || matches!(
+            byte,
+            b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+        )
 }
 
 fn validate_encrypted_reference(value: &str) -> Result<(), A2AContractError> {
-    if value.bytes().any(|byte| byte.is_ascii_control() || byte == b'\\') {
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b'\\')
+    {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
     let url = Url::parse(value).map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
@@ -351,9 +351,7 @@ fn validate_encrypted_reference(value: &str) -> Result<(), A2AContractError> {
         fields.next().ok_or(A2AContractError::InvalidInterfaceUrl)?,
         ENCRYPTED_REFERENCE_NONCE_BYTES,
     )?;
-    let size = fields
-        .next()
-        .ok_or(A2AContractError::InvalidInterfaceUrl)?;
+    let size = fields.next().ok_or(A2AContractError::InvalidInterfaceUrl)?;
     if fields.next().is_some()
         || size.starts_with('0')
         || size
@@ -405,11 +403,9 @@ fn canonicalize_json(
             value => value,
         }
     }
-    *count = count
-        .checked_add(1)
-        .ok_or(A2AContractError::OutOfRange {
-            field: "artifact.part.data",
-        })?;
+    *count = count.checked_add(1).ok_or(A2AContractError::OutOfRange {
+        field: "artifact.part.data",
+    })?;
     if *count > MAX_A2A_ARTIFACT_JSON_VALUES {
         return Err(A2AContractError::OutOfRange {
             field: "artifact.part.data",

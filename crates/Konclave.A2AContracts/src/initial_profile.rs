@@ -137,6 +137,7 @@ pub struct InitialListTasksRequest {
     tenant: Option<String>,
     page_size: u32,
     page_token: Option<String>,
+    include_artifacts: bool,
 }
 
 /// Validated `SubscribeToTask` request accepted by the streaming profile.
@@ -197,6 +198,12 @@ impl InitialListTasksRequest {
     #[must_use]
     pub fn page_token(&self) -> Option<&str> {
         self.page_token.as_deref()
+    }
+
+    /// Returns whether bounded artifacts were explicitly requested.
+    #[must_use]
+    pub const fn include_artifacts(&self) -> bool {
+        self.include_artifacts
     }
 }
 
@@ -554,15 +561,11 @@ pub fn validate_initial_list_tasks_request(
             field: "list_tasks.status_timestamp_after",
         });
     }
-    if request.include_artifacts.is_some() {
-        return Err(A2AContractError::UnsupportedField {
-            field: "list_tasks.include_artifacts",
-        });
-    }
     Ok(InitialListTasksRequest {
         tenant: validate_tenant(request.tenant, expected_tenant)?,
         page_size: validate_page_size(request.page_size)?,
         page_token: validate_page_token(request.page_token, "list_tasks.page_token")?,
+        include_artifacts: request.include_artifacts.unwrap_or(false),
     })
 }
 

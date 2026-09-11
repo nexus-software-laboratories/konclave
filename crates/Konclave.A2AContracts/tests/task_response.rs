@@ -128,6 +128,27 @@ fn task_response_rejects_unsupported_or_inconsistent_content() {
         extensions: vec![],
     });
     assert!(validate_initial_task(artifact).is_err());
+
+    let mut artifact = task();
+    artifact.artifacts.push(Artifact {
+        artifact_id: "artifact-1".to_owned(),
+        name: "Result".to_owned(),
+        description: String::new(),
+        parts: vec![KonclaveA2AContracts::wire::Part {
+            content: Some(part::Content::Text("artifact response".to_owned())),
+            metadata: None,
+            filename: "result.txt".to_owned(),
+            media_type: String::new(),
+        }],
+        metadata: None,
+        extensions: vec![],
+    });
+    let artifact = validate_initial_task(artifact).unwrap();
+    assert_eq!(artifact.as_wire().artifacts.len(), 1);
+    assert_eq!(
+        artifact.as_wire().artifacts[0].parts[0].media_type,
+        A2A_TEXT_MEDIA_TYPE
+    );
 }
 
 #[test]

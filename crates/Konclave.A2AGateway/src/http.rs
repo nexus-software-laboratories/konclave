@@ -378,7 +378,8 @@ async fn list_tasks(
     if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
         return *response;
     }
-    let (page_size, page_token) = match parse_list_tasks_query(parts.uri.query()) {
+    let (page_size, page_token, include_artifacts) = match parse_list_tasks_query(parts.uri.query())
+    {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -391,7 +392,7 @@ async fn list_tasks(
             page_token,
             history_length: None,
             status_timestamp_after: None,
-            include_artifacts: None,
+            include_artifacts,
         },
         state.application.tenant(),
     ) {
@@ -801,9 +802,11 @@ fn parse_history_length(query: Option<&str>) -> Result<Option<i32>, Box<Response
     Ok(history_length)
 }
 
-fn parse_list_tasks_query(query: Option<&str>) -> Result<(Option<i32>, String), Box<Response>> {
+fn parse_list_tasks_query(
+    query: Option<&str>,
+) -> Result<(Option<i32>, String, Option<bool>), Box<Response>> {
     let Some(query) = query else {
-        return Ok((None, String::new()));
+        return Ok((None, String::new(), None));
     };
     if query.len() > MAX_QUERY_BYTES {
         return Err(Box::new(contract_error_response(
@@ -814,6 +817,7 @@ fn parse_list_tasks_query(query: Option<&str>) -> Result<(Option<i32>, String), 
     }
     let mut page_size = None;
     let mut page_token = None;
+    let mut include_artifacts = None;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "pageSize" if page_size.is_none() => {
@@ -826,6 +830,19 @@ fn parse_list_tasks_query(query: Option<&str>) -> Result<(Option<i32>, String), 
             "pageToken" if page_token.is_none() => {
                 page_token = Some(value.into_owned());
             }
+            "includeArtifacts" if include_artifacts.is_none() => {
+                include_artifacts = Some(match value.as_ref() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(Box::new(contract_error_response(
+                            A2AContractError::UnsupportedField {
+                                field: "list_tasks.include_artifacts",
+                            },
+                        )));
+                    }
+                });
+            }
             _ => {
                 return Err(Box::new(contract_error_response(
                     A2AContractError::UnsupportedField {
@@ -835,7 +852,7 @@ fn parse_list_tasks_query(query: Option<&str>) -> Result<(Option<i32>, String), 
             }
         }
     }
-    Ok((page_size, page_token.unwrap_or_default()))
+    Ok((page_size, page_token.unwrap_or_default(), include_artifacts))
 }
 
 fn contract_error_response(error: A2AContractError) -> Response {

@@ -6,9 +6,7 @@ use crate::task_response::{
     validate_timestamp,
 };
 use crate::wire::{Role, StreamResponse, TaskState, stream_response};
-use crate::{
-    A2AContractError, validate_initial_artifact, validate_initial_task,
-};
+use crate::{A2AContractError, validate_initial_artifact, validate_initial_task};
 
 /// Streaming payload shape admitted by Konclave's text-only A2A profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

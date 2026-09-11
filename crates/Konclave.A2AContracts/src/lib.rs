@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 #![allow(non_snake_case)]
 
-mod artifact;
 mod agent_card;
+mod artifact;
 mod error;
 mod identifier;
 mod initial_profile;
@@ -10,13 +10,6 @@ mod list_tasks_response;
 mod stream_response;
 mod task_response;
 
-pub use artifact::{
-    InitialA2AArtifact, MAX_A2A_ARTIFACT_DESCRIPTION_BYTES, MAX_A2A_ARTIFACT_FILENAME_BYTES,
-    MAX_A2A_ARTIFACT_INLINE_BYTES, MAX_A2A_ARTIFACT_MEDIA_TYPE_BYTES,
-    MAX_A2A_ARTIFACT_NAME_BYTES, MAX_A2A_ARTIFACT_PARTS, MAX_A2A_ARTIFACTS_PER_TASK,
-    MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES, MAX_A2A_CANONICAL_ARTIFACT_BYTES,
-    decode_initial_artifact_json, decode_initial_artifact_protobuf, validate_initial_artifact,
-};
 pub use agent_card::{
     InitialA2AAgentCard, InitialA2AAgentSecurity, InitialA2AAgentSecurityKind,
     InitialA2AAgentSkill, MAX_A2A_AGENT_CARD_INTERFACES, MAX_A2A_AGENT_CARD_SKILLS,
@@ -24,6 +17,13 @@ pub use agent_card::{
     MAX_A2A_AGENT_SKILL_TAGS, MAX_A2A_AGENT_VERSION_BYTES, MAX_A2A_BEARER_FORMAT_BYTES,
     MAX_A2A_ENCODED_AGENT_CARD_BYTES, decode_initial_agent_card_json,
     decode_initial_agent_card_protobuf, validate_initial_agent_card,
+};
+pub use artifact::{
+    InitialA2AArtifact, MAX_A2A_ARTIFACT_DESCRIPTION_BYTES, MAX_A2A_ARTIFACT_FILENAME_BYTES,
+    MAX_A2A_ARTIFACT_INLINE_BYTES, MAX_A2A_ARTIFACT_MEDIA_TYPE_BYTES, MAX_A2A_ARTIFACT_NAME_BYTES,
+    MAX_A2A_ARTIFACT_PARTS, MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES, MAX_A2A_ARTIFACTS_PER_TASK,
+    MAX_A2A_CANONICAL_ARTIFACT_BYTES, decode_initial_artifact_json,
+    decode_initial_artifact_protobuf, validate_initial_artifact,
 };
 pub use error::A2AContractError;
 pub use identifier::{A2AIdentifier, MAX_A2A_IDENTIFIER_BYTES};
