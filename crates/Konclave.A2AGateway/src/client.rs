@@ -652,8 +652,7 @@ fn decode_sse_stream(
                 Some(Err(error)) => return Err(error),
                 None => state.eof = true,
             }
-            if state.buffer.len() > state.maximum_event_bytes
-                && !contains_sse_frame(&state.buffer)
+            if state.buffer.len() > state.maximum_event_bytes && !contains_sse_frame(&state.buffer)
             {
                 return Err(A2AGatewayError::Contract);
             }

@@ -275,8 +275,8 @@ direct trusted configuration instead of unauthenticated discovery.
 
 The built-in default client timeout is 60 seconds, leaving headroom above the
 gateway's default 30-second stream window. Custom client timeouts remain total
-request bounds and should exceed the expected remote stream window when clean EOF is
-important.
+request bounds. When a remote stream window is longer, client timeout is an expected
+resubscription boundary rather than a task failure.
 
 ## Network binding
 
