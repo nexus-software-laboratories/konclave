@@ -274,10 +274,7 @@ async fn streaming_submission_uses_the_real_bridge_and_durable_statuses() {
 
     fixture.local.mode.store(EXACT_MODE, Ordering::SeqCst);
     let completed = stream.next().await.unwrap().unwrap();
-    assert_eq!(
-        completed.kind(),
-        InitialA2AStreamResponseKind::StatusUpdate
-    );
+    assert_eq!(completed.kind(), InitialA2AStreamResponseKind::StatusUpdate);
     assert!(completed.state() == TaskState::Completed);
     assert!(stream.next().await.is_none());
     assert_eq!(

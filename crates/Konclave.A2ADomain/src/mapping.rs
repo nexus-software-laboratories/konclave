@@ -154,7 +154,7 @@ impl A2ADirectedRequestMapping {
         self.text
     }
 
-    /// Returns whether the caller requested an immediate submitted-task response.
+    /// Returns the effective non-streaming immediate-response preference.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {
         self.return_immediately

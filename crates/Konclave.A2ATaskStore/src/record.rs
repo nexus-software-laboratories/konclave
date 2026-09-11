@@ -135,7 +135,7 @@ impl A2ATaskRecord {
         self.request_text
     }
 
-    /// Returns whether immediate response was requested.
+    /// Returns the effective non-streaming immediate-response preference.
     #[must_use]
     pub const fn return_immediately(&self) -> bool {
         self.return_immediately

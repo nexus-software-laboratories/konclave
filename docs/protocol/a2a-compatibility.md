@@ -58,10 +58,11 @@ The initial validator accepts one client message with:
   reference task, push-notification configuration, or alternate output mode; and
 - optional history length `0` or `1`.
 
-The optional `return_immediately` value is preserved for the gateway task layer.
-Semantic task creation, context ownership, idempotency, and Konclave target selection
-belong to the [A2A domain-mapping](../development/a2a-domain-mapping.md) and bridge
-layers.
+The optional `return_immediately` value is preserved for `SendMessage`.
+`SendStreamingMessage` normalizes it because A2A defines it as having no effect on a
+streaming operation. Semantic task creation, context ownership, idempotency, and
+Konclave target selection belong to the
+[A2A domain-mapping](../development/a2a-domain-mapping.md) and bridge layers.
 
 ## Task lookup, subscription, and encoded bounds
 
