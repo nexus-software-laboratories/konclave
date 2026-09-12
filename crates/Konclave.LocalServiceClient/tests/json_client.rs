@@ -17,6 +17,7 @@ use KonclaveLocalServiceTransport::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::oneshot;
 
 #[tokio::test]
 async fn client_issues_a_grant_and_retries_an_ambiguous_session_request_exactly() {
@@ -28,6 +29,8 @@ async fn client_issues_a_grant_and_retries_an_ambiguous_session_request_exactly(
     let issuer_public_key = issuer_identity.public_key();
     let issuer_key_id = IssuerKeyId::from_bytes([1; 16]);
     let issuer_key_version = IssuerKeyVersion::new(1).unwrap();
+    let (request_received_sender, request_received_receiver) = oneshot::channel();
+    let (release_service_sender, release_service_receiver) = oneshot::channel();
     let registry = InMemorySessionAuthorizationRegistry::new();
     registry
         .register_issuer(
@@ -253,6 +256,10 @@ async fn persistent_session_reuses_one_authenticated_channel_for_delivery_operat
             .await
             .unwrap();
         }
+        let request = read_request(&mut session).await.unwrap();
+        assert_eq!(request.operation().as_str(), "delivery.claim");
+        request_received_sender.send(()).unwrap();
+        release_service_receiver.await.unwrap();
     };
 
     let client = async move {
@@ -290,6 +297,29 @@ async fn persistent_session_reuses_one_authenticated_channel_for_delivery_operat
                 .unwrap(),
             br#"{}"#
         );
+        let mut cancelled = Box::pin(session.request(
+            RequestId::from_bytes([7; 16]),
+            "delivery.claim",
+            br#"{"maxEvents":1,"waitMilliseconds":30000}"#.to_vec(),
+        ));
+        tokio::select! {
+            biased;
+            result = &mut cancelled => panic!("request completed before cancellation: {result:?}"),
+            result = request_received_receiver => result.unwrap(),
+        }
+        drop(cancelled);
+        assert_eq!(
+            session
+                .request(
+                    RequestId::from_bytes([8; 16]),
+                    "delivery.claim",
+                    br#"{"maxEvents":1,"waitMilliseconds":0}"#.to_vec(),
+                )
+                .await
+                .unwrap_err(),
+            KonclaveLocalServiceClient::LocalServiceJsonClientError::Transport
+        );
+        release_service_sender.send(()).unwrap();
     };
 
     let ((), ()) = tokio::join!(service, client);

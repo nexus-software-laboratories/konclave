@@ -45,7 +45,9 @@ releases its connection-owned lease and makes unacknowledged events reclaimable.
 Request identifiers are caller-generated stable 16-byte values. A transport failure
 may be ambiguous: retry only the same operation with the same request identifier and
 byte-identical payload. Never allocate a new identifier merely because the response
-was lost.
+was lost. Canceling an in-flight persistent request closes that session so a late
+frame cannot be misread as the response to a later operation; reconnect before
+retrying the exact request.
 
 Acknowledgement is idempotent. A stale lease generation cannot settle a claim issued
 to a newer attachment. If a process crashes after claiming, connection teardown

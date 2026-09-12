@@ -62,6 +62,11 @@ operations automatically; they preserve the connection-owned delivery lease and
 leave exact reconciliation to the harness adapter. `Konclave.AdapterSdk` builds its
 typed delivery API on that persistent session.
 
+A persistent request temporarily owns its stream. Cancellation, timeout, or
+transport failure drops that stream and makes the session unusable; only a fully read
+response restores it. This prevents a late response from being interpreted as a
+later operation's result.
+
 ## Authenticated transcript
 
 Protocol version 2 has separate issuer and session roles. Both transcripts begin with

@@ -144,7 +144,7 @@ pub struct LocalServiceJsonClient {
 /// connection-owned delivery lease in the service.
 pub struct LocalServiceJsonSession<'a> {
     client: &'a LocalServiceJsonClient,
-    stream: LocalServiceClientStream,
+    stream: Option<LocalServiceClientStream>,
 }
 
 impl LocalServiceJsonClient {
@@ -355,9 +355,11 @@ impl LocalServiceJsonClient {
     ) -> Result<LocalServiceJsonSession<'_>, LocalServiceJsonClientError> {
         Ok(LocalServiceJsonSession {
             client: self,
-            stream: timeout(self.config.request_timeout, self.open_session_stream(grant))
-                .await
-                .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)??,
+            stream: Some(
+                timeout(self.config.request_timeout, self.open_session_stream(grant))
+                    .await
+                    .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)??,
+            ),
         })
     }
 
@@ -453,17 +455,22 @@ impl LocalServiceJsonSession<'_> {
             .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)?;
         let request = LocalServiceRequest::new(request_id, operation, payload)
             .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)?;
-        timeout(self.client.config.request_timeout, async {
-            write_request(&mut self.stream, &request)
+        let mut stream = self
+            .stream
+            .take()
+            .ok_or(LocalServiceJsonClientError::Transport)?;
+        let response = timeout(self.client.config.request_timeout, async {
+            write_request(&mut stream, &request)
                 .await
                 .map_err(map_transport_error)?;
-            read_response(&mut self.stream)
+            read_response(&mut stream)
                 .await
                 .map_err(map_transport_error)
         })
         .await
-        .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)?
-        .and_then(|response| response_payload(response, request_id))
+        .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)??;
+        self.stream = Some(stream);
+        response_payload(response, request_id)
     }
 }
 
