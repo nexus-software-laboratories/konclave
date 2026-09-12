@@ -13,7 +13,9 @@ use KonclaveA2AContracts::{
     validate_initial_list_tasks_request, validate_initial_subscribe_to_task_request,
 };
 use KonclaveA2ADiscovery::compile_a2a_agent_publication_source;
-use KonclaveA2ADomain::{A2AAgentId, A2AArtifactId, A2ATaskId, A2ATaskState, A2ATenantId};
+use KonclaveA2ADomain::{
+    A2AAgentId, A2AAgentRoute, A2AArtifactId, A2AContextId, A2ATaskId, A2ATaskState, A2ATenantId,
+};
 use KonclaveA2AGateway::{
     A2AGatewayApplication, A2AGatewayError, A2AGatewayWaitConfig, A2ATaskSubmission,
     A2ATaskSubmissionError, A2ATaskSubmitter,
@@ -22,6 +24,7 @@ use KonclaveA2ATaskStore::{
     A2ATaskArtifact, A2ATaskKey, A2ATaskStore, A2ATaskTransition, A2ATerminalReason,
 };
 use KonclaveA2ATaskStoreSqlite::A2ASqliteTaskStoreConfig;
+use KonclaveDomainCore::DeviceId;
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 
@@ -512,6 +515,191 @@ async fn artifact_projection_fails_explicitly_when_the_response_bound_is_exceede
             .await
             .err(),
         Some(A2AGatewayError::CapacityExceeded)
+    );
+}
+
+#[tokio::test]
+async fn route_bound_artifact_publisher_validates_documents_without_resending_the_request() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let clock = Arc::new(TestClock::new(100));
+    let submitter = Arc::new(RecordingSubmitter::default());
+    let application = application(
+        store.clone(),
+        submitter.clone(),
+        clock.clone(),
+        A2AGatewayWaitConfig::default(),
+    );
+    let task = application
+        .send_message(request("request", true, 0))
+        .await
+        .unwrap();
+    assert_eq!(submitter.calls.load(Ordering::SeqCst), 1);
+    let task_id = A2ATaskId::parse(task.task_id().to_owned()).unwrap();
+    let key = A2ATaskKey::new(
+        A2AAgentId::parse("contract-agent").unwrap(),
+        Some(A2ATenantId::parse("tenant-a").unwrap()),
+        task_id.clone(),
+    );
+    store
+        .transition_task(A2ATaskTransition::new(
+            key.clone(),
+            0,
+            A2ATaskState::Working,
+            None,
+            110,
+        ))
+        .unwrap();
+
+    let artifact = artifact_with_text("artifact-bridge", "bridge output");
+    let canonical = artifact.canonical_json().to_vec();
+    let publisher = application.artifact_publisher();
+    clock.value.store(115, Ordering::SeqCst);
+    publisher
+        .publish_json(task_id.as_str(), &canonical)
+        .await
+        .unwrap();
+    assert_eq!(submitter.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.artifacts(&key, 8).unwrap().len(), 1);
+
+    store
+        .transition_task(A2ATaskTransition::new(
+            key,
+            1,
+            A2ATaskState::Completed,
+            None,
+            120,
+        ))
+        .unwrap();
+    clock.value.store(130, Ordering::SeqCst);
+    publisher
+        .publish_json(task_id.as_str(), &canonical)
+        .await
+        .unwrap();
+    assert_eq!(
+        publisher
+            .publish_json(
+                task_id.as_str(),
+                artifact_with_text("artifact-bridge", "changed").canonical_json(),
+            )
+            .await
+            .err(),
+        Some(A2AGatewayError::Conflict)
+    );
+    assert_eq!(
+        publisher
+            .publish_json(task_id.as_str(), b"result.txt")
+            .await
+            .err(),
+        Some(A2AGatewayError::InvalidRequest)
+    );
+    assert_eq!(
+        publisher
+            .publish_json(
+                task_id.as_str(),
+                br#"{"artifactId":"artifact-url","parts":[{"url":"https://example.com/file","mediaType":"application/octet-stream"}]}"#,
+            )
+            .await
+            .err(),
+        Some(A2AGatewayError::InvalidRequest)
+    );
+
+    let base_route = route();
+    let alternate_context_application = A2AGatewayApplication::new(
+        A2AAgentRoute::new(
+            base_route.agent_id().clone(),
+            A2AContextId::parse("context-2").unwrap(),
+            base_route.tenant().cloned(),
+            base_route.conversation_id(),
+            base_route.target_device_id(),
+        ),
+        compile_a2a_agent_publication_source(
+            PUBLICATION,
+            InitialA2AInterfaceEnvironment::Production,
+        )
+        .unwrap(),
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        clock.clone(),
+        A2AGatewayWaitConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        alternate_context_application
+            .artifact_publisher()
+            .publish_json(
+                task_id.as_str(),
+                artifact_with_text("artifact-other", "other").canonical_json(),
+            )
+            .await
+            .err(),
+        Some(A2AGatewayError::TaskNotFound)
+    );
+
+    let alternate_target_application = A2AGatewayApplication::new(
+        A2AAgentRoute::new(
+            base_route.agent_id().clone(),
+            base_route.context_id().clone(),
+            base_route.tenant().cloned(),
+            base_route.conversation_id(),
+            DeviceId::from_bytes([9; DeviceId::LENGTH]),
+        ),
+        compile_a2a_agent_publication_source(
+            PUBLICATION,
+            InitialA2AInterfaceEnvironment::Production,
+        )
+        .unwrap(),
+        store.clone(),
+        Arc::new(RecordingSubmitter::default()),
+        clock.clone(),
+        A2AGatewayWaitConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        alternate_target_application
+            .artifact_publisher()
+            .publish_json(
+                task_id.as_str(),
+                artifact_with_text("artifact-other", "other").canonical_json(),
+            )
+            .await
+            .err(),
+        Some(A2AGatewayError::TaskNotFound)
+    );
+
+    let alternate_route = A2AAgentRoute::new(
+        base_route.agent_id().clone(),
+        base_route.context_id().clone(),
+        Some(A2ATenantId::parse("tenant-b").unwrap()),
+        base_route.conversation_id(),
+        base_route.target_device_id(),
+    );
+    let alternate_publication = String::from_utf8(PUBLICATION.to_vec())
+        .unwrap()
+        .replace("tenant-a", "tenant-b");
+    let alternate_application = A2AGatewayApplication::new(
+        alternate_route,
+        compile_a2a_agent_publication_source(
+            alternate_publication.as_bytes(),
+            InitialA2AInterfaceEnvironment::Production,
+        )
+        .unwrap(),
+        store,
+        Arc::new(RecordingSubmitter::default()),
+        clock,
+        A2AGatewayWaitConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        alternate_application
+            .artifact_publisher()
+            .publish_json(
+                task_id.as_str(),
+                artifact_with_text("artifact-other", "other").canonical_json(),
+            )
+            .await
+            .err(),
+        Some(A2AGatewayError::TaskNotFound)
     );
 }
 

@@ -11,14 +11,13 @@ use KonclaveA2AContracts::{
 };
 use KonclaveA2ADiscovery::CompiledA2AAgentPublication;
 use KonclaveA2ADomain::{
-    A2AAgentRoute, A2AArtifactId, A2AMessageId, A2ATaskId, A2ATaskState, map_initial_get_task,
+    A2AAgentRoute, A2AMessageId, A2ATaskId, A2ATaskState, map_initial_get_task,
     map_initial_list_tasks, map_initial_send_message, map_initial_streaming_message,
     map_initial_subscribe_to_task,
 };
 use KonclaveA2ATaskStore::{
-    A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery,
-    A2ATaskRecord, A2ATaskStore, A2ATaskStoreError, AppendA2ATaskRecordOutcome,
-    CreateA2ATaskOutcome,
+    A2ATaskCreation, A2ATaskKey, A2ATaskListCursor, A2ATaskListQuery, A2ATaskRecord, A2ATaskStore,
+    A2ATaskStoreError, CreateA2ATaskOutcome,
 };
 use KonclaveA2ATaskStoreSqlite::{A2ASqliteTaskStore, A2ASqliteTaskStoreConfig};
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
@@ -27,10 +26,12 @@ use futures_util::StreamExt as _;
 use futures_util::stream::{self, BoxStream};
 use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
-use crate::A2AGatewayError;
 use crate::projection::{
     project_artifact_update, project_get_task, project_list_tasks, project_status_update,
     project_stream_task,
+};
+use crate::{
+    A2AArtifactPublication, A2AArtifactPublisher, A2AGatewayArtifactPublisher, A2AGatewayError,
 };
 
 const MAX_RESPONSE_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -259,6 +260,16 @@ impl A2AGatewayApplication {
         self.route.tenant().map(|tenant| tenant.as_str())
     }
 
+    /// Returns a least-privilege artifact publisher bound to this exact route.
+    #[must_use]
+    pub fn artifact_publisher(&self) -> A2AGatewayArtifactPublisher {
+        A2AGatewayArtifactPublisher::new(
+            self.route.clone(),
+            Arc::clone(&self.store),
+            Arc::clone(&self.clock),
+        )
+    }
+
     /// Returns the card only when public well-known discovery is enabled.
     #[must_use]
     pub fn public_card(&self) -> Option<&InitialA2AAgentCard> {
@@ -449,37 +460,9 @@ impl A2AGatewayApplication {
         task_id: &A2ATaskId,
         artifact: InitialA2AArtifact,
     ) -> Result<(), A2AGatewayError> {
-        let key = A2ATaskKey::new(
-            self.route.agent_id().clone(),
-            self.route.tenant().cloned(),
-            task_id.clone(),
-        );
-        let artifact_id = A2AArtifactId::parse(artifact.artifact_id().to_owned())
-            .map_err(|_| A2AGatewayError::InvalidRequest)?;
-        let recorded_at = self
-            .clock
-            .now_unix_milliseconds()
-            .map_err(|_| A2AGatewayError::ClockUnavailable)?;
-        let artifact = A2ATaskArtifact::new(
-            key.clone(),
-            artifact_id,
-            artifact.into_canonical_json(),
-            true,
-            recorded_at,
-        )
-        .map_err(map_store_error)?;
-        let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || {
-            match store
-                .append_working_artifact(artifact, recorded_at, MAX_A2A_ARTIFACTS_PER_TASK)
-                .map_err(map_store_error)?
-            {
-                AppendA2ATaskRecordOutcome::Appended { .. }
-                | AppendA2ATaskRecordOutcome::Existing { .. } => Ok(()),
-            }
-        })
-        .await
-        .map_err(|_| A2AGatewayError::StorageUnavailable)?
+        self.artifact_publisher()
+            .publish(A2AArtifactPublication::new(task_id.clone(), artifact))
+            .await
     }
 
     async fn prepare_task(
@@ -801,7 +784,7 @@ fn decode_page_token(value: Option<&str>) -> Result<Option<A2ATaskListCursor>, A
     )))
 }
 
-fn map_store_error(error: A2ATaskStoreError) -> A2AGatewayError {
+pub(crate) fn map_store_error(error: A2ATaskStoreError) -> A2AGatewayError {
     match error {
         A2ATaskStoreError::InvalidConfiguration => A2AGatewayError::InvalidConfiguration,
         A2ATaskStoreError::InvalidTransition => A2AGatewayError::InvalidTaskProjection,

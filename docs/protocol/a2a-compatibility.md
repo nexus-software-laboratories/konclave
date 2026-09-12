@@ -151,6 +151,14 @@ disables redirects and ambient proxy discovery, enforces exact ciphertext and
 plaintext lengths, verifies SHA-256, and authenticates the descriptor-bound AES-GCM
 object before returning plaintext.
 
+Harness output publication uses an `A2AGatewayArtifactPublisher` capability extracted
+from one exact gateway application route. The operation accepts only a canonical task
+identifier and bounded A2A Artifact ProtoJSON; callers cannot supply another agent or
+tenant route, and the implementation performs no filename, path, text, or arbitrary
+URL inference. Exact publication retries remain idempotent after terminal transition,
+while changed content under the same artifact identifier fails as a conflict without
+repeating the original directed request.
+
 Errors use an `application/a2a+json` `google.rpc.Status`-shaped envelope with an A2A
 `ErrorInfo.reason`; validation errors add a bounded field violation. The
 [reference-gateway contract](../development/a2a-reference-gateway.md) owns exact
