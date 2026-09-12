@@ -139,9 +139,10 @@ pub struct LocalServiceJsonClient {
 /// One persistent authenticated session over the shared local service.
 ///
 /// Requests on this session are never retried automatically. If transport becomes
-/// ambiguous, the caller decides whether to reconnect and repeat the same stable
-/// request identifier. Dropping the session closes the channel and releases any
-/// connection-owned delivery lease in the service.
+/// ambiguous, the caller applies operation-specific reconciliation. In particular,
+/// a connection-owned delivery claim uses a fresh request identifier after reconnect.
+/// Dropping the session closes the channel and releases any connection-owned delivery
+/// lease in the service.
 pub struct LocalServiceJsonSession<'a> {
     client: &'a LocalServiceJsonClient,
     stream: Option<LocalServiceClientStream>,
@@ -443,8 +444,8 @@ impl LocalServiceJsonSession<'_> {
     /// # Errors
     ///
     /// Returns a typed transport, deadline, service, bound, or response-validation
-    /// failure. A transport failure may be ambiguous; callers retry only with the
-    /// same request identifier and operation payload.
+    /// failure. A transport failure may be ambiguous; the caller must apply the
+    /// operation's reconciliation contract before retrying on a replacement session.
     pub async fn request(
         &mut self,
         request_id: RequestId,

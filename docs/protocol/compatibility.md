@@ -86,8 +86,12 @@ Within adapter API v1:
 - notification identity remains stable across crash recovery while lease generation
   advances;
 - acknowledgement and release use the exact notification and lease generation;
-- a transport failure may be ambiguous and is retried only with the same request
-  identifier and byte-identical payload; and
+- acknowledgement, release, heartbeat, and status retries use the same request
+  identifier and byte-identical payload after an ambiguous transport failure;
+- an ambiguous claim closes its session and is retried on a replacement connection
+  with a fresh request identifier because lease ownership is connection-bound;
+- replaying a successful claim without its owning connection fails with `conflict`
+  rather than returning stale lease generations; and
 - dropping the persistent session detaches the consumer and makes unacknowledged work
   reclaimable.
 

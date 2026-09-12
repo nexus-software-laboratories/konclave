@@ -47,8 +47,9 @@ pub trait AdapterRpc: Send {
     ///
     /// # Errors
     ///
-    /// Returns a stable adapter error. A transport failure may be ambiguous; callers
-    /// retry only with the same request identifier and exact operation payload.
+    /// Returns a stable adapter error. Retry behavior after an ambiguous transport
+    /// failure is operation-specific because delivery claims own a connection-bound
+    /// lease.
     async fn request(
         &mut self,
         request_id: AdapterRequestId,
@@ -112,8 +113,10 @@ impl<T: AdapterRpc> AdapterSession<T> {
     /// # Errors
     ///
     /// Returns an invalid-configuration error for a zero/oversized batch, a wait
-    /// above 30 seconds, or a sub-millisecond duration. Transport and service
-    /// failures remain explicit.
+    /// above 30 seconds, or a sub-millisecond duration. A transport failure or
+    /// deadline returns [`AdapterSdkError::ClaimOutcomeUnknown`]; discard the session,
+    /// reconnect, and claim with a fresh request identifier so the replacement
+    /// connection receives current lease generations.
     pub async fn claim(
         &mut self,
         request_id: AdapterRequestId,
@@ -129,7 +132,7 @@ impl<T: AdapterRpc> AdapterSession<T> {
         {
             return Err(AdapterSdkError::InvalidConfiguration);
         }
-        let response = self
+        let response = match self
             .rpc
             .request(
                 request_id,
@@ -139,7 +142,13 @@ impl<T: AdapterRpc> AdapterSession<T> {
                     wait_milliseconds,
                 })?,
             )
-            .await?;
+            .await
+        {
+            Err(AdapterSdkError::Transport | AdapterSdkError::DeadlineExceeded) => {
+                return Err(AdapterSdkError::ClaimOutcomeUnknown);
+            }
+            result => result?,
+        };
         let batch: DeliveryBatchResponse = decode(&response)?;
         batch
             .events

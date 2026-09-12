@@ -115,4 +115,5 @@ jobs:
         working-directory: extensions/Konclave.HostExtension
         run: |
           npm ci
+          npm run typecheck
           npm exec -- vitest run tests/adapter-contract.test.ts

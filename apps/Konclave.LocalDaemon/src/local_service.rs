@@ -547,6 +547,24 @@ impl ClientRequestState {
     }
 }
 
+fn detached_claim_replay_failure(
+    state: &ClientRequestState,
+    request: &LocalServiceRequest,
+    response: &LocalServiceResponse,
+) -> Option<LocalServiceResponse> {
+    if state.delivery.is_none()
+        && request.operation().as_str() == "delivery.claim"
+        && matches!(response, LocalServiceResponse::Success { .. })
+    {
+        Some(LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::Conflict,
+        ))
+    } else {
+        None
+    }
+}
+
 async fn execute_session_request(
     state: &mut ClientRequestState,
     request: LocalServiceRequest,
@@ -561,7 +579,9 @@ async fn execute_session_request(
     let ledger = Arc::clone(&state.ledger);
     match begin_request(&ledger, key.clone(), &request) {
         LedgerDecision::Cached(response, durable) => {
-            if durable {
+            if let Some(failure) = detached_claim_replay_failure(state, &request, &response) {
+                failure
+            } else if durable {
                 response
             } else {
                 let reconciliation = reconcile_session_response(state, &request, response).await;
@@ -589,7 +609,11 @@ async fn execute_session_request(
                 .and_then(|response| response.clone())
             {
                 Some(response) => {
-                    if request_is_durable(&ledger, &key) {
+                    if let Some(failure) =
+                        detached_claim_replay_failure(state, &request, &response)
+                    {
+                        failure
+                    } else if request_is_durable(&ledger, &key) {
                         response
                     } else {
                         let reconciliation =
@@ -662,8 +686,10 @@ async fn execute_session_request(
                         LocalServiceErrorCode::ProfileUnavailable,
                     );
                 }
-                completion.complete(response.clone(), true);
-                return response;
+                let client_response = detached_claim_replay_failure(state, &request, &response)
+                    .unwrap_or_else(|| response.clone());
+                completion.complete(response, true);
+                return client_response;
             }
 
             tokio::task::yield_now().await;
@@ -3627,6 +3653,41 @@ mod tests {
         database
     }
 
+    async fn wait_for_recorded_outcome_count(
+        root: &TestProfileRoot,
+        profile: &str,
+        expected: i64,
+    ) {
+        let outcome_database = wait_for_outcome_database(root, profile).await;
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                let database = outcome_database.clone();
+                let recorded = tokio::task::spawn_blocking(move || {
+                    rusqlite::Connection::open_with_flags(
+                        database,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .unwrap()
+                    .query_row(
+                        "SELECT count(*) FROM daemon_local_request_outcome",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                })
+                .await
+                .unwrap();
+                if recorded == expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal request outcomes were not persisted");
+    }
+
     fn binding(profile: &str) -> LocalServiceBinding {
         LocalServiceBinding::new(
             LOCAL_SERVICE_PROTOCOL_VERSION,
@@ -4028,6 +4089,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reconnected_claim_requires_a_fresh_request_id() {
+        let (fixture, registry) = Fixture::new();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(registry),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut first = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the client connected: {result:?}")
+            }
+            stream = fixture.connect("session-claim-retry", 4) => stream,
+        };
+        let claim_payload = br#"{"maxEvents":1,"waitMilliseconds":0}"#;
+        let initial = ledger_request(11, "delivery.claim", claim_payload.to_vec());
+        write_request(&mut first, &initial).await.unwrap();
+        wait_for_recorded_outcome_count(&fixture.root, "session-claim-retry", 1).await;
+        drop(first);
+
+        let mut reconnected = fixture.connect("session-claim-retry", 4).await;
+        assert!(matches!(
+            request(
+                &mut reconnected,
+                11,
+                "delivery.claim",
+                claim_payload
+            )
+            .await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::Conflict,
+                ..
+            }
+        ));
+
+        let fresh_payload = tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            for seed in 12..=32 {
+                match request(&mut reconnected, seed, "delivery.claim", claim_payload).await {
+                    LocalServiceResponse::Success { payload, .. } => return payload,
+                    LocalServiceResponse::Failure {
+                        code: LocalServiceErrorCode::ProfileUnavailable,
+                        ..
+                    } => tokio::task::yield_now().await,
+                    response => panic!("fresh claim returned an unexpected response: {response:?}"),
+                }
+            }
+            panic!("replacement connection did not acquire the delivery lease");
+        })
+        .await
+        .expect("replacement delivery claim exceeded the test deadline");
+        let fresh: serde_json::Value = serde_json::from_slice(&fresh_payload).unwrap();
+        assert!(fresh["events"].as_array().unwrap().is_empty());
+
+        drop(reconnected);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_retried_request_id_returns_one_recorded_outcome() {
         let (fixture, registry) = Fixture::new();
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -4045,34 +4170,7 @@ mod tests {
         };
         let initial = ledger_request(9, "create_conversation", b"{}".to_vec());
         write_request(&mut first, &initial).await.unwrap();
-        let outcome_database = wait_for_outcome_database(&fixture.root, "session-retry").await;
-        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
-            loop {
-                let database = outcome_database.clone();
-                let recorded = tokio::task::spawn_blocking(move || {
-                    rusqlite::Connection::open_with_flags(
-                        database,
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                    )
-                    .unwrap()
-                    .query_row(
-                        "SELECT count(*) FROM daemon_local_request_outcome",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap()
-                })
-                .await
-                .unwrap();
-                if recorded == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the terminal request outcome was not persisted");
+        wait_for_recorded_outcome_count(&fixture.root, "session-retry", 1).await;
         drop(first);
 
         let mut reconnected = fixture.connect("session-retry", 3).await;

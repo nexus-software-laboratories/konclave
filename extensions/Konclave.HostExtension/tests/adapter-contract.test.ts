@@ -25,12 +25,17 @@ interface AdapterFixture {
     readonly recommendedHeartbeatMilliseconds: number;
   };
   readonly lifecycle: {
+    readonly ambiguousClaimRecovery: string;
     readonly pollingFallback: string;
   };
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function record(value: unknown, field: string): Readonly<Record<string, unknown>> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new Error(`adapter fixture ${field} must be an object`);
   }
   return value;
@@ -74,6 +79,10 @@ function parseFixture(value: unknown): AdapterFixture {
       ),
     },
     lifecycle: {
+      ambiguousClaimRecovery: string(
+        lifecycle.ambiguousClaimRecovery,
+        'lifecycle.ambiguousClaimRecovery',
+      ),
       pollingFallback: string(lifecycle.pollingFallback, 'lifecycle.pollingFallback'),
     },
   };
@@ -107,6 +116,7 @@ describe('harness-neutral adapter contract', () => {
 
   it('keeps polling integrations explicitly best effort', () => {
     expect(fixture.lifecycle.pollingFallback).toContain('best effort');
+    expect(fixture.lifecycle.ambiguousClaimRecovery).toContain('fresh request identifier');
     expect(JSON.stringify(fixture.operations)).not.toMatch(/copilot|claude|codex|prompt|model/u);
   });
 });

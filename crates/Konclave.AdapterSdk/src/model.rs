@@ -29,7 +29,7 @@ pub enum DeliveredPolicyResponseOutcome {
 }
 
 /// Validated delivery content separated from authenticated routing metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum DeliveredPayload {
     /// Untrusted peer-authored application text.
     ApplicationText {
@@ -97,7 +97,7 @@ pub enum DeliveredPayload {
 }
 
 /// One claimed durable event delivered to a harness adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct DeliveredEvent {
     notification_id: [u8; NOTIFICATION_ID_LENGTH],
     lease_generation: u64,

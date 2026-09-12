@@ -75,7 +75,8 @@ check validates the persistent shared-local-service client, harness-neutral adap
 SDK, immutable delivery fixture, and fake-harness claim/crash/reclaim lifecycle. It
 uses a read-only pull-request file query and skips source checkout for unrelated
 changes. It also runs the focused local-service authorization-loss regression and
-Clippy over the service library.
+Clippy over the service library, and type-checks the TypeScript fixture consumer
+before running its focused Vitest case.
 
 ## Native package validation
 

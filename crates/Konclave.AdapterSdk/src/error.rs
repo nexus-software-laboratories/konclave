@@ -17,6 +17,9 @@ pub enum AdapterSdkError {
     /// A bounded local operation exceeded its deadline.
     #[error("adapter SDK deadline exceeded")]
     DeadlineExceeded,
+    /// A claim may have completed before its connection was lost.
+    #[error("adapter SDK claim outcome is unknown; reconnect and use a fresh request identifier")]
+    ClaimOutcomeUnknown,
     /// The authenticated service returned one stable operation failure.
     #[error("adapter SDK operation failed: {0:?}")]
     Service(LocalServiceErrorCode),

@@ -32,6 +32,20 @@ impl AdapterRpc for RecordingRpc {
     }
 }
 
+struct FailingRpc(AdapterSdkError);
+
+#[async_trait]
+impl AdapterRpc for FailingRpc {
+    async fn request(
+        &mut self,
+        _request_id: AdapterRequestId,
+        _operation: &'static str,
+        _payload: Vec<u8>,
+    ) -> Result<Vec<u8>, AdapterSdkError> {
+        Err(self.0)
+    }
+}
+
 #[tokio::test]
 async fn fixture_defines_the_complete_versioned_delivery_contract() {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -215,9 +229,28 @@ async fn invalid_claim_and_turn_bounds_fail_before_transport() {
             )
             .await,
     ] {
-        assert_eq!(outcome.unwrap_err(), AdapterSdkError::InvalidConfiguration);
+        assert!(matches!(
+            outcome,
+            Err(AdapterSdkError::InvalidConfiguration)
+        ));
     }
     assert!(session.into_inner().requests.is_empty());
+}
+
+#[tokio::test]
+async fn ambiguous_claim_transport_outcomes_require_a_fresh_request() {
+    for error in [
+        AdapterSdkError::Transport,
+        AdapterSdkError::DeadlineExceeded,
+    ] {
+        let mut session = AdapterSession::new(FailingRpc(error));
+        assert!(matches!(
+            session
+                .claim(AdapterRequestId::from_bytes([8; 16]), 1, Duration::ZERO)
+                .await,
+            Err(AdapterSdkError::ClaimOutcomeUnknown)
+        ));
+    }
 }
 
 #[test]
@@ -230,6 +263,12 @@ fn fixture_operation_names_remain_harness_neutral() {
     for forbidden in ["copilot", "claude", "codex", "prompt", "model"] {
         assert!(!text.contains(forbidden));
     }
+    assert_eq!(
+        fixture["lifecycle"]["ambiguousClaimRecovery"],
+        json!(
+            "After a claim transport failure or deadline, discard the session, reconnect, and claim with a fresh request identifier so returned lease generations belong to the replacement connection."
+        )
+    );
     assert_eq!(
         fixture["lifecycle"]["pollingFallback"],
         json!(

@@ -195,6 +195,7 @@
     "acknowledge": "Claim, deliver through the harness-native event mechanism, then acknowledge only after the harness accepts the event.",
     "release": "Release when the harness intentionally defers or rejects local delivery without completing the event.",
     "crashRecovery": "Closing a session releases its consumer lease; a replacement session reclaims each unacknowledged notification with a newer lease generation.",
+    "ambiguousClaimRecovery": "After a claim transport failure or deadline, discard the session, reconnect, and claim with a fresh request identifier so returned lease generations belong to the replacement connection.",
     "heartbeat": "Heartbeat at most every 30000 milliseconds while retaining claimed work or an active directed-request turn.",
     "pollingFallback": "Polling skills are best effort and must use finite waits; they do not claim native lifecycle or wakeup guarantees."
   }

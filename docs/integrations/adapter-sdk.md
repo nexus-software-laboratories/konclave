@@ -42,12 +42,13 @@ releases its connection-owned lease and makes unacknowledged events reclaimable.
 8. Send `heartbeat` at intervals no longer than 30 seconds while retaining claimed
    work or an active directed-request turn.
 
-Request identifiers are caller-generated stable 16-byte values. A transport failure
-may be ambiguous: retry only the same operation with the same request identifier and
-byte-identical payload. Never allocate a new identifier merely because the response
-was lost. Canceling an in-flight persistent request closes that session so a late
-frame cannot be misread as the response to a later operation; reconnect before
-retrying the exact request.
+Request identifiers are caller-generated stable 16-byte values. For acknowledgement,
+release, heartbeat, and status, retry an ambiguous operation only with the same
+request identifier and byte-identical payload. A claim is different because its
+lease belongs to the connection that produced it. If a claim returns
+`ClaimOutcomeUnknown`, discard the unusable session, reconnect, and claim with a
+fresh request identifier. The service rejects replay of a successful claim on a
+replacement connection rather than returning stale lease generations.
 
 Acknowledgement is idempotent. A stale lease generation cannot settle a claim issued
 to a newer attachment. If a process crashes after claiming, connection teardown
@@ -88,7 +89,9 @@ credentials, model inference, or repository secrets. It verifies:
 - exact operation names and fixture request/response shapes;
 - all supported delivery event kinds and bounds;
 - claim, delivery, acknowledgement, release, heartbeat, and status behavior; and
-- a fake harness crash followed by same-notification reclaim under a newer lease.
+- a fake harness crash followed by same-notification reclaim under a newer lease;
+- ambiguous claim recovery with a fresh request identifier; and
+- rejection of a successful claim replayed without its owning connection.
 
 An implementation in another language should reproduce the fixture values and the
 same lifecycle outcomes before it is presented as a paved adapter.
