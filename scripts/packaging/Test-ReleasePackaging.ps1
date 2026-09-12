@@ -189,6 +189,8 @@ function Assert-ReleaseLayout {
                 'share/konclave/a2a/gateway-config.json',
                 'share/konclave/a2a/agent-publication.json',
                 'share/konclave/a2a/README.md',
+                'share/konclave/a2a/integrity.md',
+                'share/konclave/a2a/acceptance.md',
                 'share/konclave/a2a/compose.example.yaml',
                 'share/konclave/a2a/gateway-config.container.json',
                 'share/konclave/a2a/container.md'

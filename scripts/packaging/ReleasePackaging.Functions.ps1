@@ -576,9 +576,19 @@ function Copy-GatewayPayload {
         Join-Path $gatewayRoot 'agent-publication.json'
     )
     Copy-ReleaseFile (
-        Join-Path $ProjectRoot 'docs' 'development' 'a2a-self-hosting.md'
+        Join-Path $ProjectRoot 'docs' 'distribution' 'a2a-self-hosting.md'
     ) (
         Join-Path $gatewayRoot 'README.md'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'docs' 'distribution' 'integrity.md'
+    ) (
+        Join-Path $gatewayRoot 'integrity.md'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'docs' 'distribution' 'acceptance.md'
+    ) (
+        Join-Path $gatewayRoot 'acceptance.md'
     )
     Copy-ReleaseFile (
         Join-Path $ProjectRoot 'apps' 'Konclave.A2AGateway' 'compose.example.yaml'
