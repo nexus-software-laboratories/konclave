@@ -13,20 +13,18 @@ mod model;
 use std::time::Duration;
 
 use KonclaveBoundedDocuments::{BoundedVec, deserialize_strict};
-use KonclaveLocalServiceClient::{
-    LocalServiceJsonClient, LocalServiceJsonSession,
-};
+use KonclaveLocalServiceClient::{LocalServiceJsonClient, LocalServiceJsonSession};
 use KonclaveLocalServiceTransport::{RequestId, encode_lowercase_hex};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub use error::AdapterSdkError;
+use model::DeliveryEventDocument;
 pub use model::{
     AdapterStatus, CollaborationTurnClaim, DeliveredEvent, DeliveredPayload,
     DeliveredPolicyResponseOutcome, DeliveredRole, DeliverySettlement, MESSAGE_ID_LENGTH,
     NOTIFICATION_ID_LENGTH, ROUTED_ID_LENGTH,
 };
-use model::DeliveryEventDocument;
 
 /// Version of the harness-neutral adapter API and fixture contract.
 pub const ADAPTER_SDK_VERSION: u16 = 1;

@@ -129,11 +129,7 @@ async fn fake_harness_claims_crashes_reclaims_delivers_and_acknowledges() {
     let mut broker = FakeBroker::new();
     let mut crashed = AdapterSession::new(broker.connect());
     let mut first_batch = crashed
-        .claim(
-            AdapterRequestId::from_bytes([1; 16]),
-            1,
-            Duration::ZERO,
-        )
+        .claim(AdapterRequestId::from_bytes([1; 16]), 1, Duration::ZERO)
         .await
         .unwrap();
     let first = first_batch.remove(0);
@@ -146,11 +142,7 @@ async fn fake_harness_claims_crashes_reclaims_delivers_and_acknowledges() {
 
     let mut recovered = AdapterSession::new(broker.connect());
     let mut repeated_batch = recovered
-        .claim(
-            AdapterRequestId::from_bytes([2; 16]),
-            1,
-            Duration::ZERO,
-        )
+        .claim(AdapterRequestId::from_bytes([2; 16]), 1, Duration::ZERO)
         .await
         .unwrap();
     let repeated = repeated_batch.remove(0);
@@ -165,11 +157,7 @@ async fn fake_harness_claims_crashes_reclaims_delivers_and_acknowledges() {
         .await
         .unwrap();
     let mut final_batch = recovered
-        .claim(
-            AdapterRequestId::from_bytes([4; 16]),
-            1,
-            Duration::ZERO,
-        )
+        .claim(AdapterRequestId::from_bytes([4; 16]), 1, Duration::ZERO)
         .await
         .unwrap();
     let final_delivery = final_batch.remove(0);
@@ -192,11 +180,7 @@ async fn fake_harness_claims_crashes_reclaims_delivers_and_acknowledges() {
         .unwrap();
     assert!(
         recovered
-            .claim(
-                AdapterRequestId::from_bytes([7; 16]),
-                1,
-                Duration::ZERO,
-            )
+            .claim(AdapterRequestId::from_bytes([7; 16]), 1, Duration::ZERO,)
             .await
             .unwrap()
             .is_empty()

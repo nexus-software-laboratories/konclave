@@ -141,14 +141,10 @@ async fn fixture_defines_the_complete_versioned_delivery_contract() {
         .await
         .unwrap();
     let turn = CollaborationTurnClaim::new(
-        decode_lowercase_hex(
-            "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
-        )
-        .unwrap(),
-        decode_lowercase_hex(
-            "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
-        )
-        .unwrap(),
+        decode_lowercase_hex("101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f")
+            .unwrap(),
+        decode_lowercase_hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+            .unwrap(),
         decode_lowercase_hex("515152535455565758595a5b5c5d5e5f").unwrap(),
         2,
     )
@@ -195,11 +191,7 @@ async fn invalid_claim_and_turn_bounds_fail_before_transport() {
     });
     for outcome in [
         session
-            .claim(
-                AdapterRequestId::from_bytes([1; 16]),
-                0,
-                Duration::ZERO,
-            )
+            .claim(AdapterRequestId::from_bytes([1; 16]), 0, Duration::ZERO)
             .await,
         session
             .claim(
@@ -240,6 +232,8 @@ fn fixture_operation_names_remain_harness_neutral() {
     }
     assert_eq!(
         fixture["lifecycle"]["pollingFallback"],
-        json!("Polling skills are best effort and must use finite waits; they do not claim native lifecycle or wakeup guarantees.")
+        json!(
+            "Polling skills are best effort and must use finite waits; they do not claim native lifecycle or wakeup guarantees."
+        )
     );
 }

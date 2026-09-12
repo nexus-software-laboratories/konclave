@@ -323,10 +323,12 @@ impl TryFrom<DeliveryPayloadDocument> for DeliveredPayload {
 
     fn try_from(document: DeliveryPayloadDocument) -> Result<Self, Self::Error> {
         Ok(match document {
-            DeliveryPayloadDocument::ApplicationText { message_id, text } => Self::ApplicationText {
-                message_id: decode::<MESSAGE_ID_LENGTH>(&message_id)?,
-                text: validate_text(text)?,
-            },
+            DeliveryPayloadDocument::ApplicationText { message_id, text } => {
+                Self::ApplicationText {
+                    message_id: decode::<MESSAGE_ID_LENGTH>(&message_id)?,
+                    text: validate_text(text)?,
+                }
+            }
             DeliveryPayloadDocument::DirectedRequest {
                 message_id,
                 target_device_id,
