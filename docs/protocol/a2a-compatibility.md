@@ -255,5 +255,10 @@ profile pins `a2a-sdk` 1.0.3 and exercises Agent Card discovery, non-streaming t
 creation, artifacts, task lookup/listing, and SSE through the independent official
 Python client.
 
+The [self-hosted gateway runtime](../development/a2a-self-hosting.md) composes this
+profile with one authenticated local-service bridge and one SQLite task projection.
+Its first deployable profile accepts a dedicated-origin root interface with bearer
+authentication, or explicit unauthenticated loopback development.
+
 An A2A update uses a new versioned source directory and new immutable fixtures. It
 must not rewrite the `v1.0.1` source or reinterpret its validated initial profile.

@@ -1,0 +1,33 @@
+[package]
+name = "KonclaveA2AGatewayHost"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[[bin]]
+name = "KonclaveA2AGateway"
+path = "src/main.rs"
+
+[dependencies]
+KonclaveA2AContracts = { path = "../../crates/Konclave.A2AContracts" }
+KonclaveA2ADiscovery = { path = "../../crates/Konclave.A2ADiscovery" }
+KonclaveA2ADomain = { path = "../../crates/Konclave.A2ADomain" }
+KonclaveA2AGateway = { path = "../../crates/Konclave.A2AGateway" }
+KonclaveA2AKonclaveBridge = { path = "../../crates/Konclave.A2AKonclaveBridge" }
+KonclaveA2ATaskStoreSqlite = { path = "../../crates/Konclave.A2ATaskStoreSqlite" }
+KonclaveBoundedDocuments = { path = "../../crates/Konclave.BoundedDocuments" }
+KonclaveCryptographicCore = { path = "../../crates/Konclave.CryptographicCore" }
+KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }
+KonclaveLocalServiceClient = { path = "../../crates/Konclave.LocalServiceClient" }
+KonclaveLocalServiceTransport = { path = "../../crates/Konclave.LocalServiceTransport" }
+KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["http1", "tokio"] }
+serde.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

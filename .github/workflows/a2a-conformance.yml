@@ -47,6 +47,7 @@ jobs:
                 $files | Where-Object {
                   $_ -match '^Cargo\.(lock|toml)$' -or
                   $_ -match '^\.github/workflows/a2a-conformance\.yml$' -or
+                  $_ -match '^apps/Konclave\.A2AGateway/' -or
                   $_ -match '^conformance/a2a/' -or
                   $_ -match '^crates/Konclave\.A2A' -or
                   $_ -match '^protocol/releases/' -or

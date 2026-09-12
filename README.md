@@ -31,12 +31,16 @@ Run a Rust process from the workspace root:
 ```shell
 cargo run -p KonclaveLocalDaemon --bin KonclaveLocalService -- --config <absolute-service-config>
 cargo run -p KonclaveCommunityRelay
+cargo run -p KonclaveA2AGatewayHost --bin KonclaveA2AGateway
 cargo run -p KonclaveCommandLine -- --help
 ```
 
 `KonclaveCommunityRelay` requires the access-document and SQLite paths described in
 the [relay transport authentication contract](docs/protocol/relay-authentication.md).
 Non-loopback deployments also require trusted TLS termination.
+`KonclaveA2AGatewayHost` requires `KONCLAVE_A2A_GATEWAY_CONFIG_FILE` and one
+initialized shared local service as described in the
+[self-hosted A2A runtime contract](docs/development/a2a-self-hosting.md).
 
 Run the administration console from its application directory:
 
@@ -112,6 +116,8 @@ Konclave separates the trusted local agent boundary from relay transport:
   supervision, authorization, SQLite state, and reusable operation handlers.
 - `Konclave.CommunityRelay` provides outbound WebSocket/HTTP relay transport
   without access to plaintext message content.
+- `Konclave.A2AGateway` provides the inbound standard A2A HTTP+JSON edge over one
+  exact local-service profile and SQLite task projection.
 - Shared crates own protocol contracts, cryptographic policy, domain behavior,
   and client integration.
 - TypeScript guests provide the thin Copilot CLI client and administration console.
@@ -124,6 +130,7 @@ details.
 <!-- genesis:structure:start -->
 ```
 apps/Konclave.CommandLine/       # Command-line client
+apps/Konclave.A2AGateway/        # Self-hosted A2A HTTP+JSON gateway
 apps/Konclave.CommunityRelay/    # Self-hosted relay service
 apps/Konclave.LocalDaemon/       # Shared local service and operation host
 apps/Konclave.AdminConsole/      # React administration console

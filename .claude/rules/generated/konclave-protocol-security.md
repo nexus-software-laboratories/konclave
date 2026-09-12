@@ -23,6 +23,7 @@ paths:
   - "crates/Konclave.SecretStorage/**/*.rs"
   - "crates/Konclave.DomainCore/**/*.rs"
   - "crates/Konclave.ClientLibrary/**/*.rs"
+  - "apps/Konclave.A2AGateway/**/*.rs"
   - "apps/Konclave.LocalDaemon/**/*.rs"
   - "apps/Konclave.CommunityRelay/**/*.rs"
   - "extensions/Konclave.HostExtension/**/*.{ts,tsx}"
