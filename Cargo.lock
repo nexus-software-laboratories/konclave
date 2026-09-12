@@ -354,6 +354,9 @@ dependencies = [
 name = "KonclaveLocalDaemon"
 version = "0.1.0"
 dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveA2ADomain",
+ "KonclaveA2AGateway",
  "KonclaveAdapterTransport",
  "KonclaveClientLibrary",
  "KonclaveCollaborationPolicies",

@@ -40,7 +40,9 @@ the [relay transport authentication contract](docs/protocol/relay-authentication
 Non-loopback deployments also require trusted TLS termination.
 `KonclaveA2AGatewayHost` requires `KONCLAVE_A2A_GATEWAY_CONFIG_FILE` and one
 initialized shared local service as described in the
-[self-hosted A2A runtime contract](docs/development/a2a-self-hosting.md).
+[self-hosted A2A runtime contract](docs/development/a2a-self-hosting.md). Deployment
+and recovery procedures are in the
+[self-hosted A2A operator guide](docs/distribution/a2a-self-hosting.md).
 
 Run the administration console from its application directory:
 

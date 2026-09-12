@@ -18,7 +18,7 @@ jobs:
   a2a-conformance:
     name: A2A conformance
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Resolve A2A validation scope
         id: scope
@@ -48,6 +48,7 @@ jobs:
                   $_ -match '^Cargo\.(lock|toml)$' -or
                   $_ -match '^\.github/workflows/a2a-conformance\.yml$' -or
                   $_ -match '^apps/Konclave\.A2AGateway/' -or
+                  $_ -match '^apps/Konclave\.LocalDaemon/tests/packaged_distribution_e2e\.rs$' -or
                   $_ -match '^conformance/a2a/' -or
                   $_ -match '^crates/Konclave\.A2A' -or
                   $_ -match '^protocol/releases/' -or
@@ -82,8 +83,15 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveA2AGatewayHost -- --check
+          cargo fmt --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveA2AGatewayHost
           cargo clippy --locked --package KonclaveA2AGatewayHost --all-targets -- -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --test packaged_distribution_e2e \
+            -- \
+            -D warnings
       - name: Install pinned uv
         if: steps.scope.outputs.run == 'true'
         shell: bash

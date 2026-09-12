@@ -1,5 +1,8 @@
 # Self-hosted A2A gateway runtime
 
+The maintained deployment, backup, upgrade, and troubleshooting procedure is the
+[self-hosted A2A operator guide](../distribution/a2a-self-hosting.md).
+
 `KonclaveA2AGateway` is the standalone public process for the standard A2A
 HTTP+JSON bridge. It receives inbound A2A traffic while every target agent and the
 shared local service remain outbound-only.
@@ -113,9 +116,20 @@ stops accepting requests, drains the HTTP server, signals all response observers
 and waits up to 30 seconds for observer completion. Supervisors must allow at least 90
 seconds for the bounded HTTP and observer phases plus scheduling margin.
 
+## Container boundary
+
+The Linux AMD64 image and maintained Compose definition live under
+[`apps/Konclave.A2AGateway`](../../apps/Konclave.A2AGateway/). The image runs as a
+non-root user with a read-only root filesystem. Configuration, owner-protected
+credentials, the local-service socket, SQLite state, and encrypted ciphertext objects
+use five explicit mounts; the task and object roots remain separate writable
+boundaries. Compose publishes the plaintext listener on host loopback only for an
+operator-managed TLS reverse proxy.
+
 ## Remaining packaging work
 
-Native archives, service definitions, container composition, explicit artifact
-publication/object serving, and packaged clean-install acceptance are separate
-delivery items. They must preserve this configuration and trust boundary rather than
-embedding credentials or moving plaintext into the relay.
+Native archives and the Linux AMD64 container are exercised by packaged clean-install
+acceptance against an independently installed shared service. Service definitions and
+an agent-facing artifact-publication adapter remain separate delivery items. They
+must preserve this configuration and trust boundary rather than embedding credentials
+or moving plaintext into the relay.

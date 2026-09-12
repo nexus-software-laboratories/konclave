@@ -66,11 +66,11 @@ The A2A conformance workflow follows the same hosted-only trust boundary. Its st
 required check uses a read-only pull-request file query and runs the external suite
 only when A2A contracts, gateway code, provenance, or harness files changed. It
 checks out no source for unrelated changes. Relevant runs also format, test, and
-Clippy the standalone gateway host before executing external code. Draft promotion
-does not trigger another run for an unchanged commit. An `edited` event resolves the
-pull request's files and reruns the full check when the diff is A2A-relevant,
-preventing a no-op result from masking a prior failure; unrelated diffs keep the
-lightweight scope-only result.
+Clippy the standalone gateway host and format/Clippy the packaged A2A acceptance
+harness before executing external code. Draft promotion does not trigger another run
+for an unchanged commit. An `edited` event resolves the pull request's files and
+reruns the full check when the diff is A2A-relevant, preventing a no-op result from
+masking a prior failure; unrelated diffs keep the lightweight scope-only result.
 
 The adapter-conformance workflow follows the same hosted-only boundary. Its stable
 check validates the persistent shared-local-service client, harness-neutral adapter
@@ -107,7 +107,7 @@ package-validation run, including failures and cancellations, and deletes artifa
 belonging to that exact run. Pull-request code receives no `actions: write`
 permission. One-day retention is only a fallback if trusted cleanup cannot run.
 
-`Packaged clean-install acceptance` then extracts the Linux client and relay archives
+`Packaged clean-install acceptance` then extracts the Linux client, relay, and gateway archives
 twice, creates temporary trusted TLS, and drives the packaged shared local service
 through the same authenticated thin-client contract used by Copilot. It repeats the
 same pairing, delivery, restart, cancellation, enrollment, and opacity assertions
@@ -124,14 +124,16 @@ environment markers before inference begins.
 
 ## OCI validation
 
-Container validation builds one `linux/amd64` OCI archive for the Community
-Relay and asserts its structure. The build backend differs by runner, but the
-image contract and every archive assertion are shared in
+Container validation builds separate `linux/amd64` OCI archives for the Community
+Relay and standalone A2A gateway and asserts their structure. The build backend
+differs by runner, but the image contract and every archive assertion are shared in
 `scripts/ci/container-image.lib.sh` so both backends validate identically.
 
 Validation confirms the non-root runtime user, declared health check,
 entrypoint presence in the final layers, and absence of Rust build tooling. It
-does not run the image.
+does not run the image. The A2A lane additionally compiles the maintained Compose
+definition and checks its loopback publication, read-only root, dropped capabilities,
+non-root identity, finite PID budget, and five explicit mount boundaries.
 
 ### Hosted backend
 

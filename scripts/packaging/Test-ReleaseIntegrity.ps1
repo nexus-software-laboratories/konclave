@@ -84,7 +84,7 @@ try {
         $archive = Join-Path $contractRoot ([string]$entry.fileName)
         [IO.File]::WriteAllText($archive, [string]$entry.id)
         [IO.File]::WriteAllText("$archive.intoto.jsonl", '{}')
-        if ([string]$entry.kind -in @('client', 'relay')) {
+        if ([string]$entry.kind -in @('client', 'relay', 'gateway')) {
             [IO.File]::WriteAllText("$archive.rust.cdx.json", '{}')
         }
         else {

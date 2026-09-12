@@ -8,6 +8,7 @@
     "CI",
     "A2A conformance",
     "Adapter conformance",
+    "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
     "Package validation",
@@ -65,6 +66,7 @@
         "a2a-conformance",
         "adapter-conformance",
         "community-relay-container-ci",
+        "container-ci",
         "delete-run-artifacts"
       ]
     }

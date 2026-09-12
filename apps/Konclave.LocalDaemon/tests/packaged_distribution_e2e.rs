@@ -1,29 +1,50 @@
 //! Exercises extracted client artifacts through the shared local-service boundary.
 //!
 //! Real Copilot OAuth and cloud inference remain outside this deterministic test. The
-//! packaged CLI, thin plugin, shared service, relay, pairing, messaging, restart, and
-//! profile recovery paths are real.
+//! packaged CLI, thin plugin, shared service, relay, A2A gateway, pairing, messaging,
+//! restart, and profile recovery paths are real.
 
 #![cfg(unix)]
 
 mod support;
 
 use std::ffi::OsString;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use KonclaveA2AContracts::wire::{
+    Message as A2AMessage, Part as A2APart, Role as A2ARole, SendMessageConfiguration,
+    SendMessageRequest, TaskState as A2ATaskState, part as a2a_part,
+};
+use KonclaveA2AContracts::{
+    A2A_TEXT_MEDIA_TYPE, InitialA2AInterfaceEnvironment, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    validate_initial_send_message_request,
+};
+use KonclaveA2ADomain::A2ATaskId;
+use KonclaveA2AGateway::{
+    A2AAgentCardFetchOutcome, A2ABearerCredential, A2AHttpClientConfig, A2AHttpJsonClient,
+    fetch_public_agent_card,
+};
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveLocalServiceTransport::{
     AdapterKeyId, AdapterKeyVersion, LocalServiceInstallation, LocalServiceProfileCustody,
 };
 use KonclaveSecretStorage::{create_or_verify_owner_protected_file, open_owner_protected_file};
+use sha2::{Digest as _, Sha256};
+use tokio::process::{Child, Command as TokioCommand};
 use tokio::time::timeout;
 
 use support::shared_service::{
     SessionConnectionRequest, SharedServiceProcess, complete_pairing, connect,
     connect_with_session_identity, identity, rpc,
 };
+
+const A2A_CONTEXT_ID: &str = "packaged-a2a-context";
+const A2A_REQUEST_TEXT: &str = "packaged A2A contract request";
+const A2A_RESPONSE_TEXT: &str = "packaged A2A contract response";
+const A2A_BEARER_TOKEN: &str = "packaged-a2a-bearer-0123456789abcdef";
 
 struct AcceptancePaths {
     cli: PathBuf,
@@ -41,6 +62,12 @@ struct AcceptancePaths {
     extension_root: PathBuf,
     relay_state: PathBuf,
     relay_database: PathBuf,
+    gateway: PathBuf,
+    gateway_address: String,
+    gateway_container: bool,
+    gateway_container_name: Option<String>,
+    gateway_image: Option<String>,
+    container_run_id: Option<String>,
 }
 
 impl AcceptancePaths {
@@ -61,6 +88,12 @@ impl AcceptancePaths {
             extension_root: required_path("KONCLAVE_ACCEPTANCE_EXTENSION_ROOT"),
             relay_state: required_path("KONCLAVE_ACCEPTANCE_RELAY_STATE"),
             relay_database: required_path("KONCLAVE_ACCEPTANCE_RELAY_DATABASE"),
+            gateway: required_path("KONCLAVE_ACCEPTANCE_GATEWAY"),
+            gateway_address: required("KONCLAVE_ACCEPTANCE_GATEWAY_ADDRESS"),
+            gateway_container: required_bool("KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER"),
+            gateway_container_name: optional("KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME"),
+            gateway_image: optional("KONCLAVE_ACCEPTANCE_GATEWAY_IMAGE"),
+            container_run_id: optional("KONCLAVE_ACCEPTANCE_CONTAINER_RUN_ID"),
         }
     }
 }
@@ -73,6 +106,278 @@ fn required_path(name: &str) -> PathBuf {
     let path = PathBuf::from(required(name));
     assert!(path.is_absolute(), "{name} must be absolute");
     path
+}
+
+fn optional(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn required_bool(name: &str) -> bool {
+    match required(name).as_str() {
+        "true" => true,
+        "false" => false,
+        _ => panic!("{name} must be true or false"),
+    }
+}
+
+struct GatewayFixture {
+    runtime_config_path: PathBuf,
+    config_root: PathBuf,
+    credential_root: PathBuf,
+    socket_root: PathBuf,
+    task_root: PathBuf,
+    object_root: PathBuf,
+    endpoint: String,
+}
+
+struct GatewayAcceptanceRoute<'a> {
+    conversation_id: &'a str,
+    target_device_id: &'a str,
+    policy_digest: &'a str,
+}
+
+struct GatewayProcess {
+    child: Option<Child>,
+    container_name: Option<String>,
+}
+
+impl GatewayProcess {
+    fn start(paths: &AcceptancePaths, fixture: &GatewayFixture, attempt: u8) -> Self {
+        let mut command = if paths.gateway_container {
+            let mut command = TokioCommand::new("bash");
+            command.arg(&paths.gateway);
+            command
+        } else {
+            TokioCommand::new(&paths.gateway)
+        };
+        command
+            .env(
+                "KONCLAVE_A2A_GATEWAY_CONFIG_FILE",
+                &fixture.runtime_config_path,
+            )
+            .env(
+                "KONCLAVE_ACCEPTANCE_GATEWAY_CONFIG_ROOT",
+                &fixture.config_root,
+            )
+            .env(
+                "KONCLAVE_ACCEPTANCE_GATEWAY_CREDENTIAL_ROOT",
+                &fixture.credential_root,
+            )
+            .env(
+                "KONCLAVE_ACCEPTANCE_GATEWAY_SOCKET_ROOT",
+                &fixture.socket_root,
+            )
+            .env("KONCLAVE_ACCEPTANCE_GATEWAY_TASK_ROOT", &fixture.task_root)
+            .env(
+                "KONCLAVE_ACCEPTANCE_GATEWAY_OBJECT_ROOT",
+                &fixture.object_root,
+            )
+            .env(
+                "KONCLAVE_ACCEPTANCE_GATEWAY_HEALTH_ADDRESS",
+                &paths.gateway_address,
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let container_name = if paths.gateway_container {
+            let container_name = paths
+                .gateway_container_name
+                .as_deref()
+                .expect("gateway container name is required");
+            let container_name = format!("{container_name}-{attempt}");
+            command
+                .env(
+                    "KONCLAVE_ACCEPTANCE_GATEWAY_IMAGE",
+                    paths
+                        .gateway_image
+                        .as_deref()
+                        .expect("gateway container image is required"),
+                )
+                .env(
+                    "KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME",
+                    &container_name,
+                )
+                .env(
+                    "KONCLAVE_ACCEPTANCE_CONTAINER_RUN_ID",
+                    paths
+                        .container_run_id
+                        .as_deref()
+                        .expect("container run identity is required"),
+                );
+            Some(container_name)
+        } else {
+            None
+        };
+        let child = command.spawn().expect("packaged A2A gateway must start");
+        Self {
+            child: Some(child),
+            container_name,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().and_then(Child::id).unwrap()
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(container_name) = &self.container_name {
+            let status = TokioCommand::new("docker")
+                .args(["stop", "--time", "90"])
+                .arg(container_name)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .status()
+                .await
+                .expect("gateway container stop must execute");
+            assert!(status.success(), "gateway container stop failed");
+        } else {
+            let process_id =
+                i32::try_from(self.id()).expect("gateway process identifier exceeds Unix pid_t");
+            // SAFETY: this fixture spawned `process_id`, still owns its live Child
+            // handle, and sends SIGTERM to exercise coordinated shutdown.
+            assert_eq!(unsafe { libc::kill(process_id, libc::SIGTERM) }, 0);
+        }
+        let status = timeout(
+            Duration::from_secs(100),
+            self.child.as_mut().unwrap().wait(),
+        )
+        .await
+        .expect("A2A gateway shutdown exceeded its deadline")
+        .expect("waiting for packaged A2A gateway failed");
+        assert!(status.success(), "A2A gateway exited with {status}");
+        self.child = None;
+    }
+}
+
+fn ensure_owner_directory(path: &Path) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn copy_owner_file(source: &Path, destination: &Path) {
+    let bytes = std::fs::read(source).unwrap();
+    create_or_verify_owner_protected_file(destination, &bytes).unwrap();
+}
+
+fn prepare_gateway_fixture(
+    paths: &AcceptancePaths,
+    installation: &LocalServiceInstallation,
+    installation_file: &Path,
+    issuer_key_file: &Path,
+    conversation_id: &str,
+    target_device_id: &str,
+) -> GatewayFixture {
+    let root = paths.profile_root.parent().unwrap().join("gateway");
+    let config_root = root.join("config");
+    let credential_root = root.join("credentials");
+    let task_root = root.join("tasks");
+    let object_root = root.join("objects");
+    for directory in [
+        &root,
+        &config_root,
+        &credential_root,
+        &task_root,
+        &object_root,
+    ] {
+        ensure_owner_directory(directory);
+    }
+    let installed_service =
+        credential_root.join(KonclaveLocalServiceTransport::LOCAL_SERVICE_INSTALLATION_FILE);
+    let installed_issuer = credential_root.join("account-issuer.key");
+    let bearer_file = credential_root.join("a2a-bearer");
+    copy_owner_file(installation_file, &installed_service);
+    copy_owner_file(issuer_key_file, &installed_issuer);
+    create_or_verify_owner_protected_file(&bearer_file, A2A_BEARER_TOKEN.as_bytes()).unwrap();
+
+    let (runtime_config_root, runtime_credential_root, runtime_task_root, runtime_object_root) =
+        if paths.gateway_container {
+            (
+                PathBuf::from("/etc/konclave/a2a"),
+                PathBuf::from("/run/konclave/credentials"),
+                PathBuf::from("/var/lib/konclave/a2a/tasks"),
+                PathBuf::from("/var/lib/konclave/a2a/objects"),
+            )
+        } else {
+            (
+                config_root.clone(),
+                credential_root.clone(),
+                task_root.clone(),
+                object_root.clone(),
+            )
+        };
+    let endpoint = format!("http://{}", paths.gateway_address);
+    let publication_file = config_root.join("agent-publication.json");
+    let runtime_publication_file = runtime_config_root.join("agent-publication.json");
+    let publication = serde_json::to_vec(&serde_json::json!({
+        "apiVersion": "konclave.dev/v1",
+        "kind": "A2AAgentPublication",
+        "metadata": { "name": "packaged-agent" },
+        "spec": {
+            "publicWellKnown": true,
+            "name": "Packaged agent",
+            "description": "Exercises one packaged A2A request.",
+            "version": "1.0.0",
+            "interfaces": [{ "url": format!("{endpoint}/") }],
+            "authentication": {
+                "type": "bearer",
+                "name": "bearer",
+                "bearerFormat": "opaque"
+            },
+            "skills": [{
+                "id": "contract-review",
+                "name": "Contract review",
+                "description": "Returns one deterministic response.",
+                "tags": ["contracts", "text"]
+            }]
+        }
+    }))
+    .unwrap();
+    create_or_verify_owner_protected_file(&publication_file, &publication).unwrap();
+
+    let config_path = config_root.join("gateway.json");
+    let config = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "interfaceEnvironment": "loopback_development",
+        "listener": {
+            "address": paths.gateway_address.as_str(),
+            "tlsTerminated": false
+        },
+        "publicationFile": runtime_publication_file,
+        "taskDatabaseFile": runtime_task_root.join("tasks.sqlite"),
+        "artifactObjectDirectory": runtime_object_root,
+        "route": {
+            "contextId": A2A_CONTEXT_ID,
+            "conversationId": conversation_id,
+            "targetDeviceId": target_device_id
+        },
+        "localService": {
+            "installationFile": runtime_credential_root.join(
+                KonclaveLocalServiceTransport::LOCAL_SERVICE_INSTALLATION_FILE
+            ),
+            "issuerKeyFile": runtime_credential_root.join("account-issuer.key"),
+            "profile": "session-packaged-a"
+        },
+        "bearerTokenFiles": [runtime_credential_root.join("a2a-bearer")]
+    }))
+    .unwrap();
+    create_or_verify_owner_protected_file(&config_path, &config).unwrap();
+
+    let endpoint_path = installation.endpoint().as_path();
+    GatewayFixture {
+        runtime_config_path: if paths.gateway_container {
+            runtime_config_root.join("gateway.json")
+        } else {
+            config_path
+        },
+        config_root,
+        credential_root,
+        socket_root: endpoint_path.parent().unwrap().to_path_buf(),
+        task_root,
+        object_root,
+        endpoint,
+    }
 }
 
 fn run_cli(paths: &AcceptancePaths, arguments: &[OsString], expect_success: bool) -> String {
@@ -198,6 +503,169 @@ async fn claim_application_text(
     .expect("expected application delivery was not claimed")
 }
 
+async fn claim_directed_request(
+    delivery: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
+    expected_text: &str,
+) -> serde_json::Value {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let claimed = rpc(
+                delivery,
+                "delivery.claim",
+                serde_json::json!({"maxEvents": 16, "waitMilliseconds": 1_000}),
+            )
+            .await;
+            for event in claimed["events"].as_array().unwrap() {
+                if event["payload"]["kind"].as_str() == Some("directed_request")
+                    && event["payload"]["text"].as_str() == Some(expected_text)
+                {
+                    return event.clone();
+                }
+                finish_delivery_event(delivery, event).await;
+            }
+        }
+    })
+    .await
+    .expect("expected directed request was not claimed")
+}
+
+async fn connect_gateway_client(fixture: &GatewayFixture) -> A2AHttpJsonClient {
+    let config =
+        A2AHttpClientConfig::new(Duration::from_secs(5), MAX_A2A_ENCODED_RESPONSE_BYTES).unwrap();
+    let discovery_url = format!("{}/.well-known/agent-card.json", fixture.endpoint);
+    for _ in 0..200 {
+        if let Ok(A2AAgentCardFetchOutcome::Modified { card, .. }) = fetch_public_agent_card(
+            &discovery_url,
+            InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+            None,
+            None,
+            config,
+        )
+        .await
+        {
+            return A2AHttpJsonClient::new(
+                &card,
+                Some(A2ABearerCredential::parse(A2A_BEARER_TOKEN).unwrap()),
+                config,
+            )
+            .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("packaged A2A gateway never became ready");
+}
+
+fn packaged_a2a_request() -> KonclaveA2AContracts::InitialSendMessageRequest {
+    validate_initial_send_message_request(
+        SendMessageRequest {
+            tenant: String::new(),
+            message: Some(A2AMessage {
+                message_id: "packaged-a2a-request".to_owned(),
+                context_id: A2A_CONTEXT_ID.to_owned(),
+                task_id: String::new(),
+                role: A2ARole::User as i32,
+                parts: vec![A2APart {
+                    content: Some(a2a_part::Content::Text(A2A_REQUEST_TEXT.to_owned())),
+                    metadata: None,
+                    filename: String::new(),
+                    media_type: A2A_TEXT_MEDIA_TYPE.to_owned(),
+                }],
+                metadata: None,
+                extensions: vec![],
+                reference_task_ids: vec![],
+            }),
+            configuration: Some(SendMessageConfiguration {
+                accepted_output_modes: vec![A2A_TEXT_MEDIA_TYPE.to_owned()],
+                task_push_notification_config: None,
+                history_length: Some(1),
+                return_immediately: true,
+            }),
+            metadata: None,
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn task_contains_agent_text(
+    task: &KonclaveA2AContracts::InitialA2ATaskResponse,
+    expected: &str,
+) -> bool {
+    task.as_wire().history.iter().any(|message| {
+        message.role == A2ARole::Agent as i32
+            && message.parts.iter().any(|part| {
+                matches!(
+                    &part.content,
+                    Some(a2a_part::Content::Text(text)) if text == expected
+                )
+            })
+    })
+}
+
+fn assert_ciphertext_endpoint(fixture: &GatewayFixture, object_id: &str, expected: &[u8]) {
+    let url = format!("{}/objects/sha256/{object_id}", fixture.endpoint);
+    let output = Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--max-time", "5"])
+        .arg(&url)
+        .output()
+        .expect("ciphertext retrieval must execute");
+    assert!(
+        output.status.success(),
+        "ciphertext retrieval failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, expected);
+
+    let range = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "5",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{http_code}",
+            "--header",
+            "Range: bytes=0-1",
+        ])
+        .arg(&url)
+        .output()
+        .expect("ciphertext range rejection must execute");
+    assert!(range.status.success());
+    assert_eq!(range.stdout, b"416");
+}
+
+fn assert_gateway_anonymous_rejected(fixture: &GatewayFixture) {
+    let output = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "5",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{http_code}",
+            "--header",
+            "Accept: application/a2a+json",
+            "--header",
+            "A2A-Version: 1.0",
+        ])
+        .arg(format!("{}/tasks", fixture.endpoint))
+        .output()
+        .expect("anonymous gateway request must execute");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"401");
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 async fn assert_terminal_text_not_authorized(
     delivery: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
     conversation_id: &str,
@@ -242,11 +710,153 @@ async fn connect_session_lane(
     .await
 }
 
+async fn exercise_packaged_gateway(
+    paths: &AcceptancePaths,
+    installation: &LocalServiceInstallation,
+    installation_file: &Path,
+    issuer_key_file: &Path,
+    route: GatewayAcceptanceRoute<'_>,
+    target_delivery: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
+) {
+    let fixture = prepare_gateway_fixture(
+        paths,
+        installation,
+        installation_file,
+        issuer_key_file,
+        route.conversation_id,
+        route.target_device_id,
+    );
+    let ciphertext = b"packaged-encrypted-object-ciphertext";
+    let object_id = sha256_hex(ciphertext);
+    create_or_verify_owner_protected_file(&fixture.object_root.join(&object_id), ciphertext)
+        .unwrap();
+
+    let gateway = GatewayProcess::start(paths, &fixture, 1);
+    let client = connect_gateway_client(&fixture).await;
+    assert_gateway_anonymous_rejected(&fixture);
+    let submitted = client.send_message(packaged_a2a_request()).await.unwrap();
+    assert!(matches!(
+        submitted.state(),
+        A2ATaskState::Submitted | A2ATaskState::Working
+    ));
+    assert_eq!(submitted.context_id(), A2A_CONTEXT_ID);
+    let task_id = A2ATaskId::parse(submitted.task_id().to_owned()).unwrap();
+
+    let request_event = claim_directed_request(target_delivery, A2A_REQUEST_TEXT).await;
+    assert_eq!(
+        request_event["payload"]["targetDeviceId"].as_str(),
+        Some(route.target_device_id)
+    );
+    let request_message_id = request_event["payload"]["messageId"].as_str().unwrap();
+    let turn = rpc(
+        target_delivery,
+        "collaboration.turn.authorize",
+        serde_json::json!({
+            "conversationId": route.conversation_id,
+            "requestMessageId": request_message_id,
+            "notificationId": request_event["notificationId"],
+            "leaseGeneration": request_event["leaseGeneration"]
+        }),
+    )
+    .await;
+    assert_eq!(turn["outcome"].as_str(), Some("authorized"));
+    assert_eq!(turn["policyDigest"].as_str(), Some(route.policy_digest));
+    let attempt = turn["attempt"].as_u64().unwrap();
+    let response_message_id = "61".repeat(16);
+    let action = rpc(
+        target_delivery,
+        "collaboration.action.evaluate",
+        serde_json::json!({
+            "conversationId": route.conversation_id,
+            "policyDigest": route.policy_digest,
+            "action": "conversation.reply",
+            "resource": null,
+            "messageId": response_message_id,
+            "replyToMessageId": request_message_id,
+            "text": A2A_RESPONSE_TEXT,
+            "requestMessageId": request_message_id,
+            "attempt": attempt
+        }),
+    )
+    .await;
+    assert_eq!(action["decision"].as_str(), Some("allow"));
+    let collaboration_authorization = action["authorization"].as_str().unwrap();
+    rpc(
+        target_delivery,
+        "send_message",
+        serde_json::json!({
+            "conversation_id": route.conversation_id,
+            "message_id": response_message_id,
+            "reply_to_message_id": request_message_id,
+            "text": A2A_RESPONSE_TEXT,
+            "collaboration_authorization": collaboration_authorization
+        }),
+    )
+    .await;
+    finish_delivery_event(target_delivery, &request_event).await;
+
+    let completed = timeout(Duration::from_secs(15), async {
+        loop {
+            let task = client.get_task(&task_id, Some(1)).await.unwrap();
+            if task.state() == A2ATaskState::Completed {
+                break task;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("packaged A2A task did not complete");
+    assert!(task_contains_agent_text(&completed, A2A_RESPONSE_TEXT));
+    let listed = client.list_tasks(Some(10), None).await.unwrap();
+    assert!(
+        listed
+            .as_wire()
+            .tasks
+            .iter()
+            .any(|task| task.id.as_str() == task_id.as_str())
+    );
+    assert_ciphertext_endpoint(&fixture, &object_id, ciphertext);
+    assert_process_has_no_secret_input(
+        gateway.id(),
+        &[
+            A2A_BEARER_TOKEN.as_bytes(),
+            A2A_REQUEST_TEXT.as_bytes(),
+            A2A_RESPONSE_TEXT.as_bytes(),
+        ],
+    );
+    assert_relay_opaque(
+        &paths.relay_state,
+        &[A2A_REQUEST_TEXT.as_bytes(), A2A_RESPONSE_TEXT.as_bytes()],
+    );
+    gateway.shutdown().await;
+
+    let restarted = GatewayProcess::start(paths, &fixture, 2);
+    let restarted_client = connect_gateway_client(&fixture).await;
+    let recovered = restarted_client.get_task(&task_id, Some(1)).await.unwrap();
+    assert!(recovered.state() == A2ATaskState::Completed);
+    assert!(task_contains_agent_text(&recovered, A2A_RESPONSE_TEXT));
+    let listed = restarted_client.list_tasks(Some(10), None).await.unwrap();
+    assert!(
+        listed
+            .as_wire()
+            .tasks
+            .iter()
+            .any(|task| task.id.as_str() == task_id.as_str())
+    );
+    assert_ciphertext_endpoint(&fixture, &object_id, ciphertext);
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires extracted release artifacts and a packaged relay"]
+#[ignore = "requires extracted release artifacts, packaged relays, and packaged A2A gateways"]
 async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_remains_opaque() {
     let paths = AcceptancePaths::from_environment();
-    for binary in [&paths.cli, &paths.service, &paths.second_service] {
+    for binary in [
+        &paths.cli,
+        &paths.service,
+        &paths.second_service,
+        &paths.gateway,
+    ] {
         assert!(binary.is_file(), "packaged binary is missing");
     }
     assert!(paths.client_module.is_file());
@@ -642,6 +1252,19 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     }
     drain_delivery(&mut first_delivery).await;
     drain_delivery(&mut second_delivery).await;
+    exercise_packaged_gateway(
+        &paths,
+        &installation,
+        &config_path,
+        &issuer_seed_path,
+        GatewayAcceptanceRoute {
+            conversation_id: &conversation_id,
+            target_device_id: &second_identity,
+            policy_digest: &policy_digest,
+        },
+        &mut second_delivery,
+    )
+    .await;
     let unrelated_session = LocalServiceIdentity::generate().unwrap();
     let mut unrelated = connect_session_lane(
         &installation,
