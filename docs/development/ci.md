@@ -27,6 +27,24 @@ only one pending run per group, so a third request cancels another pull request'
 queued validation. Superseded revisions of the same pull request queue rather than
 cancel, so a run already producing required checks finishes and reports.
 
+## Reuse validation on ready promotion
+
+Full CI and package validation run when a pull request is opened, when its head SHA
+changes, and when it is reopened. A draft opened on one SHA therefore produces the
+same required `CI` and `Package validation` checks used when that unchanged pull
+request becomes ready; promotion does not run either matrix again. Draft CI is
+unconditionally full so reused checks cannot represent a reduced validation scope.
+
+Full CI retains the `edited` event because retargeting a pull request onto `main`
+changes its validation eligibility without creating a new head SHA. The title and
+base checks also react to edits, and Review policy reacts to ready/draft transitions
+because its approval rule depends on that state. A failed check on an unchanged SHA
+remains failed until code changes or an operator explicitly reruns it.
+
+`scripts/ci/Test-PullRequestValidationTriggers.ps1` owns this trigger contract and
+prevents `ready_for_review` from being reintroduced into full CI, packaging, title,
+or base workflows while preserving it for Review policy.
+
 ## Fork boundary
 
 PitCrew does not execute jobs or code from fork pull requests. Pull-request

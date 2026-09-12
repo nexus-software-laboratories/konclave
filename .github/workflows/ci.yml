@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+    types: [opened, edited, synchronize, reopened]
   workflow_dispatch:
     inputs:
       validation_scope:
@@ -64,7 +64,7 @@ jobs:
       pull_request_number: ${{ github.event.pull_request.number || 0 }}
       is_draft: ${{ github.event.pull_request.draft || false }}
       requested_scope: ${{ inputs.validation_scope || '' }}
-      draft_mode: ${{ vars.CI_DRAFT_MODE || 'full' }}
+      draft_mode: full
 
   rust-build-test:
     needs: validation-plan
@@ -101,6 +101,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt --all -- --check
+      - name: Verify pull-request validation trigger contract
+        shell: pwsh
+        run: ./scripts/ci/Test-PullRequestValidationTriggers.ps1
       - run: bash ./scripts/ci/Validate-RustSecurityDependencies.sh
       - run: pwsh ./scripts/protocol/Test-ProtocolRelease.ps1
       - run: pwsh ./scripts/a2a/Test-A2AProvenance.ps1
@@ -267,7 +270,7 @@ jobs:
           }
 
   ci:
-    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
+    name: CI
     needs:
       - source-policy
       - validation-plan
