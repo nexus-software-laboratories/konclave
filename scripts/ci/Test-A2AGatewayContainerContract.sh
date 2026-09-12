@@ -24,7 +24,7 @@ compose_json="$(
         docker compose --file "$compose_file" config --format json
 )"
 
-jq -e \
+if ! jq -e \
     --arg image "$expected_image" \
     '
       .services.gateway as $gateway
@@ -57,7 +57,7 @@ jq -e \
           | map({
               target,
               read_only: (.read_only // false),
-              create_host_path: .bind.create_host_path
+              create_host_path: (.bind.create_host_path // false)
             })
           | sort_by(.target)
         ) == [
@@ -68,8 +68,31 @@ jq -e \
           {"target":"/var/lib/konclave/a2a/tasks","read_only":false,"create_host_path":false}
         ]
     ' <<<"$compose_json" >/dev/null
+then
+    echo '::error::A2A gateway Compose security contract failed.' >&2
+    jq -c '
+      .services.gateway
+      | {
+          image,
+          pull_policy,
+          restart,
+          init,
+          user,
+          read_only,
+          cap_drop,
+          security_opt,
+          pids_limit,
+          privileged,
+          network_mode,
+          ports,
+          environment,
+          volumes
+        }
+    ' <<<"$compose_json" >&2
+    exit 1
+fi
 
-jq -e '
+if ! jq -e '
     .schemaVersion == 1
     and .interfaceEnvironment == "production"
     and .listener.address == "0.0.0.0:8090"
@@ -81,5 +104,9 @@ jq -e '
     and .localService.issuerKeyFile == "/run/konclave/credentials/account-issuer.key"
     and .bearerTokenFiles == ["/run/konclave/credentials/a2a-bearer"]
 ' "$config_file" >/dev/null
+then
+    echo '::error::A2A gateway container configuration contract failed.' >&2
+    exit 1
+fi
 
 echo 'A2A gateway Compose and container configuration contract passed.'

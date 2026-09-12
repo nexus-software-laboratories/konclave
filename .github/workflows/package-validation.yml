@@ -237,6 +237,11 @@ jobs:
           "artifact-id=$($artifacts[0].id)" >>$env:GITHUB_OUTPUT
           "syft=$($release.release.toolchains.syft)" >>$env:GITHUB_OUTPUT
           "syft-sha256=$($release.release.toolchains.syftLinuxAmd64Sha256)" >>$env:GITHUB_OUTPUT
+      - name: Initialize container validation paths
+        shell: bash
+        run: >-
+          bash ./scripts/ci/Initialize-JobPrivatePaths.sh
+          CONTAINER_VALIDATION_ROOT=konclave-container-validation
       - name: Verify Compose and container contracts
         shell: bash
         run: |
@@ -264,8 +269,6 @@ jobs:
             bash ./scripts/ci/Test-A2AGatewayContainerContract.sh \
               "$CONTAINER_RELEASE_IMAGE"
           fi
-          bash ./scripts/ci/Initialize-JobPrivatePaths.sh \
-            CONTAINER_VALIDATION_ROOT=konclave-container-validation
       - name: Verify container validation cleanup contract
         shell: bash
         run: bash ./scripts/ci/Test-ContainerValidationCleanup.sh
