@@ -26,7 +26,8 @@ The workflow executes the upstream code only on a GitHub-hosted runner with a
 read-only token. It never runs the TCK or pull-request SUT code on PitCrew, receives
 no repository secrets, and binds the SUT only to loopback. Before external
 conformance, it applies rustfmt, unit tests, and Clippy with warnings denied to the
-standalone A2A gateway host.
+standalone A2A gateway host and applies rustfmt plus Clippy to the packaged
+native/container A2A acceptance harness.
 
 Independent client interoperability pins `a2a-sdk` `1.0.3`, release commit
 `8a82061571142b12745576c972bf07077930a4ff`. This is the final 1.0.x SDK release
