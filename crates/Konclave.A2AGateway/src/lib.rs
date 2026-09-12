@@ -3,6 +3,7 @@
 
 mod access;
 mod application;
+mod artifact_publication;
 mod client;
 mod error;
 mod http;
@@ -16,6 +17,9 @@ pub use application::{
     A2AGatewayApplication, A2AGatewayClock, A2AGatewayClockError, A2AGatewayTaskStream,
     A2AGatewayWaitConfig, A2ATaskSubmission, A2ATaskSubmissionError, A2ATaskSubmitter,
     SystemA2AGatewayClock,
+};
+pub use artifact_publication::{
+    A2AArtifactPublication, A2AArtifactPublisher, A2AGatewayArtifactPublisher,
 };
 pub use client::{
     A2AAgentCardFetchOutcome, A2AHttpClientConfig, A2AHttpEventStream, A2AHttpJsonClient,
