@@ -25,16 +25,11 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_ACTION: ${{ github.event.action || '' }}
           EVENT_NAME: ${{ github.event_name }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
-          BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           if ($env:EVENT_NAME -eq 'workflow_dispatch') {
             $run = $true
-          }
-          elseif ($env:EVENT_ACTION -eq 'edited' -and $env:BASE_CHANGED -ne 'true') {
-            $run = $false
           }
           else {
             $files = @(
