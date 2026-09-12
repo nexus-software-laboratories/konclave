@@ -24,12 +24,15 @@ Machine-readable manifests live under `protocol/releases/` and are verified by
 `scripts/protocol/Test-ProtocolRelease.ps1`. A manifest becomes immutable when its
 declared protocol tag is created from the merged `main` commit.
 
-The verifier evaluates a released manifest against the exact declared Git tag rather
-than against later source evolution. It first requires the tracked manifest to remain
-identical to that tag, then validates lockfiles, fixtures, dependency versions,
-protocol limits, MLS configuration, and profile schema from an isolated tag archive.
-An unreleased manifest whose tag does not yet exist is validated against the current
-working tree.
+The verifier evaluates every release manifest. A released manifest is checked against
+its exact declared Git tag rather than against later source evolution. The verifier
+first requires the tracked manifest to remain identical to that tag, then validates
+lockfiles, fixtures, dependency versions, protocol limits, MLS configuration, and
+profile schema from an isolated tag archive. An unreleased manifest whose tag does
+not yet exist is validated against the current working tree. Releases after
+`protocol-v1.0.0-alpha.1` additionally bind the vendored A2A source and provenance,
+immutable A2A fixtures, public interoperability crates, classified TCK profile, and
+official SDK provenance.
 
 Continuous integration checks out a shallow revision without tags, so a locally
 missing tag does not prove that a release is unpublished. The verifier asks the
