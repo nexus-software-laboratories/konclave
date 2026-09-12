@@ -121,6 +121,13 @@ impl ConfigSource {
         let environment = self.interface_environment.into_contract();
         let publication = compile_a2a_agent_publication_file(&publication_file, environment)
             .context("compiling A2A agent publication")?;
+        if publication
+            .card()
+            .protected_profile()
+            .is_some_and(|profile| profile.required())
+        {
+            bail!("protected-only A2A publication cannot start the standard gateway");
+        }
         for interface in publication.card().interfaces() {
             let url = Url::parse(interface.url()).context("parsing validated A2A interface URL")?;
             if url.path() != "/" {
@@ -429,6 +436,40 @@ mod tests {
         );
         assert!(
             deserialize_strict::<ConfigSource>(oversized.as_bytes(), MAX_CONFIG_BYTES).is_err()
+        );
+    }
+
+    #[test]
+    fn access_profile_rejects_unauthenticated_remote_and_unimplemented_mtls() {
+        assert!(
+            build_access(
+                None,
+                "127.0.0.1:8090".parse().unwrap(),
+                false,
+                vec![]
+            )
+            .is_ok()
+        );
+        assert!(
+            build_access(None, "0.0.0.0:8090".parse().unwrap(), true, vec![]).is_err()
+        );
+        assert!(
+            build_access(
+                Some(InitialA2AAgentSecurityKind::Bearer),
+                "127.0.0.1:8090".parse().unwrap(),
+                false,
+                vec![]
+            )
+            .is_err()
+        );
+        assert!(
+            build_access(
+                Some(InitialA2AAgentSecurityKind::MutualTls),
+                "127.0.0.1:8090".parse().unwrap(),
+                false,
+                vec![]
+            )
+            .is_err()
         );
     }
 }
