@@ -18,10 +18,9 @@ use tokio::time::timeout;
 use KonclaveLocalServiceTransport::{
     AuthorizationEvidenceSet, AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     IssuerHandshakeRequest, IssuerKeyId, IssuerKeyVersion, LocalServiceClientStream,
-    LocalServiceEndpoint,
-    LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse, LocalServiceTransportError,
-    MAX_RPC_PAYLOAD_BYTES, OperationName, RequestId, ServiceProfileId, SessionCapabilities,
-    SessionGrant, SessionGrantClaims, SessionGrantId, SessionHandshakeRequest,
+    LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse,
+    LocalServiceTransportError, MAX_RPC_PAYLOAD_BYTES, OperationName, RequestId, ServiceProfileId,
+    SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId, SessionHandshakeRequest,
     complete_issuer_client_handshake, complete_session_client_handshake, connect_local_service,
     decode_lowercase_hex, encode_lowercase_hex, read_response, write_request,
 };
@@ -369,8 +368,8 @@ impl LocalServiceJsonClient {
         let client_instance =
             ClientInstanceId::from_bytes(self.derived_id(CLIENT_INSTANCE_DOMAIN)?);
         let mut stream = connect_local_service(self.config.endpoint())
-        .await
-        .map_err(map_transport_error)?;
+            .await
+            .map_err(map_transport_error)?;
         complete_session_client_handshake(
             &mut stream,
             &SessionHandshakeRequest {

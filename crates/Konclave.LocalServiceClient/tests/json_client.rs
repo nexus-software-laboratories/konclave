@@ -236,14 +236,9 @@ async fn persistent_session_reuses_one_authenticated_channel_for_delivery_operat
         .unwrap();
 
         let mut session = listener.accept().await.unwrap();
-        complete_authorization_service_handshake(
-            &mut session,
-            &registry,
-            &service_identity,
-            2,
-        )
-        .await
-        .unwrap();
+        complete_authorization_service_handshake(&mut session, &registry, &service_identity, 2)
+            .await
+            .unwrap();
         let responses: [(&str, &[u8]); 2] = [
             ("delivery.claim", br#"{"events":[]}"#),
             ("delivery.acknowledge", br#"{}"#),
