@@ -201,6 +201,15 @@ function Assert-ReleaseLayout {
                     throw "Gateway package is missing $relative."
                 }
             }
+            $gatewayReadme = Get-Content -LiteralPath (
+                Join-Path $ExtractedRoot 'share/konclave/a2a/README.md'
+            ) -Raw -Encoding UTF8
+            if (-not $gatewayReadme.StartsWith(
+                '# Operate the self-hosted A2A gateway',
+                [StringComparison]::Ordinal
+            )) {
+                throw 'Gateway package does not contain the operator guide.'
+            }
         }
         default {
             throw "Unsupported release artifact kind: $($Artifact.kind)"
