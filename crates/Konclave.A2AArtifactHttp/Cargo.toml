@@ -1,0 +1,22 @@
+[package]
+name = "KonclaveA2AArtifactHttp"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[dependencies]
+KonclaveA2AArtifactStorage = { path = "../Konclave.A2AArtifactStorage" }
+KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+KonclaveProtectedHttp = { path = "../Konclave.ProtectedHttp" }
+async-trait.workspace = true
+axum = { version = "0.8.9", features = ["http1", "tokio"] }
+futures-util.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
