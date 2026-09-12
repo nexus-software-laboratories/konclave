@@ -240,22 +240,22 @@ foreach ($group in $profile.allowedFailures) {
     }
     $groupIds = @($group.requirements | ForEach-Object { [string] $_ } | Sort-Object)
     $errorIds = @(
-        $group.expectedErrorContains.PSObject.Properties |
+        $group.expectedErrors.PSObject.Properties |
             ForEach-Object Name |
             Sort-Object
     )
     if (($groupIds -join "`n") -cne ($errorIds -join "`n")) {
         throw 'Every allowed A2A TCK failure must define its expected error evidence.'
     }
-    foreach ($property in $group.expectedErrorContains.PSObject.Properties) {
-        $fragments = @($property.Value | ForEach-Object { [string] $_ })
+    foreach ($property in $group.expectedErrors.PSObject.Properties) {
+        $errors = @($property.Value | ForEach-Object { [string] $_ })
         if (
-            $fragments.Count -eq 0 -or
-            @($fragments | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0
+            $errors.Count -eq 0 -or
+            @($errors | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0
         ) {
             throw "Allowed A2A TCK failure has invalid error evidence: $($property.Name)"
         }
-        $expectedFailureErrors[$property.Name] = $fragments
+        $expectedFailureErrors[$property.Name] = $errors
     }
 }
 $expectedInapplicablePassIds = @(
@@ -380,11 +380,10 @@ if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
         ) {
             throw "Allowed A2A TCK failure changed and must be reclassified: $id"
         }
-        $errors = @($requirements[$id].errors) -join "`n"
-        foreach ($fragment in $expectedFailureErrors[$id]) {
-            if (-not $errors.Contains($fragment, [StringComparison]::Ordinal)) {
-                throw "Allowed A2A TCK failure reason changed and must be reclassified: $id"
-            }
+        $expectedErrors = @($expectedFailureErrors[$id] | Sort-Object)
+        $actualErrors = @($requirements[$id].errors | ForEach-Object { [string] $_ } | Sort-Object)
+        if (($actualErrors -join "`n") -cne ($expectedErrors -join "`n")) {
+            throw "Allowed A2A TCK failure reasons changed and must be reclassified: $id"
         }
     }
     foreach ($id in $expectedSkipIds) {
