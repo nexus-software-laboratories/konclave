@@ -9,8 +9,9 @@ use KonclaveA2AContracts::wire::{
 use KonclaveA2AContracts::{
     A2A_PROTOCOL_VERSION, A2A_WELL_KNOWN_AGENT_CARD_PATH, A2AContractError,
     InitialA2AAgentSecurityKind, MAX_A2A_ENCODED_REQUEST_BYTES, decode_initial_send_message_json,
-    validate_initial_get_extended_agent_card_request, validate_initial_get_task_request,
-    validate_initial_list_tasks_request, validate_initial_subscribe_to_task_request,
+    encode_initial_send_message_response_json, validate_initial_get_extended_agent_card_request,
+    validate_initial_get_task_request, validate_initial_list_tasks_request,
+    validate_initial_subscribe_to_task_request,
 };
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -167,6 +168,22 @@ pub fn a2a_router(state: A2AHttpState) -> Router {
             "/{tenant}/tasks/{id}",
             get(get_task_tenant).post(cancel_task_tenant),
         )
+        .route(
+            "/tasks/{id}/pushNotificationConfigs",
+            get(push_notification_operation_unscoped).post(push_notification_operation_unscoped),
+        )
+        .route(
+            "/tasks/{id}/pushNotificationConfigs/{config_id}",
+            get(push_notification_operation_unscoped).delete(push_notification_operation_unscoped),
+        )
+        .route(
+            "/{tenant}/tasks/{id}/pushNotificationConfigs",
+            get(push_notification_collection_tenant).post(push_notification_collection_tenant),
+        )
+        .route(
+            "/{tenant}/tasks/{id}/pushNotificationConfigs/{config_id}",
+            get(push_notification_item_tenant).delete(push_notification_item_tenant),
+        )
         .route("/extendedAgentCard", get(extended_agent_card_unscoped))
         .route(
             "/{tenant}/extendedAgentCard",
@@ -272,12 +289,12 @@ async fn send_message(
     };
     let request = match decode_initial_send_message_json(&bytes, state.application.tenant()) {
         Ok(request) => request,
-        Err(error) => return contract_error_response(error),
+        Err(error) => return send_message_contract_error_response(error),
     };
     match state.application.send_message(request).await {
         Ok(task) => {
             let response = send_message_response(task);
-            match serde_json::to_vec(&response) {
+            match encode_initial_send_message_response_json(response) {
                 Ok(bytes) => json_response(StatusCode::OK, bytes),
                 Err(_) => gateway_error_response(A2AGatewayError::InvalidTaskProjection),
             }
@@ -332,7 +349,7 @@ async fn send_streaming_message(
     };
     let request = match decode_initial_send_message_json(&bytes, state.application.tenant()) {
         Ok(request) => request,
-        Err(error) => return contract_error_response(error),
+        Err(error) => return send_message_contract_error_response(error),
     };
     match state.application.send_streaming_message(request).await {
         Ok(stream) => streaming_response(stream),
@@ -611,12 +628,63 @@ async fn cancel_task(
     unsupported_operation_response()
 }
 
+async fn push_notification_operation_unscoped(
+    State(state): State<A2AHttpState>,
+    request: Request<Body>,
+) -> Response {
+    push_notification_operation(state, None, request).await
+}
+
+async fn push_notification_collection_tenant(
+    State(state): State<A2AHttpState>,
+    Path((tenant, _id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Response {
+    push_notification_operation(state, Some(tenant), request).await
+}
+
+async fn push_notification_item_tenant(
+    State(state): State<A2AHttpState>,
+    Path((tenant, _id, _config_id)): Path<(String, String, String)>,
+    request: Request<Body>,
+) -> Response {
+    push_notification_operation(state, Some(tenant), request).await
+}
+
+async fn push_notification_operation(
+    state: A2AHttpState,
+    path_tenant: Option<String>,
+    request: Request<Body>,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    if let Err(response) = authorize(&state, &parts, A2AHttpAction::UnsupportedOperation) {
+        return *response;
+    }
+    if let Err(response) = validate_common_headers(&parts.headers) {
+        return *response;
+    }
+    if let Err(response) = validate_path_tenant(&state.application, path_tenant.as_deref()) {
+        return *response;
+    }
+    push_notification_not_supported_response()
+}
+
 fn unsupported_operation_response() -> Response {
     a2a_error_response(
         StatusCode::BAD_REQUEST,
         "INVALID_ARGUMENT",
         "A2A operation is not supported",
         "UNSUPPORTED_OPERATION",
+        None,
+    )
+}
+
+fn push_notification_not_supported_response() -> Response {
+    a2a_error_response(
+        StatusCode::BAD_REQUEST,
+        "INVALID_ARGUMENT",
+        "A2A push notifications are not supported",
+        "PUSH_NOTIFICATION_NOT_SUPPORTED",
         None,
     )
 }
@@ -747,7 +815,7 @@ fn validate_json_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> 
 
 fn content_type_error() -> Response {
     a2a_error_response(
-        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        StatusCode::BAD_REQUEST,
         "INVALID_ARGUMENT",
         "A2A content type is not supported",
         "CONTENT_TYPE_NOT_SUPPORTED",
@@ -898,6 +966,19 @@ fn contract_error_response(error: A2AContractError) -> Response {
         "INVALID_REQUEST",
         field,
     )
+}
+
+fn send_message_contract_error_response(error: A2AContractError) -> Response {
+    if matches!(
+        error,
+        A2AContractError::UnsupportedField {
+            field: "part.media_type"
+        }
+    ) {
+        content_type_error()
+    } else {
+        contract_error_response(error)
+    }
 }
 
 fn gateway_error_response(error: A2AGatewayError) -> Response {

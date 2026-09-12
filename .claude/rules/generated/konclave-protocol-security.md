@@ -1,8 +1,20 @@
 ---
 # AUTO-GENERATED from .github/instructions/konclave-protocol-security.instructions.md — do not edit
 paths:
+  - "crates/Konclave.A2AArtifactHttp/**/*.rs"
+  - "crates/Konclave.A2AArtifactStorage/**/*.rs"
+  - "crates/Konclave.A2AContracts/**/*.rs"
+  - "crates/Konclave.A2ADiscovery/**/*.rs"
+  - "crates/Konclave.A2ADomain/**/*.rs"
+  - "crates/Konclave.A2AGateway/**/*.rs"
+  - "crates/Konclave.A2AKonclaveBridge/**/*.rs"
+  - "crates/Konclave.A2ATaskStore/**/*.rs"
+  - "crates/Konclave.A2ATaskStoreSqlite/**/*.rs"
+  - "crates/Konclave.BoundedDocuments/**/*.rs"
+  - "crates/Konclave.ProtectedHttp/**/*.rs"
   - "crates/Konclave.AdapterTransport/**/*.rs"
   - "crates/Konclave.LocalFraming/**/*.rs"
+  - "crates/Konclave.LocalServiceClient/**/*.rs"
   - "crates/Konclave.LocalServiceTransport/**/*.rs"
   - "crates/Konclave.WindowsSecurity/**/*.rs"
   - "crates/Konclave.ProtocolContracts/**/*.rs"
@@ -14,9 +26,11 @@ paths:
   - "apps/Konclave.CommunityRelay/**/*.rs"
   - "extensions/Konclave.HostExtension/**/*.{ts,tsx}"
   - "packages/Konclave.ProtocolContracts.TypeScript/**/*.{ts,tsx}"
+  - "third_party/a2a/**/*.proto"
   - "**/*.proto"
   - "fixtures/adapter/**"
   - "fixtures/local-service/**"
+  - "fixtures/a2a/**"
   - "fuzz/**"
 ---
 # Konclave protocol and security
@@ -71,6 +85,9 @@ paths:
 - Async transport and concurrency tests synchronize on observable protocol events
   and explicit release signals. Never use sleeps, assumed task ordering, or a client
   deadline as a proxy for proving that one lane remains live while another is blocked.
+- Persistence fault tests inject the exact profile-scoped read or write failure through
+  deterministic test hooks. Never drop or corrupt a live schema to simulate a
+  request-local fault, because supervised background work can race and close the channel.
 - Apply hard pre-allocation bounds to every untrusted collection, frame, string,
   decompression, page, queue, and watch.
 - Windows named-pipe endpoints use an explicit current-account DACL on every

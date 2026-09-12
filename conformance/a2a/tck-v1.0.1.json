@@ -1,0 +1,423 @@
+{
+  "schemaVersion": 1,
+  "profileId": "a2a-v1.0.1-http-json-must",
+  "protocol": {
+    "repository": "https://github.com/a2aproject/A2A",
+    "release": "v1.0.1",
+    "protocolVersion": "1.0",
+    "commit": "3303592588e388e62e0f69f701af531d2f4e3991"
+  },
+  "tck": {
+    "repository": "https://github.com/a2aproject/a2a-tck",
+    "commit": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
+    "version": "1.0.0",
+    "license": "Apache-2.0",
+    "uvVersion": "0.11.7",
+    "uvArtifact": {
+      "filename": "uv-0.11.7-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "4e4d5e31bea86e1b6e0f5a0f95e14e80018e6f6c0129256d2915a4b3d793644d"
+    },
+    "specification": {
+      "release": "v1.0.0",
+      "commit": "173695755607e884aa9acf8ce4feed90e32727a1"
+    },
+    "files": [
+      {
+        "path": "LICENSE",
+        "bytes": 11558,
+        "sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+      },
+      {
+        "path": "pyproject.toml",
+        "bytes": 1802,
+        "sha256": "e860d777ca4866d5f9d71c7ee8edbafdaccb29852fef29d818219dde702eacf5"
+      },
+      {
+        "path": "run_tck.py",
+        "bytes": 4697,
+        "sha256": "e41ce04a6dc1b3fe18fc14cc9c180d27d45e21324a21a36819e501225fdb4e5a"
+      },
+      {
+        "path": "specification/version.json",
+        "bytes": 398,
+        "sha256": "5859c186d1dbabb551d0ae17bc83320a8fb30a6f80e032056c427e56eb999d05"
+      },
+      {
+        "path": "uv.lock",
+        "bytes": 107939,
+        "sha256": "889697cabd5f5bf79af2e913fa9a91ccbc70a98234398649907b9aa937e77d74"
+      }
+    ]
+  },
+  "execution": {
+    "transport": "http_json",
+    "level": "must",
+    "sutUrl": "http://127.0.0.1:9999"
+  },
+  "sdkInterop": {
+    "repository": "https://github.com/a2aproject/a2a-python",
+    "release": "v1.0.3",
+    "commit": "8a82061571142b12745576c972bf07077930a4ff",
+    "package": "a2a-sdk",
+    "version": "1.0.3",
+    "license": "Apache-2.0",
+    "sdistSha256": "c57ddd910aece4a426ae26b8f0d0e8e2f3271a6adde974078075e4f600aaf628",
+    "project": "conformance/a2a/python-sdk",
+    "files": [
+      {
+        "path": "interop.py",
+        "bytes": 5054,
+        "sha256": "5df3e8a5cb442d61db3623019c770f48c4a38771cb28b88086a385b45b0a86ab"
+      },
+      {
+        "path": "pyproject.toml",
+        "bytes": 168,
+        "sha256": "612e9fc05a9cc545b3832dca1a116d6718e52f7cf7f7243ef7d1ef8f79c838a0"
+      },
+      {
+        "path": "uv.lock",
+        "bytes": 169828,
+        "sha256": "419a6ddec71a852259dbbc3120aebaa2cab049fe71d5d75b5d1778f3106c1b8d"
+      }
+    ]
+  },
+  "supportedRequirements": [
+    "BIND-FIELD-001",
+    "CARD-DISC-001",
+    "CARD-PROTO-001",
+    "CARD-PROTO-002",
+    "CARD-STRUCT-001",
+    "CORE-CAP-001",
+    "CORE-ERR-001",
+    "CORE-ERR-002",
+    "CORE-GET-001",
+    "CORE-GET-002",
+    "CORE-MULTI-006",
+    "CORE-SEND-001",
+    "CORE-SEND-002",
+    "CORE-STREAM-001",
+    "CORE-STREAM-003",
+    "DM-ART-001",
+    "DM-MSG-002",
+    "DM-PART-001",
+    "DM-SERIAL-001",
+    "DM-SERIAL-002",
+    "DM-SERIAL-003",
+    "DM-SERIAL-004",
+    "DM-STATUS-001",
+    "DM-TASK-001",
+    "DM-TASK-002",
+    "HTTP_JSON-ERR-002",
+    "HTTP_JSON-QP-001",
+    "HTTP_JSON-SSE-001",
+    "HTTP_JSON-SVC-002",
+    "HTTP_JSON-URL-001",
+    "HTTP_JSON-URL-002",
+    "STREAM-ORDER-001",
+    "STREAM-SUB-003",
+    "STREAM-SUB-004",
+    "VER-SERVER-002"
+  ],
+  "expectedInapplicablePasses": [
+    {
+      "classification": "conditional-not-exercised",
+      "requirements": [
+        "CORE-STREAM-002"
+      ],
+      "rationale": "This requirement applies only when an agent returns a direct Message stream; the strict profile always returns a Task stream."
+    },
+    {
+      "classification": "transport-static-pass",
+      "requirements": [
+        "JSONRPC-SVC-001"
+      ],
+      "rationale": "The pinned TCK records this JSON-RPC naming rule as PASS without exercising a JSON-RPC transport."
+    }
+  ],
+  "allowedFailures": [
+    {
+      "classification": "profile-exclusion",
+      "requirements": [
+        "DM-MSG-001"
+      ],
+      "rationale": "The strict profile always creates a durable Task and does not return a direct Message response.",
+      "evidence": [
+        "docs/adr/adr-0013-a2a-edge-interoperability.md",
+        "docs/protocol/a2a-compatibility.md"
+      ],
+      "expectedErrorContains": {
+        "DM-MSG-001": [
+          "Expected a Message response"
+        ]
+      }
+    },
+    {
+      "classification": "profile-exclusion",
+      "requirements": [
+        "CORE-LIST-001",
+        "CORE-LIST-002",
+        "CORE-LIST-003",
+        "CORE-LIST-004",
+        "CORE-LIST-005"
+      ],
+      "rationale": "The initial ListTasks profile supports bounded route-scoped pagination but deliberately rejects context, status, history, and timestamp filters that the pinned TCK always supplies.",
+      "evidence": [
+        "docs/protocol/a2a-compatibility.md",
+        "docs/development/a2a-reference-gateway.md"
+      ],
+      "expectedErrorContains": {
+        "CORE-LIST-001": [
+          "Operation failed: [400] A2A request is invalid"
+        ],
+        "CORE-LIST-002": [
+          "Operation failed: [400] A2A request is invalid"
+        ],
+        "CORE-LIST-003": [
+          "Operation failed: [400] A2A request is invalid"
+        ],
+        "CORE-LIST-004": [
+          "Operation failed: [400] A2A request is invalid"
+        ],
+        "CORE-LIST-005": [
+          "Operation failed: [400] A2A request is invalid"
+        ]
+      }
+    },
+    {
+      "classification": "profile-exclusion",
+      "requirements": [
+        "CORE-CANCEL-002",
+        "CORE-CANCEL-003"
+      ],
+      "rationale": "CancelTask is intentionally unsupported because Konclave cannot retract an already delivered directed request.",
+      "evidence": [
+        "docs/adr/adr-0013-a2a-edge-interoperability.md",
+        "docs/development/a2a-reference-gateway.md"
+      ],
+      "expectedErrorContains": {
+        "CORE-CANCEL-002": [
+          "Expected error code 409 (TaskNotCancelableError), got 400"
+        ],
+        "CORE-CANCEL-003": [
+          "Expected error code 404 (TaskNotFoundError), got 400"
+        ]
+      }
+    },
+    {
+      "classification": "profile-exclusion",
+      "requirements": [
+        "CORE-MULTI-004"
+      ],
+      "rationale": "Task-addressed follow-up messages belong to the deferred multi-turn mapping and are rejected before side effects.",
+      "evidence": [
+        "docs/adr/adr-0013-a2a-edge-interoperability.md",
+        "docs/protocol/a2a-compatibility.md"
+      ],
+      "expectedErrorContains": {
+        "CORE-MULTI-004": [
+          "Expected error code 404 (TaskNotFoundError), got 400"
+        ]
+      }
+    },
+    {
+      "classification": "upstream-suite-state-collision",
+      "requirements": [
+        "CORE-EXECUTION-MODE-001",
+        "CORE-EXECUTION-MODE-002",
+        "CORE-MULTI-001a",
+        "CORE-MULTI-003"
+      ],
+      "rationale": "The full TCK reuses one messageId with changed text or configuration, which correctly conflicts with Konclave durable idempotency. Each requirement passes against a fresh SUT and store.",
+      "evidence": [
+        "a2aproject/a2a-tck@263b9cfaf16a554bdfb166a7ba5b67716e946349:backlog/archive/tasks/task-22 - Wire-TCK-tests-to-use-scenario-specific-messageId-prefixes.md"
+      ],
+      "expectedErrorContains": {
+        "CORE-EXECUTION-MODE-001": [
+          "Operation failed: [409] A2A task identity conflicts with existing state"
+        ],
+        "CORE-EXECUTION-MODE-002": [
+          "Operation failed: [409] A2A task identity conflicts with existing state"
+        ],
+        "CORE-MULTI-001a": [
+          "Operation failed: [409] A2A task identity conflicts with existing state"
+        ],
+        "CORE-MULTI-003": [
+          "Operation failed: [409] A2A task identity conflicts with existing state"
+        ]
+      }
+    },
+    {
+      "classification": "upstream-validator-defect",
+      "requirements": [
+        "CORE-MULTI-002a",
+        "CORE-SEND-003"
+      ],
+      "rationale": "The requirement definitions omit expected_error, so the generic TCK validator records the required protocol error as a failure.",
+      "evidence": [
+        "https://github.com/a2aproject/a2a-tck/issues/202"
+      ],
+      "expectedErrorContains": {
+        "CORE-MULTI-002a": [
+          "Operation failed: [404] A2A task or route was not found"
+        ],
+        "CORE-SEND-003": [
+          "Operation failed: [400] A2A content type is not supported"
+        ]
+      }
+    },
+    {
+      "classification": "tck-protocol-version-mismatch",
+      "requirements": [
+        "HTTP_JSON-ERR-001",
+        "HTTP_JSON-SVC-001"
+      ],
+      "rationale": "The pinned TCK embeds A2A v1.0.0 and expects application/json, while Konclave pins v1.0.1, whose HTTP+JSON binding recommends application/a2a+json for success and error responses.",
+      "evidence": [
+        "https://github.com/a2aproject/a2a-tck/issues/240",
+        "https://github.com/a2aproject/A2A/blob/v1.0.1/docs/specification.md"
+      ],
+      "expectedErrorContains": {
+        "HTTP_JSON-ERR-001": [
+          "Error Content-Type must be application/json, got: 'application/a2a+json'"
+        ],
+        "HTTP_JSON-SVC-001": [
+          "Expected Content-Type application/json, got: 'application/a2a+json'"
+        ]
+      }
+    },
+    {
+      "classification": "mixed-known-gap",
+      "requirements": [
+        "HTTP_JSON-STATUS-001"
+      ],
+      "rationale": "This aggregate combines the deliberate CancelTask exclusion, v1.0.0 error-status expectations superseded by v1.0.1, and a raw TCK probe that concatenates a canonical trailing-slash interface URL with a leading-slash path.",
+      "evidence": [
+        "https://github.com/a2aproject/a2a-tck/issues/240",
+        "a2aproject/a2a-tck@263b9cfaf16a554bdfb166a7ba5b67716e946349:tests/compatibility/http_json/test_http_status.py"
+      ],
+      "expectedErrorContains": {
+        "HTTP_JSON-STATUS-001": [
+          "CancelTask on non-existent task should return",
+          "expected ContentTypeNotSupportedError (415), got 404"
+        ]
+      }
+    }
+  ],
+  "isolatedRequirements": [
+    {
+      "id": "CORE-EXECUTION-MODE-001",
+      "selector": "tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-EXECUTION-MODE-001-http_json]"
+    },
+    {
+      "id": "CORE-EXECUTION-MODE-002",
+      "selector": "tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-EXECUTION-MODE-002-http_json]"
+    },
+    {
+      "id": "CORE-MULTI-001a",
+      "selector": "tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-MULTI-001a-http_json]"
+    },
+    {
+      "id": "CORE-MULTI-003",
+      "selector": "tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-MULTI-003-http_json]"
+    }
+  ],
+  "expectedSkips": [
+    {
+      "classification": "transport-filter",
+      "requirements": [
+        "GRPC-ERR-001",
+        "GRPC-ERR-002",
+        "GRPC-ERR-003",
+        "GRPC-META-001",
+        "GRPC-SVC-001",
+        "GRPC-SVC-002",
+        "JSONRPC-ERR-001",
+        "JSONRPC-ERR-002",
+        "JSONRPC-ERR-003",
+        "JSONRPC-SSE-001",
+        "JSONRPC-SSE-002",
+        "JSONRPC-SVC-002"
+      ],
+      "rationale": "This profile executes only the advertised HTTP+JSON binding."
+    },
+    {
+      "classification": "sut-capability-not-enabled",
+      "requirements": [
+        "CARD-EXT-001",
+        "CARD-EXT-002",
+        "CORE-CAP-002",
+        "CORE-CAP-003",
+        "CORE-CAP-004"
+      ],
+      "rationale": "The loopback SUT advertises streaming but no extended card, push support, or required extension; the pinned TCK skips capability-negative or unavailable scenarios."
+    },
+    {
+      "classification": "profile-exclusion",
+      "requirements": [
+        "CORE-CANCEL-001",
+        "CORE-HIST-002",
+        "CORE-MULTI-005",
+        "PUSH-CREATE-001",
+        "PUSH-CREATE-002",
+        "PUSH-DEL-001",
+        "PUSH-DEL-002",
+        "PUSH-DELIVER-001",
+        "PUSH-DELIVER-002",
+        "PUSH-DELIVER-003",
+        "PUSH-GET-001",
+        "PUSH-GET-002",
+        "PUSH-LIST-001",
+        "VER-SERVER-003"
+      ],
+      "rationale": "Cancellation, broad history, task-addressed multi-turn, push delivery, and protocol-0.3 fallback are outside the strict v1.0.1 profile."
+    },
+    {
+      "classification": "tck-scenario-not-exercised",
+      "requirements": [
+        "STREAM-ORDER-002",
+        "STREAM-ORDER-003",
+        "STREAM-ORDER-004",
+        "STREAM-SUB-001",
+        "STREAM-SUB-002"
+      ],
+      "rationale": "The pinned TCK does not exercise these multi-operation stream scenarios against this deterministic completion SUT; repository integration tests own the corresponding behavior."
+    }
+  ],
+  "expectedNotTested": [
+    {
+      "classification": "upstream-test-not-implemented",
+      "requirements": [
+        "AUTH-INTASK-001",
+        "AUTH-INTASK-002",
+        "AUTH-INTASK-003",
+        "AUTH-INTASK-004",
+        "AUTH-SCOPE-001",
+        "AUTH-SCOPE-002",
+        "AUTH-SCOPE-003",
+        "AUTH-SERVER-002",
+        "AUTH-TLS-001",
+        "CARD-SIGN-001",
+        "CARD-SIGN-002",
+        "CARD-SIGN-003",
+        "CARD-SIGN-004",
+        "VER-CLIENT-001",
+        "VER-CLIENT-002",
+        "VER-SERVER-001"
+      ],
+      "rationale": "The pinned TCK registers these MUST requirements but produces no compatibility test result for them."
+    },
+    {
+      "classification": "transport-filter-not-tested",
+      "requirements": [
+        "BIND-EQUIV-001",
+        "BIND-EQUIV-002",
+        "BIND-EQUIV-003",
+        "BIND-EQUIV-004",
+        "GRPC-SVC-003",
+        "JSONRPC-FMT-001",
+        "JSONRPC-FMT-002"
+      ],
+      "rationale": "These cross-binding, gRPC, or JSON-RPC requirements are registered but not exercised by the HTTP+JSON-only run."
+    }
+  ]
+}

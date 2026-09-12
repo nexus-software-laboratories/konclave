@@ -72,6 +72,12 @@ manifest whose release already exists.
   terminal-wait tasks, ETag revalidation, redirect refusal, no-proxy client
   construction, response
   correlation, SQLite restart state, and TLS-or-loopback binding.
+- run the pinned upstream A2A TCK only on GitHub-hosted capacity, require every
+  supported requirement ID to pass, and permit only the exact versioned exclusions
+  and upstream defects recorded by the
+  [A2A conformance profile](a2a-conformance.md); and
+- run the same loopback gateway through the pinned official `a2a-python` client for
+  discovery, non-streaming tasks, artifacts, lookup/listing, and SSE.
 
 ### MLS and cryptographic integration
 

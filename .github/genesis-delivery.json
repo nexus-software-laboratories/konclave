@@ -6,6 +6,7 @@
   "ciWorkflow": "CI",
   "requiredChecks": [
     "CI",
+    "A2A conformance",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
     "Package validation",
@@ -60,12 +61,24 @@
         "ubuntu-latest"
       ],
       "jobs": [
+        "a2a-conformance",
         "community-relay-container-ci",
         "delete-run-artifacts"
       ]
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/a2a-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "A2A conformance"
+      ]
+    },
     {
       "source": "project",
       "path": ".github/workflows/package-validation.yml",

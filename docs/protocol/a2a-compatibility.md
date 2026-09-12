@@ -131,6 +131,8 @@ The implemented standard routes are:
 - `GET /tasks/{id}` and `GET /{tenant}/tasks/{id}`;
 - `GET` or `POST /tasks/{id}:subscribe` and tenant-prefixed equivalents;
 - `POST /tasks/{id}:cancel` and `POST /{tenant}/tasks/{id}:cancel`;
+- the standard push-notification configuration paths, which authenticate and return
+  `PUSH_NOTIFICATION_NOT_SUPPORTED`;
 - `GET /extendedAgentCard` and `GET /{tenant}/extendedAgentCard`; and
 - `GET /.well-known/agent-card.json` when explicitly published.
 
@@ -140,7 +142,9 @@ omitted by default. Artifact-inclusive pages default to and are capped at `8`.
 Artifact-inclusive listing uses a separate authorization action from metadata-only
 listing. `CancelTask` authenticates and authorizes normally but returns the A2A
 `UNSUPPORTED_OPERATION` reason until the bridge can cancel an already directed
-Konclave request.
+Konclave request. An unsupported Message Part media type returns
+`CONTENT_TYPE_NOT_SUPPORTED` with the pinned v1.0.1 HTTP 400 mapping rather than a
+generic validation error.
 
 Streaming uses `text/event-stream`. Every SSE `data` field contains one bounded
 ProtoJSON `StreamResponse`. The first event is a current Task snapshot; later events
@@ -243,6 +247,13 @@ interface URLs, protected-profile negotiation and downgrade refusal, exact fixtu
 round trips, streaming event bounds, first-Task ordering, task/context correlation,
 deterministic artifact canonicalization, media types, JSON limits, inline byte limits,
 filenames, and encrypted-reference shape.
+
+The [A2A conformance profile](../development/a2a-conformance.md) pins the upstream
+TCK, runs its unmodified MUST-level HTTP+JSON suite on GitHub-hosted capacity, and
+fails on any unsupported, missing, or unclassified requirement result. The same
+profile pins `a2a-sdk` 1.0.3 and exercises Agent Card discovery, non-streaming task
+creation, artifacts, task lookup/listing, and SSE through the independent official
+Python client.
 
 An A2A update uses a new versioned source directory and new immutable fixtures. It
 must not rewrite the `v1.0.1` source or reinterpret its validated initial profile.

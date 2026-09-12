@@ -1,6 +1,7 @@
 use prost::Message as _;
 
 use crate::initial_profile::{decode_json_bounded, require_encoded_bound, validate_identifier};
+use crate::protojson::normalize_stream_response;
 use crate::task_response::{
     MAX_A2A_ENCODED_RESPONSE_BYTES, validate_task_message, validate_terminal_reason_metadata,
     validate_timestamp,
@@ -84,8 +85,9 @@ impl InitialA2AStreamResponse {
     /// Returns a contract error when generated ProtoJSON cannot be represented or
     /// exceeds the response-event bound.
     pub fn deterministic_json(&self) -> Result<Vec<u8>, A2AContractError> {
-        let value =
+        let mut value =
             serde_json::to_value(&self.wire).map_err(|_| A2AContractError::MalformedEncoding)?;
+        normalize_stream_response(&mut value);
         let bytes = serde_json::to_vec(&value).map_err(|_| A2AContractError::MalformedEncoding)?;
         require_encoded_bound(&bytes, MAX_A2A_ENCODED_RESPONSE_BYTES)?;
         Ok(bytes)

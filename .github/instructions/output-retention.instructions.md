@@ -1,5 +1,5 @@
 ---
-applyTo: "**/target/**,**/dist/**,**/coverage/**,**/.vite/**,**/.stryker-tmp/**,**/reports/mutation/**,extensions/Konclave.HostExtension/build/**"
+applyTo: "**/target/**,**/dist/**,**/coverage/**,**/.vite/**,**/.venv/**,**/__pycache__/**,**/.pytest_cache/**,**/.ruff_cache/**,**/.stryker-tmp/**,**/reports/mutation/**,extensions/Konclave.HostExtension/build/**"
 ---
 
 # Generated Output Retention
