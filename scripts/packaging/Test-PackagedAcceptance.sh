@@ -28,7 +28,7 @@ native_relay_pid=''
 proxy_pid=''
 container_run_identity=''
 container_baseline=''
-loaded_image_ids=()
+loaded_image_references=()
 
 terminate_process() {
     local process_id="$1"
@@ -57,9 +57,9 @@ cleanup() {
         container_validation_remove_owned "$container_run_identity" || cleanup_failed=1
         container_validation_assert_no_residue "$container_run_identity" || cleanup_failed=1
     fi
-    for image_id in "${loaded_image_ids[@]}"; do
-        docker image rm --force "$image_id" >/dev/null 2>&1 || cleanup_failed=1
-        docker image inspect "$image_id" >/dev/null 2>&1 && cleanup_failed=1
+    for image_reference in "${loaded_image_references[@]}"; do
+        docker image rm --force "$image_reference" >/dev/null 2>&1 || cleanup_failed=1
+        docker image inspect "$image_reference" >/dev/null 2>&1 && cleanup_failed=1
     done
     if [ -n "$container_baseline" ] && [ -f "$container_baseline" ]; then
         container_validation_assert_baseline_intact "$container_baseline" || cleanup_failed=1
@@ -292,10 +292,10 @@ container_baseline="$acceptance_root/docker-baseline.tsv"
 container_validation_capture_baseline "$container_baseline"
 docker image load --input "$relay_container_archive" >/dev/null
 relay_loaded_image_id="$(docker image inspect --format '{{.Id}}' "$relay_image_reference")"
-loaded_image_ids+=("$relay_loaded_image_id")
+loaded_image_references+=("$relay_image_reference")
 docker image load --input "$gateway_container_archive" >/dev/null
 gateway_loaded_image_id="$(docker image inspect --format '{{.Id}}' "$gateway_image_reference")"
-loaded_image_ids+=("$gateway_loaded_image_id")
+loaded_image_references+=("$gateway_image_reference")
 if [ "$relay_loaded_image_id" = "$gateway_loaded_image_id" ]; then
     echo '::error::Relay and gateway archives resolved to one image identity.' >&2
     exit 1
@@ -335,14 +335,14 @@ terminate_process "$proxy_pid"
 proxy_pid=''
 container_validation_remove_owned "$container_run_identity"
 container_validation_assert_no_residue "$container_run_identity"
-for image_id in "${loaded_image_ids[@]}"; do
-    docker image rm --force "$image_id" >/dev/null
-    if docker image inspect "$image_id" >/dev/null 2>&1; then
+for image_reference in "${loaded_image_references[@]}"; do
+    docker image rm --force "$image_reference" >/dev/null
+    if docker image inspect "$image_reference" >/dev/null 2>&1; then
         echo '::error::Acceptance image remained after exact removal.' >&2
         exit 1
     fi
 done
-loaded_image_ids=()
+loaded_image_references=()
 container_validation_assert_baseline_intact "$container_baseline"
 
 native_profiles="$(find "$native_state/profiles" -name profile.sqlite -type f | wc -l)"
