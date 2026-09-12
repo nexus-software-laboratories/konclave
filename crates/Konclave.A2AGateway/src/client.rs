@@ -8,11 +8,12 @@ use KonclaveA2AContracts::{
     DEFAULT_A2A_LIST_ARTIFACT_PAGE_SIZE, DEFAULT_A2A_LIST_PAGE_SIZE, InitialA2AAgentCard,
     InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment, InitialA2AStreamResponse,
     InitialA2AStreamResponseKind, InitialA2ATaskListResponse, InitialA2ATaskResponse,
-    InitialSendMessageRequest, MAX_A2A_ARTIFACTS_PER_TASK, MAX_A2A_ENCODED_AGENT_CARD_BYTES,
-    MAX_A2A_ENCODED_RESPONSE_BYTES, MAX_A2A_LIST_ARTIFACT_PAGE_SIZE,
-    decode_initial_agent_card_json, decode_initial_list_tasks_response_json,
-    decode_initial_send_message_response_json, decode_initial_stream_response_json,
-    decode_initial_task_json, validate_initial_agent_interface, validate_initial_artifact,
+    InitialA2ATrustRequirement, InitialSendMessageRequest, MAX_A2A_ARTIFACTS_PER_TASK,
+    MAX_A2A_ENCODED_AGENT_CARD_BYTES, MAX_A2A_ENCODED_RESPONSE_BYTES,
+    MAX_A2A_LIST_ARTIFACT_PAGE_SIZE, decode_initial_agent_card_json,
+    decode_initial_list_tasks_response_json, decode_initial_send_message_response_json,
+    decode_initial_stream_response_json, decode_initial_task_json,
+    validate_initial_agent_interface, validate_initial_artifact,
 };
 use KonclaveA2ADomain::A2ATaskId;
 use KonclaveBoundedDocuments::deserialize_strict;
@@ -108,6 +109,7 @@ pub struct A2AHttpJsonClient {
     extended_agent_card: bool,
     interface_identity: Vec<(String, Option<String>)>,
     security_identity: Option<(InitialA2AAgentSecurityKind, String)>,
+    protected_profile_identity: Option<(bool, String)>,
 }
 
 impl A2AHttpJsonClient {
@@ -125,6 +127,13 @@ impl A2AHttpJsonClient {
         credential: Option<A2ABearerCredential>,
         config: A2AHttpClientConfig,
     ) -> Result<Self, A2AGatewayError> {
+        card.negotiate_trust(InitialA2ATrustRequirement::AllowStandardBridge)
+            .map_err(|error| match error {
+                KonclaveA2AContracts::A2AContractError::RequiredExtensionUnsupported => {
+                    A2AGatewayError::RequiredExtensionUnsupported
+                }
+                _ => A2AGatewayError::InvalidConfiguration,
+            })?;
         let interface = card
             .interfaces()
             .first()
@@ -168,6 +177,7 @@ impl A2AHttpJsonClient {
             security_identity: card
                 .security()
                 .map(|security| (security.kind(), security.name().to_owned())),
+            protected_profile_identity: protected_profile_identity(card),
         })
     }
 
@@ -408,10 +418,12 @@ impl A2AHttpJsonClient {
         let security_identity = card
             .security()
             .map(|security| (security.kind(), security.name().to_owned()));
+        let protected_profile_identity = protected_profile_identity(&card);
         if card.name() != self.agent_name
             || card.version() != self.agent_version
             || interface_identity != self.interface_identity
             || security_identity != self.security_identity
+            || protected_profile_identity != self.protected_profile_identity
         {
             return Err(A2AGatewayError::Contract);
         }
@@ -476,6 +488,11 @@ impl A2AHttpJsonClient {
             expected_context_id,
         ))
     }
+}
+
+fn protected_profile_identity(card: &InitialA2AAgentCard) -> Option<(bool, String)> {
+    card.protected_profile()
+        .map(|profile| (profile.required(), profile.relay_endpoint().to_owned()))
 }
 
 /// Fetches the standard public well-known Agent Card without redirects or ambient

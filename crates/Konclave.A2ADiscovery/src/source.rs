@@ -3,11 +3,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use KonclaveA2AContracts::wire::{
-    AgentCapabilities, AgentCard, AgentInterface, AgentSkill, HttpAuthSecurityScheme,
-    MutualTlsSecurityScheme, SecurityRequirement, SecurityScheme, StringList, security_scheme,
+    AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentSkill,
+    HttpAuthSecurityScheme, MutualTlsSecurityScheme, SecurityRequirement, SecurityScheme,
+    StringList, security_scheme,
 };
 use KonclaveA2AContracts::{
-    A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
+    A2A_HTTP_JSON_BINDING, A2A_KONCLAVE_PROTECTED_DESCRIPTION,
+    A2A_KONCLAVE_PROTECTED_EXTENSION_URI, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
     InitialA2AInterfaceEnvironment, MAX_A2A_AGENT_CARD_INTERFACES, MAX_A2A_AGENT_CARD_SKILLS,
     MAX_A2A_AGENT_SKILL_TAGS, validate_initial_agent_card,
 };
@@ -87,6 +89,7 @@ fn compile_source(
         version,
         interfaces,
         authentication,
+        protected_profile,
         skills,
         extended_skills,
         oasf,
@@ -116,15 +119,15 @@ fn compile_source(
         .first()
         .and_then(|interface| interface.tenant.as_deref());
     let has_extended_card = !extended_skills.is_empty();
-    let public_wire = build_card(
-        &name,
-        &description,
-        &version,
-        &interfaces,
-        authentication.as_ref(),
-        &public_skills,
-        has_extended_card,
-    );
+    let card_input = CardBuildInput {
+        name: &name,
+        description: &description,
+        version: &version,
+        interfaces: &interfaces,
+        authentication: authentication.as_ref(),
+        protected_profile: protected_profile.as_ref(),
+    };
+    let public_wire = build_card(&card_input, &public_skills, has_extended_card);
     let card = validate_initial_agent_card(public_wire, environment, expected_tenant)
         .map_err(|_| A2ADiscoveryError::InvalidAgentCard)?;
     let extended_card = if has_extended_card {
@@ -132,15 +135,7 @@ fn compile_source(
             .iter()
             .chain(&extended_skills)
             .collect::<Vec<_>>();
-        let wire = build_card(
-            &name,
-            &description,
-            &version,
-            &interfaces,
-            authentication.as_ref(),
-            &all_skills,
-            true,
-        );
+        let wire = build_card(&card_input, &all_skills, true);
         Some(
             validate_initial_agent_card(wire, environment, expected_tenant)
                 .map_err(|_| A2ADiscoveryError::InvalidAgentCard)?,
@@ -163,19 +158,19 @@ fn compile_source(
 }
 
 fn build_card<S: Borrow<SkillSource>>(
-    name: &str,
-    description: &str,
-    version: &str,
-    interfaces: &[InterfaceSource],
-    authentication: Option<&AuthenticationSource>,
+    input: &CardBuildInput<'_>,
     skills: &[S],
     extended_agent_card: bool,
 ) -> AgentCard {
-    let (security_schemes, security_requirements) = build_security(authentication);
+    let (security_schemes, security_requirements) = build_security(input.authentication);
+    let standard_streaming = !input
+        .protected_profile
+        .is_some_and(|profile| profile.required);
     AgentCard {
-        name: name.to_owned(),
-        description: description.to_owned(),
-        supported_interfaces: interfaces
+        name: input.name.to_owned(),
+        description: input.description.to_owned(),
+        supported_interfaces: input
+            .interfaces
             .iter()
             .map(|interface| AgentInterface {
                 url: interface.url.clone(),
@@ -185,12 +180,12 @@ fn build_card<S: Borrow<SkillSource>>(
             })
             .collect(),
         provider: None,
-        version: version.to_owned(),
+        version: input.version.to_owned(),
         documentation_url: None,
         capabilities: Some(AgentCapabilities {
-            streaming: Some(true),
+            streaming: Some(standard_streaming),
             push_notifications: Some(false),
-            extensions: vec![],
+            extensions: build_extensions(input.protected_profile),
             extended_agent_card: Some(extended_agent_card),
         }),
         security_schemes,
@@ -216,6 +211,41 @@ fn build_card<S: Borrow<SkillSource>>(
         signatures: vec![],
         icon_url: None,
     }
+}
+
+struct CardBuildInput<'a> {
+    name: &'a str,
+    description: &'a str,
+    version: &'a str,
+    interfaces: &'a [InterfaceSource],
+    authentication: Option<&'a AuthenticationSource>,
+    protected_profile: Option<&'a ProtectedProfileSource>,
+}
+
+fn build_extensions(protected_profile: Option<&ProtectedProfileSource>) -> Vec<AgentExtension> {
+    let Some(protected_profile) = protected_profile else {
+        return vec![];
+    };
+    vec![AgentExtension {
+        uri: A2A_KONCLAVE_PROTECTED_EXTENSION_URI.to_owned(),
+        description: A2A_KONCLAVE_PROTECTED_DESCRIPTION.to_owned(),
+        required: protected_profile.required,
+        params: Some(pbjson_types::Struct {
+            fields: HashMap::from([string_parameter(
+                "relayEndpoint",
+                &protected_profile.relay_endpoint,
+            )]),
+        }),
+    }]
+}
+
+fn string_parameter(name: &str, value: &str) -> (String, pbjson_types::Value) {
+    (
+        name.to_owned(),
+        pbjson_types::Value {
+            kind: Some(pbjson_types::value::Kind::StringValue(value.to_owned())),
+        },
+    )
 }
 
 fn build_security(
@@ -388,10 +418,18 @@ struct PublicationSpec {
     version: String,
     interfaces: BoundedVec<InterfaceSource, MAX_A2A_AGENT_CARD_INTERFACES>,
     authentication: Option<AuthenticationSource>,
+    protected_profile: Option<ProtectedProfileSource>,
     skills: BoundedVec<SkillSource, MAX_A2A_AGENT_CARD_SKILLS>,
     #[serde(default)]
     extended_skills: BoundedVec<SkillSource, MAX_A2A_AGENT_CARD_SKILLS>,
     oasf: Option<OasfSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProtectedProfileSource {
+    required: bool,
+    relay_endpoint: String,
 }
 
 #[derive(Deserialize)]

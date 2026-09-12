@@ -888,7 +888,8 @@ fn contract_error_response(error: A2AContractError) -> Response {
         A2AContractError::EncodedMessageTooLarge { .. }
         | A2AContractError::MalformedEncoding
         | A2AContractError::TenantMismatch
-        | A2AContractError::InvalidInterfaceUrl => None,
+        | A2AContractError::InvalidInterfaceUrl
+        | A2AContractError::RequiredExtensionUnsupported => None,
     };
     a2a_error_response(
         StatusCode::BAD_REQUEST,
@@ -965,6 +966,7 @@ fn gateway_error_response(error: A2AGatewayError) -> Response {
         | A2AGatewayError::InvalidTaskProjection
         | A2AGatewayError::ClockUnavailable
         | A2AGatewayError::UnsupportedAuthentication
+        | A2AGatewayError::RequiredExtensionUnsupported
         | A2AGatewayError::Transport
         | A2AGatewayError::ServerUnavailable
         | A2AGatewayError::Remote { .. } => a2a_error_response(

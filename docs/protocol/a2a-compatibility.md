@@ -45,6 +45,43 @@ reinterpret a different authority. An optional tenant is deployment-owned and ea
 request must match it exactly; an A2A caller cannot select another Konclave profile,
 conversation, device, policy, or relay route.
 
+## Protected profile negotiation
+
+Konclave-capable clients may select the Agent Card extension
+`https://konclave.dev/a2a/extensions/protected/v1`. That URI fixes the
+`konclave-native-v1` profile, `konclave-relay-v1` transport, `mls-rfc9420`
+payload protection, `application-opaque` gateway visibility, and `fail-closed`
+downgrade policy. Its exact parameters are:
+
+```json
+{
+  "relayEndpoint": "https://relay.example.com/"
+}
+```
+
+Only the canonical relay endpoint and A2A `required` flag are deployment inputs.
+Production endpoints require HTTPS; loopback development may use loopback HTTP. The
+card never carries a relay credential, route identifier, profile alias, conversation
+identifier, device identifier, invitation, or policy state.
+
+Protected v1 is a handoff to the native Konclave client protocol, not an encrypted
+A2A Part. The protected client supplies its own approved relay credential, device
+identity, conversation membership, and local policy, then authenticates the directed
+request and response through Konclave MLS. The standard A2A HTTP gateway is not the
+task or plaintext authority for that exchange.
+
+Trust selection has no prefer-and-fallback mode. A client either explicitly permits
+the standard bridge, where the gateway sees plaintext, or requires the exact protected
+profile. Protected-required selection fails when the extension is absent or malformed.
+The standard HTTP client and gateway application reject a card that marks the
+protected extension as required. An optional extension permits both modes, but
+selecting standard mode remains an explicit plaintext-gateway decision.
+Protected-only cards do not advertise standard A2A streaming.
+
+A2A Message and Artifact extension URIs remain unsupported. The protected Agent Card
+extension does not authorize opaque A2A payloads, hidden metadata, automatic URL
+retrieval, or alternate task-state semantics.
+
 ## `SendMessage` validation
 
 The initial validator accepts one client message with:
@@ -176,8 +213,9 @@ rejects duplicate object keys before generated DTO decoding. The initial
 publication profile permits at most four canonical interfaces, 32 unique skills, and
 one HTTP Bearer or mutual-TLS security declaration with one matching requirement.
 It advertises HTTP+JSON, `text/plain`, standard streaming, no push notifications, and
-no arbitrary extension. Provider, documentation, icon, example, metadata, and
-signature fields remain unsupported.
+at most the exact protected-profile extension above. Arbitrary extensions remain
+unsupported. Provider, documentation, icon, example, metadata, and signature fields
+remain unsupported.
 
 Production publication requires Bearer or mutual TLS. Unauthenticated publication is
 limited to explicit loopback-development interfaces. `GetExtendedAgentCard` retains
@@ -195,15 +233,16 @@ Immutable fixtures live under `fixtures/a2a/v1.0.1/` for:
 
 - `SendMessageRequest`;
 - `GetTaskRequest`; and
-- the initial Agent Card shape.
+- the standard and protected-handoff Agent Card shapes.
 
 `scripts/a2a/Test-A2AProvenance.ps1` verifies every vendored byte and the exact file
 set. `scripts/a2a/Test-A2AFixtures.ps1` verifies fixture manifests and prevents
 released fixture replacement. Crate tests prove protobuf and ProtoJSON narrowing,
 unsupported-field rejection, tenant isolation, version/binding negotiation, secure
-interface URLs, exact fixture round trips, streaming event bounds, first-Task
-ordering, task/context correlation, deterministic artifact canonicalization, media
-types, JSON limits, inline byte limits, filenames, and encrypted-reference shape.
+interface URLs, protected-profile negotiation and downgrade refusal, exact fixture
+round trips, streaming event bounds, first-Task ordering, task/context correlation,
+deterministic artifact canonicalization, media types, JSON limits, inline byte limits,
+filenames, and encrypted-reference shape.
 
 An A2A update uses a new versioned source directory and new immutable fixtures. It
 must not rewrite the `v1.0.1` source or reinterpret its validated initial profile.

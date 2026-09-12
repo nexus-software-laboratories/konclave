@@ -1,14 +1,17 @@
 use KonclaveA2AContracts::wire::{AgentCard, GetTaskRequest, SendMessageRequest};
 use KonclaveA2AContracts::{
     A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, InitialA2AInterfaceEnvironment,
-    decode_initial_get_task_protobuf, decode_initial_send_message_protobuf,
-    validate_initial_agent_card, validate_initial_agent_interface,
+    InitialA2ANegotiatedTrust, InitialA2ATrustRequirement, decode_initial_get_task_protobuf,
+    decode_initial_send_message_protobuf, validate_initial_agent_card,
+    validate_initial_agent_interface,
 };
 use prost::Message as _;
 
 const SEND_MESSAGE: &[u8] = include_bytes!("../../../fixtures/a2a/v1.0.1/send-message-request.bin");
 const GET_TASK: &[u8] = include_bytes!("../../../fixtures/a2a/v1.0.1/get-task-request.bin");
 const AGENT_CARD: &[u8] = include_bytes!("../../../fixtures/a2a/v1.0.1/agent-card.bin");
+const PROTECTED_AGENT_CARD: &[u8] =
+    include_bytes!("../../../fixtures/a2a/v1.0.1/protected-agent-card.bin");
 
 #[test]
 fn immutable_a2a_fixtures_round_trip_exactly() {
@@ -53,4 +56,20 @@ fn immutable_a2a_fixtures_round_trip_exactly() {
     assert_eq!(interface.url(), "https://agent.example.com/a2a/v1");
     assert_eq!(A2A_HTTP_JSON_BINDING, "HTTP+JSON");
     assert_eq!(A2A_PROTOCOL_VERSION, "1.0");
+
+    let protected = AgentCard::decode(PROTECTED_AGENT_CARD).unwrap();
+    assert_eq!(protected.encode_to_vec(), PROTECTED_AGENT_CARD);
+    let protected = validate_initial_agent_card(
+        protected,
+        InitialA2AInterfaceEnvironment::Production,
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert!(protected.protected_profile().unwrap().required());
+    assert!(matches!(
+        protected
+            .negotiate_trust(InitialA2ATrustRequirement::RequireKonclaveProtected)
+            .unwrap(),
+        InitialA2ANegotiatedTrust::KonclaveProtected(_)
+    ));
 }

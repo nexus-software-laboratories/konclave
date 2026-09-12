@@ -4,6 +4,10 @@
     {
       "name": "contract-agent",
       "source": "agent-publication.json"
+    },
+    {
+      "name": "protected-contract-agent",
+      "source": "protected-agent-publication.json"
     }
   ]
 }

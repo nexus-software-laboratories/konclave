@@ -1,0 +1,38 @@
+{
+  "apiVersion": "konclave.dev/v1",
+  "kind": "A2AAgentPublication",
+  "metadata": {
+    "name": "protected-contract-agent"
+  },
+  "spec": {
+    "publicWellKnown": false,
+    "name": "Protected contract agent",
+    "description": "Requires native Konclave transport for protected contract requests.",
+    "version": "1.0.0",
+    "interfaces": [
+      {
+        "url": "https://agent.example.com/a2a/v1",
+        "tenant": "tenant-a"
+      }
+    ],
+    "authentication": {
+      "type": "mutualTls",
+      "name": "mutual-tls"
+    },
+    "protectedProfile": {
+      "required": true,
+      "relayEndpoint": "https://relay.example.com/"
+    },
+    "skills": [
+      {
+        "id": "protected-contract-review",
+        "name": "Protected contract review",
+        "description": "Reviews one contract through a native Konclave directed request.",
+        "tags": [
+          "contracts",
+          "protected"
+        ]
+      }
+    ]
+  }
+}

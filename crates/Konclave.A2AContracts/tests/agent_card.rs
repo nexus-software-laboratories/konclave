@@ -1,17 +1,21 @@
 use std::collections::HashMap;
 
 use KonclaveA2AContracts::wire::{
-    AgentCapabilities, AgentCard, AgentInterface, AgentProvider, AgentSkill,
+    AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentProvider, AgentSkill,
     GetExtendedAgentCardRequest, HttpAuthSecurityScheme, MutualTlsSecurityScheme,
     OAuth2SecurityScheme, SecurityRequirement, SecurityScheme, StringList, security_scheme,
 };
 use KonclaveA2AContracts::{
-    A2A_EXTENDED_AGENT_CARD_PATH, A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
-    A2A_WELL_KNOWN_AGENT_CARD_PATH, A2AContractError, InitialA2AAgentSecurityKind,
-    InitialA2AInterfaceEnvironment, MAX_A2A_AGENT_CARD_INTERFACES,
-    MAX_A2A_ENCODED_AGENT_CARD_BYTES, decode_initial_agent_card_json,
-    decode_initial_agent_card_protobuf, decode_initial_get_extended_agent_card_json,
-    decode_initial_get_extended_agent_card_protobuf, validate_initial_agent_card,
+    A2A_EXTENDED_AGENT_CARD_PATH, A2A_HTTP_JSON_BINDING, A2A_KONCLAVE_PROTECTED_DESCRIPTION,
+    A2A_KONCLAVE_PROTECTED_DOWNGRADE_POLICY, A2A_KONCLAVE_PROTECTED_EXTENSION_URI,
+    A2A_KONCLAVE_PROTECTED_GATEWAY_VISIBILITY, A2A_KONCLAVE_PROTECTED_PAYLOAD_PROTECTION,
+    A2A_KONCLAVE_PROTECTED_PROFILE, A2A_KONCLAVE_PROTECTED_TRANSPORT, A2A_PROTOCOL_VERSION,
+    A2A_TEXT_MEDIA_TYPE, A2A_WELL_KNOWN_AGENT_CARD_PATH, A2AContractError,
+    InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment, InitialA2ANegotiatedTrust,
+    InitialA2ATrustRequirement, MAX_A2A_AGENT_CARD_INTERFACES, MAX_A2A_ENCODED_AGENT_CARD_BYTES,
+    decode_initial_agent_card_json, decode_initial_agent_card_protobuf,
+    decode_initial_get_extended_agent_card_json, decode_initial_get_extended_agent_card_protobuf,
+    validate_initial_agent_card,
 };
 use prost::Message as _;
 
@@ -66,6 +70,26 @@ fn card() -> AgentCard {
     }
 }
 
+fn protected_extension(required: bool, relay_endpoint: &str) -> AgentExtension {
+    AgentExtension {
+        uri: A2A_KONCLAVE_PROTECTED_EXTENSION_URI.to_owned(),
+        description: A2A_KONCLAVE_PROTECTED_DESCRIPTION.to_owned(),
+        required,
+        params: Some(pbjson_types::Struct {
+            fields: HashMap::from([string_parameter("relayEndpoint", relay_endpoint)]),
+        }),
+    }
+}
+
+fn string_parameter(name: &str, value: &str) -> (String, pbjson_types::Value) {
+    (
+        name.to_owned(),
+        pbjson_types::Value {
+            kind: Some(pbjson_types::value::Kind::StringValue(value.to_owned())),
+        },
+    )
+}
+
 #[test]
 fn agent_card_protobuf_and_protojson_narrow_to_the_initial_profile() {
     assert_eq!(
@@ -112,6 +136,150 @@ fn agent_card_protobuf_and_protojson_narrow_to_the_initial_profile() {
         )
         .err(),
         Some(A2AContractError::MalformedEncoding)
+    );
+}
+
+#[test]
+fn protected_profile_negotiation_is_exact_and_never_falls_back() {
+    let mut optional = card();
+    optional.capabilities.as_mut().unwrap().extensions =
+        vec![protected_extension(false, "https://relay.example.com/")];
+    let optional = validate_initial_agent_card(
+        optional,
+        InitialA2AInterfaceEnvironment::Production,
+        Some("tenant-a"),
+    )
+    .unwrap();
+    let profile = optional.protected_profile().unwrap();
+    assert!(!profile.required());
+    assert_eq!(profile.relay_endpoint(), "https://relay.example.com/");
+    assert_eq!(profile.profile(), A2A_KONCLAVE_PROTECTED_PROFILE);
+    assert_eq!(profile.transport(), A2A_KONCLAVE_PROTECTED_TRANSPORT);
+    assert_eq!(
+        profile.payload_protection(),
+        A2A_KONCLAVE_PROTECTED_PAYLOAD_PROTECTION
+    );
+    assert_eq!(
+        profile.gateway_visibility(),
+        A2A_KONCLAVE_PROTECTED_GATEWAY_VISIBILITY
+    );
+    assert_eq!(
+        profile.downgrade_policy(),
+        A2A_KONCLAVE_PROTECTED_DOWNGRADE_POLICY
+    );
+    assert!(matches!(
+        optional
+            .negotiate_trust(InitialA2ATrustRequirement::AllowStandardBridge)
+            .unwrap(),
+        InitialA2ANegotiatedTrust::StandardBridge
+    ));
+    assert!(matches!(
+        optional
+            .negotiate_trust(InitialA2ATrustRequirement::RequireKonclaveProtected)
+            .unwrap(),
+        InitialA2ANegotiatedTrust::KonclaveProtected(_)
+    ));
+    let json = optional.deterministic_json().unwrap();
+    assert_eq!(json, optional.deterministic_json().unwrap());
+    let round_tripped = decode_initial_agent_card_json(
+        &json,
+        InitialA2AInterfaceEnvironment::Production,
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        round_tripped.protected_profile().unwrap().relay_endpoint(),
+        "https://relay.example.com/"
+    );
+
+    let mut required = card();
+    required.capabilities.as_mut().unwrap().extensions =
+        vec![protected_extension(true, "https://relay.example.com/")];
+    let required = validate_initial_agent_card(
+        required,
+        InitialA2AInterfaceEnvironment::Production,
+        Some("tenant-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        required
+            .negotiate_trust(InitialA2ATrustRequirement::AllowStandardBridge)
+            .err(),
+        Some(A2AContractError::RequiredExtensionUnsupported)
+    );
+    assert!(matches!(
+        required
+            .negotiate_trust(InitialA2ATrustRequirement::RequireKonclaveProtected)
+            .unwrap(),
+        InitialA2ANegotiatedTrust::KonclaveProtected(_)
+    ));
+    assert_eq!(
+        validate_initial_agent_card(
+            card(),
+            InitialA2AInterfaceEnvironment::Production,
+            Some("tenant-a")
+        )
+        .unwrap()
+        .negotiate_trust(InitialA2ATrustRequirement::RequireKonclaveProtected)
+        .err(),
+        Some(A2AContractError::RequiredExtensionUnsupported)
+    );
+}
+
+#[test]
+fn protected_profile_rejects_unknown_claims_and_insecure_endpoints() {
+    let invalid_extensions = [
+        AgentExtension {
+            uri: "https://example.com/unknown".to_owned(),
+            ..protected_extension(false, "https://relay.example.com/")
+        },
+        AgentExtension {
+            params: None,
+            ..protected_extension(false, "https://relay.example.com/")
+        },
+        protected_extension(false, "http://relay.example.com/"),
+    ];
+    for extension in invalid_extensions {
+        let mut invalid = card();
+        invalid.capabilities.as_mut().unwrap().extensions = vec![extension];
+        assert!(
+            validate_initial_agent_card(
+                invalid,
+                InitialA2AInterfaceEnvironment::Production,
+                Some("tenant-a")
+            )
+            .is_err()
+        );
+    }
+
+    let mut changed_claim = card();
+    let mut extension = protected_extension(false, "https://relay.example.com/");
+    extension.params.as_mut().unwrap().fields.insert(
+        "gatewayVisibility".to_owned(),
+        string_parameter("ignored", "application-plaintext").1,
+    );
+    changed_claim.capabilities.as_mut().unwrap().extensions = vec![extension];
+    assert!(matches!(
+        validate_initial_agent_card(
+            changed_claim,
+            InitialA2AInterfaceEnvironment::Production,
+            Some("tenant-a")
+        ),
+        Err(A2AContractError::UnsupportedField {
+            field: "agent_card.capabilities.extension.params"
+        })
+    ));
+
+    let mut loopback = card();
+    loopback.capabilities.as_mut().unwrap().extensions =
+        vec![protected_extension(false, "http://127.0.0.1:8080/")];
+    assert!(
+        validate_initial_agent_card(
+            loopback,
+            InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+            Some("tenant-a")
+        )
+        .is_ok()
     );
 }
 

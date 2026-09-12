@@ -22,6 +22,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0015: Private A2A agent discovery](adr/adr-0015-private-a2a-agent-discovery.md)
 - [ADR 0016: A2A streaming projection](adr/adr-0016-a2a-streaming-projection.md)
 - [ADR 0017: Bounded A2A artifact profile](adr/adr-0017-a2a-artifact-profile.md)
+- [ADR 0018: Fail-closed protected A2A handoff](adr/adr-0018-fail-closed-protected-a2a-handoff.md)
 
 ## Protocol
 

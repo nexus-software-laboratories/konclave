@@ -8,6 +8,10 @@ use crate::initial_profile::{
     decode_json_bounded, require_encoded_bound, validate_identifier,
     validate_initial_agent_interface,
 };
+use crate::protected_profile::{
+    InitialA2ANegotiatedTrust, InitialA2AProtectedProfile, InitialA2ATrustRequirement,
+    negotiate_initial_a2a_trust, validate_initial_protected_profile,
+};
 use crate::wire::{AgentCard, SecurityRequirement, security_scheme};
 
 /// Maximum encoded protobuf or ProtoJSON Agent Card accepted before decoding.
@@ -111,6 +115,7 @@ pub struct InitialA2AAgentCard {
     skills: Vec<InitialA2AAgentSkill>,
     streaming: bool,
     extended_agent_card: bool,
+    protected_profile: Option<InitialA2AProtectedProfile>,
 }
 
 impl InitialA2AAgentCard {
@@ -160,6 +165,25 @@ impl InitialA2AAgentCard {
     #[must_use]
     pub const fn extended_agent_card(&self) -> bool {
         self.extended_agent_card
+    }
+
+    /// Returns the optional native Konclave protected handoff.
+    #[must_use]
+    pub const fn protected_profile(&self) -> Option<&InitialA2AProtectedProfile> {
+        self.protected_profile.as_ref()
+    }
+
+    /// Selects one explicit trust mode without fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a required-extension error when the selected mode is unavailable or
+    /// the card requires protected mode from a standard caller.
+    pub fn negotiate_trust(
+        &self,
+        requirement: InitialA2ATrustRequirement,
+    ) -> Result<InitialA2ANegotiatedTrust, A2AContractError> {
+        negotiate_initial_a2a_trust(self.protected_profile(), requirement)
     }
 
     /// Returns the generated wire DTO after all initial-profile checks.
@@ -280,11 +304,8 @@ pub fn validate_initial_agent_card(
             field: "agent_card.capabilities.push_notifications",
         });
     }
-    if !capabilities.extensions.is_empty() {
-        return Err(A2AContractError::UnsupportedField {
-            field: "agent_card.capabilities.extensions",
-        });
-    }
+    let protected_profile =
+        validate_initial_protected_profile(&capabilities.extensions, environment)?;
     let extended_agent_card = capabilities.extended_agent_card.unwrap_or(false);
 
     if card.supported_interfaces.is_empty() {
@@ -327,6 +348,7 @@ pub fn validate_initial_agent_card(
         skills,
         streaming,
         extended_agent_card,
+        protected_profile,
     })
 }
 

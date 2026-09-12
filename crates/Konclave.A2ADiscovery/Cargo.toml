@@ -9,6 +9,7 @@ rust-version = "1.85"
 KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
 KonclaveA2ADomain = { path = "../Konclave.A2ADomain" }
 KonclaveBoundedDocuments = { path = "../Konclave.BoundedDocuments" }
+pbjson-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

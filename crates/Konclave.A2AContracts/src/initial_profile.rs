@@ -604,18 +604,25 @@ pub fn validate_initial_agent_interface(
         });
     }
     let tenant = optional_identifier(interface.tenant, "agent_interface.tenant")?;
-    if interface.url.is_empty()
-        || interface.url.len() > MAX_A2A_INTERFACE_URL_BYTES
-        || !interface.url.is_ascii()
-        || interface
-            .url
+    let url = validate_initial_service_url(&interface.url, environment)?;
+    Ok(InitialA2AValidatedInterface { url, tenant })
+}
+
+pub(crate) fn validate_initial_service_url(
+    value: &str,
+    environment: InitialA2AInterfaceEnvironment,
+) -> Result<String, A2AContractError> {
+    if value.is_empty()
+        || value.len() > MAX_A2A_INTERFACE_URL_BYTES
+        || !value.is_ascii()
+        || value
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte == b'\\')
     {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
-    let parsed = Url::parse(&interface.url).map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
-    if parsed.as_str() != interface.url {
+    let parsed = Url::parse(value).map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
+    if parsed.as_str() != value {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
     if parsed.cannot_be_a_base()
@@ -634,10 +641,7 @@ pub fn validate_initial_agent_interface(
     if !secure && !loopback_http {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
-    Ok(InitialA2AValidatedInterface {
-        url: parsed.to_string(),
-        tenant,
-    })
+    Ok(parsed.to_string())
 }
 
 pub(crate) fn decode_json_bounded<T: DeserializeOwned>(

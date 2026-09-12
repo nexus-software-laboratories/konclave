@@ -348,6 +348,104 @@ async fn outbound_client_bounds_responses_and_rejects_wrong_auth_profile() {
     );
 }
 
+#[test]
+fn standard_client_rejects_required_protected_mode_without_fallback() {
+    let mut publication: Value = serde_json::from_slice(PUBLICATION).unwrap();
+    publication["spec"]["protectedProfile"] = json!({
+        "required": true,
+        "relayEndpoint": "https://relay.example.com/"
+    });
+    let required = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&publication).unwrap(),
+        InitialA2AInterfaceEnvironment::Production,
+    )
+    .unwrap();
+    assert_eq!(
+        A2AHttpJsonClient::new(
+            required.card(),
+            Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+            A2AHttpClientConfig::default(),
+        )
+        .err(),
+        Some(A2AGatewayError::RequiredExtensionUnsupported)
+    );
+
+    publication["spec"]["protectedProfile"]["required"] = json!(false);
+    let optional = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&publication).unwrap(),
+        InitialA2AInterfaceEnvironment::Production,
+    )
+    .unwrap();
+    assert!(
+        A2AHttpJsonClient::new(
+            optional.card(),
+            Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+            A2AHttpClientConfig::default(),
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn extended_card_rejects_protected_profile_substitution() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut publication: Value =
+        serde_json::from_slice(&local_publication(address, false, false)).unwrap();
+    publication["spec"]["protectedProfile"] = json!({
+        "required": false,
+        "relayEndpoint": "https://relay-a.example.com/"
+    });
+    let compiled = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&publication).unwrap(),
+        InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+    )
+    .unwrap();
+    let client = A2AHttpJsonClient::new(
+        compiled.card(),
+        Some(A2ABearerCredential::parse(TOKEN).unwrap()),
+        A2AHttpClientConfig::default(),
+    )
+    .unwrap();
+
+    publication["spec"]["protectedProfile"]["relayEndpoint"] =
+        json!("https://relay-b.example.com/");
+    let changed = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&publication).unwrap(),
+        InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+    )
+    .unwrap()
+    .extended_card()
+    .unwrap()
+    .deterministic_json()
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/tenant-a/extendedAgentCard",
+            get(move || {
+                let changed = changed.clone();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, "application/a2a+json")],
+                        changed,
+                    )
+                }
+            }),
+        );
+        axum::serve(listener, router).await.unwrap();
+    });
+    assert_eq!(
+        client
+            .get_extended_agent_card(InitialA2AInterfaceEnvironment::LoopbackDevelopment)
+            .await
+            .err(),
+        Some(A2AGatewayError::Contract)
+    );
+    server.abort();
+    let _ = server.await;
+}
+
 #[tokio::test]
 async fn outbound_stream_rejects_wrong_media_type_and_non_task_first_event() {
     let wrong_media_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

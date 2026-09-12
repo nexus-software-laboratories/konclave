@@ -106,6 +106,13 @@ The source contains web authentication descriptions, never credentials. The A2A
 one publication. Conversation, device, profile, policy, and relay identifiers do not
 appear in this source.
 
+An optional `protectedProfile` contains only `required` and a canonical
+`relayEndpoint`. The compiler emits the fixed Konclave protected-extension URI,
+native-transport, MLS, application-opaque gateway, and fail-closed claims; source
+authors cannot override them. The endpoint contains no credential or route authority.
+A required protected profile is valid for discovery but cannot be composed into the
+standard plaintext gateway application.
+
 The public card contains `skills`. When `extendedSkills` is non-empty, it advertises
 extended-card support and the authenticated card contains the ordered union of public
 and extended skills. Skill identifiers and per-skill tags are unique.
