@@ -58,6 +58,7 @@ This map lists the documentation contributed by the selected project shape.
 - [A2A agent discovery](development/a2a-discovery.md)
 - [A2A reference gateway](development/a2a-reference-gateway.md)
 - [A2A-to-Konclave bridge](development/a2a-konclave-bridge.md)
+- [Self-hosted A2A gateway runtime](development/a2a-self-hosting.md)
 - [Repository controls](development/repository-controls.md)
 - [Continuous integration](development/ci.md)
 
