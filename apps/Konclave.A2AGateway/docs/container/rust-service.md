@@ -22,6 +22,10 @@ The image has five explicit mounts:
 - `/var/lib/konclave/a2a/objects` is the separate writable encrypted-ciphertext
   boundary.
 
+Allow at least 65 seconds when stopping the container. An active bounded HTTP wait
+can use up to 30 seconds before the bridge begins its separate 30-second observer
+drain.
+
 The container process must use the same nonzero numeric UID as the local service.
 The local-service socket and credential files intentionally fail closed when user
 namespace mapping changes their apparent owner or grants group/other access. Do not

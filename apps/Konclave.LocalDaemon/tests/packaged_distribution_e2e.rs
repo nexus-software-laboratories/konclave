@@ -219,7 +219,7 @@ impl GatewayProcess {
     async fn shutdown(mut self) {
         if let Some(container_name) = &self.container_name {
             let status = TokioCommand::new("docker")
-                .args(["stop", "--time", "35"])
+                .args(["stop", "--time", "65"])
                 .arg(container_name)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -235,7 +235,7 @@ impl GatewayProcess {
             // handle, and sends SIGTERM to exercise coordinated shutdown.
             assert_eq!(unsafe { libc::kill(process_id, libc::SIGTERM) }, 0);
         }
-        let status = timeout(Duration::from_secs(40), self.child.as_mut().unwrap().wait())
+        let status = timeout(Duration::from_secs(70), self.child.as_mut().unwrap().wait())
             .await
             .expect("A2A gateway shutdown exceeded its deadline")
             .expect("waiting for packaged A2A gateway failed");

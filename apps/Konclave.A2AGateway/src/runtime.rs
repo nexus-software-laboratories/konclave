@@ -21,10 +21,13 @@ use anyhow::{Context as _, bail};
 use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
+use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 use crate::config::RuntimeConfig;
 
 const DEFAULT_HEALTH_ADDRESS: &str = "127.0.0.1:8090";
+const HTTP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Runs the self-hosted A2A gateway until the supplied shutdown future completes.
@@ -103,10 +106,27 @@ where
     let listener = tokio::net::TcpListener::bind(config.listen_address)
         .await
         .context("binding A2A gateway listener")?;
-    let server_result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("serving A2A gateway");
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let shutdown_trigger = async move {
+        shutdown.await;
+        let _ = shutdown_sender.send(());
+    };
+    let server_result = {
+        let server = axum::serve(listener, router).with_graceful_shutdown(async {
+            let _ = shutdown_receiver.await;
+        });
+        tokio::pin!(server);
+        tokio::pin!(shutdown_trigger);
+        tokio::select! {
+            result = &mut server => result.context("serving A2A gateway"),
+            _ = &mut shutdown_trigger => {
+                match timeout(HTTP_SHUTDOWN_TIMEOUT, &mut server).await {
+                    Ok(result) => result.context("serving A2A gateway"),
+                    Err(_) => Err(anyhow::anyhow!("A2A HTTP shutdown deadline exceeded")),
+                }
+            }
+        }
+    };
     let shutdown_result = bridge
         .shutdown(BRIDGE_SHUTDOWN_TIMEOUT)
         .await

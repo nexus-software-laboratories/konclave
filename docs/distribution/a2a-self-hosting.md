@@ -171,7 +171,8 @@ SERVICE_HEALTH_ADDRESS=127.0.0.1:8090 <gateway-root>/bin/KonclaveA2AGateway --he
 
 Supervise the process as the same operating-system account that owns the local
 service endpoint and gateway files. Stop it with `SIGTERM`; coordinated shutdown
-stops HTTP acceptance, signals response observers, and waits up to 30 seconds.
+stops HTTP acceptance and signals response observers. Configure a supervisor timeout
+of at least 65 seconds for the bounded HTTP and observer-drain phases.
 
 ## Run the container
 
