@@ -58,8 +58,6 @@ dependencies = [
 name = "KonclaveA2ADiscovery"
 version = "0.1.0"
 dependencies = [
- "KonclaveA2AArtifactHttp",
- "KonclaveA2AArtifactStorage",
  "KonclaveA2AContracts",
  "KonclaveA2ADomain",
  "KonclaveBoundedDocuments",
