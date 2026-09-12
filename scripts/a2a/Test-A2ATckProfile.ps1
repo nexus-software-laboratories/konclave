@@ -78,6 +78,23 @@ $expectedSdkFiles = @(
     'pyproject.toml',
     'uv.lock'
 )
+
+function Get-CanonicalRepositoryText {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $text = [IO.File]::ReadAllText($Path).Replace("`r`n", "`n")
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($text)
+    return [PSCustomObject]@{
+        Bytes = $bytes.Length
+        Sha256 = [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($bytes)
+        ).ToLowerInvariant()
+    }
+}
+
 $sdkFiles = @($profile.sdkInterop.files)
 $actualSdkFiles = @($sdkFiles | ForEach-Object { [string] $_.path } | Sort-Object)
 if (($actualSdkFiles -join "`n") -cne (($expectedSdkFiles | Sort-Object) -join "`n")) {
@@ -96,12 +113,11 @@ foreach ($file in $sdkFiles) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Pinned A2A Python SDK interoperability file is missing: $($file.path)"
     }
-    $item = Get-Item -LiteralPath $path
-    if ($item.Length -ne [int64] $file.bytes) {
+    $canonical = Get-CanonicalRepositoryText -Path $path
+    if ($canonical.Bytes -ne [int64] $file.bytes) {
         throw "Pinned A2A Python SDK interoperability file length changed: $($file.path)"
     }
-    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($hash -cne [string] $file.sha256) {
+    if ($canonical.Sha256 -cne [string] $file.sha256) {
         throw "Pinned A2A Python SDK interoperability file digest changed: $($file.path)"
     }
 }

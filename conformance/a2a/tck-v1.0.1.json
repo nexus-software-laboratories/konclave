@@ -66,13 +66,13 @@
     "files": [
       {
         "path": "interop.py",
-        "bytes": 5054,
-        "sha256": "5df3e8a5cb442d61db3623019c770f48c4a38771cb28b88086a385b45b0a86ab"
+        "bytes": 4909,
+        "sha256": "0eca7252babbf0268e7161ea47b2e2e9ac42d98b7245a423e7906d8f930f1da2"
       },
       {
         "path": "pyproject.toml",
-        "bytes": 168,
-        "sha256": "612e9fc05a9cc545b3832dca1a116d6718e52f7cf7f7243ef7d1ef8f79c838a0"
+        "bytes": 158,
+        "sha256": "64b3913ab2ca57f8ebdde9e25e99dd00fc8cb701292b386267ebf85b094a71aa"
       },
       {
         "path": "uv.lock",
