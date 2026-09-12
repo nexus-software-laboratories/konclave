@@ -24,28 +24,28 @@
     "files": [
       {
         "path": "LICENSE",
-        "bytes": 11558,
-        "sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+        "bytes": 11357,
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
       },
       {
         "path": "pyproject.toml",
-        "bytes": 1802,
-        "sha256": "e860d777ca4866d5f9d71c7ee8edbafdaccb29852fef29d818219dde702eacf5"
+        "bytes": 1732,
+        "sha256": "788f80381b078e9b85a884612aa5d7cbc450bc5680aea8af42e8dfca794093c6"
       },
       {
         "path": "run_tck.py",
-        "bytes": 4697,
-        "sha256": "e41ce04a6dc1b3fe18fc14cc9c180d27d45e21324a21a36819e501225fdb4e5a"
+        "bytes": 4540,
+        "sha256": "14802ac5031cca2f5c819f4b6c6fec43560b184efafa8731632fb1dea8be5111"
       },
       {
         "path": "specification/version.json",
-        "bytes": 398,
-        "sha256": "5859c186d1dbabb551d0ae17bc83320a8fb30a6f80e032056c427e56eb999d05"
+        "bytes": 384,
+        "sha256": "1142ba3d73bd5e028c154f389cbd105c7a18ed537d477d71fcb284f32d5ca037"
       },
       {
         "path": "uv.lock",
-        "bytes": 107939,
-        "sha256": "889697cabd5f5bf79af2e913fa9a91ccbc70a98234398649907b9aa937e77d74"
+        "bytes": 107240,
+        "sha256": "7650dafd015617312c49f87bfafaa17e96f6af5d7d73540ce0ef4a2f46dfe404"
       }
     ]
   },

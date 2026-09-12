@@ -95,6 +95,52 @@ function Get-CanonicalRepositoryText {
     }
 }
 
+function Get-GitBlobMeasurement {
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot,
+
+        [Parameter(Mandatory)]
+        [string] $Revision,
+
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'git'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in @('-C', $RepositoryRoot, 'cat-file', 'blob', "${Revision}:$Path")) {
+        [void] $startInfo.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) {
+        throw 'Could not start Git while validating A2A TCK provenance.'
+    }
+    $content = [IO.MemoryStream]::new()
+    try {
+        $process.StandardOutput.BaseStream.CopyTo($content)
+        $errorText = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "Could not read pinned A2A TCK blob '$Path': $errorText"
+        }
+        $bytes = $content.ToArray()
+        return [PSCustomObject]@{
+            Bytes = $bytes.Length
+            Sha256 = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($bytes)
+            ).ToLowerInvariant()
+        }
+    }
+    finally {
+        $content.Dispose()
+        $process.Dispose()
+    }
+}
+
 $sdkFiles = @($profile.sdkInterop.files)
 $actualSdkFiles = @($sdkFiles | ForEach-Object { [string] $_.path } | Sort-Object)
 if (($actualSdkFiles -join "`n") -cne (($expectedSdkFiles | Sort-Object) -join "`n")) {
@@ -318,17 +364,25 @@ if (-not [string]::IsNullOrWhiteSpace($TckRoot)) {
     if ($LASTEXITCODE -ne 0 -or $head -cne [string] $profile.tck.commit) {
         throw 'A2A TCK checkout does not match the pinned commit.'
     }
+    $trackedChanges = @(
+        git -C $resolvedTckRoot status --porcelain --untracked-files=no
+    )
+    if ($LASTEXITCODE -ne 0 -or $trackedChanges.Count -ne 0) {
+        throw 'A2A TCK checkout contains tracked modifications.'
+    }
     foreach ($file in $files) {
         $path = Join-Path $resolvedTckRoot ([string] $file.path)
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Pinned A2A TCK file is missing: $($file.path)"
         }
-        $item = Get-Item -LiteralPath $path
-        if ($item.Length -ne [int64] $file.bytes) {
+        $blob = Get-GitBlobMeasurement `
+            -RepositoryRoot $resolvedTckRoot `
+            -Revision $head `
+            -Path ([string] $file.path)
+        if ($blob.Bytes -ne [int64] $file.bytes) {
             throw "Pinned A2A TCK file length changed: $($file.path)"
         }
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($hash -cne [string] $file.sha256) {
+        if ($blob.Sha256 -cne [string] $file.sha256) {
             throw "Pinned A2A TCK file digest changed: $($file.path)"
         }
     }
