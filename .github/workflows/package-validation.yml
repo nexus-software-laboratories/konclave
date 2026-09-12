@@ -3,7 +3,7 @@ name: Package validation
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - '.github/workflows/package-validation.yml'
       - 'Cargo.lock'
@@ -46,6 +46,7 @@ concurrency:
 jobs:
   package-native:
     name: Package ${{ matrix.target }}
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -187,7 +188,7 @@ jobs:
 
   package-container:
     name: Package ${{ matrix.name }} linux/amd64 container
-    if: ${{ !inputs.demo_windows_only }}
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -610,6 +611,7 @@ jobs:
       - name: Check package matrix
         shell: bash
         env:
+          IS_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
           DEMO_WINDOWS_ONLY: ${{ inputs.demo_windows_only }}
           NATIVE_RESULT: ${{ needs.package-native.result }}
           CONTAINER_RESULT: ${{ needs.package-container.result }}
@@ -617,6 +619,10 @@ jobs:
           ACCEPTANCE_RESULT: ${{ needs.packaged-acceptance.result }}
         run: |
           set -eu
+          if [ "$IS_DRAFT" = 'true' ]; then
+            echo 'Draft package validation deferred until the pull request is ready.'
+            exit 0
+          fi
           if [ "$NATIVE_RESULT" != 'success' ]; then
             echo "::error::Native package matrix concluded with $NATIVE_RESULT."
             exit 1

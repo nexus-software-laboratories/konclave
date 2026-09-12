@@ -1,45 +1,32 @@
 # Continuous integration
 
-This repository is public. Build, lint, and test jobs run on operator-owned PitCrew
-runners. Container, A2A conformance, and cross-platform release-package validation
-run on free GitHub-hosted capacity so those required checks never depend on private
-runner availability.
+This repository is public. Every pull-request build, lint, test, packaging,
+conformance, policy, and container job runs on GitHub-hosted capacity. Pull-request
+validation never consumes PitCrew or another self-hosted runner.
 
 ## Runner lanes
 
-- `general-purpose` (PitCrew) runs Rust and Node builds, linting, tests, and
-  daemon packaging checks.
-- `automation-control` (PitCrew) runs validation planning and pull-request
-  policy checks.
-- `ubuntu-latest` (GitHub-hosted) runs the Community Relay OCI build and
-  validation plus the pinned A2A TCK and official Python SDK interoperability.
+- `ubuntu-latest` runs Rust and Node builds, linting, tests, daemon packaging,
+  pull-request policy checks, both OCI validation lanes, the pinned A2A TCK, and
+  official Python SDK interoperability.
 - `ubuntu-latest`, `windows-latest`, `macos-15`, and `macos-15-intel`
   (GitHub-hosted) build and exercise native unsigned release candidates.
 
-Named PitCrew profiles advertise `linux`, `x64`, and the profile label without
-the broad `self-hosted` label. The default `general-purpose` profile retains
-GitHub's default labels.
-
-Validation is grouped per pull request rather than per branch. Under
-`pull_request_target`, `github.ref` resolves to the base branch, so keying
-concurrency on it alone places every open pull request in one group. GitHub keeps
-only one pending run per group, so a third request cancels another pull request's
-queued validation. Superseded revisions of the same pull request queue rather than
-cancel, so a run already producing required checks finishes and reports.
+Validation is grouped per pull request. A new head revision cancels the prior run for
+that pull request, while each manual dispatch uses its unique run identifier. Stale
+commits therefore cannot consume runner capacity or report after the current head.
 
 ## Reuse validation on ready promotion
 
-Full CI and package validation run when a pull request is opened, when its head SHA
-changes, and when it is reopened. A draft opened on one SHA therefore produces the
-same required `CI` and `Package validation` checks used when that unchanged pull
-request becomes ready; promotion does not run either matrix again. Draft CI is
-unconditionally full so reused checks cannot represent a reduced validation scope.
+Draft pull requests perform only lightweight validation planning and publish
+`Draft CI`; runner-intensive build, test, package, container, A2A, and adapter work is
+deferred. Moving a pull request to ready-for-review triggers fresh full validation on
+the unchanged head and publishes the required `CI` and component check contexts.
 
-Full CI retains the `edited` event because retargeting a pull request onto `main`
+CI retains the `edited` event because retargeting a pull request onto `main`
 changes its validation eligibility without creating a new head SHA. The title and
 base checks also react to edits, and Review policy reacts to ready/draft transitions
-because its approval rule depends on that state. A failed check on an unchanged SHA
-remains failed until code changes or an operator explicitly reruns it.
+because its approval rule depends on that state.
 
 `scripts/ci/Test-PullRequestValidationTriggers.ps1` owns this trigger contract and
 prevents `ready_for_review` from being reintroduced into full CI, packaging, title,
@@ -47,20 +34,15 @@ or base workflows while preserving it for Review policy.
 
 ## Fork boundary
 
-PitCrew does not execute jobs or code from fork pull requests. Pull-request
-workflows are defined by the default branch, and every PitCrew entry job checks
-for an exact same-repository head before runner assignment. A maintainer must
-reproduce an external contribution on a repository branch before validation.
-This preserves the outbound-only self-hosted trust boundary.
+The primary CI and component workflows use `pull_request`, read-only permissions, and
+GitHub-hosted runners, so fork code cannot reach private runner state, repository
+secrets, a registry, or a deployment target. Metadata-only title, base, and review
+policy workflows may use `pull_request_target`; they never check out or execute pull
+request code.
 
-Hosted container validation inherits the same boundary: it is scheduled by the
-default branch through `pull_request_target` and gated on the same
-same-repository head check, and it never checks out a fork head.
-
-The separate package-validation workflow uses `pull_request` and only
-GitHub-hosted runners with read-only repository permissions. Fork code may execute
-there because it cannot reach PitCrew, credentials, a registry, or a deployment
-target.
+The package-validation workflow uses only GitHub-hosted runners with read-only
+repository permissions. Fork code may execute there because it cannot reach
+credentials, a registry, or a deployment target.
 
 The A2A conformance workflow follows the same hosted-only trust boundary. Its stable
 required check uses a read-only pull-request file query and runs the external suite

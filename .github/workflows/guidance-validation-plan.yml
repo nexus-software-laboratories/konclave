@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   plan:
-    runs-on: [linux, x64, automation-control]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       scope: ${{ steps.scope.outputs.scope }}

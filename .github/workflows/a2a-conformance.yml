@@ -3,7 +3,7 @@ name: A2A conformance
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: a2a-conformance-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   a2a-conformance:
@@ -30,6 +30,9 @@ jobs:
         run: |
           if ($env:EVENT_NAME -eq 'workflow_dispatch') {
             $run = $true
+          }
+          elseif ('${{ github.event.pull_request.draft }}' -eq 'true') {
+            $run = $false
           }
           else {
             $files = @(

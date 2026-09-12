@@ -7,8 +7,10 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $workflowRoot = Join-Path $repositoryRoot '.github' 'workflows'
 $contracts = [ordered]@{
-    'ci.yml' = '    types: [opened, edited, synchronize, reopened]'
-    'package-validation.yml' = '    types: [opened, synchronize, reopened]'
+    'ci.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'a2a-conformance.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'adapter-conformance.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'package-validation.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'pr-title.yml' = '    types: [opened, edited, synchronize, reopened]'
     'pr-base.yml' = '    types: [opened, edited, synchronize, reopened]'
 }
@@ -31,20 +33,30 @@ if ($reviewPolicyTrigger -cnotin $reviewPolicyLines) {
     throw 'Review policy must re-evaluate ready and draft transitions.'
 }
 
-foreach ($name in @('ci.yml', 'package-validation.yml', 'pr-title.yml', 'pr-base.yml')) {
-    $content = Get-Content -Raw -LiteralPath (Join-Path $workflowRoot $name)
-    if ($content.Contains('ready_for_review')) {
-        throw "$name must reuse successful checks when an unchanged draft becomes ready."
-    }
-}
-
 $ciLines = @(Get-Content -LiteralPath (Join-Path $workflowRoot 'ci.yml'))
 $aggregateIndex = [Array]::IndexOf($ciLines, '  ci:')
-if ($aggregateIndex -lt 0 -or $ciLines[$aggregateIndex + 1] -cne '    name: CI') {
-    throw 'The aggregate required check must retain the stable CI name for draft reuse.'
+if (
+    $aggregateIndex -lt 0 -or
+    -not $ciLines[$aggregateIndex + 1].Contains("'Draft CI'") -or
+    -not $ciLines[$aggregateIndex + 1].Contains("'CI'")
+) {
+    throw 'The aggregate must publish Draft CI for drafts and CI for ready validation.'
 }
-if ('      draft_mode: full' -cnotin $ciLines -or $ciLines -cmatch 'CI_DRAFT_MODE') {
-    throw 'Draft CI must remain full when ready promotion reuses the existing head checks.'
+if ('      draft_mode: ready-only' -cnotin $ciLines -or $ciLines -cmatch 'CI_DRAFT_MODE') {
+    throw 'Draft CI must defer runner-intensive work until ready-for-review.'
+}
+if (
+    '  cancel-in-progress: ${{ github.event_name == ''pull_request'' }}' -cnotin $ciLines
+) {
+    throw 'Superseded pull-request CI must be cancelled automatically.'
+}
+
+foreach ($workflow in Get-ChildItem -LiteralPath $workflowRoot -File |
+    Where-Object { $_.Extension -in @('.yml', '.yaml') }) {
+    $content = Get-Content -LiteralPath $workflow.FullName -Raw
+    if ($content -cmatch 'runs-on:\s*\[[^\]]*(self-hosted|automation-control|general-purpose)') {
+        throw "$($workflow.Name) routes public repository work to a private runner."
+    }
 }
 
 Write-Output 'Pull-request validation trigger contract passed.'
