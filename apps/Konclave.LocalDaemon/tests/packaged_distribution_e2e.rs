@@ -193,10 +193,7 @@ impl GatewayProcess {
                         .as_deref()
                         .expect("gateway container image is required"),
                 )
-                .env(
-                    "KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME",
-                    container_name,
-                )
+                .env("KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME", container_name)
                 .env(
                     "KONCLAVE_ACCEPTANCE_CONTAINER_RUN_ID",
                     paths
@@ -238,13 +235,10 @@ impl GatewayProcess {
             // handle, and sends SIGTERM to exercise coordinated shutdown.
             assert_eq!(unsafe { libc::kill(process_id, libc::SIGTERM) }, 0);
         }
-        let status = timeout(
-            Duration::from_secs(40),
-            self.child.as_mut().unwrap().wait(),
-        )
-        .await
-        .expect("A2A gateway shutdown exceeded its deadline")
-        .expect("waiting for packaged A2A gateway failed");
+        let status = timeout(Duration::from_secs(40), self.child.as_mut().unwrap().wait())
+            .await
+            .expect("A2A gateway shutdown exceeded its deadline")
+            .expect("waiting for packaged A2A gateway failed");
         assert!(status.success(), "A2A gateway exited with {status}");
         self.child = None;
     }
@@ -273,38 +267,39 @@ fn prepare_gateway_fixture(
     let credential_root = root.join("credentials");
     let task_root = root.join("tasks");
     let object_root = root.join("objects");
-    for directory in [&root, &config_root, &credential_root, &task_root, &object_root] {
+    for directory in [
+        &root,
+        &config_root,
+        &credential_root,
+        &task_root,
+        &object_root,
+    ] {
         ensure_owner_directory(directory);
     }
-    let installed_service = credential_root.join(
-        KonclaveLocalServiceTransport::LOCAL_SERVICE_INSTALLATION_FILE,
-    );
+    let installed_service =
+        credential_root.join(KonclaveLocalServiceTransport::LOCAL_SERVICE_INSTALLATION_FILE);
     let installed_issuer = credential_root.join("account-issuer.key");
     let bearer_file = credential_root.join("a2a-bearer");
     copy_owner_file(installation_file, &installed_service);
     copy_owner_file(issuer_key_file, &installed_issuer);
     create_or_verify_owner_protected_file(&bearer_file, A2A_BEARER_TOKEN.as_bytes()).unwrap();
 
-    let (
-        runtime_config_root,
-        runtime_credential_root,
-        runtime_task_root,
-        runtime_object_root,
-    ) = if paths.gateway_container {
-        (
-            PathBuf::from("/etc/konclave/a2a"),
-            PathBuf::from("/run/konclave/credentials"),
-            PathBuf::from("/var/lib/konclave/a2a/tasks"),
-            PathBuf::from("/var/lib/konclave/a2a/objects"),
-        )
-    } else {
-        (
-            config_root.clone(),
-            credential_root.clone(),
-            task_root.clone(),
-            object_root.clone(),
-        )
-    };
+    let (runtime_config_root, runtime_credential_root, runtime_task_root, runtime_object_root) =
+        if paths.gateway_container {
+            (
+                PathBuf::from("/etc/konclave/a2a"),
+                PathBuf::from("/run/konclave/credentials"),
+                PathBuf::from("/var/lib/konclave/a2a/tasks"),
+                PathBuf::from("/var/lib/konclave/a2a/objects"),
+            )
+        } else {
+            (
+                config_root.clone(),
+                credential_root.clone(),
+                task_root.clone(),
+                object_root.clone(),
+            )
+        };
     let endpoint = format!("http://{}", paths.gateway_address);
     let publication_file = config_root.join("agent-publication.json");
     let runtime_publication_file = runtime_config_root.join("agent-publication.json");
@@ -530,20 +525,16 @@ async fn claim_directed_request(
 async fn connect_gateway_client(fixture: &GatewayFixture) -> A2AHttpJsonClient {
     let config =
         A2AHttpClientConfig::new(Duration::from_secs(5), MAX_A2A_ENCODED_RESPONSE_BYTES).unwrap();
-    let discovery_url = format!(
-        "{}/.well-known/agent-card.json",
-        fixture.endpoint
-    );
+    let discovery_url = format!("{}/.well-known/agent-card.json", fixture.endpoint);
     for _ in 0..200 {
-        if let Ok(A2AAgentCardFetchOutcome::Modified { card, .. }) =
-            fetch_public_agent_card(
-                &discovery_url,
-                InitialA2AInterfaceEnvironment::LoopbackDevelopment,
-                None,
-                None,
-                config,
-            )
-            .await
+        if let Ok(A2AAgentCardFetchOutcome::Modified { card, .. }) = fetch_public_agent_card(
+            &discovery_url,
+            InitialA2AInterfaceEnvironment::LoopbackDevelopment,
+            None,
+            None,
+            config,
+        )
+        .await
         {
             return A2AHttpJsonClient::new(
                 &card,
@@ -607,13 +598,7 @@ fn task_contains_agent_text(
 fn assert_ciphertext_endpoint(fixture: &GatewayFixture, object_id: &str, expected: &[u8]) {
     let url = format!("{}/objects/sha256/{object_id}", fixture.endpoint);
     let output = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "5",
-        ])
+        .args(["--fail", "--silent", "--show-error", "--max-time", "5"])
         .arg(&url)
         .output()
         .expect("ciphertext retrieval must execute");
@@ -736,11 +721,8 @@ async fn exercise_packaged_gateway(
     );
     let ciphertext = b"packaged-encrypted-object-ciphertext";
     let object_id = sha256_hex(ciphertext);
-    create_or_verify_owner_protected_file(
-        &fixture.object_root.join(&object_id),
-        ciphertext,
-    )
-    .unwrap();
+    create_or_verify_owner_protected_file(&fixture.object_root.join(&object_id), ciphertext)
+        .unwrap();
 
     let gateway = GatewayProcess::start(paths, &fixture);
     let client = connect_gateway_client(&fixture).await;
