@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path,
-    [string]$ManifestPath = 'protocol/releases/protocol-v1.0.0-alpha.1.json',
+    [string]$ManifestPath,
     [switch]$CurrentTree
 )
 
@@ -37,6 +37,28 @@ function Assert-FileHash {
     if ($actual -cne [string]$Entry.sha256) {
         throw "Release SHA-256 mismatch: $($Entry.path)"
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+    $releaseRoot = Join-Path $ProjectRoot 'protocol' 'releases'
+    $manifests = @(
+        Get-ChildItem -LiteralPath $releaseRoot -Filter 'protocol-v*.json' -File |
+            Sort-Object Name
+    )
+    if ($manifests.Count -eq 0) {
+        throw 'No protocol release manifests were found.'
+    }
+    foreach ($releaseManifest in $manifests) {
+        $relativePath = [IO.Path]::GetRelativePath(
+            $ProjectRoot,
+            $releaseManifest.FullName
+        ).Replace('\', '/')
+        & $PSCommandPath `
+            -ProjectRoot $ProjectRoot `
+            -ManifestPath $relativePath `
+            -CurrentTree:$CurrentTree
+    }
+    return
 }
 
 $manifestFullPath = Resolve-RepositoryFile $ManifestPath
@@ -196,6 +218,124 @@ $identity = Get-Content -LiteralPath (
 ) -Raw -Encoding UTF8
 if ($identity -notmatch 'CIPHER_SUITE: CipherSuite = CipherSuite::CURVE25519_AES128;') {
     throw 'Release MLS ciphersuite does not match source.'
+}
+
+$legacyTag = 'protocol-v1.0.0-alpha.1'
+$a2aAlpha2Tag = 'protocol-v1.0.0-alpha.2'
+$releaseTag = [string]$manifest.release.tag
+if ($releaseTag -cnotin @($legacyTag, $a2aAlpha2Tag)) {
+    throw "Protocol release verifier has no profile for tag $releaseTag."
+}
+if ($releaseTag -ceq $a2aAlpha2Tag) {
+    if ($null -eq $manifest.interoperability -or $null -eq $manifest.interoperability.a2a) {
+        throw 'Protocol release is missing the required A2A interoperability evidence.'
+    }
+    $a2a = $manifest.interoperability.a2a
+    if (
+        [string]$a2a.name -cne 'Linux Foundation Agent2Agent Protocol' -or
+        [string]$a2a.protocolVersion -cne '1.0' -or
+        [string]$a2a.release -cne 'v1.0.1' -or
+        [string]$a2a.commit -cne '3303592588e388e62e0f69f701af531d2f4e3991' -or
+        [string]$a2a.source.path -cne 'third_party/a2a/v1.0.1/a2a.proto' -or
+        [string]$a2a.provenance.path -cne 'third_party/a2a/v1.0.1/provenance.json' -or
+        [string]$a2a.conformanceProfile.path -cne 'conformance/a2a/tck-v1.0.1.json' -or
+        [string]$a2a.tck.repository -cne 'https://github.com/a2aproject/a2a-tck' -or
+        [string]$a2a.tck.version -cne '1.0.0' -or
+        [string]$a2a.tck.commit -cne '263b9cfaf16a554bdfb166a7ba5b67716e946349' -or
+        [string]$a2a.tck.uvVersion -cne '0.11.7' -or
+        [string]$a2a.tck.uvArtifactSha256 -cne '4e4d5e31bea86e1b6e0f5a0f95e14e80018e6f6c0129256d2915a4b3d793644d' -or
+        [string]$a2a.sdk.repository -cne 'https://github.com/a2aproject/a2a-python' -or
+        [string]$a2a.sdk.package -cne 'a2a-sdk' -or
+        [string]$a2a.sdk.version -cne '1.0.3' -or
+        [string]$a2a.sdk.release -cne 'v1.0.3' -or
+        [string]$a2a.sdk.commit -cne '8a82061571142b12745576c972bf07077930a4ff' -or
+        [string]$a2a.sdk.sdistSha256 -cne 'c57ddd910aece4a426ae26b8f0d0e8e2f3271a6adde974078075e4f600aaf628'
+    ) {
+        throw 'Protocol release A2A identity does not match the selected public profile.'
+    }
+    Assert-FileHash $a2a.source
+    Assert-FileHash $a2a.provenance
+    Assert-FileHash $a2a.conformanceProfile
+    foreach ($entry in $a2a.fixtures) {
+        Assert-FileHash $entry
+    }
+
+    $a2aFixtureRoot = Join-Path $ProjectRoot 'fixtures' 'a2a' 'v1.0.1'
+    $actualA2AFixtures = @(
+        Get-ChildItem -LiteralPath $a2aFixtureRoot -Filter '*.bin' -File |
+            ForEach-Object { "fixtures/a2a/v1.0.1/$($_.Name)" } |
+            Sort-Object
+    )
+    $manifestA2AFixtures = @($a2a.fixtures.path | Sort-Object)
+    if (@(Compare-Object $actualA2AFixtures $manifestA2AFixtures).Count -gt 0) {
+        throw 'Protocol release A2A fixture set is incomplete or contains an unknown entry.'
+    }
+
+    $expectedA2ACrates = @(
+        'KonclaveA2AArtifactHttp',
+        'KonclaveA2AArtifactStorage',
+        'KonclaveA2AContracts',
+        'KonclaveA2ADiscovery',
+        'KonclaveA2ADomain',
+        'KonclaveA2AGateway',
+        'KonclaveA2AKonclaveBridge',
+        'KonclaveA2ATaskStore',
+        'KonclaveA2ATaskStoreSqlite'
+    ) | Sort-Object
+    $manifestA2ACrates = @($a2a.publicCrates.name | Sort-Object)
+    if (@(Compare-Object $expectedA2ACrates $manifestA2ACrates).Count -gt 0) {
+        throw 'Protocol release A2A public crate set is incomplete or contains an unknown entry.'
+    }
+    foreach ($crate in $a2a.publicCrates) {
+        if ([string]$cargoVersions[[string]$crate.name] -cne [string]$crate.version) {
+            throw "Protocol release A2A crate version mismatch: $($crate.name)"
+        }
+    }
+
+    $profile = Get-Content -LiteralPath (
+        Resolve-RepositoryFile ([string]$a2a.conformanceProfile.path)
+    ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    $counts = [ordered]@{
+        supportedMustRequirements = @($profile.supportedRequirements).Count
+        inapplicablePasses = @(
+            $profile.expectedInapplicablePasses |
+                ForEach-Object requirements
+        ).Count
+        allowedFailures = @(
+            $profile.allowedFailures |
+                ForEach-Object requirements
+        ).Count
+        expectedSkips = @(
+            $profile.expectedSkips |
+                ForEach-Object requirements
+        ).Count
+        expectedNotTested = @(
+            $profile.expectedNotTested |
+                ForEach-Object requirements
+        ).Count
+    }
+    foreach ($count in $counts.GetEnumerator()) {
+        if ([int]$a2a.conformanceProfile.($count.Key) -ne [int]$count.Value) {
+            throw "Protocol release A2A conformance count mismatch: $($count.Key)"
+        }
+    }
+    if (
+        [string]$profile.protocol.release -cne [string]$a2a.release -or
+        [string]$profile.protocol.commit -cne [string]$a2a.commit -or
+        [string]$profile.tck.repository -cne [string]$a2a.tck.repository -or
+        [string]$profile.tck.version -cne [string]$a2a.tck.version -or
+        [string]$profile.tck.commit -cne [string]$a2a.tck.commit -or
+        [string]$profile.tck.uvVersion -cne [string]$a2a.tck.uvVersion -or
+        [string]$profile.tck.uvArtifact.sha256 -cne [string]$a2a.tck.uvArtifactSha256 -or
+        [string]$profile.sdkInterop.repository -cne [string]$a2a.sdk.repository -or
+        [string]$profile.sdkInterop.package -cne [string]$a2a.sdk.package -or
+        [string]$profile.sdkInterop.version -cne [string]$a2a.sdk.version -or
+        [string]$profile.sdkInterop.release -cne [string]$a2a.sdk.release -or
+        [string]$profile.sdkInterop.commit -cne [string]$a2a.sdk.commit -or
+        [string]$profile.sdkInterop.sdistSha256 -cne [string]$a2a.sdk.sdistSha256
+    ) {
+        throw 'Protocol release A2A conformance profile identity is inconsistent.'
+    }
 }
 
 Write-Host (
