@@ -7,24 +7,25 @@ script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ci/container-validation.lib.sh
 . "$script_directory/container-validation.lib.sh"
 
-image_name='konclave-community-relay'
-expected='konclave-community-relay:0.1.0'
-actual="$(container_image_release_reference "$image_name" "$expected")"
-if [ "$actual" != "$expected" ]; then
-    echo '::error::Release image reference did not round-trip exactly.'
-    exit 1
-fi
-
-for invalid in \
-    'other-image:0.1.0' \
-    'registry.example.com/konclave-community-relay:0.1.0' \
-    'konclave-community-relay:bad:tag' \
-    'konclave-community-relay:'
-do
-    if container_image_release_reference "$image_name" "$invalid" >/dev/null 2>&1; then
-        echo "::error::Invalid release image reference was accepted: $invalid"
+for image_name in konclave-community-relay konclave-a2a-gateway; do
+    expected="$image_name:0.1.0"
+    actual="$(container_image_release_reference "$image_name" "$expected")"
+    if [ "$actual" != "$expected" ]; then
+        echo '::error::Release image reference did not round-trip exactly.'
         exit 1
     fi
+
+    for invalid in \
+        'other-image:0.1.0' \
+        "registry.example.com/$image_name:0.1.0" \
+        "$image_name:bad:tag" \
+        "$image_name:"
+    do
+        if container_image_release_reference "$image_name" "$invalid" >/dev/null 2>&1; then
+            echo "::error::Invalid release image reference was accepted: $invalid"
+            exit 1
+        fi
+    done
 done
 
 fixture_root="$(mktemp -d)"

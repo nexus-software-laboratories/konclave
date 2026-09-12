@@ -138,10 +138,20 @@ jobs:
         shell: pwsh
         run: ./scripts/Invoke-NodeWorkspaceChecks.ps1
 
-  community-relay-container-ci:
+  container-ci:
     needs: validation-plan
     if: needs.validation-plan.outputs.scope == 'full'
-    name: Container CI (community-relay)
+    name: Container CI (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: community-relay
+            applicationRoot: apps/Konclave.CommunityRelay
+            imageName: konclave-community-relay
+          - name: a2a-gateway
+            applicationRoot: apps/Konclave.A2AGateway
+            imageName: konclave-a2a-gateway
     # This repository is public, so container validation uses free hosted capacity
     # and never depends on self-hosted image-builder availability.
     runs-on: ubuntu-latest
@@ -163,6 +173,10 @@ jobs:
         shell: bash
         run: |
           bash ./scripts/ci/Test-ContainerImageContract.sh
+          if [ '${{ matrix.name }}' = 'a2a-gateway' ]; then
+            bash ./scripts/ci/Test-A2AGatewayContainerContract.sh \
+              'konclave-a2a-gateway:0.1.0'
+          fi
           bash ./scripts/ci/Test-ContainerValidationCleanup.sh
       - name: Capture Docker baseline
         shell: bash
@@ -172,8 +186,8 @@ jobs:
         shell: bash
         run: >-
           bash ./scripts/ci/Validate-HostedContainerImage.sh
-          apps/Konclave.CommunityRelay
-          konclave-community-relay
+          ${{ matrix.applicationRoot }}
+          ${{ matrix.imageName }}
       # Cleanup is unconditional so no builder, cache, or archive survives the job, and
       # it fails the job when anything run-owned remains or anything else vanished.
       - name: Remove container validation state
@@ -277,7 +291,7 @@ jobs:
       - rust-build-test
       - rust-lint
       - node-build-and-test
-      - community-relay-container-ci
+      - container-ci
       - local-daemon-daemon-packaging
     if: >-
       !cancelled() &&
@@ -296,7 +310,7 @@ jobs:
           RUST_BUILD_RESULT: ${{ needs.rust-build-test.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           NODE_RESULT: ${{ needs.node-build-and-test.result }}
-          CONTAINER_RESULT: ${{ needs.community-relay-container-ci.result }}
+          CONTAINER_RESULT: ${{ needs.container-ci.result }}
           DAEMON_PACKAGING_RESULT: ${{ needs.local-daemon-daemon-packaging.result }}
         run: |
           if [ "$SOURCE_RESULT" != "success" ]; then exit 1; fi

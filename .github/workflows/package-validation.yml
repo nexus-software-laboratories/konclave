@@ -8,6 +8,7 @@ on:
       - '.github/workflows/package-validation.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - 'apps/Konclave.A2AGateway/**'
       - 'apps/Konclave.CommandLine/**'
       - 'apps/Konclave.CommunityRelay/**'
       - 'apps/Konclave.LocalDaemon/**'
@@ -94,6 +95,7 @@ jobs:
             -p KonclaveCommandLine `
             -p KonclaveLocalDaemon `
             -p KonclaveCommunityRelay `
+            -p KonclaveA2AGatewayHost `
             --bins
           if ($LASTEXITCODE -ne 0) {
             throw 'Native release build failed.'
@@ -155,11 +157,11 @@ jobs:
             $release.artifacts |
               Where-Object {
                 $_.target -ceq '${{ matrix.target }}' -and
-                $_.kind -in @('client', 'relay')
+                $_.kind -in @('client', 'relay', 'gateway')
               }
           )
-          if ($artifacts.Count -ne 2) {
-            throw 'Native target must resolve to client and relay artifacts.'
+          if ($artifacts.Count -ne 3) {
+            throw 'Native target must resolve to client, relay, and gateway artifacts.'
           }
           foreach ($artifact in $artifacts) {
             $archive = Join-Path 'target/release-artifacts' $artifact.fileName
@@ -184,8 +186,18 @@ jobs:
         run: Start-Sleep -Seconds 600
 
   package-container:
-    name: Package linux/amd64 container
+    name: Package ${{ matrix.name }} linux/amd64 container
     if: ${{ !inputs.demo_windows_only }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: community-relay
+            artifactId: konclave-community-relay-container-linux-amd64
+            uploadName: konclave-linux-amd64-container-unsigned
+          - name: a2a-gateway
+            artifactId: konclave-a2a-gateway-container-linux-amd64
+            uploadName: konclave-a2a-gateway-linux-amd64-container-unsigned
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -206,15 +218,31 @@ jobs:
             throw 'Release artifact manifest does not satisfy its schema.'
           }
           $release = $releaseJson | ConvertFrom-Json -Depth 100
-          $artifacts = @($release.artifacts | Where-Object { $_.kind -ceq 'container' })
-          if ($artifacts.Count -ne 1) {
-            throw 'Release manifest must contain exactly one container artifact.'
+          $artifacts = @(
+            $release.artifacts |
+              Where-Object { [string]$_.id -ceq '${{ matrix.artifactId }}' }
+          )
+          if (
+            $artifacts.Count -ne 1 -or
+            [string]$artifacts[0].kind -cne 'container' -or
+            [string]$artifacts[0].target -cne 'linux/amd64'
+          ) {
+            throw 'Container matrix entry does not match the release manifest.'
           }
+          $imageName = ([string]$artifacts[0].image).Split(':')[0]
           "CONTAINER_RELEASE_FILE=$($artifacts[0].fileName)" >>$env:GITHUB_ENV
           "CONTAINER_RELEASE_IMAGE=$($artifacts[0].image)" >>$env:GITHUB_ENV
+          "CONTAINER_COMPONENT_NAME=$($artifacts[0].componentName)" >>$env:GITHUB_ENV
+          "CONTAINER_APPLICATION_ROOT=$($artifacts[0].applicationRoot)" >>$env:GITHUB_ENV
+          "CONTAINER_IMAGE_NAME=$imageName" >>$env:GITHUB_ENV
           "artifact-id=$($artifacts[0].id)" >>$env:GITHUB_OUTPUT
           "syft=$($release.release.toolchains.syft)" >>$env:GITHUB_OUTPUT
           "syft-sha256=$($release.release.toolchains.syftLinuxAmd64Sha256)" >>$env:GITHUB_OUTPUT
+      - name: Initialize container validation paths
+        shell: bash
+        run: >-
+          bash ./scripts/ci/Initialize-JobPrivatePaths.sh
+          CONTAINER_VALIDATION_ROOT=konclave-container-validation
       - name: Verify Compose and container contracts
         shell: bash
         run: |
@@ -222,16 +250,26 @@ jobs:
           bash ./scripts/ci/Test-ContainerImageContract.sh
           compose_image="$(
             KONCLAVE_RELAY_ACCESS_SOURCE=/dev/null \
+            KONCLAVE_GATEWAY_UID=10001 \
+            KONCLAVE_GATEWAY_GID=10001 \
+            KONCLAVE_GATEWAY_PORT=8090 \
+            KONCLAVE_GATEWAY_CONFIG_ROOT=/tmp/konclave-a2a-config \
+            KONCLAVE_GATEWAY_CREDENTIAL_ROOT=/tmp/konclave-a2a-credentials \
+            KONCLAVE_LOCAL_SERVICE_SOCKET_ROOT=/run/user/1000/konclave \
+            KONCLAVE_GATEWAY_TASK_ROOT=/tmp/konclave-a2a-tasks \
+            KONCLAVE_GATEWAY_OBJECT_ROOT=/tmp/konclave-a2a-objects \
               docker compose \
-              --file apps/Konclave.CommunityRelay/compose.example.yaml \
+              --file "$CONTAINER_APPLICATION_ROOT/compose.example.yaml" \
               config --images
           )"
           if [ "$compose_image" != "$CONTAINER_RELEASE_IMAGE" ]; then
             echo '::error::Compose image does not match the release manifest.'
             exit 1
           fi
-          bash ./scripts/ci/Initialize-JobPrivatePaths.sh \
-            CONTAINER_VALIDATION_ROOT=konclave-container-validation
+          if [ '${{ matrix.artifactId }}' = 'konclave-a2a-gateway-container-linux-amd64' ]; then
+            bash ./scripts/ci/Test-A2AGatewayContainerContract.sh \
+              "$CONTAINER_RELEASE_IMAGE"
+          fi
       - name: Verify container validation cleanup contract
         shell: bash
         run: bash ./scripts/ci/Test-ContainerValidationCleanup.sh
@@ -242,8 +280,8 @@ jobs:
         shell: bash
         run: >-
           bash ./scripts/ci/Validate-HostedContainerImage.sh
-          apps/Konclave.CommunityRelay
-          konclave-community-relay
+          "$CONTAINER_APPLICATION_ROOT"
+          "$CONTAINER_IMAGE_NAME"
           "$CONTAINER_RELEASE_IMAGE"
       - name: Stage Docker-loadable release archive
         shell: bash
@@ -251,7 +289,7 @@ jobs:
           set -euo pipefail
           install -d -m 0700 target/release-container
           cp \
-            "$CONTAINER_VALIDATION_ROOT/konclave-community-relay-amd64-docker.tar" \
+            "$CONTAINER_VALIDATION_ROOT/$CONTAINER_IMAGE_NAME-amd64-docker.tar" \
             "target/release-container/$CONTAINER_RELEASE_FILE"
           cp distribution/release-artifacts.json target/release-container/RELEASE.json
           cp distribution/UNSIGNED-PRERELEASE.txt target/release-container/
@@ -293,7 +331,7 @@ jobs:
           ./scripts/packaging/Normalize-CycloneDx.ps1 `
             -InputPath $rawSbom `
             -OutputPath "$archive.cdx.json" `
-            -ComponentName 'konclave-community-relay-container' `
+            -ComponentName $env:CONTAINER_COMPONENT_NAME `
             -ComponentVersion (
               (Get-Content distribution/release-artifacts.json -Raw |
                 ConvertFrom-Json -Depth 100).release.version
@@ -314,7 +352,7 @@ jobs:
       - name: Upload unsigned container candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: konclave-linux-amd64-container-unsigned
+          name: ${{ matrix.uploadName }}
           path: target/release-container/*
           if-no-files-found: error
           retention-days: 1
@@ -401,11 +439,15 @@ jobs:
           $release = Get-Content distribution/release-artifacts.json -Raw |
             ConvertFrom-Json -Depth 100
           $version = [string]$release.release.version
-          foreach ($artifact in @($release.artifacts | Where-Object { $_.kind -in @('client', 'relay') })) {
-            $roots = if ($artifact.kind -ceq 'client') {
-              @('KonclaveCommandLine', 'KonclaveLocalDaemon')
-            } else {
-              @('KonclaveCommunityRelay')
+          foreach ($artifact in @(
+            $release.artifacts |
+              Where-Object { $_.kind -in @('client', 'relay', 'gateway') }
+          )) {
+            $roots = switch ([string]$artifact.kind) {
+              'client' { @('KonclaveCommandLine', 'KonclaveLocalDaemon') }
+              'relay' { @('KonclaveCommunityRelay') }
+              'gateway' { @('KonclaveA2AGatewayHost') }
+              default { throw "Unsupported native artifact kind: $($artifact.kind)" }
             }
             ./scripts/packaging/New-ReleaseRustSbom.ps1 `
               -Target $artifact.target `
@@ -471,7 +513,7 @@ jobs:
       - package-container
       - release-integrity
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -506,6 +548,11 @@ jobs:
         with:
           name: konclave-linux-amd64-container-unsigned
           path: target/packaged-acceptance
+      - name: Download Linux A2A gateway container candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: konclave-a2a-gateway-linux-amd64-container-unsigned
+          path: target/packaged-acceptance
       - name: Exercise clean native and container installations
         shell: bash
         run: |
@@ -517,6 +564,9 @@ jobs:
           relay="$(
             jq -er '.artifacts[] | select(.id == "konclave-relay-linux-x64") | .fileName' "$release"
           )"
+          gateway="$(
+            jq -er '.artifacts[] | select(.id == "konclave-gateway-linux-x64") | .fileName' "$release"
+          )"
           container="$(
             jq -er \
               '.artifacts[] | select(.id == "konclave-community-relay-container-linux-amd64") | .fileName' \
@@ -527,11 +577,24 @@ jobs:
               '.artifacts[] | select(.id == "konclave-community-relay-container-linux-amd64") | .image' \
               "$release"
           )"
+          gateway_container="$(
+            jq -er \
+              '.artifacts[] | select(.id == "konclave-a2a-gateway-container-linux-amd64") | .fileName' \
+              "$release"
+          )"
+          gateway_image="$(
+            jq -er \
+              '.artifacts[] | select(.id == "konclave-a2a-gateway-container-linux-amd64") | .image' \
+              "$release"
+          )"
           bash ./scripts/packaging/Test-PackagedAcceptance.sh \
             "target/packaged-acceptance/$client" \
             "target/packaged-acceptance/$relay" \
+            "target/packaged-acceptance/$gateway" \
             "target/packaged-acceptance/$container" \
-            "$image"
+            "$image" \
+            "target/packaged-acceptance/$gateway_container" \
+            "$gateway_image"
 
   package-validation:
     name: Package validation

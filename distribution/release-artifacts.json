@@ -36,6 +36,16 @@
       "rootDirectory": "konclave-relay-0.1.0-x86_64-unknown-linux-gnu"
     },
     {
+      "id": "konclave-gateway-linux-x64",
+      "kind": "gateway",
+      "target": "x86_64-unknown-linux-gnu",
+      "operatingSystem": "linux",
+      "architecture": "x64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-gateway-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+      "rootDirectory": "konclave-gateway-0.1.0-x86_64-unknown-linux-gnu"
+    },
+    {
       "id": "konclave-community-relay-container-linux-amd64",
       "kind": "container",
       "target": "linux/amd64",
@@ -43,7 +53,32 @@
       "architecture": "x64",
       "archiveFormat": "docker.tar",
       "fileName": "konclave-community-relay-container-0.1.0-linux-amd64.docker.tar",
-      "image": "konclave-community-relay:0.1.0"
+      "image": "konclave-community-relay:0.1.0",
+      "componentName": "konclave-community-relay-container",
+      "applicationRoot": "apps/Konclave.CommunityRelay",
+      "provenanceInputs": [
+        "apps/Konclave.CommunityRelay/.container/image.json",
+        "apps/Konclave.CommunityRelay/Dockerfile",
+        "apps/Konclave.CommunityRelay/compose.example.yaml"
+      ]
+    },
+    {
+      "id": "konclave-a2a-gateway-container-linux-amd64",
+      "kind": "container",
+      "target": "linux/amd64",
+      "operatingSystem": "linux",
+      "architecture": "x64",
+      "archiveFormat": "docker.tar",
+      "fileName": "konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar",
+      "image": "konclave-a2a-gateway:0.1.0",
+      "componentName": "konclave-a2a-gateway-container",
+      "applicationRoot": "apps/Konclave.A2AGateway",
+      "provenanceInputs": [
+        "apps/Konclave.A2AGateway/.container/image.json",
+        "apps/Konclave.A2AGateway/Dockerfile",
+        "apps/Konclave.A2AGateway/compose.example.yaml",
+        "apps/Konclave.A2AGateway/gateway-config.container.json"
+      ]
     },
     {
       "id": "konclave-client-windows-x64",
@@ -66,6 +101,16 @@
       "rootDirectory": "konclave-relay-0.1.0-x86_64-pc-windows-msvc"
     },
     {
+      "id": "konclave-gateway-windows-x64",
+      "kind": "gateway",
+      "target": "x86_64-pc-windows-msvc",
+      "operatingSystem": "windows",
+      "architecture": "x64",
+      "archiveFormat": "zip",
+      "fileName": "konclave-gateway-0.1.0-x86_64-pc-windows-msvc.zip",
+      "rootDirectory": "konclave-gateway-0.1.0-x86_64-pc-windows-msvc"
+    },
+    {
       "id": "konclave-client-macos-arm64",
       "kind": "client",
       "target": "aarch64-apple-darwin",
@@ -86,6 +131,16 @@
       "rootDirectory": "konclave-relay-0.1.0-aarch64-apple-darwin"
     },
     {
+      "id": "konclave-gateway-macos-arm64",
+      "kind": "gateway",
+      "target": "aarch64-apple-darwin",
+      "operatingSystem": "macos",
+      "architecture": "arm64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-gateway-0.1.0-aarch64-apple-darwin.tar.gz",
+      "rootDirectory": "konclave-gateway-0.1.0-aarch64-apple-darwin"
+    },
+    {
       "id": "konclave-client-macos-x64",
       "kind": "client",
       "target": "x86_64-apple-darwin",
@@ -104,6 +159,16 @@
       "archiveFormat": "tar.gz",
       "fileName": "konclave-relay-0.1.0-x86_64-apple-darwin.tar.gz",
       "rootDirectory": "konclave-relay-0.1.0-x86_64-apple-darwin"
+    },
+    {
+      "id": "konclave-gateway-macos-x64",
+      "kind": "gateway",
+      "target": "x86_64-apple-darwin",
+      "operatingSystem": "macos",
+      "architecture": "x64",
+      "archiveFormat": "tar.gz",
+      "fileName": "konclave-gateway-0.1.0-x86_64-apple-darwin.tar.gz",
+      "rootDirectory": "konclave-gateway-0.1.0-x86_64-apple-darwin"
     }
   ]
 }

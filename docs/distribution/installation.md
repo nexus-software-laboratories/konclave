@@ -6,7 +6,9 @@ platform lifecycle managers, a thin Copilot CLI extension payload, and editable
 collaboration-policy schemas and examples under
 `<install-root>/share/konclave/policy/`. The extension contains no daemon binary.
 Relay archives contain the standalone Community Relay binary and its self-hosting
-examples. No source checkout or compiler is required after extraction.
+examples. Gateway archives contain the standalone standard A2A HTTP+JSON process,
+strict configuration and publication examples, and its runtime contract. No source
+checkout or compiler is required after extraction.
 
 Package-validation artifacts are transient CI transport and are deleted immediately
 after each run. No public release download is currently published. A maintainer must
@@ -153,6 +155,51 @@ KONCLAVE_RELAY_ACCESS_SOURCE=/absolute/path/to/relay-access.json docker compose 
 The Compose example never pulls from or pushes to a registry. It publishes the relay
 only on host loopback for connection from an operator-managed TLS reverse proxy.
 
+## Run the A2A gateway
+
+Follow the complete
+[self-hosted A2A operator guide](a2a-self-hosting.md) for route bootstrap, file
+custody, TLS, backup, and upgrade behavior.
+
+Gateway archives contain `bin/KonclaveA2AGateway` plus maintained examples under
+`share/konclave/a2a/`. Initialize and start the shared local service first, enroll the
+gateway profile and target conversation, then copy the example files to
+owner-controlled configuration paths and replace the all-zero route identifiers.
+
+Set `KONCLAVE_A2A_GATEWAY_CONFIG_FILE` to the absolute gateway configuration path.
+The first native profile accepts one dedicated-origin publication with bearer
+authentication, or explicit unauthenticated loopback development:
+
+```shell
+KONCLAVE_A2A_GATEWAY_CONFIG_FILE=/etc/konclave/a2a/gateway.json \
+  <gateway-root>/bin/KonclaveA2AGateway
+```
+
+Place trusted TLS termination in front of every non-loopback listener. Standard mode
+terminates A2A plaintext at this process and stores the bounded task projection in
+SQLite. Protected A2A bypasses the standard gateway and uses native Konclave.
+
+The runtime contract and exact secret-file, local-service, persistence, health, and
+shutdown behavior are in `<gateway-root>/share/konclave/a2a/README.md`.
+
+The Linux AMD64 container candidate is a separate Docker-loadable archive:
+
+```shell
+docker image load --input konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar
+```
+
+Use `<gateway-root>/share/konclave/a2a/compose.example.yaml`,
+`gateway-config.container.json`, and `container.md`.
+The gateway runs as the local-service account's nonzero numeric UID, publishes only
+on host loopback, and uses separate read-only configuration, owner-protected
+credential, local-service socket, SQLite, and encrypted-object mounts. Trusted TLS
+termination is required before any non-loopback exposure.
+
+Package validation starts both the native and container gateway against an
+independently installed shared service and verifies discovery, authenticated task
+submission, exact directed response handling, SQLite restart recovery, and encrypted
+object retrieval.
+
 ## Unsigned status
 
 These prereleases are intentionally unsigned. Every archive contains
@@ -168,7 +215,7 @@ covering native and containerized self-hosting.
 ## Uninstall an archive installation
 
 Stop the shared service through its platform manager, remove the user extension
-directory, and remove the extracted installation directory.
-Profiles live under the separate platform profile root and are retained for a later
-installation. Remove that profile root explicitly only when permanent local data loss
-is intended.
+directory, stop any A2A gateway process, and remove the extracted installation
+directories. Profiles and A2A task databases live outside those roots and are
+retained for later installations. Remove either state root explicitly only when
+permanent local data loss is intended.

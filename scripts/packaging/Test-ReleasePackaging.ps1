@@ -111,71 +111,108 @@ function Assert-ReleaseLayout {
     }
 
     $suffix = if ([string]$Artifact.operatingSystem -ceq 'windows') { '.exe' } else { '' }
-    if ([string]$Artifact.kind -ceq 'client') {
-        foreach ($relative in @(
-            "bin/konclave$suffix",
-            "bin/KonclaveLocalService$suffix",
-            'share/konclave/plugin/plugin.json',
-            'share/konclave/plugin/extensions/Konclave.Extension/client.mjs',
-            'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs',
-            'share/konclave/plugin/extensions/Konclave.Extension/generic.mjs',
-            'share/konclave/plugin/skills/konclave-generic/SKILL.md',
-            'share/konclave/policy/collaboration-policy-source-v1.schema.json',
-            'share/konclave/policy/collaboration-policy-source-v2.schema.json',
-            'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
-            'share/konclave/policy/examples/request-reply.json',
-            'share/konclave/policy/examples/catalog.json'
-        )) {
-            if (-not (Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf)) {
-                throw "Client package is missing $relative."
+    switch ([string]$Artifact.kind) {
+        'client' {
+            foreach ($relative in @(
+                "bin/konclave$suffix",
+                "bin/KonclaveLocalService$suffix",
+                'share/konclave/plugin/plugin.json',
+                'share/konclave/plugin/extensions/Konclave.Extension/client.mjs',
+                'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs',
+                'share/konclave/plugin/extensions/Konclave.Extension/generic.mjs',
+                'share/konclave/plugin/skills/konclave-generic/SKILL.md',
+                'share/konclave/policy/collaboration-policy-source-v1.schema.json',
+                'share/konclave/policy/collaboration-policy-source-v2.schema.json',
+                'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
+                'share/konclave/policy/examples/request-reply.json',
+                'share/konclave/policy/examples/catalog.json'
+            )) {
+                if (-not (
+                    Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf
+                )) {
+                    throw "Client package is missing $relative."
+                }
             }
-        }
-        $serviceRelative = switch ([string]$Artifact.operatingSystem) {
-            'linux' { 'share/konclave/service/systemd/KonclaveLocalService.service' }
-            'macos' { 'share/konclave/service/launchd/com.genesis.KonclaveLocalService.plist' }
-            'windows' { 'share/konclave/service/windows/install-service.ps1' }
-            default { throw "Unsupported release operating system: $($Artifact.operatingSystem)" }
-        }
-        if (
-            -not (
+            $serviceRelative = switch ([string]$Artifact.operatingSystem) {
+                'linux' { 'share/konclave/service/systemd/KonclaveLocalService.service' }
+                'macos' { 'share/konclave/service/launchd/com.genesis.KonclaveLocalService.plist' }
+                'windows' { 'share/konclave/service/windows/install-service.ps1' }
+                default {
+                    throw "Unsupported release operating system: $($Artifact.operatingSystem)"
+                }
+            }
+            if (-not (
                 Test-Path -LiteralPath (Join-Path $ExtractedRoot $serviceRelative) -PathType Leaf
-            )
-        ) {
-            throw "Client package is missing $serviceRelative."
-        }
-        $managerRelative = switch ([string]$Artifact.operatingSystem) {
-            'linux' { 'share/konclave/service/systemd/manage-user-service.sh' }
-            'macos' { 'share/konclave/service/launchd/manage-agent.sh' }
-            'windows' { 'share/konclave/service/windows/install-service.ps1' }
-            default { throw "Unsupported release operating system: $($Artifact.operatingSystem)" }
-        }
-        if (
-            -not (
-                Test-Path -LiteralPath (Join-Path $ExtractedRoot $managerRelative) -PathType Leaf
-            )
-        ) {
-            throw "Client package is missing $managerRelative."
-        }
-        if (
-            [string]$Artifact.operatingSystem -ceq 'windows' -and
-            -not (
-                Test-Path -LiteralPath (
-                    Join-Path $ExtractedRoot 'bin/KonclaveLocalServiceHost.exe'
-                ) -PathType Leaf
-            )
-        ) {
-            throw 'Windows client package is missing its shared-service host.'
-        }
-    }
-    else {
-        foreach ($relative in @(
-            "bin/KonclaveCommunityRelay$suffix",
-            'share/konclave/relay/compose.example.yaml',
-            'share/konclave/relay/container.md'
-        )) {
-            if (-not (Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf)) {
-                throw "Relay package is missing $relative."
+            )) {
+                throw "Client package is missing $serviceRelative."
             }
+            $managerRelative = switch ([string]$Artifact.operatingSystem) {
+                'linux' { 'share/konclave/service/systemd/manage-user-service.sh' }
+                'macos' { 'share/konclave/service/launchd/manage-agent.sh' }
+                'windows' { 'share/konclave/service/windows/install-service.ps1' }
+                default {
+                    throw "Unsupported release operating system: $($Artifact.operatingSystem)"
+                }
+            }
+            if (-not (
+                Test-Path -LiteralPath (Join-Path $ExtractedRoot $managerRelative) -PathType Leaf
+            )) {
+                throw "Client package is missing $managerRelative."
+            }
+            if (
+                [string]$Artifact.operatingSystem -ceq 'windows' -and
+                -not (
+                    Test-Path -LiteralPath (
+                        Join-Path $ExtractedRoot 'bin/KonclaveLocalServiceHost.exe'
+                    ) -PathType Leaf
+                )
+            ) {
+                throw 'Windows client package is missing its shared-service host.'
+            }
+        }
+        'relay' {
+            foreach ($relative in @(
+                "bin/KonclaveCommunityRelay$suffix",
+                'share/konclave/relay/compose.example.yaml',
+                'share/konclave/relay/container.md'
+            )) {
+                if (-not (
+                    Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf
+                )) {
+                    throw "Relay package is missing $relative."
+                }
+            }
+        }
+        'gateway' {
+            foreach ($relative in @(
+                "bin/KonclaveA2AGateway$suffix",
+                'share/konclave/a2a/gateway-config.json',
+                'share/konclave/a2a/agent-publication.json',
+                'share/konclave/a2a/README.md',
+                'share/konclave/a2a/integrity.md',
+                'share/konclave/a2a/acceptance.md',
+                'share/konclave/a2a/compose.example.yaml',
+                'share/konclave/a2a/gateway-config.container.json',
+                'share/konclave/a2a/container.md'
+            )) {
+                if (-not (
+                    Test-Path -LiteralPath (Join-Path $ExtractedRoot $relative) -PathType Leaf
+                )) {
+                    throw "Gateway package is missing $relative."
+                }
+            }
+            $gatewayReadme = Get-Content -LiteralPath (
+                Join-Path $ExtractedRoot 'share/konclave/a2a/README.md'
+            ) -Raw -Encoding UTF8
+            if (-not $gatewayReadme.StartsWith(
+                '# Operate the self-hosted A2A gateway',
+                [StringComparison]::Ordinal
+            )) {
+                throw 'Gateway package does not contain the operator guide.'
+            }
+        }
+        default {
+            throw "Unsupported release artifact kind: $($Artifact.kind)"
         }
     }
     if (Get-ChildItem -LiteralPath $ExtractedRoot -Recurse -Filter Cargo.toml -File) {
@@ -242,7 +279,7 @@ $extractRoot = Join-Path (
 New-Item -ItemType Directory -Path $firstRoot, $secondRoot, $extractRoot | Out-Null
 try {
     New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
-    foreach ($kind in @('client', 'relay')) {
+    foreach ($kind in @('client', 'relay', 'gateway')) {
         $artifact = Get-ReleaseArtifact $manifest $Target $kind
         $first = New-ReleasePackage `
             -ProjectRoot $projectRootPath `
@@ -269,20 +306,25 @@ try {
         $payloadRoot = Join-Path $kindExtractRoot ([string]$artifact.rootDirectory)
         Assert-ReleaseLayout $payloadRoot $manifest $artifact
 
+        if ($RunBinaries -and [string]$artifact.operatingSystem -cne 'windows') {
+            $suffix = ''
+            $executables = switch ($kind) {
+                'client' { @("bin/konclave$suffix", "bin/KonclaveLocalService$suffix") }
+                'relay' { @("bin/KonclaveCommunityRelay$suffix") }
+                'gateway' { @("bin/KonclaveA2AGateway$suffix") }
+                default { throw "Unsupported executable package kind: $kind" }
+            }
+            foreach ($relative in $executables) {
+                $mode = (Get-Item -LiteralPath (Join-Path $payloadRoot $relative)).UnixFileMode
+                if (($mode -band [IO.UnixFileMode]::UserExecute) -eq 0) {
+                    throw "Extracted executable lacks owner execute permission: $relative"
+                }
+            }
+        }
+
         if ($RunBinaries -and $kind -ceq 'client') {
             $suffix = if ([string]$artifact.operatingSystem -ceq 'windows') { '.exe' } else { '' }
             $cli = Join-Path $payloadRoot 'bin' "konclave$suffix"
-            if ([string]$artifact.operatingSystem -cne 'windows') {
-                foreach ($relative in @(
-                    "bin/konclave$suffix",
-                    "bin/KonclaveLocalService$suffix"
-                )) {
-                    $mode = (Get-Item -LiteralPath (Join-Path $payloadRoot $relative)).UnixFileMode
-                    if (($mode -band [IO.UnixFileMode]::UserExecute) -eq 0) {
-                        throw "Extracted executable lacks owner execute permission: $relative"
-                    }
-                }
-            }
             $versionOutput = & $cli version
             if (
                 $LASTEXITCODE -ne 0 -or
@@ -330,4 +372,6 @@ finally {
     }
 }
 
-Write-Output "Release packaging passed for $Target; client and relay archives are deterministic."
+Write-Output (
+    "Release packaging passed for $Target; client, relay, and gateway archives are deterministic."
+)

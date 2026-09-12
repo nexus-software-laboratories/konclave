@@ -17,7 +17,7 @@ param(
     [string]$Target,
 
     [Parameter(Mandatory)]
-    [ValidateSet('client', 'relay')]
+    [ValidateSet('client', 'relay', 'gateway')]
     [string]$Kind,
 
     [Parameter(Mandatory)]

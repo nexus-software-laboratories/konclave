@@ -2,7 +2,8 @@
 
 The required `Packaged clean-install acceptance` job operates on downloaded workflow
 artifacts, not Cargo build outputs. It extracts two independent client installations,
-the standalone relay, and the Docker-loadable relay candidate into job-private paths.
+the standalone relay and A2A gateway, and both Docker-loadable service candidates into
+job-private paths.
 
 ## Automated evidence
 
@@ -31,17 +32,34 @@ The job proves:
   cursor, route, or peer-binding fields;
 - native and Docker-loaded relays expose the same enrollment, pairing, delivery, and
   recovery behavior;
+- native and Docker-loaded gateways publish the same explicitly enabled Agent Card,
+  reject anonymous task access, submit one exact directed request through the
+  packaged shared service, observe one policy-authorized response, and expose the
+  completed task through GetTask and ListTasks;
+- restarting each gateway preserves the SQLite task projection and serves the same
+  digest-verified ciphertext object while rejecting range requests;
 - relay databases and logs contain neither message plaintext, pairing capabilities,
   nor the protected enrollment record;
 - service process arguments and environments contain no relay credential or
   endpoint variables and no tested secret/plaintext sentinels;
 - removing extracted installations leaves profile databases intact; and
-- Docker cleanup removes the exact acceptance container and loaded image while
-  preserving the pre-run engine baseline.
+- Docker cleanup removes the exact relay and gateway containers and both loaded images
+  while preserving the pre-run engine baseline.
 
-The test compiles only its CI harness. Every process under test—the CLI, shared service
-and its replacement extraction, standalone relay, and container image—comes from the
-packaged release candidates.
+The test compiles only its CI harness. Every process under test—the CLI, shared
+service and its replacement extraction, standalone relay, standalone gateway, and
+both container images—comes from the packaged release candidates.
+
+Gateway-container execution uses host-loopback networking only inside the acceptance
+harness so the owner-verified Unix local-service socket retains the host account's
+kernel peer identity. The released Compose contract is validated separately and uses
+a bridge network, host-loopback publication, and an operator-managed TLS reverse
+proxy. Acceptance does not weaken socket permissions or bypass peer verification.
+
+The artifact assertion covers the packaged encrypted-object store and HTTP retrieval
+boundary. Harness-facing artifact publication remains a separate adapter concern; no
+acceptance step fabricates an A2A task artifact that the packaged target did not
+publish.
 
 Because this is the first packaged prerelease, no earlier release exists for a
 cross-version schema migration. The job covers replacement-install mechanics by

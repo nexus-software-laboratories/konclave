@@ -1,0 +1,52 @@
+name: konclave-a2a-gateway
+
+services:
+  gateway:
+    image: konclave-a2a-gateway:0.1.0
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    user: "${KONCLAVE_GATEWAY_UID:-10001}:${KONCLAVE_GATEWAY_GID:-10001}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 90s
+    environment:
+      KONCLAVE_A2A_GATEWAY_CONFIG_FILE: /etc/konclave/a2a/gateway-config.json
+      SERVICE_HEALTH_ADDRESS: 127.0.0.1:8090
+    ports:
+      - "127.0.0.1:${KONCLAVE_GATEWAY_PORT:-8090}:8090"
+    volumes:
+      - type: bind
+        source: ${KONCLAVE_GATEWAY_CONFIG_ROOT:?set KONCLAVE_GATEWAY_CONFIG_ROOT}
+        target: /etc/konclave/a2a
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KONCLAVE_GATEWAY_CREDENTIAL_ROOT:?set KONCLAVE_GATEWAY_CREDENTIAL_ROOT}
+        target: /run/konclave/credentials
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KONCLAVE_LOCAL_SERVICE_SOCKET_ROOT:?set KONCLAVE_LOCAL_SERVICE_SOCKET_ROOT}
+        target: ${KONCLAVE_LOCAL_SERVICE_SOCKET_ROOT:?set KONCLAVE_LOCAL_SERVICE_SOCKET_ROOT}
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KONCLAVE_GATEWAY_TASK_ROOT:?set KONCLAVE_GATEWAY_TASK_ROOT}
+        target: /var/lib/konclave/a2a/tasks
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KONCLAVE_GATEWAY_OBJECT_ROOT:?set KONCLAVE_GATEWAY_OBJECT_ROOT}
+        target: /var/lib/konclave/a2a/objects
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m

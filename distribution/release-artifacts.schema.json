@@ -73,7 +73,7 @@
     },
     "artifacts": {
       "type": "array",
-      "minItems": 9,
+      "minItems": 14,
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -94,7 +94,7 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["client", "relay", "container"]
+            "enum": ["client", "relay", "gateway", "container"]
           },
           "target": {
             "type": "string",
@@ -129,6 +129,26 @@
           "image": {
             "type": "string",
             "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "applicationRoot": {
+            "type": "string",
+            "pattern": "^apps/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "componentName": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*$"
+          },
+          "provenanceInputs": {
+            "type": "array",
+            "minItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^apps/[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            }
           }
         },
         "allOf": [
@@ -142,7 +162,7 @@
               "required": ["kind"]
             },
             "then": {
-              "required": ["image"]
+              "required": ["image", "componentName", "applicationRoot", "provenanceInputs"]
             },
             "else": {
               "required": ["rootDirectory"]
