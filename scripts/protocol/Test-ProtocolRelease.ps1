@@ -221,7 +221,12 @@ if ($identity -notmatch 'CIPHER_SUITE: CipherSuite = CipherSuite::CURVE25519_AES
 }
 
 $legacyTag = 'protocol-v1.0.0-alpha.1'
-if ([string]$manifest.release.tag -cne $legacyTag) {
+$a2aAlpha2Tag = 'protocol-v1.0.0-alpha.2'
+$releaseTag = [string]$manifest.release.tag
+if ($releaseTag -cnotin @($legacyTag, $a2aAlpha2Tag)) {
+    throw "Protocol release verifier has no profile for tag $releaseTag."
+}
+if ($releaseTag -ceq $a2aAlpha2Tag) {
     if ($null -eq $manifest.interoperability -or $null -eq $manifest.interoperability.a2a) {
         throw 'Protocol release is missing the required A2A interoperability evidence.'
     }

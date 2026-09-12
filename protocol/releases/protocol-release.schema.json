@@ -192,8 +192,14 @@
               "type": "string",
               "const": "Linux Foundation Agent2Agent Protocol"
             },
-            "protocolVersion": { "type": "string", "const": "1.0" },
-            "release": { "type": "string", "const": "v1.0.1" },
+            "protocolVersion": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+$"
+            },
+            "release": {
+              "type": "string",
+              "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
             "commit": {
               "type": "string",
               "pattern": "^[0-9a-f]{40}$"
@@ -262,14 +268,20 @@
               "properties": {
                 "repository": {
                   "type": "string",
-                  "const": "https://github.com/a2aproject/a2a-tck"
+                  "format": "uri"
                 },
-                "version": { "type": "string", "const": "1.0.0" },
+                "version": {
+                  "type": "string",
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                },
                 "commit": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{40}$"
                 },
-                "uvVersion": { "type": "string", "const": "0.11.7" },
+                "uvVersion": {
+                  "type": "string",
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                },
                 "uvArtifactSha256": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{64}$"
@@ -290,11 +302,17 @@
               "properties": {
                 "repository": {
                   "type": "string",
-                  "const": "https://github.com/a2aproject/a2a-python"
+                  "format": "uri"
                 },
-                "package": { "type": "string", "const": "a2a-sdk" },
-                "version": { "type": "string", "const": "1.0.3" },
-                "release": { "type": "string", "const": "v1.0.3" },
+                "package": { "type": "string", "minLength": 1 },
+                "version": {
+                  "type": "string",
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                },
+                "release": {
+                  "type": "string",
+                  "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+                },
                 "commit": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{40}$"

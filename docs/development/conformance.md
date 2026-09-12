@@ -32,7 +32,9 @@ profile schema from an isolated tag archive. An unreleased manifest whose tag do
 not yet exist is validated against the current working tree. Releases after
 `protocol-v1.0.0-alpha.1` additionally bind the vendored A2A source and provenance,
 immutable A2A fixtures, public interoperability crates, classified TCK profile, and
-official SDK provenance.
+official SDK provenance. Exact A2A identities are selected by release tag so a future
+protocol or SDK upgrade adds a verifier profile without changing the meaning of an
+older immutable manifest.
 
 Continuous integration checks out a shallow revision without tags, so a locally
 missing tag does not prove that a release is unpublished. The verifier asks the
