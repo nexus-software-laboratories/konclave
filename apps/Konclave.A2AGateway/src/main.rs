@@ -32,9 +32,7 @@ async fn run() -> anyhow::Result<()> {
 async fn wait_for_process_shutdown() {
     #[cfg(unix)]
     {
-        match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut terminate) => {
                 tokio::select! {
                     result = tokio::signal::ctrl_c() => {
