@@ -74,7 +74,8 @@ The adapter-conformance workflow follows the same hosted-only boundary. Its stab
 check validates the persistent shared-local-service client, harness-neutral adapter
 SDK, immutable delivery fixture, and fake-harness claim/crash/reclaim lifecycle. It
 uses a read-only pull-request file query and skips source checkout for unrelated
-changes.
+changes. It also runs the focused local-service authorization-loss regression and
+Clippy over the service library.
 
 ## Native package validation
 

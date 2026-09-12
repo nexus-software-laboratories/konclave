@@ -18,7 +18,7 @@ jobs:
   adapter-conformance:
     name: Adapter conformance
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Resolve adapter validation scope
         id: scope
@@ -55,6 +55,7 @@ jobs:
                 $_ -match '^crates/Konclave\.AdapterSdk/' -or
                 $_ -match '^crates/Konclave\.LocalServiceClient/' -or
                 $_ -match '^crates/Konclave\.LocalServiceTransport/' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/src/(?:adapter|local_service)\.rs$' -or
                 $_ -match '^extensions/Konclave\.HostExtension/(?:package-lock\.json|src/adapter/session\.ts|src/service/operations\.ts|tests/adapter-contract\.test\.ts)$' -or
                 $_ -match '^fixtures/local-service/v1/adapter-delivery\.json$'
               }
@@ -100,10 +101,18 @@ jobs:
           cargo test --locked \
             --package KonclaveAdapterSdk \
             --package KonclaveLocalServiceClient
+          cargo test --locked \
+            --package KonclaveLocalDaemon \
+            authorization_loss_discards_a_concurrently_claimed_batch
           cargo clippy --locked \
             --package KonclaveAdapterSdk \
             --package KonclaveLocalServiceClient \
             --all-targets \
+            -- \
+            -D warnings
+          cargo clippy --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
             -- \
             -D warnings
       - name: Verify TypeScript adapter fixture

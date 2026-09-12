@@ -26,7 +26,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
-use crate::adapter::DeliveryAttachment;
+use crate::adapter::{DeliveryAttachment, DeliveryWaitOutcome};
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
 use crate::persistence::{
@@ -543,12 +543,7 @@ struct ClientRequestState {
 
 impl ClientRequestState {
     fn authorization_is_active(&self) -> bool {
-        self.registry
-            .active_grant(
-                self.grant.grant_id(),
-                SystemUnixClock.now_unix_milliseconds(),
-            )
-            .is_some_and(|grant| grant == self.grant)
+        session_grant_is_active(&self.registry, &self.grant)
     }
 }
 
@@ -556,6 +551,12 @@ async fn execute_session_request(
     state: &mut ClientRequestState,
     request: LocalServiceRequest,
 ) -> LocalServiceResponse {
+    if !state.authorization_is_active() {
+        return LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::NotAuthorized,
+        );
+    }
     let key = LedgerKey::for_grant(&state.grant, request.request_id());
     let ledger = Arc::clone(&state.ledger);
     match begin_request(&ledger, key.clone(), &request) {
@@ -894,6 +895,12 @@ async fn dispatch_request(
     state: &mut ClientRequestState,
     request: &LocalServiceRequest,
 ) -> LocalServiceResponse {
+    if !state.authorization_is_active() {
+        return LocalServiceResponse::failure(
+            request.request_id(),
+            LocalServiceErrorCode::NotAuthorized,
+        );
+    }
     let operation = request.operation().as_str();
     let required = required_capability(operation);
     if required.is_none_or(|capability| !state.grant.capabilities().permits(capability)) {
@@ -924,6 +931,8 @@ async fn dispatch_request(
                 state.consumer,
                 &state.store,
                 &mut state.shutdown,
+                &state.registry,
+                &state.grant,
                 request.payload(),
             )
             .await
@@ -2089,6 +2098,8 @@ async fn delivery_claim(
     consumer: AdapterConsumerId,
     store: &Arc<crate::persistence::ProfileStore>,
     shutdown: &mut watch::Receiver<bool>,
+    registry: &Arc<InMemorySessionAuthorizationRegistry>,
+    grant: &SessionGrant,
     payload: &[u8],
 ) -> Result<Vec<u8>, String> {
     let request: DeliveryClaimRequest =
@@ -2109,7 +2120,7 @@ async fn delivery_claim(
                 .map_err(|_| "profile_unavailable".to_string())?,
         );
     }
-    let events = delivery
+    let outcome = delivery
         .as_ref()
         .ok_or_else(|| "profile_unavailable".to_string())?
         .wait_and_claim(
@@ -2117,13 +2128,33 @@ async fn delivery_claim(
             shutdown,
             request.max_events,
             request.wait_milliseconds,
+            || session_grant_is_active(registry, grant),
         )
         .await
         .map_err(|_| "profile_unavailable".to_string())?;
+    let events = match outcome {
+        DeliveryWaitOutcome::Events(events) => events,
+        DeliveryWaitOutcome::AuthorizationLost => {
+            *delivery = None;
+            return Err("local_service_not_authorized".to_string());
+        }
+    };
     serde_json::to_vec(&DeliveryBatchResult {
         events: events.into_iter().map(delivery_event_result).collect(),
     })
     .map_err(|_| "response_encoding_failed".to_string())
+}
+
+fn session_grant_is_active(
+    registry: &InMemorySessionAuthorizationRegistry,
+    grant: &SessionGrant,
+) -> bool {
+    registry
+        .active_grant(
+            grant.grant_id(),
+            SystemUnixClock.now_unix_milliseconds(),
+        )
+        .is_some_and(|active| &active == grant)
 }
 
 async fn delivery_finish(

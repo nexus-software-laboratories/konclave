@@ -121,6 +121,11 @@ pub(crate) struct DeliveryAttachment {
     lease_id: AdapterLeaseId,
 }
 
+pub(crate) enum DeliveryWaitOutcome {
+    Events(Vec<ClaimedRemoteEvent>),
+    AuthorizationLost,
+}
+
 impl AdapterAttachment {
     /// Returns the authenticated channel identity.
     pub(crate) fn channel(&self) -> &AuthenticatedChannel {
@@ -203,21 +208,25 @@ impl DeliveryAttachment {
     }
 
     /// Waits for and claims one bounded delivery batch.
-    pub(crate) async fn wait_and_claim(
+    pub(crate) async fn wait_and_claim<Authorized>(
         &self,
         store: &std::sync::Arc<ProfileStore>,
         shutdown: &mut watch::Receiver<bool>,
         max_events: u16,
         wait_milliseconds: u32,
-    ) -> Result<Vec<ClaimedRemoteEvent>, ProfileStoreError> {
+        authorized: Authorized,
+    ) -> Result<DeliveryWaitOutcome, ProfileStoreError>
+    where
+        Authorized: FnMut() -> bool,
+    {
         let attachment = self.clone();
-        let store = std::sync::Arc::clone(store);
-        wait_for_claim(
+        let claim_store = std::sync::Arc::clone(store);
+        let outcome = wait_for_claim_until(
             shutdown,
             wait_milliseconds,
             move || {
                 let attachment = attachment.clone();
-                let store = std::sync::Arc::clone(&store);
+                let store = std::sync::Arc::clone(&claim_store);
                 async move {
                     tokio::task::spawn_blocking(move || {
                         claim_remote_events(&attachment, &store, &SystemUnixClock, max_events)
@@ -228,8 +237,16 @@ impl DeliveryAttachment {
             },
             Vec::is_empty,
             Vec::new(),
+            authorized,
         )
-        .await
+        .await?;
+        match outcome {
+            WaitForClaimOutcome::Value(events) => Ok(DeliveryWaitOutcome::Events(events)),
+            WaitForClaimOutcome::AuthorizationLost => {
+                self.release(store.as_ref())?;
+                Ok(DeliveryWaitOutcome::AuthorizationLost)
+            }
+        }
     }
 
     /// Acknowledges one claimed delivery event.
@@ -556,39 +573,59 @@ async fn wait_and_claim(
     max_events: u16,
     wait_milliseconds: u32,
 ) -> Result<AdapterResponse, ProfileStoreError> {
-    wait_for_claim(
+    let outcome = wait_for_claim_until(
         shutdown,
         wait_milliseconds,
         || std::future::ready(claim_delivery_events(attachment, store, clock, max_events)),
         |response| matches!(response, AdapterResponse::Batch(events) if events.is_empty()),
         AdapterResponse::Batch(Vec::new()),
+        || true,
     )
-    .await
+    .await?;
+    match outcome {
+        WaitForClaimOutcome::Value(response) => Ok(response),
+        WaitForClaimOutcome::AuthorizationLost => {
+            unreachable!("legacy adapter wait is always authorized")
+        }
+    }
 }
 
-async fn wait_for_claim<T, F, Fut, IsEmpty>(
+enum WaitForClaimOutcome<T> {
+    Value(T),
+    AuthorizationLost,
+}
+
+async fn wait_for_claim_until<T, F, Fut, IsEmpty, Authorized>(
     shutdown: &mut watch::Receiver<bool>,
     wait_milliseconds: u32,
     mut claim: F,
     is_empty: IsEmpty,
     empty: T,
-) -> Result<T, ProfileStoreError>
+    mut authorized: Authorized,
+) -> Result<WaitForClaimOutcome<T>, ProfileStoreError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, ProfileStoreError>>,
     IsEmpty: Fn(&T) -> bool,
+    Authorized: FnMut() -> bool,
 {
     let deadline =
         tokio::time::Instant::now() + Duration::from_millis(u64::from(wait_milliseconds));
     loop {
+        if !authorized() {
+            return Ok(WaitForClaimOutcome::AuthorizationLost);
+        }
         let response = claim().await?;
+        if !authorized() {
+            return Ok(WaitForClaimOutcome::AuthorizationLost);
+        }
         if !is_empty(&response) {
-            return Ok(response);
+            return Ok(WaitForClaimOutcome::Value(response));
         }
         if tokio::time::Instant::now() >= deadline {
             // An expired wait is not an event, so the empty batch tells the adapter
             // to reissue rather than reporting work that does not exist.
-            return Ok(empty);
+            return Ok(WaitForClaimOutcome::Value(empty));
         }
         let poll = tokio::time::sleep(
             CLAIM_POLL_INTERVAL
@@ -598,7 +635,7 @@ where
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return Ok(empty);
+                    return Ok(WaitForClaimOutcome::Value(empty));
                 }
             }
             () = poll => {}
@@ -787,11 +824,19 @@ fn parse_consumer_id(value: &str) -> anyhow::Result<AdapterConsumerId> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    use super::{AdapterLaunchConfig, deliver, parse_consumer_id};
-    use crate::persistence::{ClaimedRemoteEvent, RemoteEvent, RemoteEventPayload};
+    use super::{
+        AdapterLaunchConfig, WaitForClaimOutcome, deliver, parse_consumer_id,
+        wait_for_claim_until,
+    };
+    use crate::persistence::{
+        ClaimedRemoteEvent, ProfileStoreError, RemoteEvent, RemoteEventPayload,
+    };
     use KonclaveAdapterTransport::DeliveredPayload;
     use KonclaveDomainCore::{
         AdapterConsumerId, ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
@@ -813,6 +858,54 @@ mod tests {
         assert!(parse_consumer_id(&URL_SAFE_NO_PAD.encode([3_u8; 8])).is_err());
         assert!(parse_consumer_id(&URL_SAFE_NO_PAD.encode([3_u8; 32])).is_err());
         assert!(parse_consumer_id("not base64!!").is_err());
+    }
+
+    #[tokio::test]
+    async fn authorization_loss_discards_a_concurrently_claimed_batch() {
+        let authorized = Arc::new(AtomicBool::new(true));
+        let claim_authorization = Arc::clone(&authorized);
+        let check_authorization = Arc::clone(&authorized);
+        let (_shutdown_sender, mut shutdown) = tokio::sync::watch::channel(false);
+
+        let outcome = wait_for_claim_until(
+            &mut shutdown,
+            30_000,
+            move || {
+                claim_authorization.store(false, Ordering::SeqCst);
+                std::future::ready(Ok::<_, ProfileStoreError>(vec![1_u8]))
+            },
+            Vec::is_empty,
+            Vec::new(),
+            move || check_authorization.load(Ordering::SeqCst),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, WaitForClaimOutcome::AuthorizationLost));
+    }
+
+    #[tokio::test]
+    async fn authorization_loss_prevents_another_claim_attempt() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let claim_attempts = Arc::clone(&attempts);
+        let (_shutdown_sender, mut shutdown) = tokio::sync::watch::channel(false);
+
+        let outcome = wait_for_claim_until(
+            &mut shutdown,
+            30_000,
+            move || {
+                claim_attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok::<_, ProfileStoreError>(Vec::<u8>::new()))
+            },
+            Vec::is_empty,
+            Vec::new(),
+            || false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, WaitForClaimOutcome::AuthorizationLost));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
     }
 
     #[test]
