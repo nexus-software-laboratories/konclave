@@ -2,13 +2,13 @@
 #![allow(non_snake_case)]
 
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use KonclaveA2AContracts::wire::{Part, part};
 use KonclaveA2AContracts::{
     A2A_ENCRYPTED_ARTIFACT_REFERENCE_PREFIX, InitialA2AArtifactReferenceDescriptor,
-    parse_initial_encrypted_artifact_reference,
+    InitialA2AEncryptedArtifactReference, parse_initial_encrypted_artifact_reference,
 };
 use KonclaveSecretStorage::{
     AUTHENTICATED_CIPHER_TAG_BYTES, AuthenticatedCipher, AuthenticatedCipherKey,
@@ -21,9 +21,15 @@ use sha2::{Digest as _, Sha256};
 use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
 
+/// Authentication-tag bytes appended to one encrypted artifact object.
+pub const A2A_ARTIFACT_OBJECT_TAG_BYTES: usize = AUTHENTICATED_CIPHER_TAG_BYTES;
+/// Maximum plaintext bytes represented by one encrypted artifact object.
+pub const MAX_A2A_ARTIFACT_PLAINTEXT_BYTES: usize = 64 * 1_024 * 1_024;
 /// Maximum ciphertext bytes retained for one encrypted artifact object.
 pub const MAX_A2A_ARTIFACT_OBJECT_BYTES: usize =
-    64 * 1_024 * 1_024 + AUTHENTICATED_CIPHER_TAG_BYTES;
+    MAX_A2A_ARTIFACT_PLAINTEXT_BYTES + A2A_ARTIFACT_OBJECT_TAG_BYTES;
+/// Maximum ciphertext bytes read before yielding one object chunk.
+pub const A2A_ARTIFACT_OBJECT_CHUNK_BYTES: usize = 64 * 1_024;
 
 /// Stable failures from encrypted artifact object storage and opening.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -90,6 +96,96 @@ impl A2AArtifactObjectId {
     }
 }
 
+/// Bounded ciphertext reader that verifies the complete content address.
+///
+/// Earlier chunks may be inspected or transmitted incrementally, but callers must
+/// treat the object as unverified until the final chunk succeeds and the next call
+/// returns `None`.
+pub struct A2AArtifactObjectReader {
+    reader: Box<dyn Read + Send>,
+    object_id: A2AArtifactObjectId,
+    length: usize,
+    remaining: usize,
+    digest: Sha256,
+    verified: bool,
+}
+
+impl A2AArtifactObjectReader {
+    /// Creates one reader with exact object and allocation bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when the declared length or maximum is invalid.
+    pub fn new(
+        object_id: A2AArtifactObjectId,
+        length: usize,
+        maximum_bytes: usize,
+        reader: impl Read + Send + 'static,
+    ) -> Result<Self, A2AArtifactStorageError> {
+        validate_maximum(maximum_bytes)?;
+        if !(AUTHENTICATED_CIPHER_TAG_BYTES..=maximum_bytes).contains(&length) {
+            return Err(A2AArtifactStorageError::InvalidConfiguration);
+        }
+        Ok(Self {
+            reader: Box::new(reader),
+            object_id,
+            length,
+            remaining: length,
+            digest: Sha256::new(),
+            verified: false,
+        })
+    }
+
+    /// Returns the exact declared ciphertext length.
+    #[must_use]
+    pub const fn length(&self) -> usize {
+        self.length
+    }
+
+    /// Reads one bounded chunk and authenticates the content address before yielding
+    /// the final chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error for an unavailable reader and a digest error for
+    /// truncation, trailing bytes, or content-address mismatch.
+    pub fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, A2AArtifactStorageError> {
+        if self.verified {
+            return Ok(None);
+        }
+        let length = self.remaining.min(A2A_ARTIFACT_OBJECT_CHUNK_BYTES);
+        let mut chunk = vec![0_u8; length];
+        let mut offset = 0;
+        while offset < length {
+            match self.reader.read(&mut chunk[offset..]) {
+                Ok(0) => return Err(A2AArtifactStorageError::DigestMismatch),
+                Ok(read) => offset += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(A2AArtifactStorageError::StorageUnavailable),
+            }
+        }
+        self.digest.update(&chunk);
+        self.remaining -= length;
+        if self.remaining == 0 {
+            let mut trailing = [0_u8; 1];
+            loop {
+                match self.reader.read(&mut trailing) {
+                    Ok(0) => break,
+                    Ok(_) => return Err(A2AArtifactStorageError::DigestMismatch),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => return Err(A2AArtifactStorageError::StorageUnavailable),
+                }
+            }
+            let digest: [u8; 32] = std::mem::take(&mut self.digest).finalize().into();
+            if digest != *self.object_id.as_bytes() {
+                return Err(A2AArtifactStorageError::DigestMismatch);
+            }
+            self.verified = true;
+        }
+        Ok(Some(chunk))
+    }
+}
+
 /// Ciphertext persistence contract shared by self-hosted and managed adapters.
 pub trait A2AArtifactObjectStore: Send + Sync {
     /// Stores exact ciphertext under its verified content address.
@@ -115,6 +211,30 @@ pub trait A2AArtifactObjectStore: Send + Sync {
         object_id: A2AArtifactObjectId,
         maximum_bytes: usize,
     ) -> Result<Vec<u8>, A2AArtifactStorageError>;
+
+    /// Opens one bounded ciphertext object for incremental verified reading.
+    ///
+    /// The default implementation preserves compatibility by wrapping [`Self::get`].
+    /// Storage adapters should override this method when they can stream without
+    /// materializing the complete object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a digest, bound, not-found, unsafe-storage, or read error.
+    fn open_object(
+        &self,
+        object_id: A2AArtifactObjectId,
+        maximum_bytes: usize,
+    ) -> Result<A2AArtifactObjectReader, A2AArtifactStorageError> {
+        let bytes = self.get(object_id, maximum_bytes)?;
+        let length = bytes.len();
+        A2AArtifactObjectReader::new(
+            object_id,
+            length,
+            maximum_bytes,
+            Cursor::new(bytes.into_boxed_slice()),
+        )
+    }
 }
 
 /// Owner-protected filesystem implementation for one self-hosted gateway.
@@ -139,6 +259,34 @@ impl FileA2AArtifactObjectStore {
     fn path(&self, object_id: A2AArtifactObjectId) -> PathBuf {
         self.root.join(object_id.to_hex())
     }
+
+    fn open_file(
+        &self,
+        object_id: A2AArtifactObjectId,
+        maximum_bytes: usize,
+    ) -> Result<(File, usize), A2AArtifactStorageError> {
+        validate_maximum(maximum_bytes)?;
+        let path = self.path(object_id);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(A2AArtifactStorageError::ObjectNotFound);
+            }
+            Err(_) => return Err(A2AArtifactStorageError::StorageUnavailable),
+            Ok(_) => {}
+        }
+        let file = open_owner_protected_file(&path)
+            .map_err(|_| A2AArtifactStorageError::StorageUnavailable)?;
+        let length = usize::try_from(
+            file.metadata()
+                .map_err(|_| A2AArtifactStorageError::StorageUnavailable)?
+                .len(),
+        )
+        .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?;
+        if !(AUTHENTICATED_CIPHER_TAG_BYTES..=maximum_bytes).contains(&length) {
+            return Err(A2AArtifactStorageError::InvalidConfiguration);
+        }
+        Ok((file, length))
+    }
 }
 
 impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
@@ -160,27 +308,22 @@ impl A2AArtifactObjectStore for FileA2AArtifactObjectStore {
         object_id: A2AArtifactObjectId,
         maximum_bytes: usize,
     ) -> Result<Vec<u8>, A2AArtifactStorageError> {
-        if !(AUTHENTICATED_CIPHER_TAG_BYTES..=MAX_A2A_ARTIFACT_OBJECT_BYTES)
-            .contains(&maximum_bytes)
-        {
-            return Err(A2AArtifactStorageError::InvalidConfiguration);
-        }
-        let path = self.path(object_id);
-        match std::fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(A2AArtifactStorageError::ObjectNotFound);
-            }
-            Err(_) => return Err(A2AArtifactStorageError::StorageUnavailable),
-            Ok(_) => {}
-        }
-        let file = open_owner_protected_file(&path)
-            .map_err(|_| A2AArtifactStorageError::StorageUnavailable)?;
+        let (file, _) = self.open_file(object_id, maximum_bytes)?;
         let bytes = read_bounded(file, maximum_bytes)?;
         validate_ciphertext(&bytes)?;
         if A2AArtifactObjectId::from_ciphertext(&bytes) != object_id {
             return Err(A2AArtifactStorageError::DigestMismatch);
         }
         Ok(bytes)
+    }
+
+    fn open_object(
+        &self,
+        object_id: A2AArtifactObjectId,
+        maximum_bytes: usize,
+    ) -> Result<A2AArtifactObjectReader, A2AArtifactStorageError> {
+        let (file, length) = self.open_file(object_id, maximum_bytes)?;
+        A2AArtifactObjectReader::new(object_id, length, maximum_bytes, file)
     }
 }
 
@@ -297,40 +440,55 @@ pub fn open_stored_artifact(
 ) -> Result<Zeroizing<Vec<u8>>, A2AArtifactStorageError> {
     let reference = parse_initial_encrypted_artifact_reference(reference_url)
         .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?;
-    if reference.plaintext_bytes() != descriptor.plaintext_bytes() {
-        return Err(A2AArtifactStorageError::InvalidConfiguration);
-    }
     let object_id = A2AArtifactObjectId::from_bytes(*reference.ciphertext_digest());
     let maximum = usize::try_from(reference.plaintext_bytes())
         .ok()
         .and_then(|size| size.checked_add(AUTHENTICATED_CIPHER_TAG_BYTES))
         .ok_or(A2AArtifactStorageError::InvalidConfiguration)?;
     let ciphertext = store.get(object_id, maximum)?;
+    open_artifact_ciphertext(descriptor, &reference, ciphertext)
+}
+
+/// Authenticates and opens one already retrieved encrypted artifact object.
+///
+/// # Errors
+///
+/// Returns descriptor/reference mismatch, digest, bound, or AES-GCM authentication
+/// failure.
+pub fn open_artifact_ciphertext(
+    descriptor: &InitialA2AArtifactReferenceDescriptor,
+    reference: &InitialA2AEncryptedArtifactReference,
+    ciphertext: Vec<u8>,
+) -> Result<Zeroizing<Vec<u8>>, A2AArtifactStorageError> {
+    if reference.plaintext_bytes() != descriptor.plaintext_bytes() {
+        return Err(A2AArtifactStorageError::InvalidConfiguration);
+    }
+    let plaintext_bytes = usize::try_from(reference.plaintext_bytes())
+        .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?;
+    let expected_ciphertext = plaintext_bytes
+        .checked_add(AUTHENTICATED_CIPHER_TAG_BYTES)
+        .ok_or(A2AArtifactStorageError::InvalidConfiguration)?;
+    if ciphertext.len() != expected_ciphertext {
+        return Err(A2AArtifactStorageError::DigestMismatch);
+    }
+    let object_id = A2AArtifactObjectId::from_bytes(*reference.ciphertext_digest());
     if A2AArtifactObjectId::from_ciphertext(&ciphertext) != object_id {
         return Err(A2AArtifactStorageError::DigestMismatch);
     }
     let cipher = AuthenticatedCipher::new(reference.key());
-    let ciphertext = AuthenticatedCiphertext::from_parts(
-        reference.nonce(),
-        ciphertext,
-        usize::try_from(reference.plaintext_bytes())
-            .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?,
-    )
-    .map_err(|_| A2AArtifactStorageError::Cryptography)?;
+    let ciphertext =
+        AuthenticatedCiphertext::from_parts(reference.nonce(), ciphertext, plaintext_bytes)
+            .map_err(|_| A2AArtifactStorageError::Cryptography)?;
     let plaintext = cipher
         .open(
             &descriptor
                 .associated_data()
                 .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?,
             &ciphertext,
-            usize::try_from(reference.plaintext_bytes())
-                .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?,
+            plaintext_bytes,
         )
         .map_err(|_| A2AArtifactStorageError::Cryptography)?;
-    if plaintext.len()
-        != usize::try_from(reference.plaintext_bytes())
-            .map_err(|_| A2AArtifactStorageError::InvalidConfiguration)?
-    {
+    if plaintext.len() != plaintext_bytes {
         return Err(A2AArtifactStorageError::Cryptography);
     }
     Ok(plaintext)
@@ -361,6 +519,14 @@ fn validate_ciphertext(ciphertext: &[u8]) -> Result<(), A2AArtifactStorageError>
     if ciphertext.len() < AUTHENTICATED_CIPHER_TAG_BYTES
         || ciphertext.len() > MAX_A2A_ARTIFACT_OBJECT_BYTES
     {
+        Err(A2AArtifactStorageError::InvalidConfiguration)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_maximum(maximum: usize) -> Result<(), A2AArtifactStorageError> {
+    if !(AUTHENTICATED_CIPHER_TAG_BYTES..=MAX_A2A_ARTIFACT_OBJECT_BYTES).contains(&maximum) {
         Err(A2AArtifactStorageError::InvalidConfiguration)
     } else {
         Ok(())
@@ -468,7 +634,56 @@ mod tests {
         let ciphertext = store
             .get(reference.object_id(), AUTHENTICATED_CIPHER_TAG_BYTES + 6)
             .unwrap();
+        let mut reader = store
+            .open_object(reference.object_id(), AUTHENTICATED_CIPHER_TAG_BYTES + 6)
+            .unwrap();
+        assert_eq!(reader.length(), ciphertext.len());
+        assert_eq!(reader.next_chunk().unwrap().unwrap(), ciphertext);
+        assert!(reader.next_chunk().unwrap().is_none());
         store.put(reference.object_id(), &ciphertext).unwrap();
+    }
+
+    #[test]
+    fn object_readers_stream_and_verify_complete_content_addresses() {
+        let bytes = vec![7_u8; A2A_ARTIFACT_OBJECT_CHUNK_BYTES + 1];
+        let object_id = A2AArtifactObjectId::from_ciphertext(&bytes);
+        let store = StaticObjectStore {
+            bytes: bytes.clone(),
+        };
+        let mut reader = store.open_object(object_id, bytes.len()).unwrap();
+        assert_eq!(reader.length(), bytes.len());
+        assert_eq!(
+            reader.next_chunk().unwrap().unwrap(),
+            bytes[..A2A_ARTIFACT_OBJECT_CHUNK_BYTES]
+        );
+        assert_eq!(
+            reader.next_chunk().unwrap().unwrap(),
+            bytes[A2A_ARTIFACT_OBJECT_CHUNK_BYTES..]
+        );
+        assert!(reader.next_chunk().unwrap().is_none());
+    }
+
+    #[test]
+    fn object_readers_reject_truncation_trailing_bytes_and_digest_mismatch() {
+        let expected = b"0123456789abcdef";
+        let object_id = A2AArtifactObjectId::from_ciphertext(expected);
+        for bytes in [
+            expected[..expected.len() - 1].to_vec(),
+            [expected.as_slice(), b"x"].concat(),
+            b"fedcba9876543210".to_vec(),
+        ] {
+            let mut reader = A2AArtifactObjectReader::new(
+                object_id,
+                expected.len(),
+                expected.len(),
+                Cursor::new(bytes),
+            )
+            .unwrap();
+            assert_eq!(
+                reader.next_chunk().err(),
+                Some(A2AArtifactStorageError::DigestMismatch)
+            );
+        }
     }
 
     #[test]

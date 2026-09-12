@@ -142,6 +142,15 @@ stream operation performs DNS resolution or network retrieval. Referenced conten
 fetched only through the explicit bounded client operation delivered with the public
 object-store layer.
 
+The self-hosted ciphertext router is nested beneath the operator-owned URL prefix and
+serves only `GET /sha256/{ciphertext-sha256}`. It rejects range and `HEAD` requests,
+streams bounded verified ciphertext, and retains its aggregate byte reservation until
+the response body is consumed or disconnected. The built-in retrieval client removes
+the secret fragment before transmission, carries no A2A `Authorization` credential,
+disables redirects and ambient proxy discovery, enforces exact ciphertext and
+plaintext lengths, verifies SHA-256, and authenticates the descriptor-bound AES-GCM
+object before returning plaintext.
+
 Errors use an `application/a2a+json` `google.rpc.Status`-shaped envelope with an A2A
 `ErrorInfo.reason`; validation errors add a bounded field violation. The
 [reference-gateway contract](../development/a2a-reference-gateway.md) owns exact
