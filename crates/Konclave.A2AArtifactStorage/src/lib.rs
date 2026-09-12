@@ -5,8 +5,6 @@ use std::fs::File;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use KonclaveA2AContracts::wire::{Part, part};
 use KonclaveA2AContracts::{
     A2A_ENCRYPTED_ARTIFACT_REFERENCE_PREFIX, InitialA2AArtifactReferenceDescriptor,
@@ -17,6 +15,8 @@ use KonclaveSecretStorage::{
     AuthenticatedCiphertext, SecretStorageError, create_or_verify_owner_protected_file,
     ensure_owner_protected_directory, open_owner_protected_file,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest as _, Sha256};
 use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
@@ -448,9 +448,13 @@ mod tests {
             6,
         )
         .unwrap();
-        let reference =
-            seal_and_store_artifact(&store, "https://objects.example.com/a2a", &descriptor, b"secret")
-                .unwrap();
+        let reference = seal_and_store_artifact(
+            &store,
+            "https://objects.example.com/a2a",
+            &descriptor,
+            b"secret",
+        )
+        .unwrap();
         let url = match reference.part().content.as_ref().unwrap() {
             part::Content::Url(url) => url,
             _ => panic!("stored artifact must be a URL Part"),
@@ -462,10 +466,7 @@ mod tests {
             b"secret"
         );
         let ciphertext = store
-            .get(
-                reference.object_id(),
-                AUTHENTICATED_CIPHER_TAG_BYTES + 6,
-            )
+            .get(reference.object_id(), AUTHENTICATED_CIPHER_TAG_BYTES + 6)
             .unwrap();
         store.put(reference.object_id(), &ciphertext).unwrap();
     }
@@ -487,9 +488,13 @@ mod tests {
                 .err(),
             Some(A2AArtifactStorageError::InvalidConfiguration)
         );
-        let reference =
-            seal_and_store_artifact(&store, "https://objects.example.com/", &descriptor, b"secret")
-                .unwrap();
+        let reference = seal_and_store_artifact(
+            &store,
+            "https://objects.example.com/",
+            &descriptor,
+            b"secret",
+        )
+        .unwrap();
         let url = match reference.part().content.as_ref().unwrap() {
             part::Content::Url(url) => url,
             _ => panic!("stored artifact must be a URL Part"),
@@ -550,19 +555,11 @@ mod tests {
             Some(A2AArtifactStorageError::InvalidConfiguration)
         );
         let mut tampered = store
-            .get(
-                reference.object_id(),
-                AUTHENTICATED_CIPHER_TAG_BYTES + 6,
-            )
+            .get(reference.object_id(), AUTHENTICATED_CIPHER_TAG_BYTES + 6)
             .unwrap();
         tampered[0] ^= 1;
         assert_eq!(
-            open_stored_artifact(
-                &StaticObjectStore { bytes: tampered },
-                &descriptor,
-                url,
-            )
-            .err(),
+            open_stored_artifact(&StaticObjectStore { bytes: tampered }, &descriptor, url,).err(),
             Some(A2AArtifactStorageError::DigestMismatch)
         );
         assert_eq!(
@@ -588,12 +585,20 @@ mod tests {
             6,
         )
         .unwrap();
-        let first =
-            seal_and_store_artifact(&store, "https://objects.example.com/", &descriptor, b"secret")
-                .unwrap();
-        let second =
-            seal_and_store_artifact(&store, "https://objects.example.com/", &descriptor, b"secret")
-                .unwrap();
+        let first = seal_and_store_artifact(
+            &store,
+            "https://objects.example.com/",
+            &descriptor,
+            b"secret",
+        )
+        .unwrap();
+        let second = seal_and_store_artifact(
+            &store,
+            "https://objects.example.com/",
+            &descriptor,
+            b"secret",
+        )
+        .unwrap();
         assert_ne!(first.object_id(), second.object_id());
         assert!(first.part().content.as_ref() != second.part().content.as_ref());
     }
@@ -604,11 +609,7 @@ mod tests {
         let store = FileA2AArtifactObjectStore::open(root.path().join("objects")).unwrap();
         let ciphertext = b"0123456789abcdef";
         let object_id = A2AArtifactObjectId::from_ciphertext(ciphertext);
-        create_or_verify_owner_protected_file(
-            &store.path(object_id),
-            b"fedcba9876543210",
-        )
-        .unwrap();
+        create_or_verify_owner_protected_file(&store.path(object_id), b"fedcba9876543210").unwrap();
         assert_eq!(
             store.put(object_id, ciphertext).err(),
             Some(A2AArtifactStorageError::ObjectConflict)
@@ -625,5 +626,4 @@ mod tests {
             Some(A2AArtifactStorageError::InvalidConfiguration)
         );
     }
-
 }

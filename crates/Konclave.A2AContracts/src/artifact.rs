@@ -6,12 +6,12 @@ use prost::Message as _;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::{A2AContractError, A2AIdentifier};
 use crate::initial_profile::{
     A2A_TEXT_MEDIA_TYPE, decode_json_bounded, require_empty_struct, require_encoded_bound,
     validate_identifier,
 };
 use crate::wire::{Artifact, Part, part};
+use crate::{A2AContractError, A2AIdentifier};
 
 /// Maximum UTF-8 byte length of an artifact name.
 pub const MAX_A2A_ARTIFACT_NAME_BYTES: usize = 128;
@@ -575,10 +575,7 @@ fn hex_nibble(value: u8) -> Result<u8, A2AContractError> {
     }
 }
 
-fn append_u16_component(
-    output: &mut Vec<u8>,
-    value: &[u8],
-) -> Result<(), A2AContractError> {
+fn append_u16_component(output: &mut Vec<u8>, value: &[u8]) -> Result<(), A2AContractError> {
     let length = u16::try_from(value.len()).map_err(|_| A2AContractError::OutOfRange {
         field: "artifact.reference",
     })?;
