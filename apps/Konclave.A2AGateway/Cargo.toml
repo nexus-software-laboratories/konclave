@@ -10,6 +10,8 @@ name = "KonclaveA2AGateway"
 path = "src/main.rs"
 
 [dependencies]
+KonclaveA2AArtifactHttp = { path = "../../crates/Konclave.A2AArtifactHttp" }
+KonclaveA2AArtifactStorage = { path = "../../crates/Konclave.A2AArtifactStorage" }
 KonclaveA2AContracts = { path = "../../crates/Konclave.A2AContracts" }
 KonclaveA2ADiscovery = { path = "../../crates/Konclave.A2ADiscovery" }
 KonclaveA2ADomain = { path = "../../crates/Konclave.A2ADomain" }
@@ -25,7 +27,7 @@ KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["http1", "tokio"] }
 serde.workspace = true
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 url.workspace = true
 zeroize.workspace = true
 

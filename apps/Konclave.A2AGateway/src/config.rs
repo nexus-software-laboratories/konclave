@@ -5,26 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use KonclaveA2AContracts::{
-    InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment,
-};
-use KonclaveA2ADiscovery::{
-    CompiledA2AAgentPublication, compile_a2a_agent_publication_file,
-};
+use KonclaveA2AContracts::{InitialA2AAgentSecurityKind, InitialA2AInterfaceEnvironment};
+use KonclaveA2ADiscovery::{CompiledA2AAgentPublication, compile_a2a_agent_publication_file};
 use KonclaveA2ADomain::{A2AAgentRoute, A2AContextId, A2ATenantId};
 use KonclaveA2AGateway::{
     A2ABearerCredential, A2AGatewayError, A2AHttpAccess, A2AHttpAction,
-    A2AHttpAuthorizationDecision, A2AHttpPrincipalId, StaticBearerAccess,
-    validate_a2a_binding,
+    A2AHttpAuthorizationDecision, A2AHttpPrincipalId, StaticBearerAccess, validate_a2a_binding,
 };
-use KonclaveBoundedDocuments::{
-    BoundedVec, deserialize_strict, read_bounded_regular_file,
-};
+use KonclaveBoundedDocuments::{BoundedVec, deserialize_strict, read_bounded_regular_file};
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveDomainCore::{ConversationId, DeviceId};
-use KonclaveLocalServiceClient::{
-    LocalServiceIssuerCredential, LocalServiceJsonClientConfig,
-};
+use KonclaveLocalServiceClient::{LocalServiceIssuerCredential, LocalServiceJsonClientConfig};
 use KonclaveLocalServiceTransport::{
     HarnessKind, LocalServiceInstallation, ServiceProfileId, decode_lowercase_hex,
 };
@@ -45,6 +36,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) publication: CompiledA2AAgentPublication,
     pub(crate) route: A2AAgentRoute,
     pub(crate) task_database_file: PathBuf,
+    pub(crate) artifact_object_directory: PathBuf,
     pub(crate) local_service: LocalServiceJsonClientConfig,
     pub(crate) access: Arc<dyn A2AHttpAccess>,
 }
@@ -60,9 +52,8 @@ impl RuntimeConfig {
         }
         let bytes = read_bounded_regular_file(path, MAX_CONFIG_BYTES)
             .context("reading bounded A2A gateway configuration")?;
-        let source: ConfigSource =
-            deserialize_strict(&bytes, MAX_CONFIG_BYTES)
-                .context("decoding A2A gateway configuration")?;
+        let source: ConfigSource = deserialize_strict(&bytes, MAX_CONFIG_BYTES)
+            .context("decoding A2A gateway configuration")?;
         source.validate()
     }
 }
@@ -75,6 +66,7 @@ struct ConfigSource {
     listener: ListenerSource,
     publication_file: PathBuf,
     task_database_file: PathBuf,
+    artifact_object_directory: PathBuf,
     route: RouteSource,
     local_service: LocalServiceSource,
     bearer_token_files: BoundedVec<PathBuf, MAX_BEARER_FILES>,
@@ -94,8 +86,9 @@ impl ConfigSource {
             .context("validating A2A gateway listener trust boundary")?;
 
         let publication_file = require_absolute(self.publication_file, "publication file")?;
-        let task_database_file =
-            require_absolute(self.task_database_file, "task database file")?;
+        let task_database_file = require_absolute(self.task_database_file, "task database file")?;
+        let artifact_object_directory =
+            require_absolute(self.artifact_object_directory, "artifact object directory")?;
         let installation_file = require_absolute(
             self.local_service.installation_file,
             "local-service installation file",
@@ -116,6 +109,9 @@ impl ConfigSource {
             .context("task database file has no parent")?;
         if !database_parent.is_absolute() {
             bail!("task database parent must be absolute");
+        }
+        if directories_overlap(database_parent, &artifact_object_directory) {
+            bail!("task database and artifact objects require separate directories");
         }
 
         let environment = self.interface_environment.into_contract();
@@ -161,15 +157,14 @@ impl ConfigSource {
             target_device_id,
         );
 
-        let profile = ServiceProfileId::parse(self.local_service.profile)
+        let profile = ServiceProfileId::parse(&self.local_service.profile)
             .context("validating local-service profile")?;
-        let local_service = load_local_service(
-            &installation_file,
-            &issuer_key_file,
-            &profile,
-        )?;
+        let local_service = load_local_service(&installation_file, &issuer_key_file, &profile)?;
         let access = build_access(
-            publication.card().security().map(|security| security.kind()),
+            publication
+                .card()
+                .security()
+                .map(|security| security.kind()),
             listen_address,
             self.listener.tls_terminated,
             bearer_token_files,
@@ -180,6 +175,7 @@ impl ConfigSource {
             publication,
             route,
             task_database_file,
+            artifact_object_directory,
             local_service,
             access,
         })
@@ -238,6 +234,24 @@ fn reject_duplicate_paths(paths: &[PathBuf]) -> anyhow::Result<()> {
         bail!("A2A bearer token files must be unique");
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn directories_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(windows)]
+fn directories_overlap(left: &Path, right: &Path) -> bool {
+    let left = left
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let right = right
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    left.starts_with(&right) || right.starts_with(&left)
 }
 
 fn load_local_service(
@@ -394,7 +408,8 @@ mod tests {
           "interfaceEnvironment":"production",
           "listener":{"address":"127.0.0.1:8090","tlsTerminated":false},
           "publicationFile":"/etc/konclave/a2a/agent.json",
-          "taskDatabaseFile":"/var/lib/konclave/a2a/tasks.sqlite",
+          "taskDatabaseFile":"/var/lib/konclave/a2a/tasks/tasks.sqlite",
+          "artifactObjectDirectory":"/var/lib/konclave/a2a/objects",
           "route":{
             "contextId":"context-a",
             "conversationId":"0000000000000000000000000000000000000000000000000000000000000000",
@@ -420,7 +435,8 @@ mod tests {
               "interfaceEnvironment":"production",
               "listener":{{"address":"127.0.0.1:8090","tlsTerminated":false}},
               "publicationFile":"/etc/konclave/a2a/agent.json",
-              "taskDatabaseFile":"/var/lib/konclave/a2a/tasks.sqlite",
+              "taskDatabaseFile":"/var/lib/konclave/a2a/tasks/tasks.sqlite",
+              "artifactObjectDirectory":"/var/lib/konclave/a2a/objects",
               "route":{{
                 "contextId":"context-a",
                 "conversationId":"0000000000000000000000000000000000000000000000000000000000000000",
@@ -441,18 +457,8 @@ mod tests {
 
     #[test]
     fn access_profile_rejects_unauthenticated_remote_and_unimplemented_mtls() {
-        assert!(
-            build_access(
-                None,
-                "127.0.0.1:8090".parse().unwrap(),
-                false,
-                vec![]
-            )
-            .is_ok()
-        );
-        assert!(
-            build_access(None, "0.0.0.0:8090".parse().unwrap(), true, vec![]).is_err()
-        );
+        assert!(build_access(None, "127.0.0.1:8090".parse().unwrap(), false, vec![]).is_ok());
+        assert!(build_access(None, "0.0.0.0:8090".parse().unwrap(), true, vec![]).is_err());
         assert!(
             build_access(
                 Some(InitialA2AAgentSecurityKind::Bearer),
@@ -471,5 +477,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn task_and_artifact_directories_must_not_overlap() {
+        assert!(directories_overlap(
+            Path::new("/var/lib/konclave/a2a"),
+            Path::new("/var/lib/konclave/a2a/objects")
+        ));
+        assert!(directories_overlap(
+            Path::new("/var/lib/konclave/a2a/tasks"),
+            Path::new("/var/lib/konclave/a2a")
+        ));
+        assert!(!directories_overlap(
+            Path::new("/var/lib/konclave/a2a/tasks"),
+            Path::new("/var/lib/konclave/a2a/objects")
+        ));
+        #[cfg(windows)]
+        assert!(directories_overlap(
+            Path::new(r"C:\Konclave\Tasks"),
+            Path::new(r"c:\konclave\tasks\objects")
+        ));
     }
 }
