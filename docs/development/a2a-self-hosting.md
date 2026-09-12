@@ -1,5 +1,8 @@
 # Self-hosted A2A gateway runtime
 
+The maintained deployment, backup, upgrade, and troubleshooting procedure is the
+[self-hosted A2A operator guide](../distribution/a2a-self-hosting.md).
+
 `KonclaveA2AGateway` is the standalone public process for the standard A2A
 HTTP+JSON bridge. It receives inbound A2A traffic while every target agent and the
 shared local service remain outbound-only.

@@ -1,5 +1,10 @@
 # A2A gateway container
 
+See the
+[self-hosted A2A operator guide](../../../../docs/distribution/a2a-self-hosting.md)
+for route bootstrap, credential preparation, TLS termination, backup, and upgrade
+procedures.
+
 The Linux AMD64 image contains only the standalone `KonclaveA2AGateway` binary and
 its maintained configuration template. The runtime user is non-root, the root
 filesystem is read-only, all Linux capabilities are dropped, and the published port

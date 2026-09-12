@@ -157,6 +157,10 @@ only on host loopback for connection from an operator-managed TLS reverse proxy.
 
 ## Run the A2A gateway
 
+Follow the complete
+[self-hosted A2A operator guide](a2a-self-hosting.md) for route bootstrap, file
+custody, TLS, backup, and upgrade behavior.
+
 Gateway archives contain `bin/KonclaveA2AGateway` plus maintained examples under
 `share/konclave/a2a/`. Initialize and start the shared local service first, enroll the
 gateway profile and target conversation, then copy the example files to

@@ -65,6 +65,7 @@ This map lists the documentation contributed by the selected project shape.
 ## Guides
 
 - [Author collaboration policies](../policy/README.md)
+- [Operate the self-hosted A2A gateway](distribution/a2a-self-hosting.md)
 - [Install an unsigned prerelease](distribution/installation.md)
 - [Verify release integrity and contents](distribution/integrity.md)
 - [Packaged clean-install acceptance](distribution/acceptance.md)
