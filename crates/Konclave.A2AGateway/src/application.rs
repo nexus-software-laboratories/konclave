@@ -211,6 +211,10 @@ impl A2AGatewayApplication {
         if publication.id() != route.agent_id()
             || publication
                 .card()
+                .protected_profile()
+                .is_some_and(|profile| profile.required())
+            || publication
+                .card()
                 .interfaces()
                 .iter()
                 .any(|interface| interface.tenant() != route.tenant().map(|tenant| tenant.as_str()))

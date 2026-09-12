@@ -271,6 +271,13 @@ Peers negotiate supported Konclave and MLS versions. Unsupported versions and em
 intersections fail closed. A peer or relay cannot silently force a lower version than
 the mutually supported maximum.
 
+Protected A2A trust selection is likewise explicit. A protected-required client
+accepts only the exact versioned Konclave extension and fixed MLS, visibility, native
+transport, and fail-closed claims. A standard HTTP client or gateway application
+rejects a card that requires protected mode; there is no automatic fallback from
+protected to plaintext. The advertised relay endpoint contains no credential or
+internal route authority.
+
 ## Threats and required mitigations
 
 | Threat | Required mitigation |
@@ -291,6 +298,7 @@ the mutually supported maximum.
 | Credential or capability substitution | Device-root binding validation covers identity and the conversation key; a separate root signature authenticates nonzero capability bits, while a missing assertion means no capability; optional out-of-band fingerprint comparison authenticates the intended device |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |
 | Protocol downgrade | Signed capability negotiation across every remote recipient of a group application message and fail-closed version selection |
+| Protected A2A downgrade or false visibility claim | Exact versioned Agent Card extension, code-owned MLS/application-opaque/fail-closed semantics, explicit caller trust requirement, standard-client and gateway refusal when protection is required, and no opaque A2A payload tunnel |
 | Oversized or malformed input | Pre-allocation bounds, deterministic parsing, property tests, fuzzing, and regression fixtures |
 | Offline database theft | Sealed secret blobs; no plaintext-key fallback |
 | Secret disclosure through diagnostics | No `Debug`, serialization, logs, telemetry, panic text, or snapshots containing keys/plaintext |
@@ -338,6 +346,8 @@ the mutually supported maximum.
 - An authorized member can copy or disclose plaintext it legitimately receives.
 - An authorized or compromised harness adapter can copy or disclose plaintext
   delivered to that harness.
+- Protected A2A requires a Konclave-capable, enrolled conversation member; it does not
+  make standard A2A clients end-to-end encrypted.
 - `AccountTrusted` does not protect one session from another malicious process running
   under the same operating-system account. Exact grants contain authority but do not
   change that declared trust boundary.

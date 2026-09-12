@@ -7,6 +7,7 @@ mod error;
 mod identifier;
 mod initial_profile;
 mod list_tasks_response;
+mod protected_profile;
 mod stream_response;
 mod task_response;
 
@@ -51,6 +52,13 @@ pub use initial_profile::{
 pub use list_tasks_response::{
     InitialA2ATaskListResponse, decode_initial_list_tasks_response_json,
     decode_initial_list_tasks_response_protobuf, validate_initial_list_tasks_response,
+};
+pub use protected_profile::{
+    A2A_KONCLAVE_PROTECTED_DESCRIPTION, A2A_KONCLAVE_PROTECTED_DOWNGRADE_POLICY,
+    A2A_KONCLAVE_PROTECTED_EXTENSION_URI, A2A_KONCLAVE_PROTECTED_GATEWAY_VISIBILITY,
+    A2A_KONCLAVE_PROTECTED_PAYLOAD_PROTECTION, A2A_KONCLAVE_PROTECTED_PROFILE,
+    A2A_KONCLAVE_PROTECTED_TRANSPORT, InitialA2ANegotiatedTrust, InitialA2AProtectedProfile,
+    InitialA2ATrustRequirement, negotiate_initial_a2a_trust,
 };
 pub use stream_response::{
     InitialA2AStreamResponse, InitialA2AStreamResponseKind, decode_initial_stream_response_json,

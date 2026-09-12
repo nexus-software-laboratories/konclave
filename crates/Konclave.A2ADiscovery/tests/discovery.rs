@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use KonclaveA2AContracts::InitialA2AInterfaceEnvironment;
+use KonclaveA2AContracts::{
+    InitialA2AInterfaceEnvironment, InitialA2ANegotiatedTrust, InitialA2ATrustRequirement,
+};
 use KonclaveA2ADiscovery::{
     A2ADiscoveryAction, A2ADiscoveryAuthorizationDecision, A2ADiscoveryAuthorizer,
     A2ADiscoveryError, FileA2AAgentCatalog, MAX_A2A_AGENT_PUBLICATION_SOURCE_BYTES,
@@ -127,6 +129,66 @@ fn source_generates_compatible_public_extended_and_oasf_views() {
     assert_eq!(
         repeated.oasf_record().unwrap().bytes(),
         compiled.oasf_record().unwrap().bytes()
+    );
+}
+
+#[test]
+fn source_emits_only_the_fixed_protected_profile_claims() {
+    let mut source: Value =
+        serde_json::from_slice(&publication("agent-a", false, false, false)).unwrap();
+    source["spec"]["protectedProfile"] = json!({
+        "required": false,
+        "relayEndpoint": "https://relay.example.com/"
+    });
+    let compiled = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&source).unwrap(),
+        InitialA2AInterfaceEnvironment::Production,
+    )
+    .unwrap();
+    let profile = compiled.card().protected_profile().unwrap();
+    assert!(!profile.required());
+    assert!(compiled.card().streaming());
+    assert_eq!(profile.relay_endpoint(), "https://relay.example.com/");
+    let extension = &compiled
+        .card()
+        .as_wire()
+        .capabilities
+        .as_ref()
+        .unwrap()
+        .extensions[0];
+    assert_eq!(
+        extension.uri,
+        "https://konclave.dev/a2a/extensions/protected/v1"
+    );
+    assert_eq!(extension.params.as_ref().unwrap().fields.len(), 1);
+
+    source["spec"]["protectedProfile"]["relayEndpoint"] = json!("http://relay.example.com/");
+    assert_eq!(
+        compile_a2a_agent_publication_source(
+            &serde_json::to_vec(&source).unwrap(),
+            InitialA2AInterfaceEnvironment::Production
+        )
+        .err(),
+        Some(A2ADiscoveryError::InvalidAgentCard)
+    );
+    source["spec"]["protectedProfile"]["relayEndpoint"] = json!("http://127.0.0.1:8080/");
+    assert!(
+        compile_a2a_agent_publication_source(
+            &serde_json::to_vec(&source).unwrap(),
+            InitialA2AInterfaceEnvironment::LoopbackDevelopment
+        )
+        .is_ok()
+    );
+    source["spec"]["protectedProfile"]["claim"] = json!("plaintext");
+    assert_eq!(
+        compile_a2a_agent_publication_source(
+            &serde_json::to_vec(&source).unwrap(),
+            InitialA2AInterfaceEnvironment::LoopbackDevelopment
+        )
+        .err(),
+        Some(A2ADiscoveryError::InvalidJson {
+            document: "publication"
+        })
     );
 }
 
@@ -441,6 +503,17 @@ fn repository_examples_compile_through_private_catalog_discovery() {
     );
     assert!(catalog.extended_card(&agent_id, &allow).is_ok());
     assert!(catalog.oasf_record(&agent_id, &allow).is_ok());
+
+    let protected_id = A2AAgentId::parse("protected-contract-agent").unwrap();
+    let protected = catalog.private_card(&protected_id, &allow).unwrap();
+    assert!(protected.protected_profile().unwrap().required());
+    assert!(!protected.streaming());
+    assert!(matches!(
+        protected
+            .negotiate_trust(InitialA2ATrustRequirement::RequireKonclaveProtected)
+            .unwrap(),
+        InitialA2ANegotiatedTrust::KonclaveProtected(_)
+    ));
 }
 
 struct RecordingAuthorizer {

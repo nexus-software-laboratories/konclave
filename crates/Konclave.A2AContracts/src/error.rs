@@ -56,4 +56,7 @@ pub enum A2AContractError {
     /// An advertised interface URL was malformed or insecure for its environment.
     #[error("A2A interface URL is invalid")]
     InvalidInterfaceUrl,
+    /// The caller cannot satisfy a required A2A extension or trust mode.
+    #[error("required A2A extension is unsupported")]
+    RequiredExtensionUnsupported,
 }

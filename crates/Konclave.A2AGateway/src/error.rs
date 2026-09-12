@@ -60,6 +60,9 @@ pub enum A2AGatewayError {
     /// The configured card authentication cannot be used by the built-in client.
     #[error("A2A client authentication is unsupported")]
     UnsupportedAuthentication,
+    /// The Agent Card requires a protected extension unsupported by the standard client.
+    #[error("A2A client requires a protected extension")]
+    RequiredExtensionUnsupported,
     /// Outbound HTTP transport failed before a valid response was received.
     #[error("A2A client transport failed")]
     Transport,

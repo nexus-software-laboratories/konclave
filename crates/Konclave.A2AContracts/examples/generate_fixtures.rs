@@ -1,11 +1,15 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use KonclaveA2AContracts::wire::{
-    AgentCapabilities, AgentCard, AgentInterface, AgentSkill, GetTaskRequest, Message, Part, Role,
-    SendMessageConfiguration, SendMessageRequest, part,
+    AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentSkill, GetTaskRequest,
+    Message, Part, Role, SendMessageConfiguration, SendMessageRequest, part,
 };
-use KonclaveA2AContracts::{A2A_HTTP_JSON_BINDING, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE};
+use KonclaveA2AContracts::{
+    A2A_HTTP_JSON_BINDING, A2A_KONCLAVE_PROTECTED_DESCRIPTION,
+    A2A_KONCLAVE_PROTECTED_EXTENSION_URI, A2A_PROTOCOL_VERSION, A2A_TEXT_MEDIA_TYPE,
+};
 use prost::Message as _;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,6 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .encode_to_vec(),
     )?;
     write(&output, "agent-card.bin", agent_card().encode_to_vec())?;
+    write(
+        &output,
+        "protected-agent-card.bin",
+        protected_agent_card().encode_to_vec(),
+    )?;
     Ok(())
 }
 
@@ -95,6 +104,29 @@ fn agent_card() -> AgentCard {
         signatures: vec![],
         icon_url: None,
     }
+}
+
+fn protected_agent_card() -> AgentCard {
+    let mut card = agent_card();
+    card.name = "Konclave protected gateway".to_string();
+    card.capabilities.as_mut().unwrap().extensions = vec![AgentExtension {
+        uri: A2A_KONCLAVE_PROTECTED_EXTENSION_URI.to_string(),
+        description: A2A_KONCLAVE_PROTECTED_DESCRIPTION.to_string(),
+        required: true,
+        params: Some(pbjson_types::Struct {
+            fields: HashMap::from([parameter("relayEndpoint", "https://relay.example.com/")]),
+        }),
+    }];
+    card
+}
+
+fn parameter(name: &str, value: &str) -> (String, pbjson_types::Value) {
+    (
+        name.to_string(),
+        pbjson_types::Value {
+            kind: Some(pbjson_types::value::Kind::StringValue(value.to_string())),
+        },
+    )
 }
 
 fn write(root: &Path, name: &str, bytes: Vec<u8>) -> std::io::Result<()> {

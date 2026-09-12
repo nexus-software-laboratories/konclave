@@ -117,6 +117,27 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0016-a2a-streaming-projection.md",
+        "title": "ADR 0016: A2A streaming projection",
+        "section": "Architecture",
+        "order": 160,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/adr/adr-0017-a2a-artifact-profile.md",
+        "title": "ADR 0017: Bounded A2A artifact profile",
+        "section": "Architecture",
+        "order": 170,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/adr/adr-0018-fail-closed-protected-a2a-handoff.md",
+        "title": "ADR 0018: Fail-closed protected A2A handoff",
+        "section": "Architecture",
+        "order": 180,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

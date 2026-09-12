@@ -27,6 +27,7 @@ use KonclaveA2ATaskStoreSqlite::A2ASqliteTaskStoreConfig;
 use KonclaveDomainCore::DeviceId;
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
+use serde_json::{Value, json};
 
 use common::{
     CompletingSubmitter, PUBLICATION, RecordingSubmitter, TestClock, application,
@@ -46,6 +47,52 @@ fn sqlite_reference_constructor_opens_the_public_store() {
             .unwrap(),
             root.path().join("tasks.sqlite"),
             A2ASqliteTaskStoreConfig::default(),
+            Arc::new(RecordingSubmitter::default()),
+            Arc::new(TestClock::new(100)),
+            A2AGatewayWaitConfig::default(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn standard_gateway_application_rejects_required_protected_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let task_store = store(&root);
+    let mut source: Value = serde_json::from_slice(PUBLICATION).unwrap();
+    source["spec"]["protectedProfile"] = json!({
+        "required": true,
+        "relayEndpoint": "https://relay.example.com/"
+    });
+    let required = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&source).unwrap(),
+        InitialA2AInterfaceEnvironment::Production,
+    )
+    .unwrap();
+    assert_eq!(
+        A2AGatewayApplication::new(
+            route(),
+            required,
+            task_store.clone(),
+            Arc::new(RecordingSubmitter::default()),
+            Arc::new(TestClock::new(100)),
+            A2AGatewayWaitConfig::default(),
+        )
+        .err(),
+        Some(A2AGatewayError::InvalidConfiguration)
+    );
+
+    source["spec"]["protectedProfile"]["required"] = json!(false);
+    let optional = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&source).unwrap(),
+        InitialA2AInterfaceEnvironment::Production,
+    )
+    .unwrap();
+    assert!(
+        A2AGatewayApplication::new(
+            route(),
+            optional,
+            task_store,
             Arc::new(RecordingSubmitter::default()),
             Arc::new(TestClock::new(100)),
             A2AGatewayWaitConfig::default(),
