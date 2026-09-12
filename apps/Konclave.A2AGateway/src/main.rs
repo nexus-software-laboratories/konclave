@@ -47,8 +47,7 @@ fn process_shutdown() -> anyhow::Result<impl Future<Output = ()>> {
 
 #[cfg(windows)]
 fn process_shutdown() -> anyhow::Result<impl Future<Output = ()>> {
-    let mut ctrl_c =
-        tokio::signal::windows::ctrl_c().context("registering Ctrl+C handler")?;
+    let mut ctrl_c = tokio::signal::windows::ctrl_c().context("registering Ctrl+C handler")?;
     let mut ctrl_break =
         tokio::signal::windows::ctrl_break().context("registering Ctrl+Break handler")?;
     Ok(async move {
