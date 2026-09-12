@@ -53,6 +53,9 @@ manifest whose release already exists.
 - reject reused field numbers, invalid enum zero values, malformed lengths, and
   unsupported major versions;
 - compare canonical semantic values across Rust and TypeScript implementations.
+- verify harness-adapter API v1 operation names, bounds, JSON shapes, every delivery
+  payload kind, acknowledgement/release behavior, and crash/reclaim semantics against
+  the immutable shared-local-service fixture without invoking Copilot CLI;
 - verify the vendored A2A v1.0.1 schema, license, generation stubs, and immutable
   fixtures against their recorded byte lengths and SHA-256 digests;
 - reject initial-profile A2A requests that use another protocol version, binding,

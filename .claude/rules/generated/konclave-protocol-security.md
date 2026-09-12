@@ -10,6 +10,7 @@ paths:
   - "crates/Konclave.A2AKonclaveBridge/**/*.rs"
   - "crates/Konclave.A2ATaskStore/**/*.rs"
   - "crates/Konclave.A2ATaskStoreSqlite/**/*.rs"
+  - "crates/Konclave.AdapterSdk/**/*.rs"
   - "crates/Konclave.BoundedDocuments/**/*.rs"
   - "crates/Konclave.ProtectedHttp/**/*.rs"
   - "crates/Konclave.AdapterTransport/**/*.rs"

@@ -161,6 +161,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveAdapterSdk"
+version = "0.1.0"
+dependencies = [
+ "KonclaveBoundedDocuments",
+ "KonclaveLocalServiceClient",
+ "KonclaveLocalServiceTransport",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "KonclaveAdapterTransport"
 version = "0.1.0"
 dependencies = [

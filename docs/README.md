@@ -69,5 +69,6 @@ This map lists the documentation contributed by the selected project shape.
 - [Packaged clean-install acceptance](distribution/acceptance.md)
 - [Local Copilot demo](distribution/local-demo.md)
 - [Generic harness client](integrations/generic-client.md)
+- [Harness-neutral adapter SDK](integrations/adapter-sdk.md)
 - [UX and design resilience](ux-design.md)
 - [Impeccable design workflow](impeccable-design.md)

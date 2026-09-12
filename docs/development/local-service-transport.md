@@ -55,6 +55,13 @@ evidence. A generic client must supply an explicit durable profile alias or use 
 clearly ephemeral isolated profile; PID, working directory, time, model name, and
 free-form text do not establish continuity.
 
+`Konclave.LocalServiceClient` exposes both one-shot reconciled requests and a
+persistent authenticated JSON session. One-shot calls may retry an ambiguous
+transport failure with the same request identifier. Persistent sessions do not retry
+operations automatically; they preserve the connection-owned delivery lease and
+leave exact reconciliation to the harness adapter. `Konclave.AdapterSdk` builds its
+typed delivery API on that persistent session.
+
 ## Authenticated transcript
 
 Protocol version 2 has separate issuer and session roles. Both transcripts begin with

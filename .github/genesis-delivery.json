@@ -7,6 +7,7 @@
   "requiredChecks": [
     "CI",
     "A2A conformance",
+    "Adapter conformance",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
     "Package validation",
@@ -62,6 +63,7 @@
       ],
       "jobs": [
         "a2a-conformance",
+        "adapter-conformance",
         "community-relay-container-ci",
         "delete-run-artifacts"
       ]
@@ -77,6 +79,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "A2A conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/adapter-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Adapter conformance"
       ]
     },
     {

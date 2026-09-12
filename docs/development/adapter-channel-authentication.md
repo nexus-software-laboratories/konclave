@@ -5,6 +5,10 @@
 > only for bounded old-version drain and rollback; the Copilot extension now uses the
 > authenticated shared local service described by ADR 0008.
 
+New integrations use the
+[harness-neutral adapter SDK](../integrations/adapter-sdk.md) over that shared local
+service. The binary channel documented below must not be selected for new adapters.
+
 `Konclave.AdapterTransport` owns the harness-neutral half of the local adapter
 channel defined by
 [ADR 0005](../adr/adr-0005-harness-neutral-adapter-boundary.md). It contains no
