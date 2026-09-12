@@ -141,6 +141,8 @@ filename_length_u16 || filename_utf8 ||
 plaintext_length_u64
 ```
 
+All integer fields use unsigned network byte order (big-endian).
+
 The key and nonce fragment is removed before the HTTP request, so the object host
 receives only the content address. A reference is self-describing but not
 self-authorizing: deployments still apply normal download rate, retention, and

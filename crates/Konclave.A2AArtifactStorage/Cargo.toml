@@ -1,0 +1,18 @@
+[package]
+name = "KonclaveA2AArtifactStorage"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[dependencies]
+KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }
+base64.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -4,13 +4,14 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use prost::Message as _;
 use url::Url;
+use zeroize::Zeroizing;
 
-use crate::A2AContractError;
 use crate::initial_profile::{
     A2A_TEXT_MEDIA_TYPE, decode_json_bounded, require_empty_struct, require_encoded_bound,
     validate_identifier,
 };
 use crate::wire::{Artifact, Part, part};
+use crate::{A2AContractError, A2AIdentifier};
 
 /// Maximum UTF-8 byte length of an artifact name.
 pub const MAX_A2A_ARTIFACT_NAME_BYTES: usize = 128;
@@ -33,9 +34,159 @@ pub const MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES: u64 = 64 * 1_024 * 1_024;
 
 const MAX_A2A_ARTIFACT_JSON_DEPTH: usize = 32;
 const MAX_A2A_ARTIFACT_JSON_VALUES: usize = 1_024;
-const ENCRYPTED_REFERENCE_PREFIX: &str = "konclave-aes256gcm-v1";
-const ENCRYPTED_REFERENCE_KEY_BYTES: usize = 32;
-const ENCRYPTED_REFERENCE_NONCE_BYTES: usize = 12;
+/// Version marker carried in encrypted artifact URL fragments.
+pub const A2A_ENCRYPTED_ARTIFACT_REFERENCE_PREFIX: &str = "konclave-aes256gcm-v1";
+/// Associated-data domain for encrypted artifact objects.
+pub const A2A_ARTIFACT_OBJECT_AAD_DOMAIN: &[u8] = b"konclave-a2a-artifact-object-v1\0";
+/// AES-256 key bytes encoded in one encrypted reference.
+pub const A2A_ENCRYPTED_ARTIFACT_KEY_BYTES: usize = 32;
+/// AES-GCM nonce bytes encoded in one encrypted reference.
+pub const A2A_ENCRYPTED_ARTIFACT_NONCE_BYTES: usize = 12;
+
+/// Validated non-secret descriptor authenticated with one encrypted artifact object.
+pub struct InitialA2AArtifactReferenceDescriptor {
+    artifact_id: A2AIdentifier,
+    part_index: u16,
+    media_type: String,
+    filename: String,
+    plaintext_bytes: u64,
+}
+
+impl InitialA2AArtifactReferenceDescriptor {
+    /// Creates one bounded descriptor for a referenced artifact Part.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract error for invalid identity, part index, media type,
+    /// filename, or plaintext length.
+    pub fn new(
+        artifact_id: impl Into<String>,
+        part_index: usize,
+        media_type: impl Into<String>,
+        filename: impl Into<String>,
+        plaintext_bytes: u64,
+    ) -> Result<Self, A2AContractError> {
+        let artifact_id = A2AIdentifier::parse(artifact_id)?;
+        if part_index >= MAX_A2A_ARTIFACT_PARTS
+            || plaintext_bytes == 0
+            || plaintext_bytes > MAX_A2A_ARTIFACT_REFERENCE_PLAINTEXT_BYTES
+        {
+            return Err(A2AContractError::OutOfRange {
+                field: "artifact.reference",
+            });
+        }
+        let media_type = media_type.into();
+        validate_media_type(&media_type, "artifact.part.media_type")?;
+        let filename = filename.into();
+        validate_filename(&filename)?;
+        Ok(Self {
+            artifact_id,
+            part_index: u16::try_from(part_index).map_err(|_| A2AContractError::OutOfRange {
+                field: "artifact.reference.part_index",
+            })?,
+            media_type,
+            filename,
+            plaintext_bytes,
+        })
+    }
+
+    /// Returns the canonical artifact identifier.
+    #[must_use]
+    pub fn artifact_id(&self) -> &str {
+        self.artifact_id.as_str()
+    }
+
+    /// Returns the zero-based artifact Part position.
+    #[must_use]
+    pub const fn part_index(&self) -> u16 {
+        self.part_index
+    }
+
+    /// Returns the canonical declared media type.
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    /// Returns the optional bounded filename.
+    #[must_use]
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    /// Returns the authenticated plaintext byte length.
+    #[must_use]
+    pub const fn plaintext_bytes(&self) -> u64 {
+        self.plaintext_bytes
+    }
+
+    /// Encodes the exact associated data authenticated by AES-GCM.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract error if a validated component cannot fit its fixed
+    /// length prefix.
+    pub fn associated_data(&self) -> Result<Vec<u8>, A2AContractError> {
+        let mut output = Vec::with_capacity(
+            A2A_ARTIFACT_OBJECT_AAD_DOMAIN.len()
+                + self.artifact_id().len()
+                + self.media_type.len()
+                + self.filename.len()
+                + 16,
+        );
+        output.extend_from_slice(A2A_ARTIFACT_OBJECT_AAD_DOMAIN);
+        append_u16_component(&mut output, self.artifact_id().as_bytes())?;
+        output.extend_from_slice(&self.part_index.to_be_bytes());
+        append_u16_component(&mut output, self.media_type.as_bytes())?;
+        append_u16_component(&mut output, self.filename.as_bytes())?;
+        output.extend_from_slice(&self.plaintext_bytes.to_be_bytes());
+        Ok(output)
+    }
+}
+
+/// Parsed secret-bearing encrypted artifact reference.
+///
+/// The decryption key is zeroized on drop. This type intentionally does not
+/// implement `Clone`, `Debug`, or serialization.
+pub struct InitialA2AEncryptedArtifactReference {
+    request_url: String,
+    ciphertext_digest: [u8; 32],
+    key: Zeroizing<[u8; A2A_ENCRYPTED_ARTIFACT_KEY_BYTES]>,
+    nonce: [u8; A2A_ENCRYPTED_ARTIFACT_NONCE_BYTES],
+    plaintext_bytes: u64,
+}
+
+impl InitialA2AEncryptedArtifactReference {
+    /// Returns the canonical HTTPS URL without its secret fragment.
+    #[must_use]
+    pub fn request_url(&self) -> &str {
+        &self.request_url
+    }
+
+    /// Returns the expected SHA-256 of ciphertext plus authentication tag.
+    #[must_use]
+    pub const fn ciphertext_digest(&self) -> &[u8; 32] {
+        &self.ciphertext_digest
+    }
+
+    /// Returns the zeroizing AES-256 key bytes.
+    #[must_use]
+    pub fn key(&self) -> &[u8; A2A_ENCRYPTED_ARTIFACT_KEY_BYTES] {
+        &self.key
+    }
+
+    /// Returns the AES-GCM nonce.
+    #[must_use]
+    pub const fn nonce(&self) -> &[u8; A2A_ENCRYPTED_ARTIFACT_NONCE_BYTES] {
+        &self.nonce
+    }
+
+    /// Returns the expected plaintext length.
+    #[must_use]
+    pub const fn plaintext_bytes(&self) -> u64 {
+        self.plaintext_bytes
+    }
+}
 
 /// Validated canonical Artifact admitted by Konclave's A2A profile.
 ///
@@ -308,6 +459,18 @@ fn media_type_token(byte: u8) -> bool {
 }
 
 fn validate_encrypted_reference(value: &str) -> Result<(), A2AContractError> {
+    parse_initial_encrypted_artifact_reference(value).map(|_| ())
+}
+
+/// Parses one exact encrypted content-addressed artifact reference.
+///
+/// # Errors
+///
+/// Returns a contract error for a noncanonical URL, wrong digest path, malformed
+/// key or nonce, query/userinfo, or invalid plaintext bound.
+pub fn parse_initial_encrypted_artifact_reference(
+    value: &str,
+) -> Result<InitialA2AEncryptedArtifactReference, A2AContractError> {
     if value
         .bytes()
         .any(|byte| byte.is_ascii_control() || byte == b'\\')
@@ -341,16 +504,16 @@ fn validate_encrypted_reference(value: &str) -> Result<(), A2AContractError> {
         .fragment()
         .ok_or(A2AContractError::InvalidInterfaceUrl)?;
     let mut fields = fragment.split('.');
-    if fields.next() != Some(ENCRYPTED_REFERENCE_PREFIX) {
+    if fields.next() != Some(A2A_ENCRYPTED_ARTIFACT_REFERENCE_PREFIX) {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
-    validate_base64url(
+    let key = decode_base64url(
         fields.next().ok_or(A2AContractError::InvalidInterfaceUrl)?,
-        ENCRYPTED_REFERENCE_KEY_BYTES,
+        A2A_ENCRYPTED_ARTIFACT_KEY_BYTES,
     )?;
-    validate_base64url(
+    let nonce = decode_base64url(
         fields.next().ok_or(A2AContractError::InvalidInterfaceUrl)?,
-        ENCRYPTED_REFERENCE_NONCE_BYTES,
+        A2A_ENCRYPTED_ARTIFACT_NONCE_BYTES,
     )?;
     let size = fields.next().ok_or(A2AContractError::InvalidInterfaceUrl)?;
     if fields.next().is_some()
@@ -363,16 +526,61 @@ fn validate_encrypted_reference(value: &str) -> Result<(), A2AContractError> {
     {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
-    Ok(())
+    let plaintext_bytes = size
+        .parse::<u64>()
+        .map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
+    let ciphertext_digest = decode_lowercase_hex(digest)?;
+    drop(path);
+    let mut request_url = url;
+    request_url.set_fragment(None);
+    Ok(InitialA2AEncryptedArtifactReference {
+        request_url: request_url.to_string(),
+        ciphertext_digest,
+        key: Zeroizing::new(
+            key.try_into()
+                .map_err(|_| A2AContractError::InvalidInterfaceUrl)?,
+        ),
+        nonce: nonce
+            .try_into()
+            .map_err(|_| A2AContractError::InvalidInterfaceUrl)?,
+        plaintext_bytes,
+    })
 }
 
-fn validate_base64url(value: &str, expected_bytes: usize) -> Result<(), A2AContractError> {
+fn decode_base64url(value: &str, expected_bytes: usize) -> Result<Vec<u8>, A2AContractError> {
     let decoded = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| A2AContractError::InvalidInterfaceUrl)?;
-    if decoded.len() != expected_bytes || URL_SAFE_NO_PAD.encode(decoded) != value {
+    if decoded.len() != expected_bytes || URL_SAFE_NO_PAD.encode(&decoded) != value {
         return Err(A2AContractError::InvalidInterfaceUrl);
     }
+    Ok(decoded)
+}
+
+fn decode_lowercase_hex(value: &str) -> Result<[u8; 32], A2AContractError> {
+    let mut output = [0_u8; 32];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = (hex_nibble(value.as_bytes()[offset])? << 4)
+            | hex_nibble(value.as_bytes()[offset + 1])?;
+    }
+    Ok(output)
+}
+
+fn hex_nibble(value: u8) -> Result<u8, A2AContractError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(A2AContractError::InvalidInterfaceUrl),
+    }
+}
+
+fn append_u16_component(output: &mut Vec<u8>, value: &[u8]) -> Result<(), A2AContractError> {
+    let length = u16::try_from(value.len()).map_err(|_| A2AContractError::OutOfRange {
+        field: "artifact.reference",
+    })?;
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(value);
     Ok(())
 }
 

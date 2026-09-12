@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "KonclaveA2AArtifactStorage"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AContracts",
+ "KonclaveSecretStorage",
+ "base64 0.22.1",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "KonclaveA2AContracts"
 version = "0.1.0"
 dependencies = [
@@ -19,6 +33,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "url",
+ "zeroize",
 ]
 
 [[package]]
