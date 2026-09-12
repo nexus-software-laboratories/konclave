@@ -2,7 +2,8 @@
 
 Each complete unsigned prerelease set assembled during package validation contains:
 
-- all native client and standalone-relay archives declared by `RELEASE.json`;
+- all native client, standalone-relay, and A2A-gateway archives declared by
+  `RELEASE.json`;
 - the Docker-loadable Community Relay and A2A gateway archives;
 - `SHA256SUMS`, covering every other file in the set;
 - target-specific Rust CycloneDX SBOMs;
@@ -36,9 +37,9 @@ trust before using it as the integrity reference.
 ## Inspect software contents
 
 Files ending in `.rust.cdx.json` describe the target-filtered normal Cargo dependency
-closure for one native archive. The plugin SBOM describes the locked runtime npm graph required by the bundled
-extension. Each container SBOM scans its Docker-loadable archive and includes
-operating-system and application packages.
+closure for one native archive. The plugin SBOM describes the locked runtime npm
+graph required by the bundled extension. Each container SBOM scans its Docker-loadable
+archive and includes operating-system and application packages.
 
 CycloneDX documents omit random serial numbers, timestamps, Cargo path identifiers,
 runner paths, and local source locations. Registry package checksums and SPDX license

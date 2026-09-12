@@ -98,7 +98,8 @@ function Assert-ReleaseSourceVersions {
     foreach ($name in @(
         'KonclaveCommandLine',
         'KonclaveLocalDaemon',
-        'KonclaveCommunityRelay'
+        'KonclaveCommunityRelay',
+        'KonclaveA2AGatewayHost'
     )) {
         if ([string]$versions[$name] -cne $ExpectedVersion) {
             throw "Release version mismatch for $name."
@@ -542,6 +543,45 @@ function Copy-RelayPayload {
     )
 }
 
+function Copy-GatewayPayload {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+
+        [Parameter(Mandatory)]
+        [string]$BinaryDirectory,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationRoot,
+
+        [Parameter(Mandatory)]
+        $Artifact
+    )
+
+    $suffix = if ([string]$Artifact.operatingSystem -ceq 'windows') { '.exe' } else { '' }
+    Copy-ReleaseFile (
+        Join-Path $BinaryDirectory "KonclaveA2AGateway$suffix"
+    ) (
+        Join-Path $DestinationRoot 'bin' "KonclaveA2AGateway$suffix"
+    )
+    $gatewayRoot = Join-Path $DestinationRoot 'share' 'konclave' 'a2a'
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'a2a' 'examples' 'gateway-config.json'
+    ) (
+        Join-Path $gatewayRoot 'gateway-config.json'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'a2a' 'examples' 'self-hosted-agent-publication.json'
+    ) (
+        Join-Path $gatewayRoot 'agent-publication.json'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'docs' 'development' 'a2a-self-hosting.md'
+    ) (
+        Join-Path $gatewayRoot 'README.md'
+    )
+}
+
 function New-ReleasePackage {
     param(
         [Parameter(Mandatory)]
@@ -551,7 +591,7 @@ function New-ReleasePackage {
         [string]$Target,
 
         [Parameter(Mandatory)]
-        [ValidateSet('client', 'relay')]
+        [ValidateSet('client', 'relay', 'gateway')]
         [string]$Kind,
 
         [Parameter(Mandatory)]
@@ -593,21 +633,29 @@ function New-ReleasePackage {
     $payloadRoot = Join-Path $stagingRoot ([string]$artifact.rootDirectory)
     New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
     try {
-        if ($Kind -ceq 'client') {
-            if ([string]::IsNullOrWhiteSpace($PluginArchivePath)) {
-                throw 'Client packaging requires a built plugin archive.'
+        switch ($Kind) {
+            'client' {
+                if ([string]::IsNullOrWhiteSpace($PluginArchivePath)) {
+                    throw 'Client packaging requires a built plugin archive.'
+                }
+                $pluginPath = (Resolve-Path -LiteralPath $PluginArchivePath).Path
+                Copy-ClientPayload `
+                    $projectRootPath `
+                    $binaryPath `
+                    $pluginPath `
+                    $payloadRoot `
+                    $artifact `
+                    $version
             }
-            $pluginPath = (Resolve-Path -LiteralPath $PluginArchivePath).Path
-            Copy-ClientPayload `
-                $projectRootPath `
-                $binaryPath `
-                $pluginPath `
-                $payloadRoot `
-                $artifact `
-                $version
-        }
-        else {
-            Copy-RelayPayload $projectRootPath $binaryPath $payloadRoot $artifact
+            'relay' {
+                Copy-RelayPayload $projectRootPath $binaryPath $payloadRoot $artifact
+            }
+            'gateway' {
+                Copy-GatewayPayload $projectRootPath $binaryPath $payloadRoot $artifact
+            }
+            default {
+                throw "Unsupported native release kind: $Kind"
+            }
         }
 
         Copy-ReleaseFile (

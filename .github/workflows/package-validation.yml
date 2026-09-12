@@ -95,6 +95,7 @@ jobs:
             -p KonclaveCommandLine `
             -p KonclaveLocalDaemon `
             -p KonclaveCommunityRelay `
+            -p KonclaveA2AGatewayHost `
             --bins
           if ($LASTEXITCODE -ne 0) {
             throw 'Native release build failed.'
@@ -156,11 +157,11 @@ jobs:
             $release.artifacts |
               Where-Object {
                 $_.target -ceq '${{ matrix.target }}' -and
-                $_.kind -in @('client', 'relay')
+                $_.kind -in @('client', 'relay', 'gateway')
               }
           )
-          if ($artifacts.Count -ne 2) {
-            throw 'Native target must resolve to client and relay artifacts.'
+          if ($artifacts.Count -ne 3) {
+            throw 'Native target must resolve to client, relay, and gateway artifacts.'
           }
           foreach ($artifact in $artifacts) {
             $archive = Join-Path 'target/release-artifacts' $artifact.fileName
@@ -434,11 +435,15 @@ jobs:
           $release = Get-Content distribution/release-artifacts.json -Raw |
             ConvertFrom-Json -Depth 100
           $version = [string]$release.release.version
-          foreach ($artifact in @($release.artifacts | Where-Object { $_.kind -in @('client', 'relay') })) {
-            $roots = if ($artifact.kind -ceq 'client') {
-              @('KonclaveCommandLine', 'KonclaveLocalDaemon')
-            } else {
-              @('KonclaveCommunityRelay')
+          foreach ($artifact in @(
+            $release.artifacts |
+              Where-Object { $_.kind -in @('client', 'relay', 'gateway') }
+          )) {
+            $roots = switch ([string]$artifact.kind) {
+              'client' { @('KonclaveCommandLine', 'KonclaveLocalDaemon') }
+              'relay' { @('KonclaveCommunityRelay') }
+              'gateway' { @('KonclaveA2AGatewayHost') }
+              default { throw "Unsupported native artifact kind: $($artifact.kind)" }
             }
             ./scripts/packaging/New-ReleaseRustSbom.ps1 `
               -Target $artifact.target `

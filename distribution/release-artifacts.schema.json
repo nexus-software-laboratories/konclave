@@ -73,7 +73,7 @@
     },
     "artifacts": {
       "type": "array",
-      "minItems": 10,
+      "minItems": 14,
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -94,7 +94,7 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["client", "relay", "container"]
+            "enum": ["client", "relay", "gateway", "container"]
           },
           "target": {
             "type": "string",

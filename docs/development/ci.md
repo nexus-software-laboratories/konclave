@@ -105,7 +105,7 @@ package-validation run, including failures and cancellations, and deletes artifa
 belonging to that exact run. Pull-request code receives no `actions: write`
 permission. One-day retention is only a fallback if trusted cleanup cannot run.
 
-`Packaged clean-install acceptance` then extracts the Linux client and relay archives
+`Packaged clean-install acceptance` then extracts the Linux client, relay, and gateway archives
 twice, creates temporary trusted TLS, and drives the packaged shared local service
 through the same authenticated thin-client contract used by Copilot. It repeats the
 same pairing, delivery, restart, cancellation, enrollment, and opacity assertions

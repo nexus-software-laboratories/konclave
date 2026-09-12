@@ -98,7 +98,7 @@ function Test-ReleaseContractCoverage {
         $fileName = [string]$artifact.fileName
         [void]$expected.Add($fileName)
         [void]$expected.Add("$fileName.intoto.jsonl")
-        if ([string]$artifact.kind -in @('client', 'relay')) {
+        if ([string]$artifact.kind -in @('client', 'relay', 'gateway')) {
             [void]$expected.Add("$fileName.rust.cdx.json")
         }
         elseif ([string]$artifact.kind -ceq 'container') {
