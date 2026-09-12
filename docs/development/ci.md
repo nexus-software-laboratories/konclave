@@ -65,10 +65,12 @@ target.
 The A2A conformance workflow follows the same hosted-only trust boundary. Its stable
 required check uses a read-only pull-request file query and runs the external suite
 only when A2A contracts, gateway code, provenance, or harness files changed. It
-checks out no source for unrelated changes. Draft promotion does not trigger another
-run for an unchanged commit. An `edited` event resolves the pull request's files and
-reruns the full check when the diff is A2A-relevant, preventing a no-op result from
-masking a prior failure; unrelated diffs keep the lightweight scope-only result.
+checks out no source for unrelated changes. Relevant runs also format, test, and
+Clippy the standalone gateway host before executing external code. Draft promotion
+does not trigger another run for an unchanged commit. An `edited` event resolves the
+pull request's files and reruns the full check when the diff is A2A-relevant,
+preventing a no-op result from masking a prior failure; unrelated diffs keep the
+lightweight scope-only result.
 
 The adapter-conformance workflow follows the same hosted-only boundary. Its stable
 check validates the persistent shared-local-service client, harness-neutral adapter

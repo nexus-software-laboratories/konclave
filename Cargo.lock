@@ -109,6 +109,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveA2AGatewayHost"
+version = "0.1.0"
+dependencies = [
+ "KonclaveA2AArtifactHttp",
+ "KonclaveA2AArtifactStorage",
+ "KonclaveA2AContracts",
+ "KonclaveA2ADiscovery",
+ "KonclaveA2ADomain",
+ "KonclaveA2AGateway",
+ "KonclaveA2AKonclaveBridge",
+ "KonclaveA2ATaskStoreSqlite",
+ "KonclaveBoundedDocuments",
+ "KonclaveCryptographicCore",
+ "KonclaveDomainCore",
+ "KonclaveLocalServiceClient",
+ "KonclaveLocalServiceTransport",
+ "KonclaveSecretStorage",
+ "anyhow",
+ "axum",
+ "serde",
+ "tempfile",
+ "tokio",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "KonclaveA2AKonclaveBridge"
 version = "0.1.0"
 dependencies = [
