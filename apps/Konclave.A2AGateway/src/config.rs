@@ -170,7 +170,7 @@ impl ConfigSource {
             target_device_id,
         );
 
-        let profile = ServiceProfileId::parse(self.local_service.profile)
+        let profile = ServiceProfileId::parse(&self.local_service.profile)
             .context("validating local-service profile")?;
         let local_service = load_local_service(
             &installation_file,
