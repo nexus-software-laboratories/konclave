@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::future::{Future, IntoFuture as _};
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -112,9 +112,11 @@ where
         let _ = shutdown_sender.send(());
     };
     let server_result = {
-        let server = axum::serve(listener, router).with_graceful_shutdown(async {
-            let _ = shutdown_receiver.await;
-        });
+        let server = axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_receiver.await;
+            })
+            .into_future();
         tokio::pin!(server);
         tokio::pin!(shutdown_trigger);
         tokio::select! {
