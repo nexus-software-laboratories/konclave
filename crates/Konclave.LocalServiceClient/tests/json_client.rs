@@ -29,8 +29,6 @@ async fn client_issues_a_grant_and_retries_an_ambiguous_session_request_exactly(
     let issuer_public_key = issuer_identity.public_key();
     let issuer_key_id = IssuerKeyId::from_bytes([1; 16]);
     let issuer_key_version = IssuerKeyVersion::new(1).unwrap();
-    let (request_received_sender, request_received_receiver) = oneshot::channel();
-    let (release_service_sender, release_service_receiver) = oneshot::channel();
     let registry = InMemorySessionAuthorizationRegistry::new();
     registry
         .register_issuer(
@@ -170,6 +168,8 @@ async fn persistent_session_reuses_one_authenticated_channel_for_delivery_operat
     let issuer_public_key = issuer_identity.public_key();
     let issuer_key_id = IssuerKeyId::from_bytes([3; 16]);
     let issuer_key_version = IssuerKeyVersion::new(1).unwrap();
+    let (request_received_sender, request_received_receiver) = oneshot::channel();
+    let (release_service_sender, release_service_receiver) = oneshot::channel();
     let registry = InMemorySessionAuthorizationRegistry::new();
     registry
         .register_issuer(
