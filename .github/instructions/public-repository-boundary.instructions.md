@@ -5,6 +5,9 @@ scope: "public repository privacy and self-hosted runner trust boundary"
 
 # Public repository boundary
 
+- This public repository runs pull-request validation only on GitHub-hosted runners.
+  Never route pull-request code or metadata jobs to PitCrew or another self-hosted
+  runner.
 - Never mention private repository names, paths, service topology, credentials,
   databases, incidents, issues, or implementation plans in tracked files, commits,
   issues, pull requests, or workflow output.

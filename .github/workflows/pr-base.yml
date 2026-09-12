@@ -12,7 +12,7 @@ jobs:
   base:
     name: PR base
     if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [linux, x64, automation-control]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}

@@ -12,9 +12,9 @@ invariant. Do not substitute a full workspace build for a missing assertion.
 
 ### Pull-request merge gates
 
-PitCrew owns complete workspace, integration, packaging, and hosted evidence. Merge
-gates grow with implemented capabilities and include the suites below once their
-corresponding surfaces exist.
+GitHub-hosted runners own complete workspace, integration, packaging, and hosted
+evidence for this public repository. Merge gates grow with implemented capabilities
+and include the suites below once their corresponding surfaces exist.
 
 ### Release evidence
 
@@ -245,7 +245,7 @@ relay-visible metadata require:
 
 ## Deferred platform evidence
 
-Native Windows Service type checking and runtime execution are not covered by the
-current Linux-only PitCrew contract. Code that changes the Windows host preserves the
-existing static checks and explicitly reports this missing evidence until a trusted
-native runner lane exists.
+Primary CI runs on hosted Linux and does not execute the Windows Service runtime.
+The hosted Windows package lane retains the existing native security and endpoint
+tests; changes needing broader Windows Service execution report that missing evidence
+until the package workflow adds the corresponding test.

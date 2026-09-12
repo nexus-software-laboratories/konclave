@@ -16,46 +16,11 @@
     "Review policy"
   ],
   "draftValidation": {
-    "hostedDefault": "subset",
-    "pitcrewDefault": "full",
-    "subsetJobs": [
-      "lint"
-    ]
+    "hostedDefault": "ready-only",
+    "pitcrewDefault": "ready-only",
+    "subsetJobs": []
   },
   "runnerProfiles": [
-    {
-      "id": "linux-x64-general-purpose",
-      "source": "project",
-      "labels": [
-        "self-hosted",
-        "linux",
-        "x64",
-        "general-purpose"
-      ],
-      "jobs": [
-        "rust-build-test",
-        "rust-lint",
-        "node-build-and-test",
-        "local-daemon-daemon-packaging"
-      ]
-    },
-    {
-      "id": "linux-x64-automation-control",
-      "source": "project",
-      "labels": [
-        "linux",
-        "x64",
-        "automation-control"
-      ],
-      "jobs": [
-        "source-policy",
-        "validation-plan",
-        "ci",
-        "pr-base/base",
-        "pr-title/title",
-        "pr-review-policy/evaluate"
-      ]
-    },
     {
       "id": "ubuntu-latest-hosted",
       "source": "github-hosted",
@@ -63,6 +28,16 @@
         "ubuntu-latest"
       ],
       "jobs": [
+        "rust-build-test",
+        "rust-lint",
+        "node-build-and-test",
+        "local-daemon-daemon-packaging",
+        "source-policy",
+        "validation-plan",
+        "ci",
+        "pr-base/base",
+        "pr-title/title",
+        "pr-review-policy/evaluate",
         "a2a-conformance",
         "adapter-conformance",
         "community-relay-container-ci",
@@ -78,7 +53,7 @@
       "roles": [
         "merge-gate"
       ],
-      "draftBehavior": "full",
+      "draftBehavior": "ready-only",
       "requiredChecks": [
         "A2A conformance"
       ]
@@ -89,7 +64,7 @@
       "roles": [
         "merge-gate"
       ],
-      "draftBehavior": "full",
+      "draftBehavior": "ready-only",
       "requiredChecks": [
         "Adapter conformance"
       ]
@@ -100,7 +75,7 @@
       "roles": [
         "merge-gate"
       ],
-      "draftBehavior": "full",
+      "draftBehavior": "ready-only",
       "requiredChecks": [
         "Package validation"
       ]

@@ -183,15 +183,15 @@ $uvRequirement = (
     "uv==$($profile.tck.uvVersion) --hash=sha256:$($profile.tck.uvArtifact.sha256)"
 )
 if (
-    $workflow -notmatch '(?m)^\s+types: \[opened, edited, synchronize, reopened\]\s*$' -or
-    $workflow -match '\bready_for_review\b' -or
+    $workflow -notmatch '(?m)^\s+types: \[opened, edited, synchronize, reopened, ready_for_review, converted_to_draft\]\s*$' -or
+    $workflow -notmatch '(?m)^\s+cancel-in-progress: true\s*$' -or
     $workflow -notmatch '(?m)^\s+runs-on: ubuntu-latest\s*$' -or
     $workflow -match '\b(?:self-hosted|general-purpose|automation-control)\b' -or
     $workflow -notmatch [regex]::Escape($uvRequirement) -or
     $workflow -notmatch '(?m)^\s+contents: read\s*$' -or
     $workflow -notmatch '(?m)^\s+pull-requests: read\s*$'
 ) {
-    throw 'A2A conformance workflow drifted from the hosted, single-run profile.'
+    throw 'A2A conformance workflow drifted from the hosted, draft-aware profile.'
 }
 
 $delivery = Get-Content -LiteralPath (
@@ -211,6 +211,7 @@ if (
     @($hostedProfile[0].jobs) -cnotcontains 'a2a-conformance' -or
     $component.Count -ne 1 -or
     @($component[0].roles) -cnotcontains 'merge-gate' -or
+    [string]$component[0].draftBehavior -cne 'ready-only' -or
     @($component[0].requiredChecks) -cnotcontains 'A2A conformance'
 ) {
     throw 'A2A conformance delivery metadata is incomplete.'
