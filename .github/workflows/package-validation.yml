@@ -509,7 +509,7 @@ jobs:
       - package-container
       - release-integrity
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -544,6 +544,11 @@ jobs:
         with:
           name: konclave-linux-amd64-container-unsigned
           path: target/packaged-acceptance
+      - name: Download Linux A2A gateway container candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: konclave-a2a-gateway-linux-amd64-container-unsigned
+          path: target/packaged-acceptance
       - name: Exercise clean native and container installations
         shell: bash
         run: |
@@ -555,6 +560,9 @@ jobs:
           relay="$(
             jq -er '.artifacts[] | select(.id == "konclave-relay-linux-x64") | .fileName' "$release"
           )"
+          gateway="$(
+            jq -er '.artifacts[] | select(.id == "konclave-gateway-linux-x64") | .fileName' "$release"
+          )"
           container="$(
             jq -er \
               '.artifacts[] | select(.id == "konclave-community-relay-container-linux-amd64") | .fileName' \
@@ -565,11 +573,24 @@ jobs:
               '.artifacts[] | select(.id == "konclave-community-relay-container-linux-amd64") | .image' \
               "$release"
           )"
+          gateway_container="$(
+            jq -er \
+              '.artifacts[] | select(.id == "konclave-a2a-gateway-container-linux-amd64") | .fileName' \
+              "$release"
+          )"
+          gateway_image="$(
+            jq -er \
+              '.artifacts[] | select(.id == "konclave-a2a-gateway-container-linux-amd64") | .image' \
+              "$release"
+          )"
           bash ./scripts/packaging/Test-PackagedAcceptance.sh \
             "target/packaged-acceptance/$client" \
             "target/packaged-acceptance/$relay" \
+            "target/packaged-acceptance/$gateway" \
             "target/packaged-acceptance/$container" \
-            "$image"
+            "$image" \
+            "target/packaged-acceptance/$gateway_container" \
+            "$gateway_image"
 
   package-validation:
     name: Package validation

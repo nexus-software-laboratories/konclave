@@ -184,17 +184,17 @@ The Linux AMD64 container candidate is a separate Docker-loadable archive:
 docker image load --input konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar
 ```
 
-Use the maintained
-[`compose.example.yaml`](../../apps/Konclave.A2AGateway/compose.example.yaml) and
-[container boundary](../../apps/Konclave.A2AGateway/docs/container/rust-service.md).
+Use `<gateway-root>/share/konclave/a2a/compose.example.yaml`,
+`gateway-config.container.json`, and `container.md`.
 The gateway runs as the local-service account's nonzero numeric UID, publishes only
 on host loopback, and uses separate read-only configuration, owner-protected
 credential, local-service socket, SQLite, and encrypted-object mounts. Trusted TLS
 termination is required before any non-loopback exposure.
 
-Container image and release-set validation are part of package validation. Starting
-the packaged gateway against an independently installed shared service remains a
-separate clean-install acceptance gate.
+Package validation starts both the native and container gateway against an
+independently installed shared service and verifies discovery, authenticated task
+submission, exact directed response handling, SQLite restart recovery, and encrypted
+object retrieval.
 
 ## Unsigned status
 

@@ -580,6 +580,21 @@ function Copy-GatewayPayload {
     ) (
         Join-Path $gatewayRoot 'README.md'
     )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'apps' 'Konclave.A2AGateway' 'compose.example.yaml'
+    ) (
+        Join-Path $gatewayRoot 'compose.example.yaml'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'apps' 'Konclave.A2AGateway' 'gateway-config.container.json'
+    ) (
+        Join-Path $gatewayRoot 'gateway-config.container.json'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'apps' 'Konclave.A2AGateway' 'docs' 'container' 'rust-service.md'
+    ) (
+        Join-Path $gatewayRoot 'container.md'
+    )
 }
 
 function New-ReleasePackage {

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-    echo 'Usage: Test-PackagedAcceptance.sh <client-tar.gz> <relay-tar.gz> <container-docker.tar> <image-reference>' >&2
+if [ "$#" -ne 7 ]; then
+    echo 'Usage: Test-PackagedAcceptance.sh <client-tar.gz> <relay-tar.gz> <gateway-tar.gz> <relay-container-docker.tar> <relay-image-reference> <gateway-container-docker.tar> <gateway-image-reference>' >&2
     exit 2
 fi
 
@@ -17,17 +17,18 @@ workspace_root="$(realpath -e -- "$GITHUB_WORKSPACE")"
 
 client_archive="$(realpath -e -- "$1")"
 relay_archive="$(realpath -e -- "$2")"
-container_archive="$(realpath -e -- "$3")"
-image_reference="$(container_image_release_reference 'konclave-community-relay' "$4")"
+gateway_archive="$(realpath -e -- "$3")"
+relay_container_archive="$(realpath -e -- "$4")"
+relay_image_reference="$(container_image_release_reference 'konclave-community-relay' "$5")"
+gateway_container_archive="$(realpath -e -- "$6")"
+gateway_image_reference="$(container_image_release_reference 'konclave-a2a-gateway' "$7")"
 acceptance_root="$(mktemp -d "$RUNNER_TEMP/konclave-acceptance-XXXXXXXX")"
 harness_target="$acceptance_root/harness-target"
 native_relay_pid=''
 proxy_pid=''
-container_name=''
 container_run_identity=''
 container_baseline=''
-image_loaded=false
-loaded_image_id=''
+loaded_image_ids=()
 
 terminate_process() {
     local process_id="$1"
@@ -56,10 +57,10 @@ cleanup() {
         container_validation_remove_owned "$container_run_identity" || cleanup_failed=1
         container_validation_assert_no_residue "$container_run_identity" || cleanup_failed=1
     fi
-    if [ "$image_loaded" = true ]; then
-        docker image rm --force "$loaded_image_id" >/dev/null 2>&1 || cleanup_failed=1
-        docker image inspect "$loaded_image_id" >/dev/null 2>&1 && cleanup_failed=1
-    fi
+    for image_id in "${loaded_image_ids[@]}"; do
+        docker image rm --force "$image_id" >/dev/null 2>&1 || cleanup_failed=1
+        docker image inspect "$image_id" >/dev/null 2>&1 && cleanup_failed=1
+    done
     if [ -n "$container_baseline" ] && [ -f "$container_baseline" ]; then
         container_validation_assert_baseline_intact "$container_baseline" || cleanup_failed=1
     fi
@@ -152,8 +153,20 @@ prepare_state() {
 }
 
 run_harness() {
-    local state_root="$1"
-    local endpoint="$2"
+    local mode="$1"
+    local state_root="$2"
+    local endpoint="$3"
+    local gateway_launcher gateway_container gateway_container_name gateway_address
+    gateway_address="127.0.0.1:$(free_port)"
+    if [ "$mode" = 'container' ]; then
+        gateway_launcher="$workspace_root/scripts/packaging/Run-PackagedA2AGatewayContainer.sh"
+        gateway_container=true
+        gateway_container_name="konclave-acceptance-gateway-$container_run_identity"
+    else
+        gateway_launcher="$gateway_root/bin/KonclaveA2AGateway"
+        gateway_container=false
+        gateway_container_name=''
+    fi
     SSL_CERT_FILE="$acceptance_root/tls/ca.crt" \
     CARGO_TARGET_DIR="$harness_target" \
     KONCLAVE_ACCEPTANCE_CLI="$client_root_a/bin/konclave" \
@@ -172,6 +185,12 @@ run_harness() {
     KONCLAVE_ACCEPTANCE_EXTENSION_ROOT="$state_root/extension" \
     KONCLAVE_ACCEPTANCE_RELAY_STATE="$state_root/relay" \
     KONCLAVE_ACCEPTANCE_RELAY_DATABASE="$state_root/relay/relay.sqlite" \
+    KONCLAVE_ACCEPTANCE_GATEWAY="$gateway_launcher" \
+    KONCLAVE_ACCEPTANCE_GATEWAY_ADDRESS="$gateway_address" \
+    KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER="$gateway_container" \
+    KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME="$gateway_container_name" \
+    KONCLAVE_ACCEPTANCE_GATEWAY_IMAGE="$gateway_image_reference" \
+    KONCLAVE_ACCEPTANCE_CONTAINER_RUN_ID="$container_run_identity" \
         cargo test \
             --manifest-path "$workspace_root/Cargo.toml" \
             -p KonclaveLocalDaemon \
@@ -236,7 +255,8 @@ openssl x509 -req \
 client_root_a="$(extract_single_root "$client_archive" "$acceptance_root/client-a")"
 client_root_b="$(extract_single_root "$client_archive" "$acceptance_root/client-b")"
 relay_root="$(extract_single_root "$relay_archive" "$acceptance_root/relay-install")"
-for root in "$client_root_a" "$client_root_b" "$relay_root"; do
+gateway_root="$(extract_single_root "$gateway_archive" "$acceptance_root/gateway-install")"
+for root in "$client_root_a" "$client_root_b" "$relay_root" "$gateway_root"; do
     test -f "$root/UNSIGNED-PRERELEASE.txt"
 done
 
@@ -255,22 +275,31 @@ start_tls_proxy "$native_http_port" "$native_tls_port" "$native_state/relay/tls-
 wait_for_health "$native_endpoint"
 assert_anonymous_rejected "$native_endpoint"
 assert_untrusted_tls_rejected "$native_state" "$native_endpoint"
-run_harness "$native_state" "$native_endpoint"
+run_harness native "$native_state" "$native_endpoint"
 terminate_process "$proxy_pid"
 proxy_pid=''
 terminate_process "$native_relay_pid"
 native_relay_pid=''
 
-if docker image inspect "$image_reference" >/dev/null 2>&1; then
-    echo "::error::Acceptance runner already contains $image_reference." >&2
-    exit 1
-fi
+for image_reference in "$relay_image_reference" "$gateway_image_reference"; do
+    if docker image inspect "$image_reference" >/dev/null 2>&1; then
+        echo "::error::Acceptance runner already contains $image_reference." >&2
+        exit 1
+    fi
+done
 container_run_identity="$(container_validation_run_identity)"
 container_baseline="$acceptance_root/docker-baseline.tsv"
 container_validation_capture_baseline "$container_baseline"
-docker image load --input "$container_archive" >/dev/null
-image_loaded=true
-loaded_image_id="$(docker image inspect --format '{{.Id}}' "$image_reference")"
+docker image load --input "$relay_container_archive" >/dev/null
+relay_loaded_image_id="$(docker image inspect --format '{{.Id}}' "$relay_image_reference")"
+loaded_image_ids+=("$relay_loaded_image_id")
+docker image load --input "$gateway_container_archive" >/dev/null
+gateway_loaded_image_id="$(docker image inspect --format '{{.Id}}' "$gateway_image_reference")"
+loaded_image_ids+=("$gateway_loaded_image_id")
+if [ "$relay_loaded_image_id" = "$gateway_loaded_image_id" ]; then
+    echo '::error::Relay and gateway archives resolved to one image identity.' >&2
+    exit 1
+fi
 
 container_http_port="$(free_port)"
 container_tls_port="$(free_port)"
@@ -278,7 +307,7 @@ container_endpoint="https://localhost:$container_tls_port"
 container_state="$(prepare_state container "$container_endpoint")"
 chmod 0777 "$container_state/relay"
 chmod 0644 "$container_state/access.json"
-container_name="konclave-acceptance-$container_run_identity"
+container_name="konclave-acceptance-relay-$container_run_identity"
 docker run --detach \
     --name "$container_name" \
     --label "${CONTAINER_VALIDATION_OWNER_LABEL}=${container_run_identity}" \
@@ -294,25 +323,26 @@ docker run --detach \
     --mount "type=bind,source=$container_state/access.json,target=/run/secrets/konclave-relay-access.json,readonly" \
     --mount "type=bind,source=$container_state/relay,target=/var/lib/konclave" \
     --tmpfs /tmp \
-    "$image_reference" >/dev/null
+    "$relay_image_reference" >/dev/null
 start_tls_proxy \
     "$container_http_port" \
     "$container_tls_port" \
     "$container_state/relay/tls-proxy.log"
 wait_for_health "$container_endpoint"
 assert_anonymous_rejected "$container_endpoint"
-run_harness "$container_state" "$container_endpoint"
+run_harness container "$container_state" "$container_endpoint"
 terminate_process "$proxy_pid"
 proxy_pid=''
 container_validation_remove_owned "$container_run_identity"
 container_validation_assert_no_residue "$container_run_identity"
-container_name=''
-docker image rm --force "$loaded_image_id" >/dev/null
-if docker image inspect "$loaded_image_id" >/dev/null 2>&1; then
-    echo '::error::Acceptance image remained after exact removal.' >&2
-    exit 1
-fi
-image_loaded=false
+for image_id in "${loaded_image_ids[@]}"; do
+    docker image rm --force "$image_id" >/dev/null
+    if docker image inspect "$image_id" >/dev/null 2>&1; then
+        echo '::error::Acceptance image remained after exact removal.' >&2
+        exit 1
+    fi
+done
+loaded_image_ids=()
 container_validation_assert_baseline_intact "$container_baseline"
 
 native_profiles="$(find "$native_state/profiles" -name profile.sqlite -type f | wc -l)"
@@ -328,15 +358,29 @@ for state_root in "$native_state" "$container_state"; do
             exit 1
         fi
     done
+    if [ ! -f "$state_root/gateway/tasks/tasks.sqlite" ]; then
+        echo '::error::Packaged gateway task database is missing.' >&2
+        exit 1
+    fi
+    if [ "$(find "$state_root/gateway/objects" -maxdepth 1 -type f | wc -l)" -ne 1 ]; then
+        echo '::error::Packaged gateway ciphertext object was not retained.' >&2
+        exit 1
+    fi
 done
 
-rm -rf -- "$acceptance_root/client-a" "$acceptance_root/client-b" "$acceptance_root/relay-install"
+rm -rf -- \
+    "$acceptance_root/client-a" \
+    "$acceptance_root/client-b" \
+    "$acceptance_root/relay-install" \
+    "$acceptance_root/gateway-install"
 if [ ! -f "$native_state/profiles/session-packaged-a/profile.sqlite" ] ||
     [ ! -f "$container_state/profiles/session-packaged-b/profile.sqlite" ] ||
     [ ! -f "$native_state/profiles/generic-packaged/profile.sqlite" ] ||
-    [ ! -f "$container_state/profiles/generic-packaged/profile.sqlite" ]; then
+    [ ! -f "$container_state/profiles/generic-packaged/profile.sqlite" ] ||
+    [ ! -f "$native_state/gateway/tasks/tasks.sqlite" ] ||
+    [ ! -f "$container_state/gateway/tasks/tasks.sqlite" ]; then
     echo '::error::Removing installed artifacts also removed durable profile state.' >&2
     exit 1
 fi
 
-echo 'Packaged native and container acceptance passed with exact cleanup.'
+echo 'Packaged native and container relay/gateway acceptance passed with exact cleanup.'

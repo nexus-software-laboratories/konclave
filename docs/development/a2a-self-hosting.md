@@ -124,7 +124,8 @@ operator-managed TLS reverse proxy.
 
 ## Remaining packaging work
 
-Native archives, service definitions, an agent-facing artifact-publication adapter,
-and packaged clean-install acceptance are separate delivery items. They must preserve
-this configuration and trust boundary rather than embedding credentials or moving
-plaintext into the relay.
+Native archives and the Linux AMD64 container are exercised by packaged clean-install
+acceptance against an independently installed shared service. Service definitions and
+an agent-facing artifact-publication adapter remain separate delivery items. They
+must preserve this configuration and trust boundary rather than embedding credentials
+or moving plaintext into the relay.
