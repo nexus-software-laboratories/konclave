@@ -609,8 +609,7 @@ async fn execute_session_request(
                 .and_then(|response| response.clone())
             {
                 Some(response) => {
-                    if let Some(failure) =
-                        detached_claim_replay_failure(state, &request, &response)
+                    if let Some(failure) = detached_claim_replay_failure(state, &request, &response)
                     {
                         failure
                     } else if request_is_durable(&ledger, &key) {
@@ -2176,10 +2175,7 @@ fn session_grant_is_active(
     grant: &SessionGrant,
 ) -> bool {
     registry
-        .active_grant(
-            grant.grant_id(),
-            SystemUnixClock.now_unix_milliseconds(),
-        )
+        .active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
         .is_some_and(|active| &active == grant)
 }
 
@@ -3653,11 +3649,7 @@ mod tests {
         database
     }
 
-    async fn wait_for_recorded_outcome_count(
-        root: &TestProfileRoot,
-        profile: &str,
-        expected: i64,
-    ) {
+    async fn wait_for_recorded_outcome_count(root: &TestProfileRoot, profile: &str, expected: i64) {
         let outcome_database = wait_for_outcome_database(root, profile).await;
         tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
             loop {
@@ -4112,13 +4104,7 @@ mod tests {
 
         let mut reconnected = fixture.connect("session-claim-retry", 4).await;
         assert!(matches!(
-            request(
-                &mut reconnected,
-                11,
-                "delivery.claim",
-                claim_payload
-            )
-            .await,
+            request(&mut reconnected, 11, "delivery.claim", claim_payload).await,
             LocalServiceResponse::Failure {
                 code: LocalServiceErrorCode::Conflict,
                 ..

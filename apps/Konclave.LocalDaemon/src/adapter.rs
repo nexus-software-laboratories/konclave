@@ -831,8 +831,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{
-        AdapterLaunchConfig, WaitForClaimOutcome, deliver, parse_consumer_id,
-        wait_for_claim_until,
+        AdapterLaunchConfig, WaitForClaimOutcome, deliver, parse_consumer_id, wait_for_claim_until,
     };
     use crate::persistence::{
         ClaimedRemoteEvent, ProfileStoreError, RemoteEvent, RemoteEventPayload,

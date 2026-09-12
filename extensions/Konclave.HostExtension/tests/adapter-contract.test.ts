@@ -2,11 +2,7 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import {
-  maxClaimBatch,
-  maxEventTextBytes,
-  maxWaitMilliseconds,
-} from '../src/adapter/session.js';
+import { maxClaimBatch, maxEventTextBytes, maxWaitMilliseconds } from '../src/adapter/session.js';
 import { deliveryOperations, serviceOperations } from '../src/service/operations.js';
 
 interface AdapterFixture {
