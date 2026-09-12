@@ -55,6 +55,19 @@ evidence. A generic client must supply an explicit durable profile alias or use 
 clearly ephemeral isolated profile; PID, working directory, time, model name, and
 free-form text do not establish continuity.
 
+`Konclave.LocalServiceClient` exposes both one-shot reconciled requests and a
+persistent authenticated JSON session. One-shot calls may retry an ambiguous
+transport failure with the same request identifier and are not valid for
+connection-owned delivery claims. Persistent sessions do not retry operations
+automatically; they preserve the connection-owned delivery lease and leave
+operation-specific reconciliation to the harness adapter. `Konclave.AdapterSdk`
+builds its typed delivery API on that persistent session.
+
+A persistent request temporarily owns its stream. Cancellation, timeout, or
+transport failure drops that stream and makes the session unusable; only a fully read
+response restores it. This prevents a late response from being interpreted as a
+later operation's result.
+
 ## Authenticated transcript
 
 Protocol version 2 has separate issuer and session roles. Both transcripts begin with
@@ -160,7 +173,10 @@ session public key, profile, and request identifier, so a replacement grant for 
 same live client can reconcile without broadening cancellation authority. Terminal
 request and response frames are sealed into the profile database before the response
 is published. The journal is bounded to the newest 256 outcomes per profile and
-survives shared-service restart. A conflicting operation or payload under one key is
+survives shared-service restart. A successful `delivery.claim` outcome is also bound
+to its live connection-owned lease. Replaying that request identifier after detach
+returns `conflict`; the replacement session uses a fresh request identifier to obtain
+current lease generations. A conflicting operation or payload under one key is
 rejected rather than replacing the recorded result.
 
 Cancellation is an authenticated control operation carrying the target request

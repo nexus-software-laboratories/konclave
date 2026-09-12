@@ -17,10 +17,10 @@ use tokio::time::timeout;
 
 use KonclaveLocalServiceTransport::{
     AuthorizationEvidenceSet, AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
-    IssuerHandshakeRequest, IssuerKeyId, IssuerKeyVersion, LocalServiceEndpoint,
-    LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse, LocalServiceTransportError,
-    MAX_RPC_PAYLOAD_BYTES, OperationName, RequestId, ServiceProfileId, SessionCapabilities,
-    SessionGrant, SessionGrantClaims, SessionGrantId, SessionHandshakeRequest,
+    IssuerHandshakeRequest, IssuerKeyId, IssuerKeyVersion, LocalServiceClientStream,
+    LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse,
+    LocalServiceTransportError, MAX_RPC_PAYLOAD_BYTES, OperationName, RequestId, ServiceProfileId,
+    SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId, SessionHandshakeRequest,
     complete_issuer_client_handshake, complete_session_client_handshake, connect_local_service,
     decode_lowercase_hex, encode_lowercase_hex, read_response, write_request,
 };
@@ -136,6 +136,18 @@ pub struct LocalServiceJsonClient {
     sequence: AtomicU64,
 }
 
+/// One persistent authenticated session over the shared local service.
+///
+/// Requests on this session are never retried automatically. If transport becomes
+/// ambiguous, the caller applies operation-specific reconciliation. In particular,
+/// a connection-owned delivery claim uses a fresh request identifier after reconnect.
+/// Dropping the session closes the channel and releases any connection-owned delivery
+/// lease in the service.
+pub struct LocalServiceJsonSession<'a> {
+    client: &'a LocalServiceJsonClient,
+    stream: Option<LocalServiceClientStream>,
+}
+
 impl LocalServiceJsonClient {
     /// Generates one ephemeral session identity and obtains its first exact-profile
     /// grant.
@@ -181,6 +193,31 @@ impl LocalServiceJsonClient {
         )
         .await
         .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)?
+    }
+
+    /// Opens one persistent authenticated session using this client's ephemeral
+    /// session identity.
+    ///
+    /// Connection and authentication may be retried before any caller operation is
+    /// sent. Once returned, each session request is single-attempt so the caller owns
+    /// reconciliation for an ambiguous side effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, authentication, deadline, service, or grant failure.
+    pub async fn open_session(
+        &self,
+    ) -> Result<LocalServiceJsonSession<'_>, LocalServiceJsonClientError> {
+        let grant = self.current_grant().await?;
+        match self.open_session_once(&grant).await {
+            Ok(session) => Ok(session),
+            Err(LocalServiceJsonClientError::Transport) => self.open_session_once(&grant).await,
+            Err(LocalServiceJsonClientError::Authentication) => {
+                let refreshed = self.refresh_grant().await?;
+                self.open_session_once(&refreshed).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn request_with_reconciliation(
@@ -299,23 +336,8 @@ impl LocalServiceJsonClient {
         grant: &SessionGrant,
         request: &LocalServiceRequest,
     ) -> Result<Vec<u8>, LocalServiceJsonClientError> {
-        let client_instance =
-            ClientInstanceId::from_bytes(self.derived_id(CLIENT_INSTANCE_DOMAIN)?);
         timeout(self.config.request_timeout, async {
-            let mut stream = connect_local_service(self.config.endpoint())
-                .await
-                .map_err(map_transport_error)?;
-            complete_session_client_handshake(
-                &mut stream,
-                &SessionHandshakeRequest {
-                    grant: grant.clone(),
-                    client_instance,
-                },
-                &self.session_identity,
-                self.config.service_public_key,
-            )
-            .await
-            .map_err(map_transport_error)?;
+            let mut stream = self.open_session_stream(grant).await?;
             write_request(&mut stream, request)
                 .await
                 .map_err(map_transport_error)?;
@@ -326,6 +348,43 @@ impl LocalServiceJsonClient {
         .await
         .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)?
         .and_then(|response| response_payload(response, request.request_id()))
+    }
+
+    async fn open_session_once(
+        &self,
+        grant: &SessionGrant,
+    ) -> Result<LocalServiceJsonSession<'_>, LocalServiceJsonClientError> {
+        Ok(LocalServiceJsonSession {
+            client: self,
+            stream: Some(
+                timeout(self.config.request_timeout, self.open_session_stream(grant))
+                    .await
+                    .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)??,
+            ),
+        })
+    }
+
+    async fn open_session_stream(
+        &self,
+        grant: &SessionGrant,
+    ) -> Result<LocalServiceClientStream, LocalServiceJsonClientError> {
+        let client_instance =
+            ClientInstanceId::from_bytes(self.derived_id(CLIENT_INSTANCE_DOMAIN)?);
+        let mut stream = connect_local_service(self.config.endpoint())
+            .await
+            .map_err(map_transport_error)?;
+        complete_session_client_handshake(
+            &mut stream,
+            &SessionHandshakeRequest {
+                grant: grant.clone(),
+                client_instance,
+            },
+            &self.session_identity,
+            self.config.service_public_key,
+        )
+        .await
+        .map_err(map_transport_error)?;
+        Ok(stream)
     }
 
     fn parse_grant(&self, payload: &[u8]) -> Result<SessionGrant, LocalServiceJsonClientError> {
@@ -376,6 +435,43 @@ impl LocalServiceJsonClient {
         digest.finalize()[..16]
             .try_into()
             .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)
+    }
+}
+
+impl LocalServiceJsonSession<'_> {
+    /// Invokes one bounded operation exactly once on this authenticated session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed transport, deadline, service, bound, or response-validation
+    /// failure. A transport failure may be ambiguous; the caller must apply the
+    /// operation's reconciliation contract before retrying on a replacement session.
+    pub async fn request(
+        &mut self,
+        request_id: RequestId,
+        operation: &str,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, LocalServiceJsonClientError> {
+        let operation = OperationName::parse(operation)
+            .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)?;
+        let request = LocalServiceRequest::new(request_id, operation, payload)
+            .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)?;
+        let mut stream = self
+            .stream
+            .take()
+            .ok_or(LocalServiceJsonClientError::Transport)?;
+        let response = timeout(self.client.config.request_timeout, async {
+            write_request(&mut stream, &request)
+                .await
+                .map_err(map_transport_error)?;
+            read_response(&mut stream)
+                .await
+                .map_err(map_transport_error)
+        })
+        .await
+        .map_err(|_| LocalServiceJsonClientError::DeadlineExceeded)??;
+        self.stream = Some(stream);
+        response_payload(response, request_id)
     }
 }
 

@@ -1,0 +1,202 @@
+{
+  "$comment": "Harness-neutral shared-local-service delivery contract. Identifiers are lowercase hex.",
+  "schemaVersion": 1,
+  "adapterApiVersion": 1,
+  "operations": {
+    "claim": "delivery.claim",
+    "acknowledge": "delivery.acknowledge",
+    "release": "delivery.release",
+    "heartbeat": "delivery.heartbeat",
+    "status": "service.status"
+  },
+  "limits": {
+    "maxClaimBatch": 16,
+    "maxWaitMilliseconds": 30000,
+    "maxEventTextBytes": 65536,
+    "recommendedHeartbeatMilliseconds": 30000
+  },
+  "claim": {
+    "request": {
+      "maxEvents": 9,
+      "waitMilliseconds": 30000
+    },
+    "response": {
+      "events": [
+        {
+          "notificationId": "000102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 1,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 11,
+          "payload": {
+            "kind": "application_text",
+            "messageId": "505152535455565758595a5b5c5d5e5f",
+            "text": "contract changed"
+          }
+        },
+        {
+          "notificationId": "010102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 2,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 12,
+          "payload": {
+            "kind": "directed_request",
+            "messageId": "515152535455565758595a5b5c5d5e5f",
+            "targetDeviceId": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+            "text": "review the contract"
+          }
+        },
+        {
+          "notificationId": "020102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 3,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 13,
+          "payload": {
+            "kind": "collaboration_policy_proposal",
+            "proposalId": "525152535455565758595a5b5c5d5e5f",
+            "policyDigest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+            "replacesPolicyDigest": null
+          }
+        },
+        {
+          "notificationId": "030102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 4,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 14,
+          "payload": {
+            "kind": "collaboration_policy_response",
+            "proposalId": "525152535455565758595a5b5c5d5e5f",
+            "policyDigest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "notificationId": "040102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 5,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 15,
+          "payload": {
+            "kind": "collaboration_policy_revocation",
+            "policyDigest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+          }
+        },
+        {
+          "notificationId": "050102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 6,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 16,
+          "payload": {
+            "kind": "member_added",
+            "device": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+            "role": "administrator"
+          }
+        },
+        {
+          "notificationId": "060102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 7,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 17,
+          "payload": {
+            "kind": "member_removed",
+            "device": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+          }
+        },
+        {
+          "notificationId": "070102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 8,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 18,
+          "payload": {
+            "kind": "member_role_changed",
+            "device": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+            "role": "member"
+          }
+        },
+        {
+          "notificationId": "080102030405060708090a0b0c0d0e0f",
+          "leaseGeneration": 7,
+          "sequence": 9,
+          "conversation": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+          "sender": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+          "relayCursor": 19,
+          "payload": {
+            "kind": "local_access_removed",
+            "device": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+          }
+        }
+      ]
+    }
+  },
+  "acknowledge": {
+    "request": {
+      "notificationId": "000102030405060708090a0b0c0d0e0f",
+      "leaseGeneration": 7
+    },
+    "response": {}
+  },
+  "release": {
+    "request": {
+      "notificationId": "000102030405060708090a0b0c0d0e0f",
+      "leaseGeneration": 7
+    },
+    "response": {}
+  },
+  "heartbeat": {
+    "request": {
+      "turn": {
+        "conversationId": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "policyDigest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "requestMessageId": "515152535455565758595a5b5c5d5e5f",
+        "attempt": 2
+      }
+    },
+    "response": {}
+  },
+  "status": {
+    "request": {},
+    "response": {
+      "profile": "adapter-example",
+      "deviceId": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "relayConfigured": true,
+      "watchedConversations": 2,
+      "pendingEvents": 3,
+      "claimedEvents": 1,
+      "deliveryDegraded": false,
+      "authorizationPolicy": "AccountTrusted",
+      "authorizationProvider": "AccountTrusted",
+      "authorizationEvidence": ["account_trusted"],
+      "authorizationPolicyVersion": 1,
+      "grantExpiresAtUnixMilliseconds": 1900000000000,
+      "grantCapabilities": 15,
+      "activeGrants": 2,
+      "activeGrantsForIssuer": 2,
+      "activeGrantsForProfile": 1,
+      "grantLimit": 1024,
+      "grantLimitPerIssuer": 256,
+      "grantLimitPerProfile": 16
+    }
+  },
+  "lifecycle": {
+    "acknowledge": "Claim, deliver through the harness-native event mechanism, then acknowledge only after the harness accepts the event.",
+    "release": "Release when the harness intentionally defers or rejects local delivery without completing the event.",
+    "crashRecovery": "Closing a session releases its consumer lease; a replacement session reclaims each unacknowledged notification with a newer lease generation.",
+    "ambiguousClaimRecovery": "After a claim transport failure or deadline, discard the session, reconnect, and claim with a fresh request identifier so returned lease generations belong to the replacement connection.",
+    "heartbeat": "Heartbeat at most every 30000 milliseconds while retaining claimed work or an active directed-request turn.",
+    "pollingFallback": "Polling skills are best effort and must use finite waits; they do not claim native lifecycle or wakeup guarantees."
+  }
+}

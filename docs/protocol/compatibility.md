@@ -11,6 +11,7 @@ Konclave tracks these versions independently:
 
 - transport endpoint version;
 - local-service authorization protocol version;
+- harness-adapter API version;
 - collaboration-policy bundle version;
 - relay envelope version;
 - Konclave application protocol version;
@@ -67,6 +68,36 @@ release or external installation predates it, the current transition is a clean
 pre-release cut rather than a v1 compatibility mode. A supported release requires the
 journaled migration and rollback machinery defined by ADR 0009 before changing this
 schema again.
+
+### Harness-adapter API
+
+Harness-adapter API v1 is the typed claim, acknowledge, release, heartbeat, and status
+contract over an authenticated shared-local-service session. Its canonical
+language-neutral fixture is
+`fixtures/local-service/v1/adapter-delivery.json`.
+
+Within adapter API v1:
+
+- operation names and JSON field meanings are immutable;
+- new delivery payload kinds require an additive SDK release and an updated fixture;
+- unknown payload kinds, roles, outcomes, malformed identifiers, oversized batches,
+  and oversized text fail closed;
+- an empty claim is an expired finite wait, not a delivery or acknowledgement;
+- notification identity remains stable across crash recovery while lease generation
+  advances;
+- acknowledgement and release use the exact notification and lease generation;
+- acknowledgement, release, heartbeat, and status retries use the same request
+  identifier and byte-identical payload after an ambiguous transport failure;
+- an ambiguous claim closes its session and is retried on a replacement connection
+  with a fresh request identifier because lease ownership is connection-bound;
+- replaying a successful claim without its owning connection fails with `conflict`
+  rather than returning stale lease generations; and
+- dropping the persistent session detaches the consumer and makes unacknowledged work
+  reclaimable.
+
+Changing those semantics or making a previously rejected shape valid requires a new
+adapter API version. Harness-specific idle, resume, permission, prompt, and tool
+events remain outside the protocol and are mapped by the adapter.
 
 ### Transport frame
 

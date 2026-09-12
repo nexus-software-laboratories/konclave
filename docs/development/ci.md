@@ -70,6 +70,14 @@ run for an unchanged commit. An `edited` event resolves the pull request's files
 reruns the full check when the diff is A2A-relevant, preventing a no-op result from
 masking a prior failure; unrelated diffs keep the lightweight scope-only result.
 
+The adapter-conformance workflow follows the same hosted-only boundary. Its stable
+check validates the persistent shared-local-service client, harness-neutral adapter
+SDK, immutable delivery fixture, and fake-harness claim/crash/reclaim lifecycle. It
+uses a read-only pull-request file query and skips source checkout for unrelated
+changes. It also runs the focused local-service authorization-loss regression and
+Clippy over the service library, and type-checks the TypeScript fixture consumer
+before running its focused Vitest case.
+
 ## Native package validation
 
 `.github/workflows/package-validation.yml` builds Linux x64, Windows x64, macOS

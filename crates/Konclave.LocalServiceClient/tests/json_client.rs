@@ -17,6 +17,7 @@ use KonclaveLocalServiceTransport::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::oneshot;
 
 #[tokio::test]
 async fn client_issues_a_grant_and_retries_an_ambiguous_session_request_exactly() {
@@ -152,6 +153,173 @@ async fn client_issues_a_grant_and_retries_an_ambiguous_session_request_exactly(
             .await
             .unwrap();
         assert_eq!(response, br#"{"device_id":"01"}"#);
+    };
+
+    let ((), ()) = tokio::join!(service, client);
+}
+
+#[tokio::test]
+async fn persistent_session_reuses_one_authenticated_channel_for_delivery_operations() {
+    let (endpoint, _endpoint_root) = endpoint("json-client-session");
+    let mut listener = LocalServiceListener::bind(&endpoint).await.unwrap();
+    let service_identity = LocalServiceIdentity::generate().unwrap();
+    let service_public_key = service_identity.public_key();
+    let issuer_identity = LocalServiceIdentity::generate().unwrap();
+    let issuer_public_key = issuer_identity.public_key();
+    let issuer_key_id = IssuerKeyId::from_bytes([3; 16]);
+    let issuer_key_version = IssuerKeyVersion::new(1).unwrap();
+    let (request_received_sender, request_received_receiver) = oneshot::channel();
+    let (release_service_sender, release_service_receiver) = oneshot::channel();
+    let registry = InMemorySessionAuthorizationRegistry::new();
+    registry
+        .register_issuer(
+            issuer_key_id,
+            issuer_key_version,
+            IssuerRegistration::new(
+                issuer_public_key,
+                HarnessKind::Generic,
+                ProfileAuthorization::All,
+            ),
+        )
+        .unwrap();
+
+    let service = async move {
+        let mut issuer_stream = listener.accept().await.unwrap();
+        complete_authorization_service_handshake(
+            &mut issuer_stream,
+            &registry,
+            &service_identity,
+            1,
+        )
+        .await
+        .unwrap();
+        let issue_request = read_request(&mut issuer_stream).await.unwrap();
+        let requested: GrantRequest = serde_json::from_slice(issue_request.payload()).unwrap();
+        let session_public_key = Ed25519PublicKey::from_bytes(
+            decode_lowercase_hex::<32>(&requested.session_public_key).unwrap(),
+        );
+        let grant = SessionGrant::new(SessionGrantClaims {
+            grant_id: SessionGrantId::from_bytes([4; 16]),
+            issuer_key_id,
+            issuer_key_version,
+            profile: ServiceProfileId::parse(&requested.profile).unwrap(),
+            session_public_key,
+            harness: HarnessKind::Generic,
+            evidence: AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+                .unwrap(),
+            policy_version: AuthorizationPolicyVersion::new(1).unwrap(),
+            issued_at_unix_milliseconds: 1,
+            expires_at_unix_milliseconds: u64::MAX,
+            capabilities: SessionCapabilities::ALL,
+        })
+        .unwrap();
+        registry.issue_grant(grant.clone(), 1).unwrap();
+        write_response(
+            &mut issuer_stream,
+            &LocalServiceResponse::success(
+                issue_request.request_id(),
+                serde_json::to_vec(&json!({
+                    "grantId": encode_lowercase_hex(grant.grant_id().as_bytes()),
+                    "issuerKeyId": encode_lowercase_hex(grant.issuer_key_id().as_bytes()),
+                    "issuerKeyVersion": grant.issuer_key_version().get(),
+                    "profile": grant.profile().as_str(),
+                    "sessionPublicKey": encode_lowercase_hex(grant.session_public_key().as_bytes()),
+                    "harness": grant.harness().as_str(),
+                    "evidence": grant.evidence().bits(),
+                    "policyVersion": grant.policy_version().get(),
+                    "issuedAtUnixMilliseconds": grant.issued_at_unix_milliseconds(),
+                    "expiresAtUnixMilliseconds": grant.expires_at_unix_milliseconds(),
+                    "capabilities": grant.capabilities().bits()
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut session = listener.accept().await.unwrap();
+        complete_authorization_service_handshake(&mut session, &registry, &service_identity, 2)
+            .await
+            .unwrap();
+        let responses: [(&str, &[u8]); 2] = [
+            ("delivery.claim", br#"{"events":[]}"#),
+            ("delivery.acknowledge", br#"{}"#),
+        ];
+        for (operation, response) in responses {
+            let request = read_request(&mut session).await.unwrap();
+            assert_eq!(request.operation().as_str(), operation);
+            write_response(
+                &mut session,
+                &LocalServiceResponse::success(request.request_id(), response.to_vec()).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        let request = read_request(&mut session).await.unwrap();
+        assert_eq!(request.operation().as_str(), "delivery.claim");
+        request_received_sender.send(()).unwrap();
+        release_service_receiver.await.unwrap();
+    };
+
+    let client = async move {
+        let config = LocalServiceJsonClientConfig::new(
+            endpoint,
+            LocalServiceIssuerCredential::new(issuer_key_id, issuer_key_version, issuer_identity),
+            service_public_key,
+            ServiceProfileId::parse("adapter-example").unwrap(),
+            HarnessKind::Generic,
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let client = LocalServiceJsonClient::connect(config).await.unwrap();
+        let mut session = client.open_session().await.unwrap();
+        assert_eq!(
+            session
+                .request(
+                    RequestId::from_bytes([5; 16]),
+                    "delivery.claim",
+                    br#"{"maxEvents":1,"waitMilliseconds":0}"#.to_vec(),
+                )
+                .await
+                .unwrap(),
+            br#"{"events":[]}"#
+        );
+        assert_eq!(
+            session
+                .request(
+                    RequestId::from_bytes([6; 16]),
+                    "delivery.acknowledge",
+                    br#"{"notificationId":"00","leaseGeneration":1}"#.to_vec(),
+                )
+                .await
+                .unwrap(),
+            br#"{}"#
+        );
+        let mut cancelled = Box::pin(session.request(
+            RequestId::from_bytes([7; 16]),
+            "delivery.claim",
+            br#"{"maxEvents":1,"waitMilliseconds":30000}"#.to_vec(),
+        ));
+        tokio::select! {
+            biased;
+            result = &mut cancelled => panic!("request completed before cancellation: {result:?}"),
+            result = request_received_receiver => result.unwrap(),
+        }
+        drop(cancelled);
+        assert_eq!(
+            session
+                .request(
+                    RequestId::from_bytes([8; 16]),
+                    "delivery.claim",
+                    br#"{"maxEvents":1,"waitMilliseconds":0}"#.to_vec(),
+                )
+                .await
+                .unwrap_err(),
+            KonclaveLocalServiceClient::LocalServiceJsonClientError::Transport
+        );
+        release_service_sender.send(()).unwrap();
     };
 
     let ((), ()) = tokio::join!(service, client);
