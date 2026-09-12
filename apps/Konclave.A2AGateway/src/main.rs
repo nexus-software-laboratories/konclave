@@ -30,6 +30,30 @@ async fn run() -> anyhow::Result<()> {
 }
 
 async fn wait_for_process_shutdown() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if let Err(error) = result {
+                            eprintln!("Shutdown signal failed: {error}");
+                        }
+                    }
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                eprintln!("SIGTERM registration failed: {error}");
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    eprintln!("Shutdown signal failed: {error}");
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
     if let Err(error) = tokio::signal::ctrl_c().await {
         eprintln!("Shutdown signal failed: {error}");
     }
