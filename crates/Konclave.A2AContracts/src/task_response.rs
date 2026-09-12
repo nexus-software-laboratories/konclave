@@ -6,6 +6,7 @@ use crate::initial_profile::{
     A2A_TEXT_MEDIA_TYPE, decode_json_bounded, require_empty_struct, require_encoded_bound,
     validate_identifier, validate_text,
 };
+use crate::protojson::{normalize_send_message_response, normalize_task};
 use crate::wire::{
     Message, Role, SendMessageResponse, Task, TaskState, part, send_message_response,
 };
@@ -63,12 +64,34 @@ impl InitialA2ATaskResponse {
     /// Returns a contract error if generated ProtoJSON unexpectedly cannot be
     /// represented or exceeds the response bound.
     pub fn deterministic_json(&self) -> Result<Vec<u8>, A2AContractError> {
-        let value =
+        let mut value =
             serde_json::to_value(&self.wire).map_err(|_| A2AContractError::MalformedEncoding)?;
+        normalize_task(&mut value);
         let bytes = serde_json::to_vec(&value).map_err(|_| A2AContractError::MalformedEncoding)?;
         require_encoded_bound(&bytes, MAX_A2A_ENCODED_RESPONSE_BYTES)?;
         Ok(bytes)
     }
+}
+
+/// Encodes one validated task-only `SendMessageResponse` as canonical ProtoJSON.
+///
+/// # Errors
+///
+/// Returns a contract error when the response is invalid, cannot be represented, or
+/// exceeds the bounded response profile.
+pub fn encode_initial_send_message_response_json(
+    response: SendMessageResponse,
+) -> Result<Vec<u8>, A2AContractError> {
+    let task = validate_initial_send_message_response(response)?;
+    let response = SendMessageResponse {
+        payload: Some(send_message_response::Payload::Task(task.into_wire())),
+    };
+    let mut value =
+        serde_json::to_value(response).map_err(|_| A2AContractError::MalformedEncoding)?;
+    normalize_send_message_response(&mut value);
+    let bytes = serde_json::to_vec(&value).map_err(|_| A2AContractError::MalformedEncoding)?;
+    require_encoded_bound(&bytes, MAX_A2A_ENCODED_RESPONSE_BYTES)?;
+    Ok(bytes)
 }
 
 /// Decodes and validates one bounded protobuf Task response.

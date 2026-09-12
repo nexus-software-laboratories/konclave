@@ -2,6 +2,7 @@ use crate::A2AContractError;
 use crate::initial_profile::{
     MAX_A2A_LIST_PAGE_SIZE, decode_json_bounded, require_encoded_bound, validate_page_token,
 };
+use crate::protojson::normalize_task_list;
 use crate::task_response::{MAX_A2A_ENCODED_RESPONSE_BYTES, validate_initial_task};
 use crate::wire::ListTasksResponse;
 use prost::Message as _;
@@ -31,8 +32,9 @@ impl InitialA2ATaskListResponse {
     /// Returns a contract error if generated ProtoJSON unexpectedly cannot be
     /// represented or exceeds the response bound.
     pub fn deterministic_json(&self) -> Result<Vec<u8>, A2AContractError> {
-        let value =
+        let mut value =
             serde_json::to_value(&self.wire).map_err(|_| A2AContractError::MalformedEncoding)?;
+        normalize_task_list(&mut value);
         let bytes = serde_json::to_vec(&value).map_err(|_| A2AContractError::MalformedEncoding)?;
         require_encoded_bound(&bytes, MAX_A2A_ENCODED_RESPONSE_BYTES)?;
         Ok(bytes)

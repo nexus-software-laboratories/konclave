@@ -6,7 +6,8 @@ use KonclaveA2AContracts::{
     A2A_TEXT_MEDIA_TYPE, A2AContractError, INITIAL_TASK_TERMINAL_REASON_FIELD,
     MAX_A2A_ENCODED_RESPONSE_BYTES, decode_initial_list_tasks_response_json,
     decode_initial_send_message_response_json, decode_initial_send_message_response_protobuf,
-    decode_initial_task_json, decode_initial_task_protobuf, validate_initial_list_tasks_response,
+    decode_initial_task_json, decode_initial_task_protobuf,
+    encode_initial_send_message_response_json, validate_initial_list_tasks_response,
     validate_initial_task,
 };
 use prost::Message as _;
@@ -56,6 +57,7 @@ fn task_and_send_response_round_trip_in_both_encodings() {
     assert!(protobuf.state() == TaskState::Completed);
 
     let json = protobuf.deterministic_json().unwrap();
+    assert!(!std::str::from_utf8(&json).unwrap().contains("+00:00"));
     let from_json = decode_initial_task_json(&json).unwrap();
     assert_eq!(from_json.task_id(), protobuf.task_id());
     assert!(from_json.state() == protobuf.state());
@@ -69,8 +71,14 @@ fn task_and_send_response_round_trip_in_both_encodings() {
             .state()
             == TaskState::Completed
     );
+    let response_json = encode_initial_send_message_response_json(response.clone()).unwrap();
+    assert!(
+        !std::str::from_utf8(&response_json)
+            .unwrap()
+            .contains("+00:00")
+    );
     assert_eq!(
-        decode_initial_send_message_response_json(&serde_json::to_vec(&response).unwrap())
+        decode_initial_send_message_response_json(&response_json)
             .unwrap()
             .task_id(),
         "task-1"

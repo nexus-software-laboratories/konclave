@@ -305,6 +305,7 @@ async fn authentication_precedes_body_parsing_and_route_disclosure() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let response = router
+        .clone()
         .oneshot(
             authenticated("/tenant-a/message:send")
                 .method("POST")
@@ -314,9 +315,35 @@ async fn authentication_precedes_body_parsing_and_route_disclosure() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         serde_json::from_slice::<Value>(&body(response).await).unwrap()["error"]["details"][0]["reason"],
+        "CONTENT_TYPE_NOT_SUPPORTED"
+    );
+
+    let response = router
+        .oneshot(
+            authenticated("/tenant-a/message:send")
+                .method("POST")
+                .header(CONTENT_TYPE, A2A_JSON_MEDIA_TYPE)
+                .body(Body::from(
+                    br#"{"tenant":"tenant-a","message":{"role":"ROLE_USER","parts":[{"raw":"dGNr","mediaType":"application/x-unsupported"}],"messageId":"unsupported-media"}}"#
+                        .to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let response_body = body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&response_body)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response_body).unwrap()["error"]["details"][0]["reason"],
         "CONTENT_TYPE_NOT_SUPPORTED"
     );
 }
@@ -542,6 +569,47 @@ async fn list_tasks_paginates_and_cancel_task_is_explicitly_unsupported() {
         serde_json::from_slice::<Value>(&body(response).await).unwrap()["error"]["details"][0]["reason"],
         "UNSUPPORTED_OPERATION"
     );
+}
+
+#[tokio::test]
+async fn push_notification_routes_fail_closed_with_the_standard_error() {
+    let root = tempfile::tempdir().unwrap();
+    let router = a2a_router(state(application(
+        store(&root),
+        Arc::new(RecordingSubmitter::default()),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    )));
+
+    for (method, path) in [
+        ("POST", "/tenant-a/tasks/task-a/pushNotificationConfigs"),
+        ("GET", "/tenant-a/tasks/task-a/pushNotificationConfigs"),
+        (
+            "GET",
+            "/tenant-a/tasks/task-a/pushNotificationConfigs/config-a",
+        ),
+        (
+            "DELETE",
+            "/tenant-a/tasks/task-a/pushNotificationConfigs/config-a",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                authenticated(path)
+                    .method(method)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body(response).await).unwrap()["error"]["details"][0]
+                ["reason"],
+            "PUSH_NOTIFICATION_NOT_SUPPORTED"
+        );
+    }
 }
 
 #[tokio::test]

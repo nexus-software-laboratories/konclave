@@ -1,9 +1,9 @@
 # Continuous integration
 
 This repository is public. Build, lint, and test jobs run on operator-owned PitCrew
-runners. Container and cross-platform release-package validation run on free
-GitHub-hosted capacity so those required checks never depend on private runner
-availability.
+runners. Container, A2A conformance, and cross-platform release-package validation
+run on free GitHub-hosted capacity so those required checks never depend on private
+runner availability.
 
 ## Runner lanes
 
@@ -12,7 +12,7 @@ availability.
 - `automation-control` (PitCrew) runs validation planning and pull-request
   policy checks.
 - `ubuntu-latest` (GitHub-hosted) runs the Community Relay OCI build and
-  validation.
+  validation plus the pinned A2A TCK and official Python SDK interoperability.
 - `ubuntu-latest`, `windows-latest`, `macos-15`, and `macos-15-intel`
   (GitHub-hosted) build and exercise native unsigned release candidates.
 
@@ -61,6 +61,14 @@ The separate package-validation workflow uses `pull_request` and only
 GitHub-hosted runners with read-only repository permissions. Fork code may execute
 there because it cannot reach PitCrew, credentials, a registry, or a deployment
 target.
+
+The A2A conformance workflow follows the same hosted-only trust boundary. Its stable
+required check uses a read-only pull-request file query and runs the external suite
+only when A2A contracts, gateway code, provenance, or harness files changed. It
+checks out no source for unrelated changes. Draft promotion does not trigger another
+run for an unchanged commit. An `edited` event resolves the pull request's files and
+reruns the full check when the diff is A2A-relevant, preventing a no-op result from
+masking a prior failure; unrelated diffs keep the lightweight scope-only result.
 
 ## Native package validation
 

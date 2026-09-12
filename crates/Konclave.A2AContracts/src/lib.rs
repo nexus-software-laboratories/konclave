@@ -8,6 +8,7 @@ mod identifier;
 mod initial_profile;
 mod list_tasks_response;
 mod protected_profile;
+mod protojson;
 mod stream_response;
 mod task_response;
 
@@ -67,7 +68,8 @@ pub use stream_response::{
 pub use task_response::{
     INITIAL_TASK_TERMINAL_REASON_FIELD, InitialA2ATaskResponse, MAX_A2A_ENCODED_RESPONSE_BYTES,
     decode_initial_send_message_response_json, decode_initial_send_message_response_protobuf,
-    decode_initial_task_json, decode_initial_task_protobuf, validate_initial_send_message_response,
+    decode_initial_task_json, decode_initial_task_protobuf,
+    encode_initial_send_message_response_json, validate_initial_send_message_response,
     validate_initial_task,
 };
 

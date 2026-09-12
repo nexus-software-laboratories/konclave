@@ -47,6 +47,7 @@ The reference router implements the pinned A2A v1.0.1 HTTP+JSON binding:
 | GetTask | `GET /tasks/{id}` | `GET /{tenant}/tasks/{id}` |
 | SubscribeToTask | `GET` or `POST /tasks/{id}:subscribe` | `GET` or `POST /{tenant}/tasks/{id}:subscribe` |
 | CancelTask | `POST /tasks/{id}:cancel` | `POST /{tenant}/tasks/{id}:cancel` |
+| Push notification configuration | Standard create/get/list/delete paths return `PUSH_NOTIFICATION_NOT_SUPPORTED` | Tenant-prefixed equivalents return the same error |
 | GetExtendedAgentCard | `GET /extendedAgentCard` | `GET /{tenant}/extendedAgentCard` |
 
 `historyLength` is the only accepted GetTask query parameter and remains limited to
@@ -60,11 +61,14 @@ authorizes like `GetTask` but returns `UNSUPPORTED_OPERATION`. The optional
 Request bodies accept `application/a2a+json` and compatibility
 `application/json`, with an optional UTF-8 charset parameter. Every JSON response
 uses the v1.0.1-preferred `application/a2a+json` media type.
+Unsupported Message Part media types return HTTP 400 with
+`CONTENT_TYPE_NOT_SUPPORTED`.
 
 Streaming message and task-subscription responses use `text/event-stream`. The
 server accepts both subscribe verbs because the pinned v1.0.1 schema annotation and
-prose HTTP+JSON binding disagree. Push notification and other task-lifecycle
-operations remain outside this profile.
+prose HTTP+JSON binding disagree. Push notification configuration remains
+unsupported; its standard routes authenticate and fail closed with the A2A
+capability error. Other task-lifecycle operations remain outside this profile.
 
 ## Authentication and authorization
 
