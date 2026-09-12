@@ -12,8 +12,8 @@ application_root="$project_root/apps/Konclave.A2AGateway"
 compose_file="$application_root/compose.example.yaml"
 config_file="$application_root/gateway-config.container.json"
 
-if ! grep -Fxq '    stop_grace_period: 65s' "$compose_file"; then
-    echo '::error::A2A gateway Compose shutdown grace is not 65 seconds.' >&2
+if ! grep -Fxq '    stop_grace_period: 90s' "$compose_file"; then
+    echo '::error::A2A gateway Compose shutdown grace is not 90 seconds.' >&2
     exit 1
 fi
 

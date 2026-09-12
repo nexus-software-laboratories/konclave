@@ -54,6 +54,7 @@
       "archiveFormat": "docker.tar",
       "fileName": "konclave-community-relay-container-0.1.0-linux-amd64.docker.tar",
       "image": "konclave-community-relay:0.1.0",
+      "componentName": "konclave-community-relay-container",
       "applicationRoot": "apps/Konclave.CommunityRelay",
       "provenanceInputs": [
         "apps/Konclave.CommunityRelay/.container/image.json",
@@ -70,6 +71,7 @@
       "archiveFormat": "docker.tar",
       "fileName": "konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar",
       "image": "konclave-a2a-gateway:0.1.0",
+      "componentName": "konclave-a2a-gateway-container",
       "applicationRoot": "apps/Konclave.A2AGateway",
       "provenanceInputs": [
         "apps/Konclave.A2AGateway/.container/image.json",

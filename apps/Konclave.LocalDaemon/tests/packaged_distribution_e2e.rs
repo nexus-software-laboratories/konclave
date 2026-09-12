@@ -142,7 +142,7 @@ struct GatewayProcess {
 }
 
 impl GatewayProcess {
-    fn start(paths: &AcceptancePaths, fixture: &GatewayFixture) -> Self {
+    fn start(paths: &AcceptancePaths, fixture: &GatewayFixture, attempt: u8) -> Self {
         let mut command = if paths.gateway_container {
             let mut command = TokioCommand::new("bash");
             command.arg(&paths.gateway);
@@ -185,6 +185,7 @@ impl GatewayProcess {
                 .gateway_container_name
                 .as_deref()
                 .expect("gateway container name is required");
+            let container_name = format!("{container_name}-{attempt}");
             command
                 .env(
                     "KONCLAVE_ACCEPTANCE_GATEWAY_IMAGE",
@@ -193,7 +194,7 @@ impl GatewayProcess {
                         .as_deref()
                         .expect("gateway container image is required"),
                 )
-                .env("KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME", container_name)
+                .env("KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME", &container_name)
                 .env(
                     "KONCLAVE_ACCEPTANCE_CONTAINER_RUN_ID",
                     paths
@@ -201,7 +202,7 @@ impl GatewayProcess {
                         .as_deref()
                         .expect("container run identity is required"),
                 );
-            Some(container_name.to_owned())
+            Some(container_name)
         } else {
             None
         };
@@ -219,7 +220,7 @@ impl GatewayProcess {
     async fn shutdown(mut self) {
         if let Some(container_name) = &self.container_name {
             let status = TokioCommand::new("docker")
-                .args(["stop", "--time", "65"])
+                .args(["stop", "--time", "90"])
                 .arg(container_name)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -235,7 +236,7 @@ impl GatewayProcess {
             // handle, and sends SIGTERM to exercise coordinated shutdown.
             assert_eq!(unsafe { libc::kill(process_id, libc::SIGTERM) }, 0);
         }
-        let status = timeout(Duration::from_secs(70), self.child.as_mut().unwrap().wait())
+        let status = timeout(Duration::from_secs(100), self.child.as_mut().unwrap().wait())
             .await
             .expect("A2A gateway shutdown exceeded its deadline")
             .expect("waiting for packaged A2A gateway failed");
@@ -724,7 +725,7 @@ async fn exercise_packaged_gateway(
     create_or_verify_owner_protected_file(&fixture.object_root.join(&object_id), ciphertext)
         .unwrap();
 
-    let gateway = GatewayProcess::start(paths, &fixture);
+    let gateway = GatewayProcess::start(paths, &fixture, 1);
     let client = connect_gateway_client(&fixture).await;
     assert_gateway_anonymous_rejected(&fixture);
     let submitted = client.send_message(packaged_a2a_request()).await.unwrap();
@@ -823,7 +824,7 @@ async fn exercise_packaged_gateway(
     );
     gateway.shutdown().await;
 
-    let restarted = GatewayProcess::start(paths, &fixture);
+    let restarted = GatewayProcess::start(paths, &fixture, 2);
     let restarted_client = connect_gateway_client(&fixture).await;
     let recovered = restarted_client.get_task(&task_id, Some(1)).await.unwrap();
     assert!(recovered.state() == A2ATaskState::Completed);

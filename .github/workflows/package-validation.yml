@@ -232,6 +232,7 @@ jobs:
           $imageName = ([string]$artifacts[0].image).Split(':')[0]
           "CONTAINER_RELEASE_FILE=$($artifacts[0].fileName)" >>$env:GITHUB_ENV
           "CONTAINER_RELEASE_IMAGE=$($artifacts[0].image)" >>$env:GITHUB_ENV
+          "CONTAINER_COMPONENT_NAME=$($artifacts[0].componentName)" >>$env:GITHUB_ENV
           "CONTAINER_APPLICATION_ROOT=$($artifacts[0].applicationRoot)" >>$env:GITHUB_ENV
           "CONTAINER_IMAGE_NAME=$imageName" >>$env:GITHUB_ENV
           "artifact-id=$($artifacts[0].id)" >>$env:GITHUB_OUTPUT
@@ -330,7 +331,7 @@ jobs:
           ./scripts/packaging/Normalize-CycloneDx.ps1 `
             -InputPath $rawSbom `
             -OutputPath "$archive.cdx.json" `
-            -ComponentName $env:CONTAINER_IMAGE_NAME `
+            -ComponentName $env:CONTAINER_COMPONENT_NAME `
             -ComponentVersion (
               (Get-Content distribution/release-artifacts.json -Raw |
                 ConvertFrom-Json -Depth 100).release.version

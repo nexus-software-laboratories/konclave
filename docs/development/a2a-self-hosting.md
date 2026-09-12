@@ -113,8 +113,8 @@ SERVICE_HEALTH_ADDRESS=127.0.0.1:8090 \
 Startup loads and validates every file, connects to the authenticated local service,
 opens SQLite, constructs the exact bridge, and only then binds the listener. Shutdown
 stops accepting requests, drains the HTTP server, signals all response observers,
-and waits up to 30 seconds for observer completion. Supervisors must allow at least 65
-seconds for the bounded HTTP and observer phases together.
+and waits up to 30 seconds for observer completion. Supervisors must allow at least 90
+seconds for the bounded HTTP and observer phases plus scheduling margin.
 
 ## Container boundary
 
