@@ -824,7 +824,7 @@ async fn exercise_packaged_gateway(
             .as_wire()
             .tasks
             .iter()
-            .any(|task| task.id == task_id.as_str())
+            .any(|task| task.id.as_str() == task_id.as_str())
     );
     assert_ciphertext_endpoint(&fixture, &object_id, ciphertext);
     assert_process_has_no_secret_input(
@@ -852,7 +852,7 @@ async fn exercise_packaged_gateway(
             .as_wire()
             .tasks
             .iter()
-            .any(|task| task.id == task_id.as_str())
+            .any(|task| task.id.as_str() == task_id.as_str())
     );
     assert_ciphertext_endpoint(&fixture, &object_id, ciphertext);
     restarted.shutdown().await;
