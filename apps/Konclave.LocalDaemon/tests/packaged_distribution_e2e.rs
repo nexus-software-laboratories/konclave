@@ -826,7 +826,7 @@ async fn exercise_packaged_gateway(
     let restarted = GatewayProcess::start(paths, &fixture);
     let restarted_client = connect_gateway_client(&fixture).await;
     let recovered = restarted_client.get_task(&task_id, Some(1)).await.unwrap();
-    assert_eq!(recovered.state(), A2ATaskState::Completed);
+    assert!(recovered.state() == A2ATaskState::Completed);
     assert!(task_contains_agent_text(&recovered, A2A_RESPONSE_TEXT));
     let listed = restarted_client.list_tasks(Some(10), None).await.unwrap();
     assert!(
