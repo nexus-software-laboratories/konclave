@@ -194,7 +194,10 @@ impl GatewayProcess {
                         .as_deref()
                         .expect("gateway container image is required"),
                 )
-                .env("KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME", &container_name)
+                .env(
+                    "KONCLAVE_ACCEPTANCE_GATEWAY_CONTAINER_NAME",
+                    &container_name,
+                )
                 .env(
                     "KONCLAVE_ACCEPTANCE_CONTAINER_RUN_ID",
                     paths
@@ -236,10 +239,13 @@ impl GatewayProcess {
             // handle, and sends SIGTERM to exercise coordinated shutdown.
             assert_eq!(unsafe { libc::kill(process_id, libc::SIGTERM) }, 0);
         }
-        let status = timeout(Duration::from_secs(100), self.child.as_mut().unwrap().wait())
-            .await
-            .expect("A2A gateway shutdown exceeded its deadline")
-            .expect("waiting for packaged A2A gateway failed");
+        let status = timeout(
+            Duration::from_secs(100),
+            self.child.as_mut().unwrap().wait(),
+        )
+        .await
+        .expect("A2A gateway shutdown exceeded its deadline")
+        .expect("waiting for packaged A2A gateway failed");
         assert!(status.success(), "A2A gateway exited with {status}");
         self.child = None;
     }
