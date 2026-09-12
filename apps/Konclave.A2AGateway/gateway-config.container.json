@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "interfaceEnvironment": "production",
   "listener": {
-    "address": "127.0.0.1:8090",
-    "tlsTerminated": false
+    "address": "0.0.0.0:8090",
+    "tlsTerminated": true
   },
   "publicationFile": "/etc/konclave/a2a/agent-publication.json",
   "taskDatabaseFile": "/var/lib/konclave/a2a/tasks/tasks.sqlite",
@@ -14,11 +14,11 @@
     "targetDeviceId": "1111111111111111111111111111111111111111111111111111111111111111"
   },
   "localService": {
-    "installationFile": "/etc/konclave/konclave-local-service.json",
-    "issuerKeyFile": "/etc/konclave/account-issuer.key",
+    "installationFile": "/run/konclave/credentials/konclave-local-service.json",
+    "issuerKeyFile": "/run/konclave/credentials/account-issuer.key",
     "profile": "a2a-gateway"
   },
   "bearerTokenFiles": [
-    "/run/secrets/konclave-a2a-bearer"
+    "/run/konclave/credentials/a2a-bearer"
   ]
 }

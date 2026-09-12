@@ -10,6 +10,8 @@ name = "KonclaveA2AGateway"
 path = "src/main.rs"
 
 [dependencies]
+KonclaveA2AArtifactHttp = { path = "../../crates/Konclave.A2AArtifactHttp" }
+KonclaveA2AArtifactStorage = { path = "../../crates/Konclave.A2AArtifactStorage" }
 KonclaveA2AContracts = { path = "../../crates/Konclave.A2AContracts" }
 KonclaveA2ADiscovery = { path = "../../crates/Konclave.A2ADiscovery" }
 KonclaveA2ADomain = { path = "../../crates/Konclave.A2ADomain" }

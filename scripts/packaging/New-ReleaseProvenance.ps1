@@ -57,7 +57,14 @@ function Get-InputDescriptor {
         [string]$SourceCommit
     )
 
-    $fullPath = Join-Path $Root $RelativePath
+    $rootPrefix = $Root.TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    ) + [IO.Path]::DirectorySeparatorChar
+    $fullPath = [IO.Path]::GetFullPath((Join-Path $Root $RelativePath))
+    if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Provenance input resolves outside the repository: $RelativePath"
+    }
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         throw "Provenance input is missing: $RelativePath"
     }
@@ -80,6 +87,13 @@ if (
     [IO.Path]::GetFileName($artifactFullPath) -cne [string]$artifacts[0].fileName
 ) {
     throw 'Provenance artifact does not match the release manifest.'
+}
+$artifact = $artifacts[0]
+if (
+    ($BuildKind -ceq 'container' -and [string]$artifact.kind -cne 'container') -or
+    ($BuildKind -ceq 'native' -and [string]$artifact.kind -ceq 'container')
+) {
+    throw 'Provenance build kind does not match the release artifact.'
 }
 $sourceCommit = (Invoke-VersionCommand git @('-C', $projectRootPath, 'rev-parse', 'HEAD')).Trim()
 if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
@@ -118,10 +132,26 @@ else {
     $syft = Invoke-VersionCommand $SyftCommand @('version', '-o', 'json') |
         ConvertFrom-Json -Depth 20
     $toolVersions.syft = [string]$syft.version
+    $applicationRoot = [string]$artifact.applicationRoot
+    if ($applicationRoot -cnotmatch '^apps/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw 'Container application root is invalid.'
+    }
+    $applicationRootPath = [IO.Path]::GetFullPath(
+        (Join-Path $projectRootPath $applicationRoot)
+    )
+    $appsPrefix = (Join-Path $projectRootPath 'apps').TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    ) + [IO.Path]::DirectorySeparatorChar
+    if (-not $applicationRootPath.StartsWith(
+        $appsPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Container application root resolves outside the applications directory.'
+    }
+    $dockerfilePath = Join-Path $applicationRootPath 'Dockerfile'
     $rustBase = [regex]::Match(
-        (Get-Content -LiteralPath (
-            Join-Path $projectRootPath 'apps' 'Konclave.CommunityRelay' 'Dockerfile'
-        ) -Raw),
+        (Get-Content -LiteralPath $dockerfilePath -Raw),
         '(?m)^FROM rust:([0-9]+\.[0-9]+\.[0-9]+)(?:-[^@\s]+)?@sha256:[0-9a-f]{64}\s'
     )
     if (-not $rustBase.Success) {
@@ -148,8 +178,34 @@ if ($BuildKind -ceq 'native') {
     $inputPaths.Add('extensions/Konclave.HostExtension/package-lock.json')
 }
 else {
-    $inputPaths.Add('apps/Konclave.CommunityRelay/Dockerfile')
-    $inputPaths.Add('apps/Konclave.CommunityRelay/compose.example.yaml')
+    $requiredContainerInputs = @(
+        "$applicationRoot/.container/image.json",
+        "$applicationRoot/Dockerfile",
+        "$applicationRoot/compose.example.yaml"
+    )
+    $containerInputs = [string[]]@($artifact.provenanceInputs)
+    foreach ($requiredInput in $requiredContainerInputs) {
+        if ($requiredInput -cnotin $containerInputs) {
+            throw "Container provenance input is missing: $requiredInput"
+        }
+    }
+    foreach ($path in $containerInputs) {
+        if (-not $path.StartsWith("$applicationRoot/", [StringComparison]::Ordinal)) {
+            throw "Container provenance input is outside its application root: $path"
+        }
+        $inputPath = [IO.Path]::GetFullPath((Join-Path $projectRootPath $path))
+        $applicationPrefix = $applicationRootPath.TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar
+        ) + [IO.Path]::DirectorySeparatorChar
+        if (-not $inputPath.StartsWith(
+            $applicationPrefix,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Container provenance input resolves outside its application root: $path"
+        }
+        $inputPaths.Add($path)
+    }
 }
 $resolvedDependencies = [Collections.Generic.List[object]]::new()
 $resolvedDependencies.Add([ordered]@{
@@ -162,9 +218,7 @@ foreach ($path in @($inputPaths | Sort-Object -CaseSensitive)) {
     )
 }
 if ($BuildKind -ceq 'container') {
-    $dockerfile = Get-Content -LiteralPath (
-        Join-Path $projectRootPath 'apps' 'Konclave.CommunityRelay' 'Dockerfile'
-    )
+    $dockerfile = Get-Content -LiteralPath $dockerfilePath
     $baseImages = @(
         foreach ($line in $dockerfile) {
             $match = [regex]::Match(

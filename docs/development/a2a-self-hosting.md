@@ -22,6 +22,8 @@ The first standalone runtime supports:
 - `SendMessage`, `GetTask`, `ListTasks`, standard SSE streaming and subscription;
 - explicit unsupported cancellation and push-notification responses;
 - bounded SQLite task persistence and restart-safe idempotency; and
+- bounded encrypted artifact ciphertext retrieval under
+  `/objects/sha256/<ciphertext-sha256>`; and
 - `GET /healthz`.
 
 Mutual-TLS caller extraction and path-prefixed interfaces are rejected at startup
@@ -42,6 +44,7 @@ It references:
 - the matching owner-protected AccountTrusted issuer seed;
 - one canonical local-service profile;
 - one owner-protected SQLite parent directory; and
+- one separate owner-protected encrypted artifact object directory; and
 - one to 64 owner-protected bearer files when the card advertises bearer security.
 
 The publication identity and tenant become the public route identity. The gateway
@@ -81,6 +84,12 @@ database.
 Active tasks are never removed by retention. Terminal content and longer-lived
 idempotency tombstones remain independently bounded.
 
+The artifact object directory is distinct from the task database directory. The
+runtime serves only content-addressed ciphertext from that root and refuses ranges,
+HEAD, malformed digests, missing objects, and objects whose bytes do not match their
+path digest. Trusted TLS termination and any deployment download-rate policy remain
+operator responsibilities.
+
 ## Process lifecycle
 
 Start the process with no arguments:
@@ -103,9 +112,19 @@ opens SQLite, constructs the exact bridge, and only then binds the listener. Shu
 stops accepting requests, drains the HTTP server, signals all response observers,
 and waits up to 30 seconds for their completion.
 
+## Container boundary
+
+The Linux AMD64 image and maintained Compose definition live under
+[`apps/Konclave.A2AGateway`](../../apps/Konclave.A2AGateway/). The image runs as a
+non-root user with a read-only root filesystem. Configuration, owner-protected
+credentials, the local-service socket, SQLite state, and encrypted ciphertext objects
+use five explicit mounts; the task and object roots remain separate writable
+boundaries. Compose publishes the plaintext listener on host loopback only for an
+operator-managed TLS reverse proxy.
+
 ## Remaining packaging work
 
-Native archives, service definitions, container composition, explicit artifact
-publication/object serving, and packaged clean-install acceptance are separate
-delivery items. They must preserve this configuration and trust boundary rather than
-embedding credentials or moving plaintext into the relay.
+Native archives, service definitions, an agent-facing artifact-publication adapter,
+and packaged clean-install acceptance are separate delivery items. They must preserve
+this configuration and trust boundary rather than embedding credentials or moving
+plaintext into the relay.

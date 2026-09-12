@@ -24,6 +24,8 @@ dependencies = [
 name = "KonclaveA2AArtifactStorage"
 version = "0.1.0"
 dependencies = [
+ "KonclaveA2AArtifactHttp",
+ "KonclaveA2AArtifactStorage",
  "KonclaveA2AContracts",
  "KonclaveSecretStorage",
  "base64 0.22.1",

@@ -122,14 +122,16 @@ environment markers before inference begins.
 
 ## OCI validation
 
-Container validation builds one `linux/amd64` OCI archive for the Community
-Relay and asserts its structure. The build backend differs by runner, but the
-image contract and every archive assertion are shared in
+Container validation builds separate `linux/amd64` OCI archives for the Community
+Relay and standalone A2A gateway and asserts their structure. The build backend
+differs by runner, but the image contract and every archive assertion are shared in
 `scripts/ci/container-image.lib.sh` so both backends validate identically.
 
 Validation confirms the non-root runtime user, declared health check,
 entrypoint presence in the final layers, and absence of Rust build tooling. It
-does not run the image.
+does not run the image. The A2A lane additionally compiles the maintained Compose
+definition and checks its loopback publication, read-only root, dropped capabilities,
+non-root identity, finite PID budget, and five explicit mount boundaries.
 
 ### Hosted backend
 

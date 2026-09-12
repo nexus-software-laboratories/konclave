@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use KonclaveA2AArtifactHttp::{
+    A2AArtifactHttpServerConfig, A2AArtifactHttpState, a2a_artifact_router,
+};
+use KonclaveA2AArtifactStorage::FileA2AArtifactObjectStore;
 use KonclaveA2AGateway::{
     A2AGatewayApplication, A2AGatewayWaitConfig, A2AHttpConfig, A2AHttpState,
     SystemA2AGatewayClock, a2a_router,
@@ -56,6 +60,15 @@ where
         .await
         .context("joining A2A task-store open")??,
     );
+    let artifact_object_directory = config.artifact_object_directory.clone();
+    let artifact_store = Arc::new(
+        tokio::task::spawn_blocking(move || {
+            FileA2AArtifactObjectStore::open(artifact_object_directory)
+                .context("opening A2A artifact object store")
+        })
+        .await
+        .context("joining A2A artifact object-store open")??,
+    );
     let clock = Arc::new(SystemA2AGatewayClock);
     let bridge = Arc::new(
         A2AKonclaveBridge::new(
@@ -79,6 +92,13 @@ where
         .context("building A2A HTTP state")?;
     let router = Router::new()
         .route("/healthz", get(health))
+        .nest(
+            "/objects",
+            a2a_artifact_router(A2AArtifactHttpState::new(
+                artifact_store,
+                A2AArtifactHttpServerConfig::default(),
+            )),
+        )
         .merge(a2a_router(state));
     let listener = tokio::net::TcpListener::bind(config.listen_address)
         .await

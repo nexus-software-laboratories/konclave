@@ -43,7 +43,30 @@
       "architecture": "x64",
       "archiveFormat": "docker.tar",
       "fileName": "konclave-community-relay-container-0.1.0-linux-amd64.docker.tar",
-      "image": "konclave-community-relay:0.1.0"
+      "image": "konclave-community-relay:0.1.0",
+      "applicationRoot": "apps/Konclave.CommunityRelay",
+      "provenanceInputs": [
+        "apps/Konclave.CommunityRelay/.container/image.json",
+        "apps/Konclave.CommunityRelay/Dockerfile",
+        "apps/Konclave.CommunityRelay/compose.example.yaml"
+      ]
+    },
+    {
+      "id": "konclave-a2a-gateway-container-linux-amd64",
+      "kind": "container",
+      "target": "linux/amd64",
+      "operatingSystem": "linux",
+      "architecture": "x64",
+      "archiveFormat": "docker.tar",
+      "fileName": "konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar",
+      "image": "konclave-a2a-gateway:0.1.0",
+      "applicationRoot": "apps/Konclave.A2AGateway",
+      "provenanceInputs": [
+        "apps/Konclave.A2AGateway/.container/image.json",
+        "apps/Konclave.A2AGateway/Dockerfile",
+        "apps/Konclave.A2AGateway/compose.example.yaml",
+        "apps/Konclave.A2AGateway/gateway-config.container.json"
+      ]
     },
     {
       "id": "konclave-client-windows-x64",

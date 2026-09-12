@@ -153,6 +153,26 @@ KONCLAVE_RELAY_ACCESS_SOURCE=/absolute/path/to/relay-access.json docker compose 
 The Compose example never pulls from or pushes to a registry. It publishes the relay
 only on host loopback for connection from an operator-managed TLS reverse proxy.
 
+## Run the A2A gateway container
+
+The Linux AMD64 gateway candidate is a separate Docker-loadable archive:
+
+```shell
+docker image load --input konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar
+```
+
+Use the maintained
+[`compose.example.yaml`](../../apps/Konclave.A2AGateway/compose.example.yaml) and
+[container boundary](../../apps/Konclave.A2AGateway/docs/container/rust-service.md).
+The gateway runs as the local-service account's nonzero numeric UID, publishes only
+on host loopback, and uses separate read-only configuration, owner-protected
+credential, local-service socket, SQLite, and encrypted-object mounts. Trusted TLS
+termination is required before any non-loopback exposure.
+
+Container image and release-set validation are part of package validation. Starting
+the packaged gateway against an independently installed shared service remains a
+separate clean-install acceptance gate.
+
 ## Unsigned status
 
 These prereleases are intentionally unsigned. Every archive contains
