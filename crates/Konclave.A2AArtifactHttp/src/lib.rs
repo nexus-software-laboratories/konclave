@@ -608,7 +608,9 @@ mod tests {
             bytes: bytes.clone(),
         });
         let config = A2AArtifactHttpServerConfig::new(bytes.len(), bytes.len()).unwrap();
-        let router = a2a_artifact_router(A2AArtifactHttpState::new(store, config));
+        let state = A2AArtifactHttpState::new(store, config);
+        let byte_budget = Arc::clone(&state.byte_budget);
+        let router = a2a_artifact_router(state);
         let uri = format!("/sha256/{}", object_id.to_hex());
 
         let first = router
@@ -641,6 +643,14 @@ mod tests {
             .unwrap();
         assert_eq!(resumed.status(), StatusCode::OK);
         drop(resumed);
+        let released = tokio::time::timeout(
+            Duration::from_secs(1),
+            byte_budget.acquire_many_owned(bytes.len() as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(released);
         let after_disconnect = router
             .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
             .await
