@@ -53,10 +53,10 @@ conversation membership approval, or operation-by-operation transaction signing.
 - A WebAuthn assertion signs authenticator data together with the hash of client data.
   The verified client data contains the random challenge and origin; authenticator
   data contains the relying-party hash and user-presence and user-verification flags.
-- The maintained `webauthn-rs` safe API requires user verification for passkey
-  registration and authentication, keeps pending challenge state server-side by
-  default, and verifies challenge, origin, relying party, credential, signature,
-  flags, and counter behavior.
+- The pure-Rust `passkey-auth` API can require user verification, retain pending
+  challenge state server-side, enforce strict base64url input, and verify challenge,
+  origin, relying party, credential, signature, flags, user handle, and counter
+  behavior without adding OpenSSL to the package.
 - The `webauthn-authenticator-rs` Windows backend maps the same safe challenge DTOs to
   the native Windows WebAuthn API without a browser or listener. It is pre-1.0 and not
   itself a trust boundary because the local service independently verifies every
@@ -87,8 +87,8 @@ conversation membership approval, or operation-by-operation transaction signing.
 - Bind the action to the exact profile, session key, harness, capabilities, policy,
   service, installation, request, and expiry.
 - Preserve the outbound-only network model and avoid a browser callback.
-- Use a maintained verifier rather than authoring custom WebAuthn parsing or
-  signature validation.
+- Use a pinned pure-Rust verifier rather than authoring custom WebAuthn parsing or
+  signature validation or adding a second native cryptographic provider.
 - Keep platform user-interface mechanics behind an adapter boundary.
 - Fail closed on unsupported hardware, platforms, stale credentials, cancellation,
   replay, and downgrade.
@@ -111,10 +111,10 @@ with:
 - a valid authenticator signature and credential counter transition; and
 - no unrecognized or downgraded verification state.
 
-The server uses the `webauthn-rs` safe passkey interface. Pending registration and
-authentication state remains service-side and is never accepted from the client.
-Credential state is serialized only in the owner-protected durable authorization
-store.
+The server uses pinned `passkey-auth` with strict base64url decoding and user
+verification required. Pending registration and authentication state remains
+service-side and is never accepted from the client. Credential state is serialized
+only in the owner-protected durable authorization store.
 
 The first provider identifier is `windows-native-webauthn-v1`. Its relying-party ID is
 `konclave.local` and its synthetic native-application origin is
@@ -362,7 +362,8 @@ authenticator, not the sole provider.
 - A user can approve an attacker-initiated legitimate prompt.
 - One ceremony authorizes the resulting grant for up to one hour.
 - The first local provider does not add cross-restart hostile rollback resistance.
-- Two MPL-2.0 WebAuthn dependencies add supply-chain and license obligations.
+- The native client adapter is MPL-2.0 and the newer pure-Rust verifier needs focused
+  supply-chain and security review.
 
 ### Neutral
 
@@ -416,9 +417,8 @@ Continued compliance is demonstrated by:
 - [Windows
   `WebAuthNAuthenticatorGetAssertion`](https://learn.microsoft.com/en-us/windows/win32/api/webauthn/nf-webauthn-webauthnauthenticatorgetassertion)
   defines the native modal assertion ceremony used by the first adapter.
-- [`webauthn-rs` 0.5.2](https://github.com/kanidm/webauthn-rs/tree/v0.5.2) provides
-  the safe relying-party registration and authentication verifier used by the local
-  service.
+- [`passkey-auth` 0.1.3](https://crates.io/crates/passkey-auth/0.1.3) provides the
+  pinned pure-Rust relying-party verifier used by the local service.
 - [OpenAI Codex revision
   `1715e55076737158ba61d43158ede504de6d4ce1`](https://github.com/openai/codex/tree/1715e55076737158ba61d43158ede504de6d4ce1/codex-rs/user-verification)
   provides public prior art for challenge-signing lifecycle and explicit

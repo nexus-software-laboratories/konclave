@@ -8,5 +8,17 @@ rust-version = "1.85"
 [dependencies]
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveLocalServiceTransport = { path = "../Konclave.LocalServiceTransport" }
+passkey-auth.workspace = true
 sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+url.workspace = true
+webauthn-authenticator-rs = { workspace = true, features = ["win10"] }
+
+[dev-dependencies]
+base64.workspace = true
+ciborium.workspace = true
+ed25519-dalek.workspace = true
