@@ -237,8 +237,10 @@ fn install_with(
     let client_config_parent = client_config_path
         .parent()
         .context("client configuration path has no parent")?;
-    ensure_owner_protected_directory(client_config_parent)
-        .context("protecting canonical client configuration root")?;
+    if client_config_parent != service_root {
+        ensure_owner_protected_directory(client_config_parent)
+            .context("protecting canonical client configuration root")?;
+    }
     let canonical = load_optional_client_config(&client_config_path)?;
     let legacy_client_config_path = legacy_extension_root
         .map(|root| root.join(COPILOT_SERVICE_CONFIG_FILE))
@@ -477,7 +479,7 @@ mod tests {
         let legacy_extension_root = root.path().join("extension");
         let client_config_path = root
             .path()
-            .join("client-config")
+            .join(SERVICE_DIRECTORY)
             .join(COPILOT_SERVICE_CONFIG_FILE);
         std::fs::create_dir(&profile_root).unwrap();
         let endpoint = if cfg!(windows) {
