@@ -33,6 +33,14 @@ The extension never discovers an endpoint, trusts a network URL, broadens a
 registration, or starts a service. Missing, malformed, unsafe, or unauthorized state
 fails visibly with no per-session fallback.
 
+The installed client gives initial authorization transport a two-second deadline.
+That bound applies independently to the issuer exchange and the first session
+handshake, so an endpoint that accepts a connection but never answers cannot consume
+the ordinary 30-second operation deadline or hold Copilot startup indefinitely.
+Missing endpoints normally fail immediately. UserPresence retains its longer
+interactive ceremony window, while each service handshake and begin/complete
+exchange remains subject to the startup transport bound.
+
 On Unix, configuration and key records are opened with `O_NOFOLLOW`, verified through
 the same descriptor as regular files owned by the current UID with no group or other
 permissions, and read within hard byte limits. On Windows, the Rust installer creates

@@ -12,6 +12,7 @@ import { requestNativeUserPresence } from './user-presence.js';
 
 const genericIntegrationLabelPattern = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 const ephemeralProfilePattern = /^generic-[0-9a-f]{24}$/u;
+const installedStartupDeadlineMilliseconds = 2_000;
 
 /** Whether a Generic profile is an explicit continuity alias or an isolated session. */
 export type GenericProfileMode = 'durable' | 'ephemeral';
@@ -141,6 +142,7 @@ async function connectInstalledHarnessService(
     profile,
     grantEvidence,
     grantDeadlineMs: grantEvidence === 'user_presence' ? 180_000 : undefined,
+    startupDeadlineMs: installedStartupDeadlineMilliseconds,
     requestUserPresence,
   });
 }
