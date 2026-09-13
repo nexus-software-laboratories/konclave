@@ -47,6 +47,70 @@ Active grants are bounded globally, per issuer, and per profile. Expired grants 
 reclaimed before issuance; quota exhaustion denies the new grant and never evicts an
 active one.
 
+The daemon opens the owner-protected authorization database beside the immutable
+installation record and binds it to a fingerprint of that complete record. Missing,
+empty, corrupt, unsafe, mismatched, unsupported, or process-lifetime rolled-back
+state prevents endpoint binding. The endpoint, service identity, profile root, and
+custody configuration remain installation-owned and are never reloaded from mutable
+authorization state.
+
+One validated durable snapshot supplies the issuer projection, active grants,
+suspensions, generation, and effective evidence policy. Publication replaces the
+complete in-memory issuer/grant registry while holding the same projection boundary
+that exposes policy and issuer availability. Grant issuance and clean retirement
+commit through the durable store first, then load and publish the committed
+generation before returning success. Grant issuance retries preserve the same issuer
+client instance, request identifier, and byte-identical payload so response loss,
+including service restart after commit, resolves to the original durable grant rather
+than minting replacement authority. A client retrying clean retirement remains bound
+to the original grant and never mints a replacement grant as part of cleanup.
+`service.status` reports the published authorization generation so diagnostics can
+correlate client-visible authority with one exact durable snapshot.
+
+The service polls durable authorization state every 500 milliseconds. A published
+generation wakes authenticated connections immediately; a long delivery claim also
+rechecks authorization on its 250-millisecond claim cadence. Therefore an exact
+revocation, profile suspension, policy invalidation, or revoke-on-disable transition
+is observed within one second of a successful durable commit, excluding an
+already-failing storage operation. A reload error, corruption finding, installation
+mismatch, or generation rollback stops admission, makes the current projection
+unusable, closes clients, and terminates the service instead of retaining stale
+authority. If authorization changes while another request is running, the transport
+closes immediately; already-committed work remains owned until reconciliation, but
+its result is not written to the revoked connection.
+
+Disabling an issuer always denies new issuance. `retain_until_expiry` keeps its
+already-issued grants active until expiry or another terminal transition, while
+`revoke` terminalizes those grants in the same durable transaction. A disabled
+issuer remains handshake-visible only so an authenticated issuance request receives
+the stable `issuer_disabled` result; a removed or unknown issuer fails the uniform
+handshake.
+
+Operator-only administration is exposed through `konclave authorization`. The
+commands inspect bounded state, revoke one exact grant, suspend or resume one exact
+profile, register a strictly newer issuer key version, enable, disable, or remove one
+exact issuer key version, and replace the evidence policy with a strictly newer
+version. Rotation registers and activates the replacement public key before clients
+switch credentials and the prior key is disabled or removed. A policy that omits
+AccountTrusted cannot be installed through this owner-account CLI. Stronger policy
+administration remains unavailable until a provider-authenticated administrative or
+recovery boundary exists. These commands mutate the owner-protected authorization
+database directly; they are not local-service operations available to agent or model
+tools.
+
+Examples:
+
+```text
+konclave authorization status
+konclave authorization revoke-grant --grant-id <grant-id>
+konclave authorization suspend-profile --profile <profile-id>
+konclave authorization resume-profile --profile <profile-id>
+konclave authorization disable-issuer --issuer-key-id <issuer-key-id> --issuer-key-version 1 --existing-grants revoke
+konclave authorization register-issuer --issuer-key-id <issuer-key-id> --issuer-key-version 2 --public-key <ed25519-public-key> --harness generic --profile-scope all
+konclave authorization remove-issuer --issuer-key-id <issuer-key-id> --issuer-key-version 1 --existing-grants revoke
+konclave authorization replace-policy --clause account_trusted
+```
+
 The built-in Generic integration and A2A gateway use the same AccountTrusted issuer
 and grant contract. `HarnessKind::A2AGateway` has additive wire value `5`, allowing
 registration, audit, and policy code to distinguish an internet-facing A2A edge from
@@ -154,6 +218,11 @@ carries a stable 16-byte request identifier, an operation name of at most 64 ASC
 identifier characters, and an opaque payload of at most 1 MiB. A response is either a
 success payload or one stable error code from a closed set that carries no message,
 path, identifier, or plaintext.
+
+Wire values `1` through `11` retain their existing meanings. Live authorization adds
+`12 profile_suspended`, `13 issuer_disabled`,
+`14 required_evidence_unavailable`, and `15 capacity`. Unknown values remain protocol
+errors rather than being surfaced as free-form service text.
 
 The transport does not interpret an operation or its payload, so a new operation needs
 no transport change and every bound applies to all of them uniformly.

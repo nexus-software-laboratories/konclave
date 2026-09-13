@@ -73,14 +73,28 @@ The service signing seed uses native operating-system custody by default; an exp
 headless installation may bind it to one owner-protected external file. The
 installation record pins the derived service public key, so missing or substituted
 custody fails before the endpoint opens. AccountTrusted session keys are re-created
-after client restart. Service restart invalidates in-memory grants, and a live client
-uses the same session key to obtain a replacement grant.
+after client restart. Session grants are durable service state and survive service
+restart until expiry or an explicit terminal transition.
 
 Active grants are bounded globally, per issuer, and per profile. Revocation removes
 one exact grant and closes its connections; AccountTrusted can issue a replacement
-because the same account remains trusted. Profile suspension and durable issuer
-disablement are stronger operator controls tracked separately and are not claimed by
-the initial in-memory registry.
+because the same account remains trusted. Profile suspension closes every matching
+grant and blocks issuance without deleting profile data. Issuer disablement always
+blocks new issuance and either retains existing grants until expiry or revokes them
+in the same transaction. A policy replacement terminalizes only grants whose
+recorded evidence no longer satisfies the effective policy.
+
+Mutable authorization state is held in an owner-protected SQLite database bound to a
+fingerprint of the immutable installation. The daemon loads and validates a complete
+snapshot before binding its endpoint, publishes the issuer/grant registry and
+effective policy as one generation, and polls every 500 milliseconds. Idle
+connections revalidate on publication and long delivery claims revalidate every 250
+milliseconds, so a successful durable change is observed within one second.
+Missing, empty, corrupt, unsafe, mismatched, unsupported, rolled-back, or unreadable
+state fails closed: the daemon stops admission, invalidates the projection, closes
+clients, and terminates rather than continuing with stale authority. AccountTrusted
+does not claim resistance to a hostile same-account durable rollback across process
+lifetimes.
 
 Terminal local request outcomes are sealed in the profile database and keyed by
 session public key, profile, and request identifier. Authenticated cancellation can
@@ -305,6 +319,7 @@ internal route authority.
 | Malicious model/tool input | Schema validation, local authorization, bounded values, and explicit user-controlled policy |
 | Local service client impersonation | Owner-restricted endpoint, verified platform peer account, issuer/session role separation, proof of the exact private key, signed fresh protocol-v2 transcript, exact-profile finite grant, capability checks, and uniform rejection |
 | Account issuer substitution or theft | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, installer-owned public registration, key versioning, exact-path cleanup, and explicit AccountTrusted semantics |
+| Authorization-state corruption or process-lifetime rollback | Installation fingerprint binding, owner protection, schema and integrity validation, monotonic generation high-water checks, atomic snapshot publication, and fail-stop service shutdown on reload failure |
 | Shared-service endpoint squatting | Owner-protected well-known endpoint, single-instance service ownership, authenticated service/client transcript, and fail-closed startup when endpoint identity conflicts |
 | Cross-profile local attachment | Exact profile, session public key, harness, evidence, policy, expiry, and capabilities signed into one immutable grant binding; no profile-switch request |
 | False timeout or cancellation outcome | Session-scoped authenticated cancellation, explicit pre/post-commit state, sealed terminal-outcome journal, exact retry reconciliation, and no dropped-join cancellation claim |
@@ -351,9 +366,9 @@ internal route authority.
 - `AccountTrusted` does not protect one session from another malicious process running
   under the same operating-system account. Exact grants contain authority but do not
   change that declared trust boundary.
-- The initial service-lifetime grant registry does not provide durable administrative
-  suspension or issuer disablement across service restart. Those controls require the
-  live durable registry tracked separately.
+- AccountTrusted storage detects rollback only against the current process high-water
+  mark. Stronger cross-process or cross-restart rollback resistance requires a
+  provider-owned monotonic anchor.
 - Konclave cannot guarantee availability against a malicious relay or network.
 - The initial protocol cannot guarantee consistent membership against a relay that
   equivocates between isolated clients.

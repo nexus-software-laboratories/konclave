@@ -63,6 +63,24 @@ profile, harness, evidence, policy version, issuance, expiry, capabilities, issu
 client instance, both fresh challenges, and pinned service key. Invalid grants use one
 signed uniform rejection after proof exchange.
 
+The daemon's mutable authorization state is a versioned owner-protected database
+bound to the immutable installation fingerprint. It is loaded before endpoint
+binding and polled every 500 milliseconds. Snapshot publication is atomic across the
+issuer/grant projection and effective policy. Active connections revalidate on each
+published generation; long delivery claims revalidate on their 250-millisecond claim
+cadence, giving a documented one-second observation bound after a successful
+durable authorization commit. Storage failure, corruption, installation mismatch, or
+generation rollback terminates the service rather than preserving stale authority.
+The authenticated `service.status` response carries that published generation for
+bounded diagnostics and cross-process correlation.
+
+Local-service failure values are append-only. Values `1` through `11` retain their
+existing meanings; version 2 additionally defines `12 profile_suspended`,
+`13 issuer_disabled`, `14 required_evidence_unavailable`, and `15 capacity`.
+Implementations MUST reject unknown values. A disabled issuer may complete its
+authenticated issuer handshake to receive `issuer_disabled` for grant issuance, but
+a removed or unknown issuer remains a uniform handshake failure.
+
 Installation schema version 2 emits only this protocol. Because no supported Konclave
 release or external installation predates it, the current transition is a clean
 pre-release cut rather than a v1 compatibility mode. A supported release requires the

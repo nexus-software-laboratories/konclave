@@ -85,12 +85,21 @@ per-profile wrapping-key custody are also explicit:
 ```
 
 `init` creates or verifies one service identity, one AccountTrusted issuer identity,
-the finite issuer registration, the explicit evidence policy, the service
+the finite issuer registration, the explicit evidence policy, the owner-protected
+`konclave-local-authorization.sqlite3` authority database, the immutable service
 configuration, and the extension sidecar. A Copilot process uses the issuer only to
 obtain a finite exact-profile grant for a memory-only session key. The issuer cannot
-invoke profile operations directly. Repeating the exact command is idempotent; a
-conflicting endpoint, policy, custody source, or existing file fails without
-replacement.
+invoke profile operations directly. The authority database is created before the
+immutable installation record is published; once that record exists, a missing or
+empty authority database fails closed instead of being recreated. Repeating the exact
+command is idempotent; a conflicting endpoint, policy, custody source, or existing
+file fails without replacement.
+
+Use `konclave authorization status` to inspect the current generation and bounded
+counts. Operator-only subcommands can revoke an exact grant, suspend or resume a
+profile, register a higher issuer key version, enable or disable an issuer, remove an
+issuer, or replace the evidence policy. These are direct owner-authorized state
+changes and are not exposed as agent tools.
 
 ## Run as a service
 
@@ -117,8 +126,9 @@ Protocol-v2/schema-v2 setup is therefore a clean development transition, not a
 customer migration contract. Close old harness sessions, stop the exact recorded
 service, install the complete new archive, rerun the exact `init` command with the
 same explicit policy, and then start the shared service. The demo's `-Refresh` path
-replaces only the obsolete development authorization record, issuer key, sidecar, and
-package after stopping that service; durable profiles remain separate.
+replaces only the obsolete development authorization record, issuer key, sidecar,
+authority database, and package after stopping that service; durable profiles remain
+separate.
 Existing conversation credential bindings remain valid for ordinary text but do not
 gain directed-request capability retroactively. Create new membership with the
 upgraded clients before using `send_directed_request` or `/konclave request`.
@@ -214,8 +224,13 @@ covering native and containerized self-hosting.
 
 ## Uninstall an archive installation
 
-Stop the shared service through its platform manager, remove the user extension
-directory, stop any A2A gateway process, and remove the extracted installation
-directories. Profiles and A2A task databases live outside those roots and are
-retained for later installations. Remove either state root explicitly only when
-permanent local data loss is intended.
+Disable or remove the exact issuer key versions owned by the package, stop the shared
+service through its platform manager, stop any A2A gateway process, remove the user
+extension directory, and remove the extracted installation directories. Remove the
+service-level authorization database only when uninstalling the complete local
+service after all issuer records have been removed; keep it for a package-specific
+uninstall so unrelated issuers and profile suspensions remain intact.
+
+Profiles and A2A task databases live outside the installation roots and are retained
+for later installations. Remove either state root explicitly only when permanent
+local data loss is intended.
