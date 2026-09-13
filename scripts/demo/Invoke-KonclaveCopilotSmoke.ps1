@@ -76,7 +76,7 @@ $smokeStateRoot = Join-Path $localAppData 'Konclave' 'demo' 'smoke'
 $copilotHome = Join-Path $smokeStateRoot 'copilot-home'
 $extensionRoot = Join-Path $copilotHome 'extensions' 'konclave'
 $clientModulePath = Join-Path $extensionRoot 'client.mjs'
-$serviceConfigPath = Join-Path $extensionRoot 'konclave.service.json'
+$serviceConfigPath = Join-Path $smokeStateRoot 'service' 'konclave.service.json'
 foreach ($path in @($clientModulePath, $serviceConfigPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Installed Konclave shared-client asset is unavailable: $path"
@@ -89,8 +89,13 @@ if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
 $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 20
 if (
-    [int64]$status.schemaVersion -ne 3 -or
-    [int64]$status.serviceProcessId -le 0
+    [int64]$status.schemaVersion -ne 4 -or
+    [int64]$status.serviceProcessId -le 0 -or
+    [string]::IsNullOrWhiteSpace([string]$status.clientConfigPath) -or
+    -not [IO.Path]::GetFullPath([string]$status.clientConfigPath).Equals(
+        [IO.Path]::GetFullPath($serviceConfigPath),
+        [StringComparison]::OrdinalIgnoreCase
+    )
 ) {
     throw 'Konclave demo shared-service status is malformed.'
 }

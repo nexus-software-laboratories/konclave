@@ -114,6 +114,10 @@ jobs:
             --locked \
             --package KonclaveCommandLine \
             --test authorization
+          cargo check \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --test packaged_distribution_e2e
           cargo clippy \
             --locked \
             --package KonclaveLocalServiceTransport \
@@ -135,3 +139,26 @@ jobs:
           npm run lint
           npm run typecheck
           npm exec -- vitest run tests/service-config.test.ts
+      - name: Verify distribution script syntax
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'scripts/demo/Invoke-KonclaveCopilotSmoke.ps1',
+            'scripts/demo/Start-KonclaveLocalDemo.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              throw "$path contains PowerShell parse errors."
+            }
+          }
+          bash -n scripts/packaging/Test-PackagedAcceptance.sh
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged acceptance script syntax validation failed.'
+          }

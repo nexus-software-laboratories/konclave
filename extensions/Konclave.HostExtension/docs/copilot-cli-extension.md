@@ -19,9 +19,13 @@ never sent to the service or included in diagnostics.
 
 ## Shared-service client
 
-Installation writes `konclave.service.json` beside the installed extension. A bounded
-development override may name that file with `KONCLAVE_SERVICE_CONFIG_FILE`. The
-record contains only:
+Installation writes `konclave.service.json` under Konclave's canonical platform data
+root, outside the replaceable Copilot plugin or raw-extension directory. A bounded
+development override may name that file with `KONCLAVE_SERVICE_CONFIG_FILE`. During
+migration, a module-adjacent legacy sidecar is accepted only when its validated
+authority values match the canonical record; the legacy record may omit the newer
+UserPresence helper. Unsafe or conflicting canonical state never falls back to legacy
+configuration. The record contains only:
 
 - the local named-pipe or Unix-socket endpoint;
 - the registered adapter key identifier and version;
@@ -44,7 +48,7 @@ exchange remains subject to the startup transport bound.
 On Unix, configuration and key records are opened with `O_NOFOLLOW`, verified through
 the same descriptor as regular files owned by the current UID with no group or other
 permissions, and read within hard byte limits. On Windows, the Rust installer creates
-and verifies the extension directory and both files with an explicit
+and verifies the canonical directory and both files with an explicit
 current-account-only DACL before Node reads either through one bounded descriptor.
 The service named pipe independently verifies both process SIDs and integrity levels.
 The Ed25519 seed and its temporary DER encoding are zeroized immediately after the

@@ -39,23 +39,39 @@ Before extraction, verify the complete downloaded release set as described in
 ## Install the Copilot extension
 
 Copilot discovers user-scoped extensions under
-`~/.copilot/extensions/konclave/`. A complete installation contains `extension.mjs`, the reusable `client.mjs`, and the
-one-shot `generic.mjs` fallback plus the installer-created `konclave.service.json`
-sidecar. No native executable lives under the extension directory.
-UserPresence sidecars record the absolute packaged CLI path as
+`~/.copilot/extensions/konclave/`. A complete legacy installation contains
+`extension.mjs`, the reusable `client.mjs`, and the one-shot `generic.mjs` fallback.
+Installer-owned `konclave.service.json` lives under the canonical Konclave platform
+data root rather than the replaceable extension directory:
+
+- Windows: `%LOCALAPPDATA%\Konclave\service\konclave.service.json`;
+- Linux: `$XDG_DATA_HOME/konclave/service/konclave.service.json`, or
+  `~/.local/share/konclave/service/konclave.service.json`; and
+- macOS: `~/Library/Application Support/Konclave/service/konclave.service.json`.
+
+`init` migrates an existing module-adjacent sidecar only when its validated endpoint,
+issuer, pinned service key, signing-key path, and authorization policy match the
+requested installation. A legacy AccountTrusted sidecar may omit the newer
+UserPresence helper. Conflicting, malformed, unsafe, linked, oversized, or
+permission-invalid state fails closed, and new installations never create a legacy
+sidecar. The `--local-service-client-config` option is an absolute-path override for
+isolated tests and declared development scenarios; it is not a production location
+selector.
+
+UserPresence client configuration records the absolute packaged CLI path as
 `userPresenceHelper`; clients never discover or launch an arbitrary executable.
-AccountTrusted-only sidecars omit that field, preserving the prior document exactly,
-but cannot satisfy UserPresence.
+AccountTrusted-only records omit that field and cannot satisfy UserPresence.
+No native executable or authority state belongs under the extension directory.
 
 The [Local Copilot demo](local-demo.md) performs this installation atomically on
 Windows and enables experimental extension support when necessary. Direct
 `copilot plugin install` is not the extension installation path: current Copilot CLI
 versions can cache the plugin payload without mounting its extension.
 
-On Linux or macOS, run `init` first so the owner-protected extension directory and
-sidecar exist, then copy `extension.mjs`, `client.mjs`, and `generic.mjs` from
-`<install-root>/share/konclave/plugin/extensions/Konclave.Extension/` into that
-directory. Copy
+On Linux or macOS, run `init` first so the owner-protected canonical client
+configuration exists. Create the legacy extension directory separately, then copy
+`extension.mjs`, `client.mjs`, and `generic.mjs` from
+`<install-root>/share/konclave/plugin/extensions/Konclave.Extension/` into it. Copy
 `<install-root>/share/konclave/plugin/skills/konclave-generic/SKILL.md` only into an
 unsupported harness's own skill location when the best-effort fallback is wanted.
 Do not install it into Copilot CLI; the paved extension owns that harness.
@@ -108,9 +124,9 @@ installation.
 `init` creates or verifies one service identity, one AccountTrusted issuer identity,
 the finite issuer registration, the explicit evidence policy, the owner-protected
 `konclave-local-authorization.sqlite3` authority database, the immutable service
-configuration, and the extension sidecar. Under UserPresence, the AccountTrusted
-issuer authenticates only the challenge request; it cannot satisfy the policy without
-the independently verified assertion. A Copilot process obtains a finite
+configuration, and the canonical client configuration. Under UserPresence, the
+AccountTrusted issuer authenticates only the challenge request; it cannot satisfy the
+policy without the independently verified assertion. A Copilot process obtains a finite
 exact-profile grant for a memory-only session key, and the issuer cannot invoke
 profile operations directly. The authority database is created before the immutable
 installation record is published; once that record exists, a missing or empty

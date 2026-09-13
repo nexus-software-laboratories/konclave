@@ -183,6 +183,7 @@ run_harness() {
     KONCLAVE_ACCEPTANCE_PROFILE_KEYS="$state_root/profile-keys" \
     KONCLAVE_ACCEPTANCE_SERVICE_IDENTITY="$state_root/service/identity.key" \
     KONCLAVE_ACCEPTANCE_EXTENSION_ROOT="$state_root/extension" \
+    KONCLAVE_ACCEPTANCE_CLIENT_CONFIG="$state_root/service/konclave.service.json" \
     KONCLAVE_ACCEPTANCE_RELAY_STATE="$state_root/relay" \
     KONCLAVE_ACCEPTANCE_RELAY_DATABASE="$state_root/relay/relay.sqlite" \
     KONCLAVE_ACCEPTANCE_GATEWAY="$gateway_launcher" \

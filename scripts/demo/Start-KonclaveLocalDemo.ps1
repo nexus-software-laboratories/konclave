@@ -184,6 +184,7 @@ $clientSource = Join-Path $pluginRoot 'extensions' 'Konclave.Extension' 'client.
 $genericSource = Join-Path $pluginRoot 'extensions' 'Konclave.Extension' 'generic.mjs'
 $genericSkillSource = Join-Path $pluginRoot 'skills' 'konclave-generic' 'SKILL.md'
 $serviceConfigPath = Join-Path $demoRoot 'service' 'konclave-local-service.json'
+$clientConfigPath = Join-Path $demoRoot 'service' 'konclave.service.json'
 $serviceIdentityPath = Join-Path $demoRoot 'service' 'identity.key'
 $copilotHomeValue = $env:COPILOT_HOME
 if ($IsolatedSmokeState) {
@@ -242,7 +243,7 @@ function Read-DemoStatus {
         ConvertFrom-Json -Depth 20
     $schemaVersion = [int64]$status.schemaVersion
     if (
-        $schemaVersion -notin @(2, 3) -or
+        $schemaVersion -notin @(2, 3, 4) -or
         [int64]$status.relayProcessId -le 0 -or
         [int64]$status.relayStartTimeUtcFileTime -le 0 -or
         [string]::IsNullOrWhiteSpace([string]$status.relayExecutable)
@@ -250,13 +251,24 @@ function Read-DemoStatus {
         throw 'Konclave demo status is malformed.'
     }
     if (
-        $schemaVersion -eq 3 -and (
+        $schemaVersion -ge 3 -and (
             [int64]$status.serviceProcessId -le 0 -or
             [int64]$status.serviceStartTimeUtcFileTime -le 0 -or
             [string]::IsNullOrWhiteSpace([string]$status.serviceExecutable)
         )
     ) {
         throw 'Konclave demo shared-service status is malformed.'
+    }
+    if (
+        $schemaVersion -ge 4 -and (
+            [string]::IsNullOrWhiteSpace([string]$status.clientConfigPath) -or
+            -not [IO.Path]::GetFullPath([string]$status.clientConfigPath).Equals(
+                [IO.Path]::GetFullPath($clientConfigPath),
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        )
+    ) {
+        throw 'Konclave demo client-configuration status is malformed.'
     }
     return $status
 }
@@ -316,7 +328,7 @@ function Stop-DemoProcesses {
     if ($null -eq $status) {
         return
     }
-    if ([int64]$status.schemaVersion -eq 3) {
+    if ([int64]$status.schemaVersion -ge 3) {
         Stop-DemoProcess `
             -ProcessId ([int]$status.serviceProcessId) `
             -ExpectedStartTime ([int64]$status.serviceStartTimeUtcFileTime) `
@@ -643,6 +655,7 @@ function Reset-PreReleaseAuthorizationState {
     }
     foreach ($path in @(
         $serviceConfigPath,
+        $clientConfigPath,
         (Join-Path $demoRoot 'service' 'copilot-adapter.key'),
         (Join-Path $copilotExtensionRoot 'konclave.service.json')
     )) {
@@ -808,9 +821,8 @@ function Install-CopilotExtension {
     ) {
         throw 'Installed Konclave extension root is unsafe.'
     }
-    $serviceConfig = Join-Path $copilotExtensionRoot 'konclave.service.json'
-    if (-not (Test-Path -LiteralPath $serviceConfig -PathType Leaf)) {
-        throw 'Shared-service initialization did not install the extension sidecar.'
+    if (-not (Test-Path -LiteralPath $clientConfigPath -PathType Leaf)) {
+        throw 'Shared-service initialization did not install client configuration.'
     }
     [void](Enable-CopilotExperimentalExtensions)
     Install-AtomicExtensionFile `
@@ -960,7 +972,6 @@ function Wait-LocalService {
         [Diagnostics.Process]$Process
     )
 
-    $clientConfigPath = Join-Path $copilotExtensionRoot 'konclave.service.json'
     $clientConfig = Get-Content -LiteralPath $clientConfigPath -Raw -Encoding UTF8 |
         ConvertFrom-Json -Depth 20
     $pipePrefix = '\\.\pipe\'
@@ -986,7 +997,8 @@ function Wait-LocalService {
         }
         $lastOutput = @(& $cliPath doctor `
             --profile-root $profileRoot `
-            --install-root $clientRoot 2>&1)
+            --install-root $clientRoot `
+            --local-service-client-config $clientConfigPath 2>&1)
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 0) {
             return $lastOutput
@@ -1363,7 +1375,7 @@ function Write-DemoStatus {
     )
 
     $status = [ordered]@{
-        schemaVersion = 3
+        schemaVersion = 4
         relayProcessId = $RelayProcess.Id
         relayStartTimeUtcFileTime = (
             $RelayProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
@@ -1374,6 +1386,7 @@ function Write-DemoStatus {
             $ServiceProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
         )
         serviceExecutable = $serviceExecutable
+        clientConfigPath = $clientConfigPath
         endpoint = $endpoint
         installRoot = $installRoot
         profileRoot = $profileRoot
@@ -1704,6 +1717,8 @@ try {
         $profileRoot,
         '--copilot-extension-root',
         $copilotExtensionRoot,
+        '--local-service-client-config',
+        $clientConfigPath,
         '--local-service-identity-file',
         $serviceIdentityPath
     ))
