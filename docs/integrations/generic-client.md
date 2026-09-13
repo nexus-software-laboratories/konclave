@@ -42,6 +42,11 @@ metadata but never sends it to the service, stores it as evidence, or uses it to
 a profile. Unknown labels are accepted because they are self-declared, not an
 allowlist.
 
+The packaged reference executable proves only `AccountTrusted`. Future
+provider-specific Generic adapters may present independently verified
+`UserPresence` or `WorkloadIdentity` evidence through the same grant architecture,
+but no Generic caller may self-assert those claims or `HarnessAttested`.
+
 ## Profile selection
 
 Pass one canonical lowercase profile alias and an explicit profile mode. A

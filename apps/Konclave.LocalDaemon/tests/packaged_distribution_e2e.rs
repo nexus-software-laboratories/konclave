@@ -1446,6 +1446,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
         reply_text.as_bytes(),
         generic_text.as_bytes(),
         generic_reply.as_bytes(),
+        generic_capability.as_bytes(),
         policy_source.as_bytes(),
         protected_source.as_slice(),
     ];
