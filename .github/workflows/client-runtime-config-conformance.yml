@@ -106,6 +106,13 @@ jobs:
             --locked \
             --package KonclaveCommandLine \
             doctor
+          cargo test \
+            --locked \
+            --package KonclaveCommandLine \
+            --test cli \
+            external_init_is_idempotent_and_conflicts_fail \
+            -- \
+            --exact
           cargo check \
             --locked \
             --package KonclaveCommandLine \

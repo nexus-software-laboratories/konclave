@@ -178,6 +178,10 @@ fn external_init_is_idempotent_and_conflicts_fail() {
     assert!(authorization_store_path(&installation_path)
         .unwrap()
         .is_file());
+    assert!(client_config.is_file());
+    assert!(!extension
+        .join(KonclaveLocalServiceTransport::COPILOT_SERVICE_CONFIG_FILE)
+        .exists());
     assert!(!std::fs::read(root.join("relay-installation.conf"))
         .unwrap()
         .windows(encoded_credential.len())
