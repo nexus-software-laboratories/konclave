@@ -51,6 +51,9 @@ lowercase hexadecimal characters, prefix them with `generic-`, and use
 `--profile-mode ephemeral`. Never derive continuity from a process identifier, working
 directory, timestamp, model name, integration label, or agent text. Aliases beginning
 with `session-` are reserved for paved harnesses and rejected by the Generic client.
+Programmatic callers pass the same `{ profile, profileMode, integrationLabel }`
+identity to `connectInstalledGenericService`; the SDK validates it before reading
+installation configuration or opening a service connection.
 
 ## Invocation
 

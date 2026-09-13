@@ -72,6 +72,7 @@ interface TestServiceOptions {
   readonly maximumGrantIssues?: number;
   readonly grantResponsesToDrop?: number;
   readonly observeIssuerClientInstance?: (clientInstance: Buffer) => void;
+  readonly observeGrantRequest?: (request: ReceivedRequest) => void;
 }
 
 function endpoint(): string {
@@ -209,6 +210,7 @@ async function serveConnection(
   grantIssueAllowed: () => boolean,
   dropGrantResponse: () => boolean,
   observeIssuerClientInstance: ((clientInstance: Buffer) => void) | undefined,
+  observeGrantRequest: ((request: ReceivedRequest) => void) | undefined,
 ): Promise<void> {
   const reader = new FrameReader(socket, handshakeFrameLimit + 4);
   const helloFrame = await reader.read(handshakeFrameLimit);
@@ -277,6 +279,7 @@ async function serveConnection(
     ) {
       throw new Error('grant request was malformed');
     }
+    observeGrantRequest?.(request);
     const values = request.payload as Record<string, unknown>;
     if (!grantIssueAllowed()) {
       await writeFrame(socket, failure(request.requestId, 13), rpcFrameLimit);
@@ -426,6 +429,7 @@ async function startService(
           return true;
         },
         options.observeIssuerClientInstance,
+        options.observeGrantRequest,
       ).catch((error: unknown) => {
         if (error instanceof FrameError && error.failure === 'closed') {
           return;
@@ -525,10 +529,17 @@ describe('shared local service client', () => {
   });
 
   it('connects an unsupported harness through the installed generic issuer', async () => {
-    const service = await startService(() => ({
-      kind: 'respond',
-      value: { device_id: 'ac' },
-    }));
+    const grantRequests: ReceivedRequest[] = [];
+    const service = await startService(
+      () => ({
+        kind: 'respond',
+        value: { device_id: 'ac' },
+      }),
+      undefined,
+      {
+        observeGrantRequest: (request) => grantRequests.push(request),
+      },
+    );
     const directory = mkdtempSync(join(tmpdir(), 'konclave-generic-client-test-'));
     temporaryDirectories.push(directory);
     const issuerKeyFile = join(directory, 'account-issuer.key');
@@ -555,12 +566,42 @@ describe('shared local service client', () => {
     const client = await connectInstalledGenericService(
       { KONCLAVE_SERVICE_CONFIG_FILE: serviceConfigFile },
       directory,
-      'generic-test',
+      {
+        profile: 'generic-test',
+        profileMode: 'durable',
+        integrationLabel: 'future-harness.v1',
+      },
     );
 
     await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ac' });
+    expect(grantRequests).toHaveLength(1);
+    expect(grantRequests[0]?.operation).toBe('authorization.grant.issue');
+    expect(grantRequests[0]?.payload).toMatchObject({
+      profile: 'generic-test',
+      harness: 'generic',
+    });
+    expect(Object.keys(grantRequests[0]?.payload as Record<string, unknown>).sort()).toEqual([
+      'harness',
+      'profile',
+      'sessionPublicKey',
+    ]);
     await client.retire();
     await service.close();
+
+    await expect(
+      connectInstalledGenericService({}, directory, {
+        profile: 'session-0123456789abcdef01234567',
+        profileMode: 'durable',
+        integrationLabel: 'future-harness.v1',
+      }),
+    ).rejects.toMatchObject({ code: 'paved_profile_reserved' });
+    await expect(
+      connectInstalledGenericService({}, directory, {
+        profile: 'generic-readable-name',
+        profileMode: 'ephemeral',
+        integrationLabel: 'future-harness.v1',
+      }),
+    ).rejects.toMatchObject({ code: 'ephemeral_profile_invalid' });
   });
 
   it('redacts an unavailable endpoint from connection errors', async () => {

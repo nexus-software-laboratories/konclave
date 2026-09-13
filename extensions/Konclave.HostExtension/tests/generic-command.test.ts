@@ -185,7 +185,11 @@ describe('generic harness command', () => {
       result: { messages: [] },
     });
 
-    expect(connect).toHaveBeenCalledWith(environment, 'module', 'generic-test');
+    expect(connect).toHaveBeenCalledWith(environment, 'module', {
+      profile: 'generic-test',
+      profileMode: 'durable',
+      integrationLabel: 'future-harness.v1',
+    });
     expect(request).toHaveBeenCalledWith(
       'read_messages',
       { conversation_id: 'ab', limit: 10 },

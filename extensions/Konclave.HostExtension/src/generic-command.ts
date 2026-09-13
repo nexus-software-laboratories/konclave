@@ -1,31 +1,19 @@
 import type { LocalServiceClient } from './service/client.js';
 import { LocalServiceError, LocalServiceUpgradeRequiredError } from './service/client.js';
 import { ServiceConfigurationError } from './service/config.js';
-import { connectInstalledGenericService } from './service/installed.js';
+import {
+  connectInstalledGenericService,
+  GenericClientIdentityError,
+  validateGenericClientIdentity,
+  type GenericClientIdentity,
+  type GenericProfileMode,
+} from './service/installed.js';
 import { serviceOperations, toolOperations } from './service/operations.js';
-import { assertCanonicalProfile } from './service/transcript.js';
 
 const requestDeadlineMs = 90_000;
 const allowedOperations = new Set<string>([...toolOperations, serviceOperations.status]);
-const genericIntegrationLabelPattern = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
-const ephemeralProfilePattern = /^generic-[0-9a-f]{24}$/u;
 
-export type GenericProfileMode = 'durable' | 'ephemeral';
-
-class GenericCommandUsageError extends Error {
-  readonly code: 'invalid_arguments' | 'paved_profile_reserved' | 'ephemeral_profile_invalid';
-
-  constructor(code: 'invalid_arguments' | 'paved_profile_reserved' | 'ephemeral_profile_invalid') {
-    super(code);
-    this.name = 'GenericCommandUsageError';
-    this.code = code;
-  }
-}
-
-export interface GenericCommandArguments {
-  readonly profile: string;
-  readonly profileMode: GenericProfileMode;
-  readonly integrationLabel: string;
+export interface GenericCommandArguments extends GenericClientIdentity {
   readonly operation: string;
   readonly requestId?: Buffer;
 }
@@ -37,7 +25,7 @@ export interface GenericCommandResult {
   };
   readonly profile: {
     readonly alias: string;
-    readonly mode: GenericProfileMode;
+    readonly mode: GenericClientIdentity['profileMode'];
   };
   readonly result: unknown;
 }
@@ -69,33 +57,33 @@ export function parseGenericCommandArguments(values: readonly string[]): Generic
     ) {
       if (name === '--profile') {
         if (profile !== undefined) {
-          throw new GenericCommandUsageError('invalid_arguments');
+          throw new GenericClientIdentityError('invalid_arguments');
         }
         profile = value;
       } else if (name === '--profile-mode') {
         if (profileMode !== undefined || (value !== 'durable' && value !== 'ephemeral')) {
-          throw new GenericCommandUsageError('invalid_arguments');
+          throw new GenericClientIdentityError('invalid_arguments');
         }
         profileMode = value;
       } else if (name === '--integration-label') {
-        if (integrationLabel !== undefined || !genericIntegrationLabelPattern.test(value)) {
-          throw new GenericCommandUsageError('invalid_arguments');
+        if (integrationLabel !== undefined) {
+          throw new GenericClientIdentityError('invalid_arguments');
         }
         integrationLabel = value;
       } else if (name === '--operation') {
         if (operation !== undefined) {
-          throw new GenericCommandUsageError('invalid_arguments');
+          throw new GenericClientIdentityError('invalid_arguments');
         }
         operation = value;
       } else if (requestId === undefined && /^[0-9a-f]{32}$/u.test(value)) {
         requestId = Buffer.from(value, 'hex');
       } else {
-        throw new GenericCommandUsageError('invalid_arguments');
+        throw new GenericClientIdentityError('invalid_arguments');
       }
       index += 1;
       continue;
     }
-    throw new GenericCommandUsageError('invalid_arguments');
+    throw new GenericClientIdentityError('invalid_arguments');
   }
   if (
     !profile ||
@@ -104,20 +92,10 @@ export function parseGenericCommandArguments(values: readonly string[]): Generic
     !operation ||
     !allowedOperations.has(operation)
   ) {
-    throw new GenericCommandUsageError('invalid_arguments');
+    throw new GenericClientIdentityError('invalid_arguments');
   }
-  try {
-    assertCanonicalProfile(profile);
-  } catch {
-    throw new GenericCommandUsageError('invalid_arguments');
-  }
-  if (profile.startsWith('session-')) {
-    throw new GenericCommandUsageError('paved_profile_reserved');
-  }
-  if (profileMode === 'ephemeral' && !ephemeralProfilePattern.test(profile)) {
-    throw new GenericCommandUsageError('ephemeral_profile_invalid');
-  }
-  const parsed = { profile, profileMode, integrationLabel, operation };
+  const identity = validateGenericClientIdentity({ profile, profileMode, integrationLabel });
+  const parsed = { ...identity, operation };
   return requestId ? { ...parsed, requestId } : parsed;
 }
 
@@ -130,7 +108,11 @@ export async function invokeGenericCommand(
   const client: LocalServiceClient = await connect(
     dependencies.environment,
     dependencies.moduleDir,
-    args.profile,
+    {
+      profile: args.profile,
+      profileMode: args.profileMode,
+      integrationLabel: args.integrationLabel,
+    },
   );
   let operationSucceeded = false;
   try {
@@ -176,7 +158,7 @@ export function genericCommandFailure(error: unknown): {
   if (error instanceof LocalServiceUpgradeRequiredError) {
     return { error: error.code };
   }
-  if (error instanceof GenericCommandUsageError) {
+  if (error instanceof GenericClientIdentityError) {
     return { error: error.code };
   }
   return { error: 'generic_client_failed' };

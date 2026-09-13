@@ -102,6 +102,8 @@ check(
 check(
   typeof clientApi.connectInstalledService === 'function' &&
     typeof clientApi.connectInstalledGenericService === 'function' &&
+    typeof clientApi.validateGenericClientIdentity === 'function' &&
+    typeof clientApi.GenericClientIdentityError === 'function' &&
     compiledClient.includes('request.cancel') &&
     typeof clientApi.createKonclaveTools === 'function' &&
     typeof clientApi.createCopilotPolicyGate === 'function' &&
