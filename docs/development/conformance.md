@@ -230,6 +230,9 @@ crash or excessive-allocation case becomes a permanent regression input.
 - prove an absent or connection-accepted-but-silent local service cannot hold Copilot
   extension startup beyond the installed transport budget, while ordinary operation
   deadlines and the UserPresence ceremony window remain independent;
+- simulate long and changing extension outages to prove retries recover, diagnostics
+  remain logarithmically sparse, arbitrary exception text is not logged, and a valid
+  response resets suppression;
 - verify CLI and Copilot adapters produce the same domain outcomes through the public
   client contract.
 - verify the outbound relay client refuses insecure remote endpoints and redirects,

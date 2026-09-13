@@ -172,6 +172,13 @@ extension reuses the established delivery coordinator to:
 - acknowledge only after the harness accepts a synthetic turn; and
 - release or reclaim work after rejection, disconnect, or restart.
 
+After a service outage, delivery continues its capped exponential retry policy but
+does not emit one error per attempt. It reports the first occurrence of each finite
+failure class and power-of-two milestones across the current outage, then resets
+suppression after a valid heartbeat or claim response. A 50,000-attempt identical
+outage therefore emits 16 diagnostics. Transport exceptions are reduced to bounded
+class labels rather than copying arbitrary error text into extension logs.
+
 When a conversation has a locally active collaboration policy, the delivery client
 asks the shared service to authorize `conversation.reply` before injecting the
 synthetic turn. The service requires an authenticated Copilot grant, the profile's

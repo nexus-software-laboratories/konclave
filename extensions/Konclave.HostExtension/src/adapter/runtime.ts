@@ -28,6 +28,14 @@ export const maximumHeartbeatRetryMilliseconds = 5_000;
 export const defaultClaimRetryMilliseconds = 1_000;
 export const maximumClaimRetryMilliseconds = 30_000;
 
+type DeliveryFailureClass =
+  | 'heartbeat-rejected'
+  | 'heartbeat-protocol'
+  | 'heartbeat-transport'
+  | 'claim-rejected'
+  | 'claim-protocol'
+  | 'claim-transport';
+
 export interface DeliveryRuntimeOptions {
   readonly channel: AdapterChannel;
   readonly coordinator: DeliveryCoordinator;
@@ -63,7 +71,27 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
   const clock = options.clock ?? { now: () => performance.now() };
   let running = true;
   let consecutiveFailures = 0;
+  let outageFailures = 0;
+  const reportedFailureClasses = new Set<DeliveryFailureClass>();
   let lastHeartbeatAt = clock.now() - heartbeatMilliseconds;
+
+  const reportFailure = (failureClass: DeliveryFailureClass, message: string): void => {
+    consecutiveFailures = Math.min(Number.MAX_SAFE_INTEGER, consecutiveFailures + 1);
+    outageFailures = Math.min(Number.MAX_SAFE_INTEGER, outageFailures + 1);
+    const firstOfClass = !reportedFailureClasses.has(failureClass);
+    reportedFailureClasses.add(failureClass);
+    if (firstOfClass || Number.isInteger(Math.log2(outageFailures))) {
+      options.diagnostics.error(
+        outageFailures === 1 ? message : `${message} (outage failure ${outageFailures})`,
+      );
+    }
+  };
+
+  const resetFailures = (): void => {
+    consecutiveFailures = 0;
+    outageFailures = 0;
+    reportedFailureClasses.clear();
+  };
 
   const retryDelay = (maximum = maximumClaimRetryMilliseconds): number => {
     const exponent = Math.min(Math.max(0, consecutiveFailures - 1), 10);
@@ -88,27 +116,28 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
               turn: options.coordinator.activeTurn ?? undefined,
             });
             if (heartbeat.kind === 'failure') {
-              options.diagnostics.error(`Konclave rejected a heartbeat: ${heartbeat.code}`);
-              consecutiveFailures += 1;
+              reportFailure(
+                'heartbeat-rejected',
+                `Konclave rejected a heartbeat: ${heartbeat.code}`,
+              );
               await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
               continue;
             }
             if (heartbeat.kind !== 'accepted') {
-              options.diagnostics.error(
+              reportFailure(
+                'heartbeat-protocol',
                 'Konclave answered a delivery heartbeat with an unexpected response.',
               );
-              consecutiveFailures += 1;
               await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
               continue;
             }
             lastHeartbeatAt = now;
-            consecutiveFailures = 0;
-          } catch (error) {
+            resetFailures();
+          } catch {
             if (!running) {
               return;
             }
-            options.diagnostics.error(`Konclave heartbeat failed: ${describeError(error)}`);
-            consecutiveFailures += 1;
+            reportFailure('heartbeat-transport', 'Konclave heartbeat transport failed.');
             await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
             continue;
           }
@@ -123,37 +152,34 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
           maxEvents: maxClaimBatch,
           waitMilliseconds: claimWaitMilliseconds,
         });
-      } catch (error) {
+      } catch {
         if (!running) {
           return;
         }
-        options.diagnostics.error(`Konclave claim failed: ${describeError(error)}`);
-        consecutiveFailures += 1;
+        reportFailure('claim-transport', 'Konclave claim transport failed.');
         await sleep(retryDelay());
         continue;
       }
 
       if (response.kind === 'failure') {
-        options.diagnostics.error(`Konclave rejected a claim: ${response.code}`);
-        consecutiveFailures += 1;
+        reportFailure('claim-rejected', `Konclave rejected a claim: ${response.code}`);
         await sleep(retryDelay());
         continue;
       }
 
       if (response.kind !== 'batch') {
-        options.diagnostics.error('Konclave answered a claim with an unexpected response.');
-        consecutiveFailures += 1;
+        reportFailure('claim-protocol', 'Konclave answered a claim with an unexpected response.');
         await sleep(retryDelay());
         continue;
       }
 
       if (response.events.length === 0) {
-        consecutiveFailures = 0;
+        resetFailures();
         // An expired wait is not an event, so the loop simply reissues.
         continue;
       }
 
-      consecutiveFailures = 0;
+      resetFailures();
       enqueue(options.coordinator, response.events, options.diagnostics);
       await options.coordinator.flush();
     }
@@ -174,13 +200,9 @@ function enqueue(
 ): void {
   try {
     coordinator.enqueue(events);
-  } catch (error) {
-    diagnostics.error(`Konclave could not queue a delivery: ${describeError(error)}`);
+  } catch {
+    diagnostics.error('Konclave could not queue a delivery.');
   }
 }
 
 export { createDeliveryCoordinator };
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : 'unknown error';
-}

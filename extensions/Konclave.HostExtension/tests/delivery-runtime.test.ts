@@ -123,9 +123,110 @@ describe('delivery runtime loop', () => {
     });
 
     await runtime.completed;
-    expect(errors.join(' ')).toContain('claim failed');
+    expect(errors.join(' ')).toContain('claim transport failed');
     expect(attempts).toBe(2);
     expect(sleeps).toBe(1);
+  });
+
+  it('emits logarithmically sparse diagnostics during a long identical outage', async () => {
+    const errors: string[] = [];
+    let attempts = 0;
+    let stopLoop: () => void = () => {};
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request() {
+          attempts += 1;
+          if (attempts > 50_000) {
+            stopLoop();
+            return { kind: 'batch', events: [] };
+          }
+          throw new Error('local service connection is unavailable');
+        },
+        close: () => {},
+      },
+      coordinator: coordinator(),
+      diagnostics: { error: (message) => errors.push(message) },
+      sleep: async () => {},
+    });
+    stopLoop = () => runtime.stop();
+
+    await runtime.completed;
+
+    expect(attempts).toBe(50_001);
+    expect(errors).toHaveLength(16);
+    expect(errors[0]).toBe('Konclave claim transport failed.');
+    expect(errors.at(-1)).toContain('outage failure 32768');
+  });
+
+  it('reports each newly observed outage class before suppressing repeats', async () => {
+    const errors: string[] = [];
+    let attempts = 0;
+    let stopLoop: () => void = () => {};
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request() {
+          attempts += 1;
+          switch (attempts) {
+            case 1:
+              throw new Error('transport unavailable');
+            case 2:
+              return { kind: 'failure', code: 'adapter_stale_lease' };
+            case 3:
+              return { kind: 'accepted' };
+            default:
+              stopLoop();
+              return { kind: 'batch', events: [] };
+          }
+        },
+        close: () => {},
+      },
+      coordinator: coordinator(),
+      diagnostics: { error: (message) => errors.push(message) },
+      sleep: async () => {},
+    });
+    stopLoop = () => runtime.stop();
+
+    await runtime.completed;
+
+    expect(errors).toHaveLength(3);
+    expect(errors[0]).toContain('claim transport failed');
+    expect(errors[1]).toContain('rejected a claim');
+    expect(errors[2]).toContain('unexpected response');
+  });
+
+  it('resets diagnostic suppression after a successful claim response', async () => {
+    const errors: string[] = [];
+    let attempts = 0;
+    let stopLoop: () => void = () => {};
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request() {
+          attempts += 1;
+          if (attempts === 1 || attempts === 3) {
+            throw new Error('local service connection is unavailable');
+          }
+          if (attempts >= 4) {
+            stopLoop();
+          }
+          return { kind: 'batch', events: [] };
+        },
+        close: () => {},
+      },
+      coordinator: coordinator(),
+      diagnostics: { error: (message) => errors.push(message) },
+      sleep: async () => {},
+    });
+    stopLoop = () => runtime.stop();
+
+    await runtime.completed;
+
+    expect(errors).toEqual([
+      'Konclave claim transport failed.',
+      'Konclave claim transport failed.',
+    ]);
   });
 
   it('backs off with its own timer when none is supplied', async () => {
@@ -343,7 +444,7 @@ describe('delivery runtime loop', () => {
 
     await runtime.completed;
     expect(requests).toEqual(['heartbeat', 'wait-and-claim']);
-    expect(errors.join(' ')).toContain('heartbeat connection closed');
+    expect(errors.join(' ')).toContain('heartbeat transport failed');
     expect(sleeps).toHaveLength(1);
   });
 
