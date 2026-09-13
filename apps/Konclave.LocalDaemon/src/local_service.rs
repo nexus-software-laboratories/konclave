@@ -3695,6 +3695,7 @@ mod tests {
         client_identity: LocalServiceIdentity,
         adapter_key_id: AdapterKeyId,
         adapter_key_version: AdapterKeyVersion,
+        issuer_harness: HarnessKind,
         authorization: Arc<LiveAuthorizationRuntime>,
         installation_path: PathBuf,
         installation_fingerprint: InstallationFingerprint,
@@ -3705,7 +3706,29 @@ mod tests {
             Self::new_with_policy(AuthorizationPolicy::account_trusted()).await
         }
 
+        async fn new_generic() -> Self {
+            Self::new_with_policy_and_issuer(
+                AuthorizationPolicy::account_trusted(),
+                HarnessKind::Generic,
+                ProfileAuthorization::All,
+            )
+            .await
+        }
+
         async fn new_with_policy(policy: AuthorizationPolicy) -> Self {
+            Self::new_with_policy_and_issuer(
+                policy,
+                HarnessKind::Copilot,
+                ProfileAuthorization::Namespace(ServiceProfileId::parse("session").unwrap()),
+            )
+            .await
+        }
+
+        async fn new_with_policy_and_issuer(
+            policy: AuthorizationPolicy,
+            issuer_harness: HarnessKind,
+            profiles: ProfileAuthorization,
+        ) -> Self {
             let root = TestProfileRoot::new();
             let endpoint = LocalServiceEndpoint::parse(
                 root.path()
@@ -3727,8 +3750,8 @@ mod tests {
                 adapter_key_version,
                 AdapterRegistration::new(
                     client_identity.public_key(),
-                    HarnessKind::Copilot,
-                    ProfileAuthorization::Namespace(ServiceProfileId::parse("session").unwrap()),
+                    issuer_harness,
+                    profiles,
                 ),
             );
             let installation_path = root
@@ -3766,6 +3789,7 @@ mod tests {
                 client_identity,
                 adapter_key_id,
                 adapter_key_version,
+                issuer_harness,
                 authorization,
                 installation_path,
                 installation_fingerprint,
@@ -3811,7 +3835,7 @@ mod tests {
                 issuer_key_version: self.adapter_key_version,
                 profile: ServiceProfileId::parse(profile).unwrap(),
                 session_public_key: self.client_identity.public_key(),
-                harness: HarnessKind::Copilot,
+                harness: self.issuer_harness,
                 evidence: AuthorizationEvidenceSet::new([evidence]).unwrap(),
                 policy_version: AuthorizationPolicyVersion::new(policy_version).unwrap(),
                 issued_at_unix_milliseconds: 1,
@@ -3899,7 +3923,7 @@ mod tests {
                         client_instance: ClientInstanceId::from_bytes(
                             [instance_seed; ClientInstanceId::LENGTH],
                         ),
-                        harness: HarnessKind::Copilot,
+                        harness: self.issuer_harness,
                     },
                     &self.client_identity,
                     self.service_identity.public_key(),
@@ -4001,7 +4025,7 @@ mod tests {
             "sessionPublicKey": crate::mcp::encode_hex(
                 fixture.client_identity.public_key().as_bytes()
             ),
-            "harness": "copilot"
+            "harness": fixture.issuer_harness.as_str()
         }))
         .unwrap();
         match request(issuer, seed, "authorization.grant.issue", &payload).await {
@@ -5074,7 +5098,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn disabled_issuer_denies_new_grants_and_applies_retain_then_revoke() {
-        let fixture = Fixture::new().await;
+        let fixture = Fixture::new_generic().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
             fixture.config(),
@@ -5088,7 +5112,7 @@ mod tests {
             }
             stream = fixture.connect_issuer(51) => stream,
         };
-        let grant = issue_grant(&fixture, &mut issuer, 51, "session-disabled")
+        let grant = issue_grant(&fixture, &mut issuer, 51, "generic-disabled")
             .await
             .unwrap();
         let mut session = fixture.connect_grant(grant, 52).await;
@@ -5107,7 +5131,7 @@ mod tests {
             })
             .await;
         assert_eq!(
-            issue_grant(&fixture, &mut issuer, 52, "session-disabled-new").await,
+            issue_grant(&fixture, &mut issuer, 52, "generic-disabled-new").await,
             Err(LocalServiceErrorCode::IssuerDisabled)
         );
         assert!(matches!(
@@ -5139,7 +5163,7 @@ mod tests {
                 &fixture,
                 &mut disabled_reconnect,
                 54,
-                "session-disabled-new",
+                "generic-disabled-new",
             )
             .await,
             Err(LocalServiceErrorCode::IssuerDisabled)

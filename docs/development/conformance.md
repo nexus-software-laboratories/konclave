@@ -25,8 +25,9 @@ behavior.
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, formatting, lint, type checking,
-compilation, and package verification before packaged daemon or skill integration
-relies on that contract.
+compilation, and package verification. It also runs generic issuer disablement and
+quota coverage through the durable authorization boundaries before packaged daemon or
+skill integration relies on that contract.
 
 ### Release evidence
 
