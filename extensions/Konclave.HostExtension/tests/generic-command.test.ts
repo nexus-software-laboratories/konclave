@@ -252,6 +252,15 @@ describe('generic harness command', () => {
     expect(genericCommandFailure(reserved)).toEqual({
       error: 'paved_profile_reserved',
     });
+    let invalidArguments: unknown;
+    try {
+      parseGenericCommandArguments([]);
+    } catch (error) {
+      invalidArguments = error;
+    }
+    expect(genericCommandFailure(invalidArguments)).toEqual({
+      error: 'invalid_arguments',
+    });
   });
 
   it('preserves a successful operation when clean retirement fails', async () => {
