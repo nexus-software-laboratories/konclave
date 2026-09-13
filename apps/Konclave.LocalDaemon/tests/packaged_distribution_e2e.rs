@@ -33,7 +33,10 @@ use KonclaveLocalServiceTransport::{
     AdapterKeyId, AdapterKeyVersion, LocalServiceInstallation, LocalServiceProfileCustody,
     encode_lowercase_hex,
 };
-use KonclaveSecretStorage::{create_or_verify_owner_protected_file, open_owner_protected_file};
+use KonclaveSecretStorage::{
+    create_or_verify_owner_protected_file, ensure_owner_protected_directory,
+    open_owner_protected_file,
+};
 use sha2::{Digest as _, Sha256};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::time::timeout;
@@ -979,6 +982,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             .exists()
     );
     let installed_generic = paths.extension_root.join("generic.mjs");
+    ensure_owner_protected_directory(&paths.extension_root).unwrap();
     std::fs::copy(&paths.generic_module, &installed_generic).unwrap();
     for (profile, value) in [
         ("session-packaged-a", 31_u8),
