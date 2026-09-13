@@ -1059,12 +1059,8 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
         .as_str()
         .unwrap()
         .to_string();
-    let generic_capability = Zeroizing::new(
-        generic_pairing["capability"]
-            .as_str()
-            .unwrap()
-            .to_string(),
-    );
+    let generic_capability =
+        Zeroizing::new(generic_pairing["capability"].as_str().unwrap().to_string());
     let redeemed = rpc(
         &mut first,
         "redeem_pairing_capability",
