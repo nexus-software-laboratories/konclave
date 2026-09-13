@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -16,11 +17,12 @@ use crate::{
 /// File name of the service-owned installation record.
 pub const LOCAL_SERVICE_INSTALLATION_FILE: &str = "konclave-local-service.json";
 
-/// File name installed beside the Copilot extension.
+/// File name of the installer-owned Copilot and Generic client configuration.
 pub const COPILOT_SERVICE_CONFIG_FILE: &str = "konclave.service.json";
 
 const INSTALLATION_SCHEMA_VERSION: u32 = 2;
 const MAX_INSTALLATION_BYTES: usize = 64 * 1024;
+const MAX_CLIENT_CONFIG_BYTES: usize = 4 * 1024;
 const MAX_ISSUER_REGISTRATIONS: usize = 64;
 const MAX_PATH_BYTES: usize = 4 * 1024;
 
@@ -234,7 +236,8 @@ impl LocalServiceInstallation {
     }
 }
 
-/// Validated Copilot extension sidecar emitted from an installation.
+/// Validated Copilot and Generic client configuration emitted from an installation.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CopilotServiceConfig {
     endpoint: LocalServiceEndpoint,
     issuer_key_id: IssuerKeyId,
@@ -276,36 +279,133 @@ impl CopilotServiceConfig {
         })
     }
 
-    /// Writes the exact sidecar consumed by the thin Copilot extension.
+    /// Reads one bounded installer-owned client configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite I/O, size, or validation error. Unknown fields, unsupported
+    /// schema versions, relative paths, and malformed authorization values are
+    /// rejected.
+    pub fn from_reader(mut reader: impl Read) -> Result<Self, LocalServiceInstallationError> {
+        let mut bytes = Vec::with_capacity(MAX_CLIENT_CONFIG_BYTES + 1);
+        reader
+            .by_ref()
+            .take((MAX_CLIENT_CONFIG_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| LocalServiceInstallationError::Io)?;
+        if bytes.len() > MAX_CLIENT_CONFIG_BYTES {
+            return Err(LocalServiceInstallationError::TooLarge);
+        }
+        let document: CopilotDocument =
+            serde_json::from_slice(&bytes).map_err(|_| LocalServiceInstallationError::Invalid)?;
+        document.try_into()
+    }
+
+    /// Writes the exact installer-owned record consumed by thin local clients.
     ///
     /// # Errors
     ///
     /// Returns a finite encoding or output error.
     pub fn write_to(&self, mut writer: impl Write) -> Result<(), LocalServiceInstallationError> {
-        let user_presence_helper = self
-            .user_presence_helper
-            .as_ref()
-            .map(|path| path.to_str().ok_or(LocalServiceInstallationError::Invalid))
-            .transpose()?;
-        serde_json::to_writer(
-            &mut writer,
-            &CopilotDocument {
-                schema_version: INSTALLATION_SCHEMA_VERSION,
-                endpoint: self.endpoint.as_str(),
-                issuer_key_id: encode_hex(self.issuer_key_id.as_bytes()),
-                issuer_key_version: self.issuer_key_version.get(),
-                harness: "copilot",
-                service_key: encode_hex(self.service_public_key.as_bytes()),
-                issuer_key_file: self
-                    .signing_key_file
-                    .to_str()
-                    .ok_or(LocalServiceInstallationError::Invalid)?,
-                user_presence_helper,
-                authorization_policy: AuthorizationPolicyDocument::from(&self.authorization_policy),
-            },
-        )
-        .map_err(|_| LocalServiceInstallationError::Io)
+        serde_json::to_writer(&mut writer, &CopilotDocument::try_from(self)?)
+            .map_err(|_| LocalServiceInstallationError::Io)
     }
+
+    fn matches_legacy(&self, desired: &Self) -> bool {
+        self.endpoint == desired.endpoint
+            && self.issuer_key_id == desired.issuer_key_id
+            && self.issuer_key_version == desired.issuer_key_version
+            && self.service_public_key == desired.service_public_key
+            && self.signing_key_file == desired.signing_key_file
+            && (self.user_presence_helper.is_none()
+                || self.user_presence_helper == desired.user_presence_helper)
+            && self.authorization_policy == desired.authorization_policy
+    }
+}
+
+/// Stable failures while resolving the canonical per-user client configuration path.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ClientRuntimeConfigPathError {
+    /// The platform-required home or data directory is unavailable.
+    #[error("client runtime configuration location is unavailable")]
+    Unavailable,
+    /// The configured platform data directory is relative, oversized, or non-Unicode.
+    #[error("client runtime configuration location is invalid")]
+    Invalid,
+}
+
+/// Resolves the canonical per-user client configuration path for the current platform.
+///
+/// # Errors
+///
+/// Returns [`ClientRuntimeConfigPathError::Unavailable`] when a required environment
+/// location is absent and [`ClientRuntimeConfigPathError::Invalid`] when a supplied
+/// location is unsafe.
+pub fn default_client_runtime_config_path() -> Result<PathBuf, ClientRuntimeConfigPathError> {
+    #[cfg(windows)]
+    {
+        return windows_client_runtime_config_path(std::env::var_os("LOCALAPPDATA"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_client_runtime_config_path(std::env::var_os("HOME"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return unix_client_runtime_config_path(
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("HOME"),
+        );
+    }
+    #[allow(unreachable_code)]
+    Err(ClientRuntimeConfigPathError::Unavailable)
+}
+
+/// Filesystem action selected for installer-owned client configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientRuntimeConfigAction {
+    /// No prior configuration exists; create the canonical record.
+    CreateCanonical,
+    /// The canonical record already contains the requested authority values.
+    PreserveCanonical,
+    /// Only an equal legacy sidecar exists; copy its authority into the canonical path.
+    MigrateLegacy,
+}
+
+/// Stable failure while reconciling canonical and legacy client configuration.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ClientRuntimeConfigReconciliationError {
+    /// Existing canonical or legacy authority values differ from the requested install.
+    #[error("installed client runtime configuration conflicts with the requested installation")]
+    Conflict,
+}
+
+/// Selects the exact idempotent action for canonical and legacy client configuration.
+///
+/// Existing records must already have passed bounded parsing and owner-protection
+/// checks. Any semantic difference in endpoint, issuer, pinned service key, signing
+/// key location, or authorization policy fails closed. A legacy record may omit the
+/// optional UserPresence helper added by a newer installer.
+///
+/// # Errors
+///
+/// Returns [`ClientRuntimeConfigReconciliationError::Conflict`] when either existing
+/// record differs from `desired`.
+pub fn reconcile_client_runtime_config(
+    desired: &CopilotServiceConfig,
+    canonical: Option<&CopilotServiceConfig>,
+    legacy: Option<&CopilotServiceConfig>,
+) -> Result<ClientRuntimeConfigAction, ClientRuntimeConfigReconciliationError> {
+    if canonical.is_some_and(|existing| existing != desired)
+        || legacy.is_some_and(|existing| !existing.matches_legacy(desired))
+    {
+        return Err(ClientRuntimeConfigReconciliationError::Conflict);
+    }
+    Ok(match (canonical, legacy) {
+        (Some(_), _) => ClientRuntimeConfigAction::PreserveCanonical,
+        (None, Some(_)) => ClientRuntimeConfigAction::MigrateLegacy,
+        (None, None) => ClientRuntimeConfigAction::CreateCanonical,
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -353,18 +453,18 @@ struct AuthorizationPolicyDocument {
     accepted_evidence: Vec<Vec<String>>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CopilotDocument<'a> {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CopilotDocument {
     schema_version: u32,
-    endpoint: &'a str,
+    endpoint: String,
     issuer_key_id: String,
     issuer_key_version: u32,
-    harness: &'static str,
+    harness: String,
     service_key: String,
-    issuer_key_file: &'a str,
+    issuer_key_file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    user_presence_helper: Option<&'a str>,
+    user_presence_helper: Option<String>,
     authorization_policy: AuthorizationPolicyDocument,
 }
 
@@ -407,6 +507,57 @@ impl TryFrom<InstallationDocument> for LocalServiceInstallation {
             authorization_policy,
             issuers,
         )
+    }
+}
+
+impl TryFrom<CopilotDocument> for CopilotServiceConfig {
+    type Error = LocalServiceInstallationError;
+
+    fn try_from(document: CopilotDocument) -> Result<Self, Self::Error> {
+        if document.schema_version != INSTALLATION_SCHEMA_VERSION || document.harness != "copilot" {
+            return Err(LocalServiceInstallationError::Invalid);
+        }
+        Self::new(
+            LocalServiceEndpoint::parse(&document.endpoint)
+                .map_err(|_| LocalServiceInstallationError::Invalid)?,
+            IssuerKeyId::from_bytes(decode_hex(&document.issuer_key_id)?),
+            IssuerKeyVersion::new(document.issuer_key_version)
+                .map_err(|_| LocalServiceInstallationError::Invalid)?,
+            Ed25519PublicKey::from_bytes(decode_hex(&document.service_key)?),
+            PathBuf::from(document.issuer_key_file),
+            document.user_presence_helper.map(PathBuf::from),
+            AuthorizationPolicy::try_from(document.authorization_policy)?,
+        )
+    }
+}
+
+impl TryFrom<&CopilotServiceConfig> for CopilotDocument {
+    type Error = LocalServiceInstallationError;
+
+    fn try_from(config: &CopilotServiceConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            schema_version: INSTALLATION_SCHEMA_VERSION,
+            endpoint: config.endpoint.as_str().to_string(),
+            issuer_key_id: encode_hex(config.issuer_key_id.as_bytes()),
+            issuer_key_version: config.issuer_key_version.get(),
+            harness: "copilot".to_string(),
+            service_key: encode_hex(config.service_public_key.as_bytes()),
+            issuer_key_file: config
+                .signing_key_file
+                .to_str()
+                .ok_or(LocalServiceInstallationError::Invalid)?
+                .to_string(),
+            user_presence_helper: config
+                .user_presence_helper
+                .as_ref()
+                .map(|path| {
+                    path.to_str()
+                        .map(str::to_string)
+                        .ok_or(LocalServiceInstallationError::Invalid)
+                })
+                .transpose()?,
+            authorization_policy: AuthorizationPolicyDocument::from(&config.authorization_policy),
+        })
     }
 }
 
@@ -567,6 +718,80 @@ fn parse_evidence_kind(
     }
 }
 
+#[cfg(any(windows, test))]
+fn windows_client_runtime_config_path(
+    local_app_data: Option<OsString>,
+) -> Result<PathBuf, ClientRuntimeConfigPathError> {
+    client_runtime_config_path(
+        required_client_config_root(local_app_data)?,
+        &["Konclave", "service"],
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_client_runtime_config_path(
+    home: Option<OsString>,
+) -> Result<PathBuf, ClientRuntimeConfigPathError> {
+    client_runtime_config_path(
+        required_client_config_root(home)?,
+        &["Library", "Application Support", "Konclave", "service"],
+    )
+}
+
+fn unix_client_runtime_config_path(
+    xdg_data_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, ClientRuntimeConfigPathError> {
+    match optional_client_config_root(xdg_data_home)? {
+        Some(root) => client_runtime_config_path(root, &["konclave", "service"]),
+        None => client_runtime_config_path(
+            required_client_config_root(home)?,
+            &[".local", "share", "konclave", "service"],
+        ),
+    }
+}
+
+fn required_client_config_root(
+    value: Option<OsString>,
+) -> Result<PathBuf, ClientRuntimeConfigPathError> {
+    optional_client_config_root(value)?.ok_or(ClientRuntimeConfigPathError::Unavailable)
+}
+
+fn optional_client_config_root(
+    value: Option<OsString>,
+) -> Result<Option<PathBuf>, ClientRuntimeConfigPathError> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    validate_client_config_path(&path)?;
+    Ok(Some(path))
+}
+
+fn client_runtime_config_path(
+    root: PathBuf,
+    directories: &[&str],
+) -> Result<PathBuf, ClientRuntimeConfigPathError> {
+    let mut path = root;
+    for directory in directories {
+        path.push(directory);
+    }
+    path.push(COPILOT_SERVICE_CONFIG_FILE);
+    validate_client_config_path(&path)?;
+    Ok(path)
+}
+
+fn validate_client_config_path(path: &Path) -> Result<(), ClientRuntimeConfigPathError> {
+    if !path.is_absolute()
+        || path
+            .to_str()
+            .is_none_or(|value| value.is_empty() || value.len() > MAX_PATH_BYTES)
+    {
+        return Err(ClientRuntimeConfigPathError::Invalid);
+    }
+    Ok(())
+}
+
 fn validate_absolute_path(path: &Path) -> Result<(), LocalServiceInstallationError> {
     if !path.is_absolute()
         || path
@@ -652,6 +877,10 @@ mod tests {
         .unwrap();
         let mut client_json = Vec::new();
         client.write_to(&mut client_json).unwrap();
+        assert_eq!(
+            CopilotServiceConfig::from_reader(client_json.as_slice()).unwrap(),
+            client
+        );
         let value: serde_json::Value = serde_json::from_slice(&client_json).unwrap();
         assert_eq!(value["schemaVersion"], 2);
         assert_eq!(value["harness"], "copilot");
@@ -684,8 +913,162 @@ mod tests {
         .unwrap();
         let mut legacy_json = Vec::new();
         legacy_compatible.write_to(&mut legacy_json).unwrap();
+        assert_eq!(
+            CopilotServiceConfig::from_reader(legacy_json.as_slice()).unwrap(),
+            legacy_compatible
+        );
         let legacy: serde_json::Value = serde_json::from_slice(&legacy_json).unwrap();
         assert!(legacy.get("userPresenceHelper").is_none());
+    }
+
+    #[test]
+    fn client_configuration_reconciliation_is_finite_and_fail_closed() {
+        let desired = client_config(1);
+        let mut legacy_without_helper = desired.clone();
+        legacy_without_helper.user_presence_helper = None;
+        let mut helper_conflict = desired.clone();
+        helper_conflict.user_presence_helper = Some(if cfg!(windows) {
+            PathBuf::from(r"C:\Other\konclave.exe")
+        } else {
+            PathBuf::from("/other/konclave")
+        });
+        let conflict = client_config(2);
+        for (canonical, legacy, expected) in [
+            (
+                None,
+                None,
+                Ok(ClientRuntimeConfigAction::CreateCanonical),
+            ),
+            (
+                Some(&desired),
+                None,
+                Ok(ClientRuntimeConfigAction::PreserveCanonical),
+            ),
+            (
+                None,
+                Some(&legacy_without_helper),
+                Ok(ClientRuntimeConfigAction::MigrateLegacy),
+            ),
+            (
+                Some(&desired),
+                Some(&legacy_without_helper),
+                Ok(ClientRuntimeConfigAction::PreserveCanonical),
+            ),
+            (
+                Some(&conflict),
+                None,
+                Err(ClientRuntimeConfigReconciliationError::Conflict),
+            ),
+            (
+                Some(&legacy_without_helper),
+                None,
+                Err(ClientRuntimeConfigReconciliationError::Conflict),
+            ),
+            (
+                None,
+                Some(&conflict),
+                Err(ClientRuntimeConfigReconciliationError::Conflict),
+            ),
+            (
+                None,
+                Some(&helper_conflict),
+                Err(ClientRuntimeConfigReconciliationError::Conflict),
+            ),
+            (
+                Some(&desired),
+                Some(&conflict),
+                Err(ClientRuntimeConfigReconciliationError::Conflict),
+            ),
+        ] {
+            assert_eq!(
+                reconcile_client_runtime_config(&desired, canonical, legacy),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn client_configuration_paths_follow_platform_data_conventions() {
+        let base = std::env::temp_dir().join("konclave-client-config-root");
+        assert_eq!(
+            windows_client_runtime_config_path(Some(base.clone().into_os_string())).unwrap(),
+            base.join("Konclave")
+                .join("service")
+                .join(COPILOT_SERVICE_CONFIG_FILE)
+        );
+        assert_eq!(
+            macos_client_runtime_config_path(Some(base.clone().into_os_string())).unwrap(),
+            base.join("Library")
+                .join("Application Support")
+                .join("Konclave")
+                .join("service")
+                .join(COPILOT_SERVICE_CONFIG_FILE)
+        );
+        assert_eq!(
+            unix_client_runtime_config_path(Some(base.clone().into_os_string()), None).unwrap(),
+            base.join("konclave")
+                .join("service")
+                .join(COPILOT_SERVICE_CONFIG_FILE)
+        );
+        assert_eq!(
+            unix_client_runtime_config_path(None, Some(base.clone().into_os_string())).unwrap(),
+            base.join(".local")
+                .join("share")
+                .join("konclave")
+                .join("service")
+                .join(COPILOT_SERVICE_CONFIG_FILE)
+        );
+        assert_eq!(
+            windows_client_runtime_config_path(None),
+            Err(ClientRuntimeConfigPathError::Unavailable)
+        );
+        assert_eq!(
+            macos_client_runtime_config_path(Some(OsString::new())),
+            Err(ClientRuntimeConfigPathError::Unavailable)
+        );
+        assert_eq!(
+            unix_client_runtime_config_path(Some(OsString::from("relative")), None),
+            Err(ClientRuntimeConfigPathError::Invalid)
+        );
+    }
+
+    #[test]
+    fn malformed_or_oversized_client_configuration_fails_closed() {
+        let client = client_config(1);
+        let mut encoded = Vec::new();
+        client.write_to(&mut encoded).unwrap();
+        let valid: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let invalid = [
+            serde_json::json!({}),
+            {
+                let mut value = valid.clone();
+                value["schemaVersion"] = serde_json::json!(3);
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["harness"] = serde_json::json!("generic");
+                value
+            },
+            {
+                let mut value = valid;
+                value["issuerKeyFile"] = serde_json::json!("relative.key");
+                value
+            },
+        ];
+        for value in invalid {
+            assert_eq!(
+                CopilotServiceConfig::from_reader(value.to_string().as_bytes()).unwrap_err(),
+                LocalServiceInstallationError::Invalid
+            );
+        }
+        assert_eq!(
+            CopilotServiceConfig::from_reader(
+                vec![0_u8; MAX_CLIENT_CONFIG_BYTES + 1].as_slice()
+            )
+            .unwrap_err(),
+            LocalServiceInstallationError::TooLarge
+        );
     }
 
     #[test]
@@ -755,5 +1138,31 @@ mod tests {
                 LocalServiceInstallationError::Invalid
             );
         }
+    }
+
+    fn client_config(marker: u8) -> CopilotServiceConfig {
+        CopilotServiceConfig::new(
+            LocalServiceEndpoint::parse(if cfg!(windows) {
+                r"\\.\pipe\konclave-local-service"
+            } else {
+                "/tmp/konclave/service.sock"
+            })
+            .unwrap(),
+            IssuerKeyId::from_bytes([marker; IssuerKeyId::LENGTH]),
+            IssuerKeyVersion::new(1).unwrap(),
+            Ed25519PublicKey::from_bytes([marker.saturating_add(1); Ed25519PublicKey::LENGTH]),
+            if cfg!(windows) {
+                PathBuf::from(r"C:\Users\example\AppData\Local\Konclave\account-issuer.key")
+            } else {
+                PathBuf::from("/home/example/.local/share/konclave/account-issuer.key")
+            },
+            Some(if cfg!(windows) {
+                PathBuf::from(r"C:\Program Files\Konclave\bin\konclave.exe")
+            } else {
+                PathBuf::from("/opt/konclave/bin/konclave")
+            }),
+            AuthorizationPolicy::account_trusted(),
+        )
+        .unwrap()
     }
 }
