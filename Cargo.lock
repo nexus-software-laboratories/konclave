@@ -397,6 +397,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "KonclaveLocalAuthorizationStore"
+version = "0.1.0"
+dependencies = [
+ "KonclaveDomainCore",
+ "KonclaveLocalServiceTransport",
+ "KonclaveSecretStorage",
+ "rusqlite",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "KonclaveLocalFraming"
 version = "0.1.0"
 dependencies = [

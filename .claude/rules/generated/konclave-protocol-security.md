@@ -14,6 +14,7 @@ paths:
   - "crates/Konclave.BoundedDocuments/**/*.rs"
   - "crates/Konclave.ProtectedHttp/**/*.rs"
   - "crates/Konclave.AdapterTransport/**/*.rs"
+  - "crates/Konclave.LocalAuthorizationStore/**/*.rs"
   - "crates/Konclave.LocalFraming/**/*.rs"
   - "crates/Konclave.LocalServiceClient/**/*.rs"
   - "crates/Konclave.LocalServiceTransport/**/*.rs"
