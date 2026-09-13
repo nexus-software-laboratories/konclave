@@ -46,7 +46,7 @@ jobs:
             $run = $files.Count -ge 3000 -or @(
               $files | Where-Object {
                 $_ -match '^\.github/workflows/generic-client-conformance\.yml$' -or
-                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|scripts/(?:build-extension|package-contract|package-plugin|verify-package)\.mjs|skills/konclave-generic/SKILL\.md|src/generic-(?:cli|command)\.ts|src/service/(?:client|config|installed|operations|transcript)\.ts|tests/(?:generic-command|service-client)\.test\.ts)$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|scripts/(?:build-extension|package-contract|package-plugin|verify-package)\.mjs|skills/konclave-generic/SKILL\.md|src/generic-(?:cli|command)\.ts|src/service/(?:client|config|installed|operations|transcript)\.ts|tests/(?:generic-command|service-client|service-config)\.test\.ts)$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/tests/packaged_distribution_e2e\.rs$' -or
                 $_ -match '^docs/integrations/generic-client\.md$'
               }
@@ -85,16 +85,19 @@ jobs:
             src/generic-command.ts \
             src/service/installed.ts \
             tests/generic-command.test.ts \
-            tests/service-client.test.ts
+            tests/service-client.test.ts \
+            tests/service-config.test.ts
           npm exec -- prettier --check \
             src/generic-cli.ts \
             src/generic-command.ts \
             src/service/installed.ts \
             tests/generic-command.test.ts \
-            tests/service-client.test.ts
+            tests/service-client.test.ts \
+            tests/service-config.test.ts
           npm exec -- vitest run \
             tests/generic-command.test.ts \
-            tests/service-client.test.ts
+            tests/service-client.test.ts \
+            tests/service-config.test.ts
           npm run compile
           npm run package
           npm run verify:package
