@@ -138,6 +138,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0019-harness-owned-session-attestation.md",
+        "title": "ADR 0019: Harness-owned session attestation",
+        "section": "Architecture",
+        "order": 190,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -212,6 +219,13 @@
         "title": "Security-sensitive component delivery",
         "section": "Development",
         "order": 26,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/harness-attestation.md",
+        "title": "Harness attestation provider contract",
+        "section": "Development",
+        "order": 27,
         "owner": "project:konclave"
       },
       {

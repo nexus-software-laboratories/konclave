@@ -21,6 +21,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0016: Project A2A streaming from durable task status history](../adr/adr-0016-a2a-streaming-projection.md)
 - [ADR 0017: Bound A2A artifacts with canonical inline content and encrypted references](../adr/adr-0017-a2a-artifact-profile.md)
 - [ADR 0018: Negotiate protected A2A as a fail-closed native Konclave handoff](../adr/adr-0018-fail-closed-protected-a2a-handoff.md)
+- [ADR 0019: Require harness-owned challenge-bound assertions for HarnessAttested grants](../adr/adr-0019-harness-owned-session-attestation.md)
 
 ## Superseded records
 

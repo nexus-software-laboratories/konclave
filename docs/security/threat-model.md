@@ -76,6 +76,16 @@ custody fails before the endpoint opens. AccountTrusted session keys are re-crea
 after client restart. Session grants are durable service state and survive service
 restart until expiry or an explicit terminal transition.
 
+`HarnessAttested` is not currently available from any shipped provider. Session IDs,
+hook payloads, environment variables, process ancestry, executable paths, extension
+manifests, and caller-declared host metadata are not accepted as attestation. A future
+provider must return a harness-owned signed assertion bound to a fresh Konclave
+challenge, the local-service installation, exact profile, ephemeral session key,
+capabilities, verified session lifecycle, and the digest of the extension code the
+harness actually loaded. Provider signing keys remain unavailable to extensions and
+arbitrary same-account processes. Missing or unverifiable support returns
+`required_evidence_unavailable` without falling back to `AccountTrusted`.
+
 Active grants are bounded globally, per issuer, and per profile. Revocation removes
 one exact grant and closes its connections; AccountTrusted can issue a replacement
 because the same account remains trusted. Profile suspension closes every matching
