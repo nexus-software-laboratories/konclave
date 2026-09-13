@@ -12,12 +12,11 @@ use KonclaveDomainCore::{
     DeviceId, NotificationId, evaluate_collaboration_policy,
 };
 use KonclaveLocalServiceTransport::{
-    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
-    HarnessKind, InMemorySessionAuthorizationRegistry, LocalServiceEndpoint, LocalServiceErrorCode,
-    LocalServiceListener, LocalServiceRequest, LocalServiceResponse, MAX_GRANTS_PER_ISSUER,
-    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId, ServiceProfileId,
-    SessionAuthorizationRegistry, SessionCapabilities, SessionGrant, SessionGrantClaims,
-    SessionGrantId, complete_authorization_service_handshake, read_request, write_response,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
+    LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
+    LocalServiceResponse, MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES,
+    MAX_SESSION_GRANTS, RequestId, ServiceProfileId, SessionCapabilities, SessionGrant,
+    complete_authorization_service_handshake, read_request, write_response,
 };
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -27,6 +26,9 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 use crate::adapter::{DeliveryAttachment, DeliveryWaitOutcome};
+use crate::authorization_runtime::{
+    AccountTrustedGrantRequest, AuthorizationRuntimeError, LiveAuthorizationRuntime,
+};
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
 use crate::persistence::{
@@ -41,7 +43,6 @@ use crate::runtime::ProfileSource;
 const MAX_LEDGER_ENTRIES: usize = 256;
 const MAX_LEDGER_BYTES: usize = 64 * 1024 * 1024;
 const CLIENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-const AUTHORIZATION_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 const OPERATION_RECONCILIATION_THRESHOLD: Duration = Duration::from_secs(85);
 const MAX_DELIVERY_EVENTS: u16 = 16;
 const MAX_DELIVERY_WAIT_MILLISECONDS: u32 = 30_000;
@@ -60,14 +61,13 @@ const COLLABORATION_SEND_AUTHORIZATION_TTL: Duration = Duration::from_secs(60);
 
 /// Validated inputs loaded before the shared service can start.
 ///
-/// Secret custody and adapter registration are injected rather than read from
-/// process-global defaults. An absent or invalid installation therefore fails before
-/// an endpoint is opened and can never select the legacy per-session host.
+/// Secret custody and the validated live authorization runtime are injected rather
+/// than read from process-global defaults. Invalid durable authority therefore fails
+/// before an endpoint is opened and can never select the legacy per-session host.
 pub(crate) struct SharedLocalServiceConfig {
     pub(crate) endpoint: LocalServiceEndpoint,
     pub(crate) service_identity: Arc<LocalServiceIdentity>,
-    pub(crate) authorization_registry: Arc<InMemorySessionAuthorizationRegistry>,
-    pub(crate) authorization_policy: AuthorizationPolicy,
+    pub(crate) authorization: Arc<LiveAuthorizationRuntime>,
     pub(crate) profile_source: Arc<dyn ProfileSource>,
     pub(crate) supervisor: ProfileSupervisorConfig,
 }
@@ -94,17 +94,29 @@ where
     let ledger = Arc::new(Mutex::new(RequestLedger::default()));
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut clients = JoinSet::new();
+    let mut authorization_reload =
+        tokio::spawn(Arc::clone(&config.authorization).run_reload_loop(stop_rx.clone()));
+    let mut authorization_reload_finished = false;
+    let mut service_error = None;
     tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
             biased;
             () = &mut shutdown => break,
+            result = &mut authorization_reload => {
+                authorization_reload_finished = true;
+                service_error = Some(match result {
+                    Ok(Ok(())) => anyhow::Error::new(AuthorizationRuntimeError::UnexpectedStop),
+                    Ok(Err(error)) => anyhow::Error::new(error),
+                    Err(_) => anyhow::Error::new(AuthorizationRuntimeError::BlockingOperationFailed),
+                });
+                break;
+            }
             accepted = listener.accept() => {
                 match accepted {
                     Ok(stream) => {
-                        let registry = Arc::clone(&config.authorization_registry);
-                        let policy = config.authorization_policy.clone();
+                        let authorization = Arc::clone(&config.authorization);
                         let identity = Arc::clone(&config.service_identity);
                         let supervisor = Arc::clone(&supervisor);
                         let ledger = Arc::clone(&ledger);
@@ -112,8 +124,7 @@ where
                         clients.spawn(async move {
                             serve_client(
                                 stream,
-                                registry,
-                                policy,
+                                authorization,
                                 identity,
                                 supervisor,
                                 ledger,
@@ -126,7 +137,12 @@ where
                         KonclaveLocalServiceTransport::LocalServiceTransportError::UnauthorizedPeer
                         | KonclaveLocalServiceTransport::LocalServiceTransportError::PeerVerificationUnavailable,
                     ) => {}
-                    Err(error) => return Err(error).context("accepting a shared local client"),
+                    Err(error) => {
+                        service_error = Some(
+                            anyhow::Error::new(error).context("accepting a shared local client")
+                        );
+                        break;
+                    }
                 }
             }
             joined = clients.join_next(), if !clients.is_empty() => {
@@ -142,7 +158,8 @@ where
                             panic = error.is_panic(),
                             "shared local client task ended unexpectedly"
                         );
-                        anyhow::bail!("shared local client task failed");
+                        service_error = Some(anyhow::anyhow!("shared local client task failed"));
+                        break;
                     }
                 }
             }
@@ -151,6 +168,20 @@ where
 
     stop_admission_and_cancel_precommit(&ledger, RequestCancellationReason::Shutdown);
     stop_tx.send_replace(true);
+    if !authorization_reload_finished {
+        match authorization_reload.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if service_error.is_none() => {
+                service_error = Some(anyhow::Error::new(error));
+            }
+            Err(_) if service_error.is_none() => {
+                service_error = Some(anyhow::Error::new(
+                    AuthorizationRuntimeError::BlockingOperationFailed,
+                ));
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
     let drained = timeout(CLIENT_SHUTDOWN_TIMEOUT, async {
         while clients.join_next().await.is_some() {}
     })
@@ -162,28 +193,54 @@ where
         );
         while clients.join_next().await.is_some() {}
     }
-    supervisor.shutdown().await?;
+    let supervisor_shutdown = supervisor.shutdown().await;
+    if let Some(error) = service_error {
+        return Err(error);
+    }
+    supervisor_shutdown?;
     Ok(())
 }
 
 async fn serve_client(
     mut stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
-    registry: Arc<InMemorySessionAuthorizationRegistry>,
-    policy: AuthorizationPolicy,
+    authorization: Arc<LiveAuthorizationRuntime>,
     identity: Arc<LocalServiceIdentity>,
     supervisor: Arc<ProfileSupervisor>,
     ledger: Arc<Mutex<RequestLedger>>,
-    stop: watch::Receiver<bool>,
+    mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    let mut authorization_status = authorization.subscribe();
     let now = SystemUnixClock.now_unix_milliseconds();
-    let channel = complete_authorization_service_handshake(
+    let mut handshake = Box::pin(complete_authorization_service_handshake(
         &mut stream,
-        registry.as_ref(),
+        authorization.as_ref(),
         identity.as_ref(),
         now,
-    )
-    .await
-    .context("authenticating a shared local client")?;
+    ));
+    let channel = loop {
+        tokio::select! {
+            biased;
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return Ok(());
+                }
+            }
+            changed = authorization_status.changed() => {
+                if changed.is_err()
+                    || matches!(
+                        *authorization_status.borrow(),
+                        crate::authorization_runtime::AuthorizationRuntimeStatus::Failed(_)
+                    )
+                {
+                    return Ok(());
+                }
+            }
+            result = &mut handshake => {
+                break result.context("authenticating a shared local client")?;
+            }
+        }
+    };
+    drop(handshake);
     match channel.binding().clone() {
         AuthorizationBinding::Issuer {
             issuer_key_id,
@@ -193,9 +250,8 @@ async fn serve_client(
             harness,
         } => {
             serve_issuer_client(
-                &mut stream,
-                registry,
-                policy,
+                stream,
+                authorization,
                 ledger,
                 IssuerConnection {
                     issuer_key_id,
@@ -205,23 +261,39 @@ async fn serve_client(
                     harness,
                 },
                 stop,
+                authorization_status,
             )
             .await
         }
         AuthorizationBinding::Session { grant, .. } => {
-            serve_session_client(&mut stream, registry, supervisor, ledger, grant, stop).await
+            serve_session_client(
+                stream,
+                authorization,
+                supervisor,
+                ledger,
+                grant,
+                stop,
+                authorization_status,
+            )
+            .await
         }
     }
 }
 
 async fn serve_session_client(
-    stream: &mut KonclaveLocalServiceTransport::LocalServiceServerStream,
-    registry: Arc<InMemorySessionAuthorizationRegistry>,
+    stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
+    authorization: Arc<LiveAuthorizationRuntime>,
     supervisor: Arc<ProfileSupervisor>,
     ledger: Arc<Mutex<RequestLedger>>,
     grant: SessionGrant,
     mut stop: watch::Receiver<bool>,
+    mut authorization_status: watch::Receiver<
+        crate::authorization_runtime::AuthorizationRuntimeStatus,
+    >,
 ) -> anyhow::Result<()> {
+    if !authorization.grant_is_active(&grant) {
+        return Ok(());
+    }
     let lease = supervisor
         .attach(grant.profile().as_str())
         .await
@@ -230,9 +302,9 @@ async fn serve_session_client(
     let handler = operation_handler(&services);
     let store = services.conversations().store();
     let consumer = derive_local_service_session_consumer_id(grant.session_public_key());
-    let mut state = ClientRequestState {
+    let mut state = Some(ClientRequestState {
         ledger,
-        registry,
+        authorization: Arc::clone(&authorization),
         consumer,
         grant,
         handler,
@@ -241,46 +313,135 @@ async fn serve_session_client(
         delivery: None,
         collaboration_send_authorizations: HashMap::new(),
         shutdown: stop.clone(),
-    };
-    let mut authorization_check = tokio::time::interval(AUTHORIZATION_RECHECK_INTERVAL);
-    authorization_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    });
+    let mut stream = Some(stream);
 
     let result = async {
         loop {
+            let active_stream = stream
+                .as_mut()
+                .context("shared local session stream is unavailable")?;
+            let request_state = state
+                .as_ref()
+                .context("shared local session state is unavailable")?;
             let request = tokio::select! {
                 biased;
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
-                        break;
+                        None
+                    } else {
+                        continue;
                     }
-                    continue;
                 }
-                _ = authorization_check.tick() => {
-                    if !state.authorization_is_active() {
-                        break;
+                changed = authorization_status.changed() => {
+                    if changed.is_err() || !request_state.authorization_is_active() {
+                        None
+                    } else {
+                        continue;
                     }
-                    continue;
                 }
-                request = read_request(stream) => match request {
-                    Ok(request) => request,
-                    Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => break,
+                request = read_request(active_stream) => match request {
+                    Ok(request) => Some(request),
+                    Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => None,
                     Err(error) => return Err(error).context("reading a shared local request"),
                 }
             };
-            let response = if is_fresh_collaboration_policy_request(request.operation().as_str()) {
-                dispatch_request(&mut state, &request).await
-            } else {
-                execute_session_request(&mut state, request).await
+            let Some(request) = request else {
+                drop(stream.take());
+                break;
             };
-            write_response(stream, &response)
+            let operation = request.operation().as_str();
+            let retirement = operation == "authorization.grant.retire";
+            // Retirement is idempotent in the authorization store; the profile
+            // request journal intentionally correlates replacement grants by key.
+            let direct_dispatch =
+                retirement || is_fresh_collaboration_policy_request(operation);
+            let uses_ledger = !direct_dispatch;
+            let mut request_state = state
+                .take()
+                .context("shared local session state is unavailable")?;
+            let request_key = uses_ledger.then(|| {
+                LedgerKey::for_grant(&request_state.grant, request.request_id())
+            });
+            let cancellation_ledger = Arc::clone(&request_state.ledger);
+            let active_grant = request_state.grant.clone();
+            let mut execution = tokio::spawn(async move {
+                let response = if direct_dispatch {
+                    dispatch_request(&mut request_state, &request).await
+                } else {
+                    execute_session_request(&mut request_state, request).await
+                };
+                (request_state, response)
+            });
+            let completed = loop {
+                tokio::select! {
+                    biased;
+                    changed = stop.changed() => {
+                        if changed.is_err() || *stop.borrow() {
+                            break Err(RequestCancellationReason::Shutdown);
+                        }
+                    }
+                    changed = authorization_status.changed() => {
+                        if changed.is_err()
+                            || matches!(
+                                *authorization_status.borrow(),
+                                crate::authorization_runtime::AuthorizationRuntimeStatus::Failed(_)
+                            )
+                            || (!retirement && !authorization.grant_is_active(&active_grant))
+                        {
+                            break Err(RequestCancellationReason::AuthorizationLost);
+                        }
+                    }
+                    result = &mut execution => break Ok(result),
+                }
+            };
+            let (next_state, response) = match completed {
+                Ok(result) => result.context("joining a shared local request")?,
+                Err(reason) => {
+                    if let Some(key) = request_key.as_ref() {
+                        cancel_request(&cancellation_ledger, key, reason);
+                    }
+                    drop(stream.take());
+                    let (next_state, response) = execution
+                        .await
+                        .context("joining a revoked shared local request")?;
+                    state = Some(next_state);
+                    let _ = response;
+                    break;
+                }
+            };
+            state = Some(next_state);
+            let request_state = state
+                .as_ref()
+                .context("shared local session state is unavailable")?;
+            if *stop.borrow()
+                || matches!(
+                    *authorization_status.borrow(),
+                    crate::authorization_runtime::AuthorizationRuntimeStatus::Failed(_)
+                )
+                || (!retirement && !request_state.authorization_is_active())
+            {
+                drop(stream.take());
+                break;
+            }
+            let active_stream = stream
+                .as_mut()
+                .context("shared local session stream is unavailable")?;
+            write_response(active_stream, &response)
                 .await
                 .context("writing a shared local response")?;
+            if retirement {
+                drop(stream.take());
+                break;
+            }
         }
         Ok(())
     }
     .await;
 
-    if let Some(delivery) = state.delivery {
+    if let Some(state) = state.as_mut()
+        && let Some(delivery) = state.delivery.take()
+    {
         let store = Arc::clone(&state.store);
         tokio::task::spawn_blocking(move || delivery.release(&store))
             .await
@@ -300,28 +461,34 @@ struct IssuerConnection {
 }
 
 impl IssuerConnection {
-    fn authorization_is_active(&self, registry: &InMemorySessionAuthorizationRegistry) -> bool {
-        registry
-            .active_issuer(self.issuer_key_id, self.issuer_key_version)
-            .is_some_and(|registration| {
-                registration.public_key() == self.issuer_public_key
-                    && (registration.harness() == self.harness
-                        || registration.harness() == HarnessKind::Generic)
-            })
+    fn registration_is_present(&self, authorization: &LiveAuthorizationRuntime) -> bool {
+        authorization.issuer_is_known(
+            self.issuer_key_id,
+            self.issuer_key_version,
+            self.issuer_public_key,
+            self.harness,
+        )
     }
 }
 
 async fn serve_issuer_client(
-    stream: &mut KonclaveLocalServiceTransport::LocalServiceServerStream,
-    registry: Arc<InMemorySessionAuthorizationRegistry>,
-    policy: AuthorizationPolicy,
+    stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
+    authorization: Arc<LiveAuthorizationRuntime>,
     ledger: Arc<Mutex<RequestLedger>>,
     issuer: IssuerConnection,
     mut stop: watch::Receiver<bool>,
+    mut authorization_status: watch::Receiver<
+        crate::authorization_runtime::AuthorizationRuntimeStatus,
+    >,
 ) -> anyhow::Result<()> {
-    let mut authorization_check = tokio::time::interval(AUTHORIZATION_RECHECK_INTERVAL);
-    authorization_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    if !issuer.registration_is_present(&authorization) {
+        return Ok(());
+    }
+    let mut stream = Some(stream);
     loop {
+        let active_stream = stream
+            .as_mut()
+            .context("shared local issuer stream is unavailable")?;
         let request = tokio::select! {
             biased;
             changed = stop.changed() => {
@@ -330,24 +497,58 @@ async fn serve_issuer_client(
                 }
                 continue;
             }
-            _ = authorization_check.tick() => {
-                if !issuer.authorization_is_active(&registry) {
+            changed = authorization_status.changed() => {
+                if changed.is_err() || !issuer.registration_is_present(&authorization) {
                     break;
                 }
                 continue;
             }
-            request = read_request(stream) => match request {
+            request = read_request(active_stream) => match request {
                 Ok(request) => request,
                 Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => break,
                 Err(error) => return Err(error).context("reading a shared local issuer request"),
             }
         };
         let key = LedgerKey::for_issuer(&issuer, request.request_id());
-        let response = execute_idempotent(Arc::clone(&ledger), key, &request, || async {
-            dispatch_issuer_request(&registry, &policy, &issuer, &request)
-        })
-        .await;
-        write_response(stream, &response)
+        let execution_authorization = Arc::clone(&authorization);
+        let execution_issuer = issuer.clone();
+        let execution_ledger = Arc::clone(&ledger);
+        let mut execution = tokio::spawn(async move {
+            execute_idempotent(execution_ledger, key, &request, || async {
+                dispatch_issuer_request(&execution_authorization, &execution_issuer, &request).await
+            })
+            .await
+        });
+        let response = loop {
+            tokio::select! {
+                biased;
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        drop(stream.take());
+                        execution.await.context("joining a stopped issuer request")?;
+                        return Ok(());
+                    }
+                }
+                changed = authorization_status.changed() => {
+                    if changed.is_err() || !issuer.registration_is_present(&authorization) {
+                        drop(stream.take());
+                        execution.await.context("joining a revoked issuer request")?;
+                        return Ok(());
+                    }
+                }
+                result = &mut execution => {
+                    break result.context("joining a shared local issuer request")?;
+                }
+            }
+        };
+        if *stop.borrow() || !issuer.registration_is_present(&authorization) {
+            drop(stream.take());
+            break;
+        }
+        let active_stream = stream
+            .as_mut()
+            .context("shared local issuer stream is unavailable")?;
+        write_response(active_stream, &response)
             .await
             .context("writing a shared local issuer response")?;
     }
@@ -378,66 +579,69 @@ struct GrantIssueResult {
     capabilities: u64,
 }
 
-fn dispatch_issuer_request(
-    registry: &InMemorySessionAuthorizationRegistry,
-    policy: &AuthorizationPolicy,
+async fn dispatch_issuer_request(
+    authorization: &LiveAuthorizationRuntime,
     issuer: &IssuerConnection,
     request: &LocalServiceRequest,
 ) -> LocalServiceResponse {
     let result = match request.operation().as_str() {
         "authorization.grant.issue" => {
-            issue_account_trusted_grant(registry, policy, issuer, request.payload())
+            issue_account_trusted_grant(
+                authorization,
+                issuer,
+                request.request_id(),
+                request.payload(),
+            )
+            .await
         }
-        _ => Err("unknown_operation".to_string()),
+        _ => Err(LocalServiceErrorCode::UnknownOperation),
     };
-    response_from_result(request.request_id(), result)
+    match result {
+        Ok(payload) => {
+            LocalServiceResponse::success(request.request_id(), payload).unwrap_or_else(|_| {
+                LocalServiceResponse::failure(
+                    request.request_id(),
+                    LocalServiceErrorCode::PayloadTooLarge,
+                )
+            })
+        }
+        Err(code) => LocalServiceResponse::failure(request.request_id(), code),
+    }
 }
 
-fn issue_account_trusted_grant(
-    registry: &InMemorySessionAuthorizationRegistry,
-    policy: &AuthorizationPolicy,
+async fn issue_account_trusted_grant(
+    authorization: &LiveAuthorizationRuntime,
     issuer: &IssuerConnection,
+    request_id: RequestId,
     payload: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, LocalServiceErrorCode> {
     let request: GrantIssueRequest =
-        serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
-    let profile =
-        ServiceProfileId::parse(&request.profile).map_err(|_| "invalid_request".to_string())?;
-    let harness = parse_harness(&request.harness).ok_or_else(|| "invalid_request".to_string())?;
+        serde_json::from_slice(payload).map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let profile = ServiceProfileId::parse(&request.profile)
+        .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let harness = parse_harness(&request.harness).ok_or(LocalServiceErrorCode::InvalidRequest)?;
     let session_public_key = crate::mcp::decode_hex::<32>(&request.session_public_key)
         .map(KonclaveDomainCore::Ed25519PublicKey::from_bytes)
-        .map_err(|_| "invalid_request".to_string())?;
-    let registration = registry
-        .active_issuer(issuer.issuer_key_id, issuer.issuer_key_version)
-        .ok_or_else(|| "local_service_not_authorized".to_string())?;
-    if !registration.profiles().permits(&profile)
-        || (registration.harness() != harness && registration.harness() != HarnessKind::Generic)
-    {
-        return Err("local_service_not_authorized".to_string());
-    }
-    let evidence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
-        .map_err(|_| "internal".to_string())?;
-    if !policy.accepts(evidence) {
-        return Err("local_service_not_authorized".to_string());
-    }
+        .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
     let now = SystemUnixClock.now_unix_milliseconds();
-    let ttl =
-        u64::try_from(ACCOUNT_TRUSTED_GRANT_TTL.as_millis()).map_err(|_| "internal".to_string())?;
-    let expires = now.checked_add(ttl).ok_or_else(|| "internal".to_string())?;
-    let grant = issue_unique_grant(
-        registry,
-        GrantIssuance {
+    let ttl = u64::try_from(ACCOUNT_TRUSTED_GRANT_TTL.as_millis())
+        .map_err(|_| LocalServiceErrorCode::Internal)?;
+    let expires = now
+        .checked_add(ttl)
+        .ok_or(LocalServiceErrorCode::Internal)?;
+    let grant = authorization
+        .issue_account_trusted_grant(AccountTrustedGrantRequest {
             issuer_key_id: issuer.issuer_key_id,
             issuer_key_version: issuer.issuer_key_version,
+            issuer_client_instance: issuer.client_instance,
+            request_id,
             profile,
             session_public_key,
             harness,
-            evidence,
-            policy_version: policy.version(),
             issued_at_unix_milliseconds: now,
             expires_at_unix_milliseconds: expires,
-        },
-    )?;
+        })
+        .await?;
     serde_json::to_vec(&GrantIssueResult {
         grant_id: crate::mcp::encode_hex(grant.grant_id().as_bytes()),
         issuer_key_id: crate::mcp::encode_hex(grant.issuer_key_id().as_bytes()),
@@ -451,53 +655,7 @@ fn issue_account_trusted_grant(
         expires_at_unix_milliseconds: grant.expires_at_unix_milliseconds(),
         capabilities: grant.capabilities().bits(),
     })
-    .map_err(|_| "response_encoding_failed".to_string())
-}
-
-struct GrantIssuance {
-    issuer_key_id: KonclaveLocalServiceTransport::IssuerKeyId,
-    issuer_key_version: KonclaveLocalServiceTransport::IssuerKeyVersion,
-    profile: ServiceProfileId,
-    session_public_key: KonclaveDomainCore::Ed25519PublicKey,
-    harness: HarnessKind,
-    evidence: AuthorizationEvidenceSet,
-    policy_version: KonclaveLocalServiceTransport::AuthorizationPolicyVersion,
-    issued_at_unix_milliseconds: u64,
-    expires_at_unix_milliseconds: u64,
-}
-
-fn issue_unique_grant(
-    registry: &InMemorySessionAuthorizationRegistry,
-    issuance: GrantIssuance,
-) -> Result<SessionGrant, String> {
-    for _ in 0..4 {
-        let mut identifier = [0_u8; 16];
-        KonclaveCryptographicCore::fill_random(&mut identifier)
-            .map_err(|_| "internal".to_string())?;
-        let grant = SessionGrant::new(SessionGrantClaims {
-            grant_id: SessionGrantId::from_bytes(identifier),
-            issuer_key_id: issuance.issuer_key_id,
-            issuer_key_version: issuance.issuer_key_version,
-            profile: issuance.profile.clone(),
-            session_public_key: issuance.session_public_key,
-            harness: issuance.harness,
-            evidence: issuance.evidence,
-            policy_version: issuance.policy_version,
-            issued_at_unix_milliseconds: issuance.issued_at_unix_milliseconds,
-            expires_at_unix_milliseconds: issuance.expires_at_unix_milliseconds,
-            capabilities: SessionCapabilities::ALL,
-        })
-        .map_err(|_| "internal".to_string())?;
-        match registry.issue_grant(grant.clone(), issuance.issued_at_unix_milliseconds) {
-            Ok(()) => return Ok(grant),
-            Err(KonclaveLocalServiceTransport::LocalServiceTransportError::DuplicateGrant) => {}
-            Err(KonclaveLocalServiceTransport::LocalServiceTransportError::GrantLimitReached) => {
-                return Err("busy".to_string());
-            }
-            Err(_) => return Err("internal".to_string()),
-        }
-    }
-    Err("busy".to_string())
+    .map_err(|_| LocalServiceErrorCode::Internal)
 }
 
 fn parse_harness(value: &str) -> Option<HarnessKind> {
@@ -530,7 +688,7 @@ fn operation_handler(services: &ProfileServices) -> StdioServer {
 
 struct ClientRequestState {
     ledger: Arc<Mutex<RequestLedger>>,
-    registry: Arc<InMemorySessionAuthorizationRegistry>,
+    authorization: Arc<LiveAuthorizationRuntime>,
     consumer: AdapterConsumerId,
     grant: SessionGrant,
     handler: StdioServer,
@@ -543,7 +701,7 @@ struct ClientRequestState {
 
 impl ClientRequestState {
     fn authorization_is_active(&self) -> bool {
-        session_grant_is_active(&self.registry, &self.grant)
+        session_grant_is_active(&self.authorization, &self.grant)
     }
 }
 
@@ -937,16 +1095,25 @@ async fn dispatch_request(
     let result = match operation {
         "request.cancel" => cancel_target_request(state, request.payload()),
         "authorization.grant.retire" => {
-            let retired = state.registry.revoke_grant(state.grant.grant_id());
-            serde_json::to_vec(&GrantRetirementResult { retired })
-                .map_err(|_| "response_encoding_failed".to_string())
+            match state
+                .authorization
+                .retire_grant(
+                    state.grant.grant_id(),
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .await
+            {
+                Ok(retired) => serde_json::to_vec(&GrantRetirementResult { retired })
+                    .map_err(|_| "response_encoding_failed".to_string()),
+                Err(code) => Err(code.as_str().to_string()),
+            }
         }
         "service.status" => {
             service_status(
                 state.services.clone(),
                 Arc::clone(&state.store),
                 state.grant.clone(),
-                Arc::clone(&state.registry),
+                Arc::clone(&state.authorization),
             )
             .await
         }
@@ -956,7 +1123,7 @@ async fn dispatch_request(
                 state.consumer,
                 &state.store,
                 &mut state.shutdown,
-                &state.registry,
+                &state.authorization,
                 &state.grant,
                 request.payload(),
             )
@@ -1894,6 +2061,10 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         "local_service_not_authorized" | "invalid_collaboration_authorization" => {
             LocalServiceErrorCode::NotAuthorized
         }
+        "profile_suspended" => LocalServiceErrorCode::ProfileSuspended,
+        "issuer_disabled" => LocalServiceErrorCode::IssuerDisabled,
+        "required_evidence_unavailable" => LocalServiceErrorCode::RequiredEvidenceUnavailable,
+        "capacity" => LocalServiceErrorCode::Capacity,
         "busy" => LocalServiceErrorCode::Busy,
         "deadline_exceeded" => LocalServiceErrorCode::DeadlineExceeded,
         "collaboration_policy_conflict" => LocalServiceErrorCode::Conflict,
@@ -1952,6 +2123,7 @@ struct ServiceStatusResult {
     authorization_policy: &'static str,
     authorization_provider: &'static str,
     authorization_evidence: Vec<&'static str>,
+    authorization_generation: u64,
     authorization_policy_version: u64,
     grant_expires_at_unix_milliseconds: u64,
     grant_capabilities: u64,
@@ -1967,13 +2139,11 @@ async fn service_status(
     services: ProfileServices,
     store: Arc<crate::persistence::ProfileStore>,
     grant: SessionGrant,
-    registry: Arc<InMemorySessionAuthorizationRegistry>,
+    authorization: Arc<LiveAuthorizationRuntime>,
 ) -> Result<Vec<u8>, String> {
-    let capacity = registry.grant_capacity(
-        grant.issuer_key_id(),
-        grant.profile(),
-        SystemUnixClock.now_unix_milliseconds(),
-    );
+    let (authorization_generation, capacity, effective_policy) = authorization
+        .status_snapshot(grant.issuer_key_id(), grant.profile())
+        .ok_or_else(|| "local_service_not_authorized".to_string())?;
     tokio::task::spawn_blocking(move || {
         let (pending_events, claimed_events) = store
             .remote_event_counts()
@@ -1995,7 +2165,8 @@ async fn service_status(
             authorization_policy: "AccountTrusted",
             authorization_provider: "AccountTrusted",
             authorization_evidence: evidence_names(grant.evidence()),
-            authorization_policy_version: grant.policy_version().get(),
+            authorization_generation: authorization_generation.get(),
+            authorization_policy_version: effective_policy.version().get(),
             grant_expires_at_unix_milliseconds: grant.expires_at_unix_milliseconds(),
             grant_capabilities: grant.capabilities().bits(),
             active_grants: capacity.active_global(),
@@ -2123,7 +2294,7 @@ async fn delivery_claim(
     consumer: AdapterConsumerId,
     store: &Arc<crate::persistence::ProfileStore>,
     shutdown: &mut watch::Receiver<bool>,
-    registry: &Arc<InMemorySessionAuthorizationRegistry>,
+    authorization: &Arc<LiveAuthorizationRuntime>,
     grant: &SessionGrant,
     payload: &[u8],
 ) -> Result<Vec<u8>, String> {
@@ -2153,7 +2324,7 @@ async fn delivery_claim(
             shutdown,
             request.max_events,
             request.wait_milliseconds,
-            || session_grant_is_active(registry, grant),
+            || session_grant_is_active(authorization, grant),
         )
         .await
         .map_err(|_| "profile_unavailable".to_string())?;
@@ -2170,13 +2341,8 @@ async fn delivery_claim(
     .map_err(|_| "response_encoding_failed".to_string())
 }
 
-fn session_grant_is_active(
-    registry: &InMemorySessionAuthorizationRegistry,
-    grant: &SessionGrant,
-) -> bool {
-    registry
-        .active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
-        .is_some_and(|active| &active == grant)
+fn session_grant_is_active(authorization: &LiveAuthorizationRuntime, grant: &SessionGrant) -> bool {
+    authorization.grant_is_active(grant)
 }
 
 async fn delivery_finish(
@@ -2338,6 +2504,7 @@ enum LedgerPrincipal {
     Issuer {
         key_id: [u8; 16],
         key_version: u32,
+        client_instance: [u8; 16],
     },
     Session {
         public_key: [u8; 32],
@@ -2367,6 +2534,7 @@ impl LedgerKey {
             principal: LedgerPrincipal::Issuer {
                 key_id: *issuer.issuer_key_id.as_bytes(),
                 key_version: issuer.issuer_key_version.get(),
+                client_instance: *issuer.client_instance.as_bytes(),
             },
             request_id: *request_id.as_bytes(),
         }
@@ -2381,6 +2549,7 @@ impl LedgerKey {
             principal: LedgerPrincipal::Issuer {
                 key_id: *binding.adapter_key_id().as_bytes(),
                 key_version: binding.adapter_key_version().get(),
+                client_instance: *binding.client_instance().as_bytes(),
             },
             request_id: *request_id.as_bytes(),
         }
@@ -2392,6 +2561,7 @@ enum RequestCancellationReason {
     Caller,
     Deadline,
     Shutdown,
+    AuthorizationLost,
 }
 
 impl RequestCancellationReason {
@@ -2400,6 +2570,7 @@ impl RequestCancellationReason {
             Self::Caller => LocalServiceErrorCode::Cancelled,
             Self::Deadline => LocalServiceErrorCode::DeadlineExceeded,
             Self::Shutdown => LocalServiceErrorCode::ProfileUnavailable,
+            Self::AuthorizationLost => LocalServiceErrorCode::NotAuthorized,
         }
     }
 }
@@ -2804,6 +2975,22 @@ mod delivery_contract_tests {
             LocalServiceErrorCode::NotAuthorized
         );
         assert_eq!(
+            operation_error_code("profile_suspended"),
+            LocalServiceErrorCode::ProfileSuspended
+        );
+        assert_eq!(
+            operation_error_code("issuer_disabled"),
+            LocalServiceErrorCode::IssuerDisabled
+        );
+        assert_eq!(
+            operation_error_code("required_evidence_unavailable"),
+            LocalServiceErrorCode::RequiredEvidenceUnavailable
+        );
+        assert_eq!(
+            operation_error_code("capacity"),
+            LocalServiceErrorCode::Capacity
+        );
+        assert_eq!(
             operation_error_code("directed_request_unsupported"),
             LocalServiceErrorCode::InvalidRequest
         );
@@ -2855,7 +3042,7 @@ mod collaboration_policy_tests {
     };
     use KonclaveLocalServiceTransport::{
         AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicyVersion,
-        HarnessKind, IssuerKeyId, IssuerKeyVersion, RequestId, ServiceProfileId,
+        ClientInstanceId, HarnessKind, IssuerKeyId, IssuerKeyVersion, RequestId, ServiceProfileId,
         SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
     };
     use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
@@ -2912,6 +3099,31 @@ mod collaboration_policy_tests {
         assert!(
             super::LedgerKey::for_grant(&first, request_id)
                 != super::LedgerKey::for_grant(&another_session, request_id)
+        );
+    }
+
+    #[test]
+    fn issuer_request_ledger_principal_includes_the_client_instance() {
+        let request_id = RequestId::from_bytes([7; 16]);
+        let first = super::IssuerConnection {
+            issuer_key_id: IssuerKeyId::from_bytes([2; 16]),
+            issuer_key_version: IssuerKeyVersion::new(1).unwrap(),
+            issuer_public_key: Ed25519PublicKey::from_bytes([3; 32]),
+            client_instance: ClientInstanceId::from_bytes([4; 16]),
+            harness: HarnessKind::Generic,
+        };
+        let second = super::IssuerConnection {
+            client_instance: ClientInstanceId::from_bytes([5; 16]),
+            ..first.clone()
+        };
+
+        assert!(
+            super::LedgerKey::for_issuer(&first, request_id)
+                != super::LedgerKey::for_issuer(&second, request_id)
+        );
+        assert!(
+            super::LedgerKey::for_issuer(&first, request_id)
+                == super::LedgerKey::for_issuer(&first, request_id)
         );
     }
 
@@ -3436,24 +3648,37 @@ mod collaboration_policy_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
-    use KonclaveCryptographicCore::LocalServiceIdentity;
+    use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
+    use KonclaveLocalAuthorizationStore::{
+        AuthorizationGeneration, AuthorizationMutation, ExistingGrantDisposition,
+        InstallationFingerprint, IssuerAvailability, LocalAuthorizationStore,
+        LocalAuthorizationStoreError,
+    };
     use KonclaveLocalServiceTransport::{
         AdapterKeyId, AdapterKeyVersion, AdapterRegistration, AuthorizationEvidenceKind,
         AuthorizationEvidenceSet, AuthorizationPolicy, AuthorizationPolicyVersion,
-        ClientInstanceId, HarnessKind, InMemorySessionAuthorizationRegistry,
-        LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceBinding, LocalServiceEndpoint,
-        LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse, MAX_RPC_PAYLOAD_BYTES,
-        OperationName, ProfileAuthorization, RequestId, ServiceProfileId,
-        SessionAuthorizationRegistry, SessionCapabilities, SessionGrant, SessionGrantClaims,
-        SessionGrantId, complete_session_client_handshake, connect_local_service, read_response,
-        write_request,
+        ClientInstanceId, HarnessKind, InstalledIssuerRegistration, IssuerHandshakeRequest,
+        LOCAL_SERVICE_INSTALLATION_FILE, LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceBinding,
+        LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse,
+        MAX_RPC_PAYLOAD_BYTES, OperationName, ProfileAuthorization, RequestId, ServiceProfileId,
+        SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
+        complete_issuer_client_handshake, complete_session_client_handshake, connect_local_service,
+        read_response, write_request,
+    };
+    use KonclaveSecretStorage::{
+        create_or_verify_owner_protected_file, ensure_owner_protected_directory,
     };
     use tokio::sync::oneshot;
 
     use super::{SharedLocalServiceConfig, run_shared_local_service_until};
+    use crate::authorization_runtime::{
+        AUTHORIZATION_OBSERVATION_BOUND, AuthorizationRuntimeStatus, LiveAuthorizationRuntime,
+    };
+    use crate::clock::{SystemUnixClock, UnixClock};
     use crate::profile_runtime::{ProfileHost, ProfileHostOptions};
     use crate::profile_supervisor::ProfileSupervisorConfig;
     use crate::runtime::initialize_profile;
@@ -3470,11 +3695,17 @@ mod tests {
         client_identity: LocalServiceIdentity,
         adapter_key_id: AdapterKeyId,
         adapter_key_version: AdapterKeyVersion,
-        registry: Arc<InMemorySessionAuthorizationRegistry>,
+        authorization: Arc<LiveAuthorizationRuntime>,
+        installation_path: PathBuf,
+        installation_fingerprint: InstallationFingerprint,
     }
 
     impl Fixture {
-        fn new() -> (Self, Arc<InMemorySessionAuthorizationRegistry>) {
+        async fn new() -> Self {
+            Self::new_with_policy(AuthorizationPolicy::account_trusted()).await
+        }
+
+        async fn new_with_policy(policy: AuthorizationPolicy) -> Self {
             let root = TestProfileRoot::new();
             let endpoint = LocalServiceEndpoint::parse(
                 root.path()
@@ -3484,84 +3715,226 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-            let service_identity = Arc::new(LocalServiceIdentity::generate().unwrap());
-            let client_identity = LocalServiceIdentity::generate().unwrap();
+            let service_seed = LocalServiceSigningSeed::from_reader([5_u8; 32].as_slice()).unwrap();
+            let service_identity =
+                Arc::new(LocalServiceIdentity::from_signing_seed(&service_seed).unwrap());
+            let client_seed = LocalServiceSigningSeed::from_reader([6_u8; 32].as_slice()).unwrap();
+            let client_identity = LocalServiceIdentity::from_signing_seed(&client_seed).unwrap();
             let adapter_key_id = AdapterKeyId::from_bytes([7_u8; AdapterKeyId::LENGTH]);
             let adapter_key_version = AdapterKeyVersion::new(1).unwrap();
-            let registry = Arc::new(InMemorySessionAuthorizationRegistry::new());
-            registry
-                .register_issuer(
-                    adapter_key_id,
-                    adapter_key_version,
-                    AdapterRegistration::new(
-                        client_identity.public_key(),
-                        HarnessKind::Copilot,
-                        ProfileAuthorization::Namespace(
-                            ServiceProfileId::parse("session").unwrap(),
-                        ),
-                    ),
-                )
-                .unwrap();
-            (
-                Self {
-                    root,
-                    endpoint,
-                    service_identity,
-                    client_identity,
-                    adapter_key_id,
-                    adapter_key_version,
-                    registry: Arc::clone(&registry),
-                },
-                registry,
-            )
+            let issuer = InstalledIssuerRegistration::new(
+                adapter_key_id,
+                adapter_key_version,
+                AdapterRegistration::new(
+                    client_identity.public_key(),
+                    HarnessKind::Copilot,
+                    ProfileAuthorization::Namespace(ServiceProfileId::parse("session").unwrap()),
+                ),
+            );
+            let installation_path = root
+                .path()
+                .join("service")
+                .join(LOCAL_SERVICE_INSTALLATION_FILE);
+            let installation_fingerprint = InstallationFingerprint::from_bytes([9; 32]);
+            let setup_path = installation_path.clone();
+            let setup_issuer = issuer.clone();
+            let setup_policy = policy.clone();
+            tokio::task::spawn_blocking(move || {
+                ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+                drop(
+                    LocalAuthorizationStore::bootstrap(
+                        &setup_path,
+                        installation_fingerprint,
+                        &setup_policy,
+                        &[setup_issuer],
+                        1,
+                    )
+                    .unwrap(),
+                );
+                create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+            })
+            .await
+            .unwrap();
+            let authorization =
+                LiveAuthorizationRuntime::open(&installation_path, installation_fingerprint)
+                    .await
+                    .unwrap();
+            Self {
+                root,
+                endpoint,
+                service_identity,
+                client_identity,
+                adapter_key_id,
+                adapter_key_version,
+                authorization,
+                installation_path,
+                installation_fingerprint,
+            }
         }
 
-        fn config(
+        fn config(&self) -> SharedLocalServiceConfig {
+            self.config_with(Arc::clone(&self.authorization))
+        }
+
+        fn config_with(
             &self,
-            registry: Arc<InMemorySessionAuthorizationRegistry>,
+            authorization: Arc<LiveAuthorizationRuntime>,
         ) -> SharedLocalServiceConfig {
             SharedLocalServiceConfig {
                 endpoint: self.endpoint.clone(),
                 service_identity: Arc::clone(&self.service_identity),
-                authorization_registry: registry,
-                authorization_policy: AuthorizationPolicy::account_trusted(),
+                authorization,
                 profile_source: Arc::new(self.root.settings()),
                 supervisor: ProfileSupervisorConfig::default(),
             }
         }
 
-        async fn connect(
+        fn grant(&self, profile: &str, instance_seed: u8) -> SessionGrant {
+            self.grant_with_evidence(
+                profile,
+                instance_seed,
+                AuthorizationEvidenceKind::AccountTrusted,
+                1,
+            )
+        }
+
+        fn grant_with_evidence(
             &self,
             profile: &str,
+            instance_seed: u8,
+            evidence: AuthorizationEvidenceKind,
+            policy_version: u64,
+        ) -> SessionGrant {
+            SessionGrant::new(SessionGrantClaims {
+                grant_id: SessionGrantId::from_bytes([instance_seed; 16]),
+                issuer_key_id: self.adapter_key_id,
+                issuer_key_version: self.adapter_key_version,
+                profile: ServiceProfileId::parse(profile).unwrap(),
+                session_public_key: self.client_identity.public_key(),
+                harness: HarnessKind::Copilot,
+                evidence: AuthorizationEvidenceSet::new([evidence]).unwrap(),
+                policy_version: AuthorizationPolicyVersion::new(policy_version).unwrap(),
+                issued_at_unix_milliseconds: 1,
+                expires_at_unix_milliseconds: i64::MAX as u64,
+                capabilities: SessionCapabilities::ALL,
+            })
+            .unwrap()
+        }
+
+        async fn persist_grant(&self, grant: SessionGrant) {
+            if !self.authorization.grant_is_active(&grant) {
+                self.authorization
+                    .persist_grant_for_test(grant, SystemUnixClock.now_unix_milliseconds())
+                    .await
+                    .unwrap();
+            }
+        }
+
+        async fn mutate_authorization<F>(&self, mutation: F) -> AuthorizationMutation
+        where
+            F: FnOnce(
+                    &LocalAuthorizationStore,
+                    u64,
+                )
+                    -> Result<AuthorizationMutation, LocalAuthorizationStoreError>
+                + Send
+                + 'static,
+        {
+            let installation_path = self.installation_path.clone();
+            let installation_fingerprint = self.installation_fingerprint;
+            let mutation = tokio::task::spawn_blocking(move || {
+                let store = LocalAuthorizationStore::open(
+                    installation_path,
+                    installation_fingerprint,
+                    None,
+                )?;
+                mutation(&store, SystemUnixClock.now_unix_milliseconds())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            self.authorization.request_reload();
+            self.wait_for_generation(mutation.generation()).await;
+            mutation
+        }
+
+        async fn wait_for_generation(&self, expected: AuthorizationGeneration) {
+            let mut status = self.authorization.subscribe();
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+                loop {
+                    match *status.borrow_and_update() {
+                        AuthorizationRuntimeStatus::Active(generation)
+                            if generation >= expected =>
+                        {
+                            break;
+                        }
+                        AuthorizationRuntimeStatus::Failed(_) => {
+                            panic!("authorization runtime failed before publishing generation")
+                        }
+                        AuthorizationRuntimeStatus::Active(_) => {}
+                    }
+                    status.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("authorization generation was not published");
+        }
+
+        async fn connect_issuer(
+            &self,
             instance_seed: u8,
         ) -> KonclaveLocalServiceTransport::LocalServiceClientStream {
             tokio::time::timeout(TEST_STARTUP_DEADLINE, async {
                 let mut stream = loop {
                     match connect_local_service(&self.endpoint).await {
                         Ok(stream) => break stream,
-                        Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        Err(_) => tokio::task::yield_now().await,
                     }
                 };
-                let grant = SessionGrant::new(SessionGrantClaims {
-                    grant_id: SessionGrantId::from_bytes([instance_seed; 16]),
-                    issuer_key_id: self.adapter_key_id,
-                    issuer_key_version: self.adapter_key_version,
-                    profile: ServiceProfileId::parse(profile).unwrap(),
-                    session_public_key: self.client_identity.public_key(),
-                    harness: HarnessKind::Copilot,
-                    evidence: AuthorizationEvidenceSet::new([
-                        AuthorizationEvidenceKind::AccountTrusted,
-                    ])
-                    .unwrap(),
-                    policy_version: AuthorizationPolicyVersion::new(1).unwrap(),
-                    issued_at_unix_milliseconds: 1,
-                    expires_at_unix_milliseconds: u64::MAX,
-                    capabilities: SessionCapabilities::ALL,
-                })
+                complete_issuer_client_handshake(
+                    &mut stream,
+                    &IssuerHandshakeRequest {
+                        issuer_key_id: self.adapter_key_id,
+                        issuer_key_version: self.adapter_key_version,
+                        client_instance: ClientInstanceId::from_bytes(
+                            [instance_seed; ClientInstanceId::LENGTH],
+                        ),
+                        harness: HarnessKind::Copilot,
+                    },
+                    &self.client_identity,
+                    self.service_identity.public_key(),
+                )
+                .await
                 .unwrap();
-                if self.registry.active_grant(grant.grant_id(), 1).is_none() {
-                    self.registry.issue_grant(grant.clone(), 1).unwrap();
-                }
+                stream
+            })
+            .await
+            .expect("shared service issuer handshake exceeded the test deadline")
+        }
+
+        async fn connect_grant(
+            &self,
+            grant: SessionGrant,
+            instance_seed: u8,
+        ) -> KonclaveLocalServiceTransport::LocalServiceClientStream {
+            self.try_connect_grant(grant, instance_seed).await.unwrap()
+        }
+
+        async fn try_connect_grant(
+            &self,
+            grant: SessionGrant,
+            instance_seed: u8,
+        ) -> Result<
+            KonclaveLocalServiceTransport::LocalServiceClientStream,
+            KonclaveLocalServiceTransport::LocalServiceTransportError,
+        > {
+            tokio::time::timeout(TEST_STARTUP_DEADLINE, async {
+                let mut stream = loop {
+                    match connect_local_service(&self.endpoint).await {
+                        Ok(stream) => break stream,
+                        Err(_) => tokio::task::yield_now().await,
+                    }
+                };
                 complete_session_client_handshake(
                     &mut stream,
                     &KonclaveLocalServiceTransport::SessionHandshakeRequest {
@@ -3573,12 +3946,21 @@ mod tests {
                     &self.client_identity,
                     self.service_identity.public_key(),
                 )
-                .await
-                .unwrap();
-                stream
+                .await?;
+                Ok(stream)
             })
             .await
             .expect("shared service startup and handshake exceeded the test deadline")
+        }
+
+        async fn connect(
+            &self,
+            profile: &str,
+            instance_seed: u8,
+        ) -> KonclaveLocalServiceTransport::LocalServiceClientStream {
+            let grant = self.grant(profile, instance_seed);
+            self.persist_grant(grant.clone()).await;
+            self.connect_grant(grant, instance_seed).await
         }
     }
 
@@ -3606,6 +3988,102 @@ mod tests {
         .unwrap_or_else(|_| {
             panic!("shared service operation '{operation}' exceeded the test deadline")
         })
+    }
+
+    async fn issue_grant(
+        fixture: &Fixture,
+        issuer: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
+        seed: u8,
+        profile: &str,
+    ) -> Result<SessionGrant, LocalServiceErrorCode> {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "profile": profile,
+            "sessionPublicKey": crate::mcp::encode_hex(
+                fixture.client_identity.public_key().as_bytes()
+            ),
+            "harness": "copilot"
+        }))
+        .unwrap();
+        match request(issuer, seed, "authorization.grant.issue", &payload).await {
+            LocalServiceResponse::Success { payload, .. } => {
+                let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                let grant_id =
+                    crate::mcp::decode_hex::<16>(value["grantId"].as_str().unwrap()).unwrap();
+                let issuer_key_id =
+                    crate::mcp::decode_hex::<16>(value["issuerKeyId"].as_str().unwrap()).unwrap();
+                let session_public_key =
+                    crate::mcp::decode_hex::<32>(value["sessionPublicKey"].as_str().unwrap())
+                        .unwrap();
+                Ok(SessionGrant::new(SessionGrantClaims {
+                    grant_id: SessionGrantId::from_bytes(grant_id),
+                    issuer_key_id: AdapterKeyId::from_bytes(issuer_key_id),
+                    issuer_key_version: AdapterKeyVersion::new(
+                        u32::try_from(value["issuerKeyVersion"].as_u64().unwrap()).unwrap(),
+                    )
+                    .unwrap(),
+                    profile: ServiceProfileId::parse(value["profile"].as_str().unwrap()).unwrap(),
+                    session_public_key: KonclaveDomainCore::Ed25519PublicKey::from_bytes(
+                        session_public_key,
+                    ),
+                    harness: super::parse_harness(value["harness"].as_str().unwrap()).unwrap(),
+                    evidence: AuthorizationEvidenceSet::from_bits(
+                        u8::try_from(value["evidence"].as_u64().unwrap()).unwrap(),
+                    )
+                    .unwrap(),
+                    policy_version: AuthorizationPolicyVersion::new(
+                        value["policyVersion"].as_u64().unwrap(),
+                    )
+                    .unwrap(),
+                    issued_at_unix_milliseconds: value["issuedAtUnixMilliseconds"]
+                        .as_u64()
+                        .unwrap(),
+                    expires_at_unix_milliseconds: value["expiresAtUnixMilliseconds"]
+                        .as_u64()
+                        .unwrap(),
+                    capabilities: SessionCapabilities::from_bits(
+                        value["capabilities"].as_u64().unwrap(),
+                    )
+                    .unwrap(),
+                })
+                .unwrap())
+            }
+            LocalServiceResponse::Failure { code, .. } => Err(code),
+        }
+    }
+
+    async fn wait_for_active_delivery(root: &TestProfileRoot, profile: &str) {
+        let database = root.root().join(profile).join("profile.sqlite");
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                let candidate = database.clone();
+                let active = tokio::task::spawn_blocking(move || {
+                    if !candidate.is_file() {
+                        return false;
+                    }
+                    rusqlite::Connection::open_with_flags(
+                        candidate,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .ok()
+                    .and_then(|connection| {
+                        connection
+                            .query_row("SELECT count(*) FROM daemon_adapter_consumer", [], |row| {
+                                row.get::<_, i64>(0)
+                            })
+                            .ok()
+                    }) == Some(1)
+                })
+                .await
+                .unwrap();
+                if active {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("delivery claim did not acquire its consumer lease");
     }
 
     async fn wait_for_outcome_database(
@@ -4019,10 +4497,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_profiles_share_one_listener_but_not_one_identity() {
-        let (fixture, registry) = Fixture::new();
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry),
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4082,10 +4560,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_reconnected_claim_requires_a_fresh_request_id() {
-        let (fixture, registry) = Fixture::new();
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry),
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4140,10 +4618,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_retried_request_id_returns_one_recorded_outcome() {
-        let (fixture, registry) = Fixture::new();
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry),
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4183,10 +4661,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn outcome_read_failure_discards_admission_without_wedging_retry() {
-        let (fixture, registry) = Fixture::new();
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry),
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4223,10 +4701,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn outcome_write_failure_returns_nonterminal_and_exact_retry_recovers() {
-        let (fixture, registry) = Fixture::new();
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry),
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4286,10 +4764,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn authenticated_cancellation_survives_a_replacement_grant_race() {
-        let (fixture, registry) = Fixture::new();
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry),
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4332,11 +4810,466 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn revocation_closes_an_already_authenticated_connection() {
-        let (fixture, registry) = Fixture::new();
+    async fn a_durable_grant_survives_service_restart_and_reconnect() {
+        let fixture = Fixture::new().await;
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(registry.clone()),
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(31) => stream,
+        };
+        let grant = issue_grant(&fixture, &mut issuer, 31, "session-durable")
+            .await
+            .unwrap();
+        let mut session = fixture.connect_grant(grant.clone(), 32).await;
+        assert!(matches!(
+            request(&mut session, 31, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop((issuer, session));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("first shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+
+        let reopened = LiveAuthorizationRuntime::open(
+            &fixture.installation_path,
+            fixture.installation_fingerprint,
+        )
+        .await
+        .unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut restarted = tokio::spawn(run_shared_local_service_until(
+            fixture.config_with(reopened),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut reconnected = tokio::select! {
+            result = &mut restarted => {
+                panic!("restarted service exited before reconnect: {result:?}")
+            }
+            stream = fixture.connect_grant(grant, 33) => stream,
+        };
+        assert!(matches!(
+            request(&mut reconnected, 32, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop(reconnected);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, restarted)
+            .await
+            .expect("restarted shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lost_grant_response_replays_the_same_durable_grant_after_restart() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(34) => stream,
+        };
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "profile": "session-issuance-replay",
+            "sessionPublicKey": crate::mcp::encode_hex(
+                fixture.client_identity.public_key().as_bytes()
+            ),
+            "harness": "copilot"
+        }))
+        .unwrap();
+        write_request(
+            &mut issuer,
+            &LocalServiceRequest::new(
+                RequestId::from_bytes([34; 16]),
+                OperationName::parse("authorization.grant.issue").unwrap(),
+                payload.clone(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        fixture
+            .wait_for_generation(AuthorizationGeneration::new(2).unwrap())
+            .await;
+        drop(issuer);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("first shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+
+        let reopened = LiveAuthorizationRuntime::open(
+            &fixture.installation_path,
+            fixture.installation_fingerprint,
+        )
+        .await
+        .unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut restarted = tokio::spawn(run_shared_local_service_until(
+            fixture.config_with(reopened),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut retrying_issuer = tokio::select! {
+            result = &mut restarted => {
+                panic!("restarted service exited before issuer reconnect: {result:?}")
+            }
+            stream = fixture.connect_issuer(34) => stream,
+        };
+        let replayed = issue_grant(
+            &fixture,
+            &mut retrying_issuer,
+            34,
+            "session-issuance-replay",
+        )
+        .await
+        .unwrap();
+        let installation_path = fixture.installation_path.clone();
+        let fingerprint = fixture.installation_fingerprint;
+        let active_grants = tokio::task::spawn_blocking(move || {
+            LocalAuthorizationStore::open(installation_path, fingerprint, None)
+                .unwrap()
+                .load_snapshot(SystemUnixClock.now_unix_milliseconds(), None)
+                .unwrap()
+                .active_grants()
+                .to_vec()
+        })
+        .await
+        .unwrap();
+        assert_eq!(active_grants, vec![replayed]);
+
+        drop(retrying_issuer);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, restarted)
+            .await
+            .expect("restarted shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exact_revocation_closes_only_matching_active_connections() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut revoked = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the client connected: {result:?}")
+            }
+            stream = fixture.connect("session-revocation-exact", 8) => stream,
+        };
+        let mut retained = fixture.connect("session-revocation-exact", 9).await;
+        assert!(matches!(
+            request(&mut revoked, 8, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+        assert!(matches!(
+            request(&mut retained, 9, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        fixture
+            .mutate_authorization(move |store, now| {
+                store.revoke_grant(SessionGrantId::from_bytes([8; 16]), now)
+            })
+            .await;
+        let closed =
+            tokio::time::timeout(AUTHORIZATION_OBSERVATION_BOUND, read_response(&mut revoked))
+                .await
+                .expect("revoked connection was not closed within the authorization deadline");
+        assert!(closed.is_err());
+        assert!(
+            fixture
+                .try_connect_grant(fixture.grant("session-revocation-exact", 8), 10)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            request(&mut retained, 11, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop((revoked, retained));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn profile_suspension_closes_all_matching_grants_and_blocks_issuance() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut first = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the first session connected: {result:?}")
+            }
+            stream = fixture.connect("session-suspended", 41) => stream,
+        };
+        let mut second = fixture.connect("session-suspended", 42).await;
+        let mut issuer = fixture.connect_issuer(43).await;
+
+        fixture
+            .mutate_authorization(|store, now| {
+                store.suspend_profile(&ServiceProfileId::parse("session-suspended").unwrap(), now)
+            })
+            .await;
+
+        let (first_closed, second_closed) = tokio::join!(
+            tokio::time::timeout(AUTHORIZATION_OBSERVATION_BOUND, read_response(&mut first)),
+            tokio::time::timeout(AUTHORIZATION_OBSERVATION_BOUND, read_response(&mut second)),
+        );
+        assert!(first_closed.unwrap().is_err());
+        assert!(second_closed.unwrap().is_err());
+        assert_eq!(
+            issue_grant(&fixture, &mut issuer, 43, "session-suspended").await,
+            Err(LocalServiceErrorCode::ProfileSuspended)
+        );
+
+        drop((first, second, issuer));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn disabled_issuer_denies_new_grants_and_applies_retain_then_revoke() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(51) => stream,
+        };
+        let grant = issue_grant(&fixture, &mut issuer, 51, "session-disabled")
+            .await
+            .unwrap();
+        let mut session = fixture.connect_grant(grant, 52).await;
+
+        let issuer_key_id = fixture.adapter_key_id;
+        let issuer_key_version = fixture.adapter_key_version;
+        fixture
+            .mutate_authorization(move |store, now| {
+                store.set_issuer_state(
+                    issuer_key_id,
+                    issuer_key_version,
+                    IssuerAvailability::Disabled,
+                    ExistingGrantDisposition::RetainUntilExpiry,
+                    now,
+                )
+            })
+            .await;
+        assert_eq!(
+            issue_grant(&fixture, &mut issuer, 52, "session-disabled-new").await,
+            Err(LocalServiceErrorCode::IssuerDisabled)
+        );
+        assert!(matches!(
+            request(&mut session, 53, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        let issuer_key_id = fixture.adapter_key_id;
+        let issuer_key_version = fixture.adapter_key_version;
+        fixture
+            .mutate_authorization(move |store, now| {
+                store.set_issuer_state(
+                    issuer_key_id,
+                    issuer_key_version,
+                    IssuerAvailability::Disabled,
+                    ExistingGrantDisposition::Revoke,
+                    now,
+                )
+            })
+            .await;
+        let closed =
+            tokio::time::timeout(AUTHORIZATION_OBSERVATION_BOUND, read_response(&mut session))
+                .await
+                .expect("revoke-on-disable connection was not closed");
+        assert!(closed.is_err());
+        let mut disabled_reconnect = fixture.connect_issuer(54).await;
+        assert_eq!(
+            issue_grant(
+                &fixture,
+                &mut disabled_reconnect,
+                54,
+                "session-disabled-new",
+            )
+            .await,
+            Err(LocalServiceErrorCode::IssuerDisabled)
+        );
+
+        drop((issuer, disabled_reconnect, session));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn policy_replacement_invalidates_only_unsatisfied_grants() {
+        let account =
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted]).unwrap();
+        let presence =
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).unwrap();
+        let initial = AuthorizationPolicy::new(
+            AuthorizationPolicyVersion::new(1).unwrap(),
+            vec![account, presence],
+        )
+        .unwrap();
+        let fixture = Fixture::new_with_policy(initial).await;
+        let account_grant = fixture.grant_with_evidence(
+            "session-policy",
+            61,
+            AuthorizationEvidenceKind::AccountTrusted,
+            1,
+        );
+        let presence_grant = fixture.grant_with_evidence(
+            "session-policy",
+            62,
+            AuthorizationEvidenceKind::UserPresence,
+            1,
+        );
+        fixture.persist_grant(account_grant.clone()).await;
+        fixture.persist_grant(presence_grant.clone()).await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut account_session = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the policy session connected: {result:?}")
+            }
+            stream = fixture.connect_grant(account_grant, 61) => stream,
+        };
+        let mut presence_session = fixture.connect_grant(presence_grant, 62).await;
+        let mut issuer = fixture.connect_issuer(63).await;
+        let replacement =
+            AuthorizationPolicy::new(AuthorizationPolicyVersion::new(2).unwrap(), vec![presence])
+                .unwrap();
+        fixture
+            .mutate_authorization(move |store, now| store.replace_policy(&replacement, now))
+            .await;
+
+        let closed = tokio::time::timeout(
+            AUTHORIZATION_OBSERVATION_BOUND,
+            read_response(&mut account_session),
+        )
+        .await
+        .expect("policy-invalid connection was not closed");
+        assert!(closed.is_err());
+        assert!(matches!(
+            request(&mut presence_session, 63, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+        assert_eq!(
+            issue_grant(&fixture, &mut issuer, 64, "session-policy-new").await,
+            Err(LocalServiceErrorCode::RequiredEvidenceUnavailable)
+        );
+
+        drop((account_session, presence_session, issuer));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn grant_retirement_persists_and_prevents_reconnect() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(71) => stream,
+        };
+        let grant = issue_grant(&fixture, &mut issuer, 71, "session-retired")
+            .await
+            .unwrap();
+        let mut session = fixture.connect_grant(grant.clone(), 72).await;
+        let retirement = request(&mut session, 72, "authorization.grant.retire", b"{}").await;
+        let LocalServiceResponse::Success { payload, .. } = retirement else {
+            panic!("grant retirement failed");
+        };
+        let result: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(result["retired"], true);
+        assert!(fixture.try_connect_grant(grant, 73).await.is_err());
+
+        drop((issuer, session));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reload_failure_stops_the_service_and_closes_clients() {
+        let fixture = Fixture::new().await;
+        let (_hold_shutdown, stop_rx) = oneshot::channel::<()>();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
             async move {
                 let _ = stop_rx.await;
             },
@@ -4345,21 +5278,69 @@ mod tests {
             result = &mut service => {
                 panic!("shared service exited before the client connected: {result:?}")
             }
-            stream = fixture.connect("session-revoked", 8) => stream,
+            stream = fixture.connect("session-reload-failure", 81) => stream,
         };
-        assert!(matches!(
-            request(&mut client, 8, "get_identity", b"{}").await,
-            LocalServiceResponse::Success { .. }
-        ));
+        fixture.authorization.fail_next_reload_for_test();
+        fixture.authorization.request_reload();
 
-        assert!(registry.revoke_grant(SessionGrantId::from_bytes([8; 16])));
-        let closed = tokio::time::timeout(
-            super::AUTHORIZATION_RECHECK_INTERVAL + Duration::from_secs(2),
-            read_response(&mut client),
+        let result = tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, &mut service)
+            .await
+            .expect("authorization reload failure did not stop the service")
+            .unwrap();
+        let error = result.expect_err("authorization reload failure returned success");
+        assert!(
+            error
+                .to_string()
+                .contains("local authorization storage is unavailable")
+        );
+        assert!(
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn long_delivery_claim_observes_live_revocation() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut client = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the delivery client connected: {result:?}")
+            }
+            stream = fixture.connect("session-long-claim", 91) => stream,
+        };
+        write_request(
+            &mut client,
+            &LocalServiceRequest::new(
+                RequestId::from_bytes([91; 16]),
+                OperationName::parse("delivery.claim").unwrap(),
+                br#"{"maxEvents":1,"waitMilliseconds":30000}"#.to_vec(),
+            )
+            .unwrap(),
         )
         .await
-        .expect("revoked connection was not closed within the authorization deadline");
-        assert!(closed.is_err());
+        .unwrap();
+        wait_for_active_delivery(&fixture.root, "session-long-claim").await;
+
+        fixture
+            .mutate_authorization(move |store, now| {
+                store.revoke_grant(SessionGrantId::from_bytes([91; 16]), now)
+            })
+            .await;
+        assert!(
+            tokio::time::timeout(AUTHORIZATION_OBSERVATION_BOUND, read_response(&mut client))
+                .await
+                .expect("long delivery claim did not observe revocation")
+                .is_err()
+        );
 
         drop(client);
         stop_tx.send(()).unwrap();

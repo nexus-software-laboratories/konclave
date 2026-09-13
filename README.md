@@ -91,6 +91,15 @@ Each client still uses a memory-only session key and a finite exact-profile gran
 Unsupported harnesses can use the same minimum-trust contract through the generic
 installed client API without claiming stronger evidence.
 
+Operators can inspect and change the live durable authorization state without
+exposing administration as an agent tool:
+
+```shell
+konclave authorization status
+konclave authorization suspend-profile --profile <profile-id>
+konclave authorization disable-issuer --issuer-key-id <issuer-key-id> --issuer-key-version 1 --existing-grants revoke
+```
+
 ### Run the local Copilot demo
 
 On Windows, one script builds the Windows candidate on public CI, deletes its

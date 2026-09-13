@@ -33,6 +33,10 @@ const ERROR_CONFLICT: u16 = 8;
 const ERROR_INTERNAL: u16 = 9;
 const ERROR_CANCELLED: u16 = 10;
 const ERROR_RECONCILIATION_PENDING: u16 = 11;
+const ERROR_PROFILE_SUSPENDED: u16 = 12;
+const ERROR_ISSUER_DISABLED: u16 = 13;
+const ERROR_REQUIRED_EVIDENCE_UNAVAILABLE: u16 = 14;
+const ERROR_CAPACITY: u16 = 15;
 
 /// Stable identifier for one request on one connection.
 ///
@@ -142,6 +146,14 @@ pub enum LocalServiceErrorCode {
     Cancelled,
     /// The actual result is known in memory but is not yet durably journaled.
     ReconciliationPending,
+    /// New authorization issuance is blocked for the exact profile.
+    ProfileSuspended,
+    /// New authorization issuance is blocked for the exact issuer key version.
+    IssuerDisabled,
+    /// The effective policy does not accept the evidence available to the issuer.
+    RequiredEvidenceUnavailable,
+    /// A durable authorization-state bound was reached without evicting authority.
+    Capacity,
 }
 
 impl LocalServiceErrorCode {
@@ -160,6 +172,10 @@ impl LocalServiceErrorCode {
             Self::Internal => ERROR_INTERNAL,
             Self::Cancelled => ERROR_CANCELLED,
             Self::ReconciliationPending => ERROR_RECONCILIATION_PENDING,
+            Self::ProfileSuspended => ERROR_PROFILE_SUSPENDED,
+            Self::IssuerDisabled => ERROR_ISSUER_DISABLED,
+            Self::RequiredEvidenceUnavailable => ERROR_REQUIRED_EVIDENCE_UNAVAILABLE,
+            Self::Capacity => ERROR_CAPACITY,
         }
     }
 
@@ -182,6 +198,10 @@ impl LocalServiceErrorCode {
             ERROR_INTERNAL => Ok(Self::Internal),
             ERROR_CANCELLED => Ok(Self::Cancelled),
             ERROR_RECONCILIATION_PENDING => Ok(Self::ReconciliationPending),
+            ERROR_PROFILE_SUSPENDED => Ok(Self::ProfileSuspended),
+            ERROR_ISSUER_DISABLED => Ok(Self::IssuerDisabled),
+            ERROR_REQUIRED_EVIDENCE_UNAVAILABLE => Ok(Self::RequiredEvidenceUnavailable),
+            ERROR_CAPACITY => Ok(Self::Capacity),
             _ => Err(LocalServiceTransportError::UnknownErrorCode),
         }
     }
@@ -201,6 +221,10 @@ impl LocalServiceErrorCode {
             Self::Internal => "internal",
             Self::Cancelled => "cancelled",
             Self::ReconciliationPending => "reconciliation_pending",
+            Self::ProfileSuspended => "profile_suspended",
+            Self::IssuerDisabled => "issuer_disabled",
+            Self::RequiredEvidenceUnavailable => "required_evidence_unavailable",
+            Self::Capacity => "capacity",
         }
     }
 }
@@ -742,6 +766,13 @@ mod tests {
 
     #[test]
     fn every_error_code_round_trips_and_unknown_values_fail_closed() {
+        assert_eq!(LocalServiceErrorCode::ProfileSuspended.wire_value(), 12);
+        assert_eq!(LocalServiceErrorCode::IssuerDisabled.wire_value(), 13);
+        assert_eq!(
+            LocalServiceErrorCode::RequiredEvidenceUnavailable.wire_value(),
+            14
+        );
+        assert_eq!(LocalServiceErrorCode::Capacity.wire_value(), 15);
         for code in [
             LocalServiceErrorCode::InvalidRequest,
             LocalServiceErrorCode::UnknownOperation,
@@ -754,6 +785,10 @@ mod tests {
             LocalServiceErrorCode::Internal,
             LocalServiceErrorCode::Cancelled,
             LocalServiceErrorCode::ReconciliationPending,
+            LocalServiceErrorCode::ProfileSuspended,
+            LocalServiceErrorCode::IssuerDisabled,
+            LocalServiceErrorCode::RequiredEvidenceUnavailable,
+            LocalServiceErrorCode::Capacity,
         ] {
             let response = LocalServiceResponse::failure(request_id(), code);
             let encoded = response.encode().unwrap();
@@ -763,7 +798,7 @@ mod tests {
                 code
             );
         }
-        for value in [0_u16, 12, u16::MAX] {
+        for value in [0_u16, 16, u16::MAX] {
             assert_eq!(
                 LocalServiceErrorCode::from_wire_value(value).unwrap_err(),
                 LocalServiceTransportError::UnknownErrorCode

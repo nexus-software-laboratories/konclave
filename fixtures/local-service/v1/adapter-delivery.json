@@ -180,6 +180,7 @@
       "authorizationPolicy": "AccountTrusted",
       "authorizationProvider": "AccountTrusted",
       "authorizationEvidence": ["account_trusted"],
+      "authorizationGeneration": 1,
       "authorizationPolicyVersion": 1,
       "grantExpiresAtUnixMilliseconds": 1900000000000,
       "grantCapabilities": 15,

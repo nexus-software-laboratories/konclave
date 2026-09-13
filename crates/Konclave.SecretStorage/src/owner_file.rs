@@ -31,6 +31,19 @@ pub fn create_or_verify_owner_protected_file(
     platform::create_or_verify_file(path, expected)
 }
 
+/// Opens one owner-only ordinary file for reading and writing, creating it empty
+/// when absent.
+///
+/// Existing content is preserved. Creation is exclusive, and concurrent callers
+/// converge on the same owner-protected file.
+///
+/// # Errors
+///
+/// Returns a finite unavailable or unsafe-storage error.
+pub fn open_or_create_owner_protected_file(path: &Path) -> Result<File, SecretStorageError> {
+    platform::open_or_create_file(path)
+}
+
 /// Opens one existing owner-only ordinary file without following the final link.
 ///
 /// # Errors
@@ -117,7 +130,53 @@ mod platform {
         }
     }
 
+    pub(super) fn open_or_create_file(path: &Path) -> Result<File, SecretStorageError> {
+        let parent = path
+            .parent()
+            .ok_or(SecretStorageError::OwnerProtectedStorageUnsafe)?;
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+        verify_directory(&metadata)?;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => verify_file_metadata(&metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(SecretStorageError::OwnerProtectedStorageUnavailable),
+        }
+
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(FILE_MODE)
+            .custom_flags(libc_flags())
+            .open(path)
+        {
+            Ok(file) => {
+                verify_file(&file)?;
+                Ok(file)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc_flags())
+                    .open(path)
+                    .map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+                verify_file(&file)?;
+                Ok(file)
+            }
+            Err(_) => Err(SecretStorageError::OwnerProtectedStorageUnavailable),
+        }
+    }
+
     pub(super) fn open_file(path: &Path) -> Result<File, SecretStorageError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => verify_file_metadata(&metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SecretStorageError::OwnerProtectedStorageUnavailable);
+            }
+            Err(_) => return Err(SecretStorageError::OwnerProtectedStorageUnavailable),
+        }
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc_flags())
@@ -142,6 +201,10 @@ mod platform {
         let metadata = file
             .metadata()
             .map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+        verify_file_metadata(&metadata)
+    }
+
+    fn verify_file_metadata(metadata: &std::fs::Metadata) -> Result<(), SecretStorageError> {
         if !metadata.is_file()
             || metadata.uid() != rustix::process::geteuid().as_raw()
             || metadata.mode() & 0o077 != 0
@@ -174,6 +237,10 @@ mod platform {
     ) -> Result<(), SecretStorageError> {
         KonclaveWindowsSecurity::create_or_verify_owner_restricted_file(path, expected)
             .map_err(map_error)
+    }
+
+    pub(super) fn open_or_create_file(path: &Path) -> Result<File, SecretStorageError> {
+        KonclaveWindowsSecurity::open_or_create_owner_restricted_file(path).map_err(map_error)
     }
 
     pub(super) fn open_file(path: &Path) -> Result<File, SecretStorageError> {
@@ -218,6 +285,29 @@ mod tests {
         assert_eq!(value, b"exact");
     }
 
+    #[test]
+    fn owner_protected_mutable_file_is_created_empty_and_reopened() {
+        use std::io::{Read as _, Write as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private");
+        ensure_owner_protected_directory(&directory).unwrap();
+        let path = directory.join("mutable");
+
+        let mut created = open_or_create_owner_protected_file(&path).unwrap();
+        let mut contents = Vec::new();
+        created.read_to_end(&mut contents).unwrap();
+        assert!(contents.is_empty());
+        created.write_all(b"state").unwrap();
+        created.sync_all().unwrap();
+        drop(created);
+
+        let mut reopened = open_or_create_owner_protected_file(&path).unwrap();
+        let mut contents = Vec::new();
+        reopened.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"state");
+    }
+
     #[cfg(unix)]
     #[test]
     fn links_permissions_and_foreign_shapes_fail_closed() {
@@ -238,7 +328,16 @@ mod tests {
         let link = directory.join("linked");
         std::fs::hard_link(&file, &link).unwrap();
         assert_eq!(
-            open_owner_protected_file(&file).unwrap_err(),
+            open_or_create_owner_protected_file(&file).unwrap_err(),
+            SecretStorageError::OwnerProtectedStorageUnsafe
+        );
+
+        let target = directory.join("target");
+        create_or_verify_owner_protected_file(&target, b"target").unwrap();
+        let symlink = directory.join("symlink");
+        std::os::unix::fs::symlink(&target, &symlink).unwrap();
+        assert_eq!(
+            open_or_create_owner_protected_file(&symlink).unwrap_err(),
             SecretStorageError::OwnerProtectedStorageUnsafe
         );
     }

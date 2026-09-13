@@ -30,6 +30,7 @@ KonclaveCollaborationPolicies = { path = "../../crates/Konclave.CollaborationPol
 KonclaveAdapterTransport = { path = "../../crates/Konclave.AdapterTransport" }
 KonclaveCryptographicCore = { path = "../../crates/Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }
+KonclaveLocalAuthorizationStore = { path = "../../crates/Konclave.LocalAuthorizationStore", optional = true }
 KonclaveLocalServiceTransport = { path = "../../crates/Konclave.LocalServiceTransport" }
 KonclaveProtocolContracts = { path = "../../crates/Konclave.ProtocolContracts" }
 KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
@@ -77,6 +78,6 @@ tower = { version = "0.5.3", features = ["util"] }
 [features]
 default = ["rust-service-mcp", "rust-service-observability", "rust-service-sqlite", "rust-service-windows-service"]
 rust-service-sqlite = ["dep:rusqlite"]
-rust-service-mcp = ["dep:libc", "dep:rmcp", "dep:serde", "dep:serde_json", "dep:windows-sys"]
+rust-service-mcp = ["dep:KonclaveLocalAuthorizationStore", "dep:libc", "dep:rmcp", "dep:serde", "dep:serde_json", "dep:windows-sys"]
 rust-service-observability = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing", "dep:tracing-opentelemetry", "dep:tracing-subscriber"]
 rust-service-windows-service = ["dep:windows-service"]

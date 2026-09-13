@@ -1,3 +1,4 @@
+mod authorization;
 mod cli;
 mod doctor;
 mod encoding;
@@ -30,6 +31,7 @@ async fn run() -> anyhow::Result<()> {
         Command::Init(args) => init::run(args)?,
         Command::RelayBootstrap(args) => relay_bootstrap::run(args)?,
         Command::Doctor(args) => doctor::run(args).await?,
+        Command::Authorization(args) => authorization::run(args)?,
         Command::Policy(args) => policy::run(args)?,
     }
     Ok(())

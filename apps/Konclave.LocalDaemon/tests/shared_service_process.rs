@@ -11,6 +11,7 @@ use KonclaveClientLibrary::{
     RelayEnrollmentSourceConfig, RelayInstallationConfig,
 };
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
+use KonclaveLocalAuthorizationStore::{LocalAuthorizationStore, installation_fingerprint};
 use KonclaveLocalServiceTransport::{
     AdapterKeyId, AdapterKeyVersion, AdapterRegistration, HarnessKind,
     LOCAL_SERVICE_INSTALLATION_FILE, LocalServiceEndpoint, LocalServiceIdentitySource,
@@ -127,6 +128,16 @@ async fn twenty_clients_share_one_process_and_recover_after_restart() {
     let mut encoded = Vec::new();
     installation.write_to(&mut encoded).unwrap();
     let config = service_root.join(LOCAL_SERVICE_INSTALLATION_FILE);
+    drop(
+        LocalAuthorizationStore::bootstrap(
+            &config,
+            installation_fingerprint(&installation).unwrap(),
+            installation.authorization_policy(),
+            installation.issuers(),
+            1,
+        )
+        .unwrap(),
+    );
     create_or_verify_owner_protected_file(&config, &encoded).unwrap();
 
     let service = SharedServiceProcess::start(

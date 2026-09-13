@@ -237,7 +237,10 @@ pub async fn rpc_with_request_id(
                 serde_json::from_slice(&payload).unwrap()
             }
             LocalServiceResponse::Failure { code, .. } => {
-                panic!("shared service operation failed: {}", code.as_str())
+                panic!(
+                    "shared service operation '{operation}' failed: {}",
+                    code.as_str()
+                )
             }
         }
     })

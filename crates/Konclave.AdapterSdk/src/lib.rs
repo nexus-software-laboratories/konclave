@@ -226,6 +226,7 @@ impl<T: AdapterRpc> AdapterSession<T> {
             .await?;
         let status: ServiceStatusResponse = decode(&response)?;
         Ok(AdapterStatus {
+            authorization_generation: status.authorization_generation,
             pending_events: status.pending_events,
             claimed_events: status.claimed_events,
             watched_conversations: status.watched_conversations,
@@ -323,6 +324,7 @@ impl From<&CollaborationTurnClaim> for DeliveryHeartbeatTurn {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServiceStatusResponse {
+    authorization_generation: u64,
     pending_events: u32,
     claimed_events: u32,
     watched_conversations: u32,

@@ -8,6 +8,7 @@
     "CI",
     "A2A conformance",
     "Adapter conformance",
+    "Authorization store conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
@@ -41,6 +42,7 @@
         "pr-review-policy/evaluate",
         "a2a-conformance",
         "adapter-conformance",
+        "authorization-store-conformance",
         "community-relay-container-ci",
         "container-ci",
         "delete-run-artifacts"
@@ -68,6 +70,17 @@
       "draftBehavior": "ready-only",
       "requiredChecks": [
         "Adapter conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/authorization-store-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Authorization store conformance"
       ]
     },
     {

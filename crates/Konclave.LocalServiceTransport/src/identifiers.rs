@@ -83,8 +83,8 @@ pub type AdapterKeyId = IssuerKeyId;
 define_fixed_identifier!(
     /// Identifier for one live client connection attempt.
     ///
-    /// A reconnect uses the same registered adapter key with a fresh instance, so
-    /// this value distinguishes connections without becoming a durable identity.
+    /// A new logical connection uses a fresh instance. An ambiguous issuer request
+    /// retry preserves its instance so the durable request key resolves exactly once.
     ClientInstanceId,
     16,
     "client_instance"

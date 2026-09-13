@@ -173,6 +173,7 @@ async fn fixture_defines_the_complete_versioned_delivery_contract() {
             .await
             .unwrap(),
         AdapterStatus {
+            authorization_generation: 1,
             pending_events: 3,
             claimed_events: 1,
             watched_conversations: 2,

@@ -66,6 +66,10 @@ export const localServiceErrorCodes = {
   9: 'internal',
   10: 'cancelled',
   11: 'reconciliation_pending',
+  12: 'profile_suspended',
+  13: 'issuer_disabled',
+  14: 'required_evidence_unavailable',
+  15: 'capacity',
 } as const;
 
 export type LocalServiceErrorCode =
@@ -514,6 +518,7 @@ type ConnectionCredential =
   | {
       readonly kind: 'issuer';
       readonly key: KeyObject;
+      readonly clientInstance: Buffer;
     }
   | {
       readonly kind: 'session';
@@ -557,7 +562,10 @@ async function openConnection(
   };
 
   try {
-    const clientInstance = randomBytes(clientInstanceLength);
+    const clientInstance =
+      credential.kind === 'issuer'
+        ? Buffer.from(credential.clientInstance)
+        : randomBytes(clientInstanceLength);
     const clientChallenge = randomBytes(challengeLength);
     await withDeadline(
       (async () => {
@@ -678,6 +686,7 @@ async function issueSessionGrant(
   sleep: (milliseconds: number) => Promise<void>,
 ): Promise<SessionGrantRecord> {
   const requestId = randomBytes(requestIdLength);
+  const clientInstance = randomBytes(clientInstanceLength);
   const payload = encodeRequestPayload('authorization.grant.issue', {
     profile: options.profile,
     sessionPublicKey: rawPublicKey(sessionKey).toString('hex'),
@@ -694,6 +703,7 @@ async function issueSessionGrant(
       issuer = await openConnection(options, remaining, {
         kind: 'issuer',
         key: options.signingKey,
+        clientInstance,
       });
       const result = await withDeadline(
         issuer.invoke(requestId, 'authorization.grant.issue', payload),
@@ -909,7 +919,7 @@ export async function connectLocalService(
     if (lane.connection?.connected) {
       return lane.connection;
     }
-    if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now() + 60_000)) {
+    if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
       grant = await refreshGrant();
     }
     try {
@@ -919,13 +929,13 @@ export async function connectLocalService(
         grant,
       });
     } catch (error) {
-      if (
-        !(error instanceof LocalServiceAuthorizationError) &&
-        !isRetryableTransportFailure(error)
-      ) {
+      if (error instanceof LocalServiceAuthorizationError) {
+        grant = await refreshGrant();
+      } else if (!isRetryableTransportFailure(error)) {
         throw error;
+      } else if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
+        grant = await refreshGrant();
       }
-      grant = await refreshGrant();
       lane.connection = await openConnection(options, remainingMs, {
         kind: 'session',
         key: sessionKey,
@@ -983,6 +993,47 @@ export async function connectLocalService(
       reason,
     });
 
+  const retireGrant = async (retiringGrant: SessionGrantRecord): Promise<void> => {
+    const operation = 'authorization.grant.retire';
+    const requestId = randomBytes(requestIdLength);
+    const payload = encodeRequestPayload(operation, {});
+    const expiresAt = Date.now() + deadlineMs;
+    for (let attempt = 0; ; attempt += 1) {
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        throw new LocalServiceError(operation, 'deadline_exceeded');
+      }
+      let connection: AuthenticatedConnection | null = null;
+      try {
+        connection = await openConnection(options, remaining, {
+          kind: 'session',
+          key: sessionKey,
+          grant: retiringGrant,
+        });
+        await withDeadline(
+          connection.invoke(requestId, operation, payload),
+          remaining,
+          operation,
+          connection.close,
+        );
+        return;
+      } catch (error) {
+        if (error instanceof LocalServiceAuthorizationError) {
+          return;
+        }
+        if (attempt >= reconnectAttempts || !isRetryableTransportFailure(error)) {
+          throw error;
+        }
+        const delay = Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
+        if (delay > 0) {
+          await sleep(delay);
+        }
+      } finally {
+        connection?.close();
+      }
+    }
+  };
+
   return {
     profile: options.profile,
     get connected() {
@@ -993,11 +1044,9 @@ export async function connectLocalService(
       if (closed) {
         return;
       }
-      try {
-        await invokeControl('authorization.grant.retire', {});
-      } finally {
-        close();
-      }
+      close();
+      await Promise.allSettled([interactiveLane.inFlight, deliveryLane.inFlight]);
+      await retireGrant(grant);
     },
     request(operation, payload, requestOptions) {
       let normalized: NormalizedRequestOptions;

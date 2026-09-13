@@ -276,6 +276,7 @@ dependencies = [
  "KonclaveCollaborationPolicies",
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
+ "KonclaveLocalAuthorizationStore",
  "KonclaveLocalServiceTransport",
  "KonclaveSecretStorage",
  "anyhow",
@@ -363,6 +364,7 @@ dependencies = [
  "KonclaveCommunityRelay",
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
+ "KonclaveLocalAuthorizationStore",
  "KonclaveLocalServiceTransport",
  "KonclaveProtocolContracts",
  "KonclaveRelayCore",
@@ -394,6 +396,19 @@ dependencies = [
  "windows-service",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "KonclaveLocalAuthorizationStore"
+version = "0.1.0"
+dependencies = [
+ "KonclaveDomainCore",
+ "KonclaveLocalServiceTransport",
+ "KonclaveSecretStorage",
+ "rusqlite",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

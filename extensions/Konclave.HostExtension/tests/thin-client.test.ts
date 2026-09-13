@@ -60,6 +60,7 @@ function serviceStatus(overrides: Partial<ServiceStatusResult> = {}): ServiceSta
     authorizationPolicy: 'AccountTrusted',
     authorizationProvider: 'AccountTrusted',
     authorizationEvidence: ['account_trusted'],
+    authorizationGeneration: 1,
     authorizationPolicyVersion: 1,
     grantExpiresAtUnixMilliseconds: Date.now() + 60_000,
     grantCapabilities: 15,
@@ -2089,6 +2090,7 @@ describe('shared-service delivery adaptation', () => {
     await expect(channel.request({ kind: 'status' })).resolves.toMatchObject({
       kind: 'status',
       status: {
+        authorizationGeneration: 1,
         pendingEvents: 3,
         claimedEvents: 4,
         watchedConversations: 2,

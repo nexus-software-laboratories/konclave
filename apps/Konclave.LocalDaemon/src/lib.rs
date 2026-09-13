@@ -4,6 +4,8 @@ mod activity;
 mod adapter;
 #[allow(dead_code)]
 mod application;
+#[cfg(feature = "rust-service-mcp")]
+mod authorization_runtime;
 mod clock;
 #[allow(dead_code)]
 mod conversation;
@@ -57,8 +59,8 @@ where
 ///
 /// # Errors
 ///
-/// Returns owner-protected installation, native service-identity, adapter-registry,
-/// endpoint, profile-supervision, or coordinated-shutdown failures.
+/// Returns owner-protected installation, native service-identity, durable
+/// authorization, endpoint, profile-supervision, or coordinated-shutdown failures.
 #[cfg(feature = "rust-service-mcp")]
 pub async fn run_shared_until<F>(
     installation_path: &std::path::Path,
