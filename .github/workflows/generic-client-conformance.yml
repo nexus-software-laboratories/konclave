@@ -100,6 +100,10 @@ jobs:
             --package KonclaveLocalDaemon \
             --lib \
             disabled_issuer_denies_new_grants_and_applies_retain_then_revoke
+          cargo check \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --test packaged_distribution_e2e
           cargo clippy \
             --locked \
             --package KonclaveLocalDaemon \
