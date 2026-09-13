@@ -616,6 +616,8 @@ describe('shared local service client', () => {
       }),
     ).rejects.toMatchObject({ code: 'ephemeral_profile_invalid' });
     for (const invalid of [
+      null,
+      undefined,
       {
         profile: 'generic-test',
         profileMode: 'unknown',

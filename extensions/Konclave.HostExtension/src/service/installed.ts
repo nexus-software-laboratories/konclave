@@ -36,6 +36,9 @@ export class GenericClientIdentityError extends Error {
 export function validateGenericClientIdentity(
   identity: GenericClientIdentity,
 ): GenericClientIdentity {
+  if (typeof identity !== 'object' || identity === null) {
+    throw new GenericClientIdentityError('invalid_arguments');
+  }
   const profile: unknown = identity.profile;
   const profileMode: unknown = identity.profileMode;
   const integrationLabel: unknown = identity.integrationLabel;
