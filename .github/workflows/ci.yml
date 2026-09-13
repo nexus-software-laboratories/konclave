@@ -54,6 +54,21 @@ jobs:
       requested_scope: ${{ inputs.validation_scope || '' }}
       draft_mode: ready-only
 
+  guidance-policy:
+    needs: validation-plan
+    if: needs.validation-plan.result == 'success'
+    name: Agent delivery policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify security-sensitive delivery policy
+        shell: pwsh
+        run: ./scripts/ci/Test-SecuritySensitiveDeliveryPolicy.ps1
+
   rust-build-test:
     needs: validation-plan
     if: needs.validation-plan.outputs.scope == 'full'
@@ -275,6 +290,7 @@ jobs:
     needs:
       - source-policy
       - validation-plan
+      - guidance-policy
       - rust-build-test
       - rust-lint
       - node-build-and-test
@@ -289,6 +305,7 @@ jobs:
           SOURCE_RESULT: ${{ needs.source-policy.result }}
           SCOPE: ${{ needs.validation-plan.outputs.scope }}
           PLAN_RESULT: ${{ needs.validation-plan.result }}
+          GUIDANCE_POLICY_RESULT: ${{ needs.guidance-policy.result }}
           RUST_BUILD_RESULT: ${{ needs.rust-build-test.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           NODE_RESULT: ${{ needs.node-build-and-test.result }}
@@ -297,6 +314,7 @@ jobs:
         run: |
           if [ "$SOURCE_RESULT" != "success" ]; then exit 1; fi
           if [ "$PLAN_RESULT" != "success" ]; then exit 1; fi
+          if [ "$GUIDANCE_POLICY_RESULT" != "success" ]; then exit 1; fi
           for result in \
             "$RUST_BUILD_RESULT" \
             "$RUST_LINT_RESULT" \
