@@ -1,5 +1,5 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { posix, win32 } from 'node:path';
 
 import type { HarnessKind } from './transcript.js';
 
@@ -15,6 +15,7 @@ import type { HarnessKind } from './transcript.js';
 const serviceConfigFileName = 'konclave.service.json';
 const maxServiceConfigBytes = 4096;
 const maxKeyFileBytes = 32;
+const maxPathCharacters = 4096;
 const hex32 = /^[0-9a-f]{32}$/;
 const hex64 = /^[0-9a-f]{64}$/;
 
@@ -52,6 +53,8 @@ export class ServiceConfigurationError extends Error {
     this.code = code;
   }
 }
+
+class MissingInstalledFileError extends Error {}
 
 interface SecureFileStats {
   readonly uid: number;
@@ -106,7 +109,7 @@ function readBoundedFile(
     );
   } catch (error) {
     if (isMissingFile(error)) {
-      throw new ServiceConfigurationError(`Konclave ${what} is not installed.`);
+      throw new MissingInstalledFileError();
     }
     throw new ServiceConfigurationError(`Konclave ${what} cannot be opened safely.`);
   }
@@ -140,6 +143,131 @@ function readBoundedFile(
   }
 }
 
+function readRequiredBoundedFile(
+  path: string,
+  maxBytes: number,
+  what: string,
+  platform: NodeJS.Platform,
+  operations: SecureFileOperations,
+): Buffer {
+  try {
+    return readBoundedFile(path, maxBytes, what, platform, operations);
+  } catch (error) {
+    if (error instanceof MissingInstalledFileError) {
+      throw new ServiceConfigurationError(`Konclave ${what} is not installed.`);
+    }
+    throw error;
+  }
+}
+
+function readOptionalBoundedFile(
+  path: string,
+  maxBytes: number,
+  what: string,
+  platform: NodeJS.Platform,
+  operations: SecureFileOperations,
+): Buffer | undefined {
+  try {
+    return readBoundedFile(path, maxBytes, what, platform, operations);
+  } catch (error) {
+    if (error instanceof MissingInstalledFileError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function environmentPath(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  const value = environment[name]?.trim();
+  return value && value.length > 0 ? value : undefined;
+}
+
+function pathApi(platform: NodeJS.Platform): typeof posix | typeof win32 {
+  if (platform === 'win32') {
+    return win32;
+  }
+  if (platform === 'linux' || platform === 'darwin') {
+    return posix;
+  }
+  throw new ServiceConfigurationError('Konclave client platform is unsupported.');
+}
+
+function requireAbsolutePath(value: string, what: string, platform: NodeJS.Platform): string {
+  if (
+    value.length === 0 ||
+    value.length > maxPathCharacters ||
+    value.includes('\0') ||
+    value.includes('\r') ||
+    value.includes('\n') ||
+    !pathApi(platform).isAbsolute(value)
+  ) {
+    throw new ServiceConfigurationError(`Konclave ${what} path is invalid.`);
+  }
+  return value;
+}
+
+function defaultServiceConfigPath(
+  environment: Readonly<Record<string, string | undefined>>,
+  platform: NodeJS.Platform,
+): string {
+  const paths = pathApi(platform);
+  if (platform === 'win32') {
+    const root = environmentPath(environment, 'LOCALAPPDATA');
+    if (root === undefined) {
+      throw new ServiceConfigurationError(
+        'Konclave canonical service configuration location is unavailable.',
+      );
+    }
+    return paths.join(
+      requireAbsolutePath(root, 'local application data', platform),
+      'Konclave',
+      'service',
+      serviceConfigFileName,
+    );
+  }
+  const home = environmentPath(environment, 'HOME');
+  if (platform === 'darwin') {
+    if (home === undefined) {
+      throw new ServiceConfigurationError(
+        'Konclave canonical service configuration location is unavailable.',
+      );
+    }
+    return paths.join(
+      requireAbsolutePath(home, 'home', platform),
+      'Library',
+      'Application Support',
+      'Konclave',
+      'service',
+      serviceConfigFileName,
+    );
+  }
+  const xdgDataHome = environmentPath(environment, 'XDG_DATA_HOME');
+  if (xdgDataHome !== undefined) {
+    return paths.join(
+      requireAbsolutePath(xdgDataHome, 'XDG data', platform),
+      'konclave',
+      'service',
+      serviceConfigFileName,
+    );
+  }
+  if (home === undefined) {
+    throw new ServiceConfigurationError(
+      'Konclave canonical service configuration location is unavailable.',
+    );
+  }
+  return paths.join(
+    requireAbsolutePath(home, 'home', platform),
+    '.local',
+    'share',
+    'konclave',
+    'service',
+    serviceConfigFileName,
+  );
+}
+
 function requireHex(value: unknown, pattern: RegExp, what: string): Buffer {
   if (typeof value !== 'string' || !pattern.test(value)) {
     throw new ServiceConfigurationError(`Konclave ${what} is invalid.`);
@@ -150,8 +278,10 @@ function requireHex(value: unknown, pattern: RegExp, what: string): Buffer {
 /**
  * Reads the installed service configuration.
  *
- * The location is the installed sidecar beside this module, or an explicit override
- * used by deterministic tests and local development.
+ * The canonical location is independent of the replaceable plugin cache. An equal
+ * legacy module-adjacent sidecar remains readable during migration, while conflicting
+ * or unsafe canonical state fails closed. An explicit absolute override is reserved
+ * for deterministic tests and declared development scenarios.
  */
 export function resolveLocalServiceConfig(
   environment: Readonly<Record<string, string | undefined>>,
@@ -159,20 +289,60 @@ export function resolveLocalServiceConfig(
   platform: NodeJS.Platform = process.platform,
   operations: SecureFileOperations = nodeFileOperations,
 ): LocalServiceRuntimeConfig {
-  const override = environment.KONCLAVE_SERVICE_CONFIG_FILE?.trim();
-  const configPath =
-    override && override.length > 0 ? override : join(moduleDir, serviceConfigFileName);
-  if (!isAbsolute(configPath)) {
-    throw new ServiceConfigurationError('Konclave service configuration path must be absolute.');
+  const override = environmentPath(environment, 'KONCLAVE_SERVICE_CONFIG_FILE');
+  if (override !== undefined) {
+    const raw = readRequiredBoundedFile(
+      requireAbsolutePath(override, 'service configuration', platform),
+      maxServiceConfigBytes,
+      'service configuration',
+      platform,
+      operations,
+    );
+    return parseLocalServiceConfig(raw, platform);
   }
 
-  const raw = readBoundedFile(
-    configPath,
+  const paths = pathApi(platform);
+  const canonicalPath = defaultServiceConfigPath(environment, platform);
+  const legacyPath = paths.join(
+    requireAbsolutePath(moduleDir, 'plugin module', platform),
+    serviceConfigFileName,
+  );
+  const canonicalRaw = readOptionalBoundedFile(
+    canonicalPath,
     maxServiceConfigBytes,
     'service configuration',
     platform,
     operations,
   );
+  const legacyRaw =
+    canonicalPath === legacyPath
+      ? undefined
+      : readOptionalBoundedFile(
+          legacyPath,
+          maxServiceConfigBytes,
+          'service configuration',
+          platform,
+          operations,
+        );
+  const canonical =
+    canonicalRaw === undefined ? undefined : parseLocalServiceConfig(canonicalRaw, platform);
+  const legacy = legacyRaw === undefined ? undefined : parseLocalServiceConfig(legacyRaw, platform);
+  if (canonical !== undefined && legacy !== undefined && !legacyMatchesCanonical(legacy, canonical)) {
+    throw new ServiceConfigurationError(
+      'Konclave service configuration conflicts with the legacy extension sidecar.',
+    );
+  }
+  const selected = canonical ?? legacy;
+  if (selected === undefined) {
+    throw new ServiceConfigurationError('Konclave service configuration is not installed.');
+  }
+  return selected;
+}
+
+function parseLocalServiceConfig(
+  raw: Buffer,
+  platform: NodeJS.Platform,
+): LocalServiceRuntimeConfig {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString('utf8'));
@@ -208,16 +378,17 @@ export function resolveLocalServiceConfig(
   }
 
   const issuerKeyFile = typeof parsed.issuerKeyFile === 'string' ? parsed.issuerKeyFile.trim() : '';
-  if (!issuerKeyFile || !isAbsolute(issuerKeyFile)) {
+  if (!issuerKeyFile) {
     throw new ServiceConfigurationError('Konclave issuer key file must be absolute.');
   }
+  requireAbsolutePath(issuerKeyFile, 'issuer key file', platform);
   const userPresenceHelper =
     typeof parsed.userPresenceHelper === 'string' ? parsed.userPresenceHelper.trim() : undefined;
-  if (
-    parsed.userPresenceHelper !== undefined &&
-    (!userPresenceHelper || !isAbsolute(userPresenceHelper))
-  ) {
+  if (parsed.userPresenceHelper !== undefined && !userPresenceHelper) {
     throw new ServiceConfigurationError('Konclave user-presence helper must be absolute.');
+  }
+  if (userPresenceHelper !== undefined) {
+    requireAbsolutePath(userPresenceHelper, 'user-presence helper', platform);
   }
   const authorizationPolicy = parseAuthorizationPolicy(parsed.authorizationPolicy);
 
@@ -233,6 +404,44 @@ export function resolveLocalServiceConfig(
   };
 }
 
+function legacyMatchesCanonical(
+  legacy: LocalServiceRuntimeConfig,
+  canonical: LocalServiceRuntimeConfig,
+): boolean {
+  return (
+    legacy.endpoint === canonical.endpoint &&
+    legacy.issuerKeyId.equals(canonical.issuerKeyId) &&
+    legacy.issuerKeyVersion === canonical.issuerKeyVersion &&
+    legacy.harness === canonical.harness &&
+    legacy.serviceKey.equals(canonical.serviceKey) &&
+    legacy.issuerKeyFile === canonical.issuerKeyFile &&
+    (legacy.userPresenceHelper === undefined ||
+      legacy.userPresenceHelper === canonical.userPresenceHelper) &&
+    policiesEqual(legacy.authorizationPolicy, canonical.authorizationPolicy)
+  );
+}
+
+function policiesEqual(
+  left: LocalServiceRuntimeConfig['authorizationPolicy'],
+  right: LocalServiceRuntimeConfig['authorizationPolicy'],
+): boolean {
+  const leftClauses = canonicalPolicyClauses(left);
+  const rightClauses = canonicalPolicyClauses(right);
+  return (
+    left.version === right.version &&
+    leftClauses.length === rightClauses.length &&
+    leftClauses.every((clause, index) => clause === rightClauses[index])
+  );
+}
+
+function canonicalPolicyClauses(
+  policy: LocalServiceRuntimeConfig['authorizationPolicy'],
+): string[] {
+  return policy.acceptedEvidence
+    .map((clause) => [...clause].sort().join('|'))
+    .sort();
+}
+
 /**
  * Reads the AccountTrusted issuer seed from its owner-protected file.
  *
@@ -245,7 +454,7 @@ export function readIssuerSigningSeed(
   platform: NodeJS.Platform = process.platform,
   operations: SecureFileOperations = nodeFileOperations,
 ): Buffer {
-  const contents = readBoundedFile(
+  const contents = readRequiredBoundedFile(
     signingKeyFile,
     maxKeyFileBytes,
     'issuer key',
