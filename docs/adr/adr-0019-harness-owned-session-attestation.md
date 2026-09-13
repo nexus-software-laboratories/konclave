@@ -1,6 +1,6 @@
 ---
 title: Require harness-owned challenge-bound assertions for HarnessAttested grants
-status: Proposed
+status: Accepted
 date: 2026-09-13
 authors:
   - Konclave maintainers
