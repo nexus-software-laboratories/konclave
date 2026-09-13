@@ -1,0 +1,100 @@
+name: Generic client conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: generic-client-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generic-client-conformance:
+    name: Generic client conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve generic-client validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(
+              gh api --paginate `
+                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
+                --jq '.[].filename'
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not resolve pull-request files for generic-client conformance.'
+            }
+            if ($files.Count -eq 0) {
+              throw 'Pull-request file discovery returned no files.'
+            }
+            $run = $files.Count -ge 3000 -or @(
+              $files | Where-Object {
+                $_ -match '^\.github/workflows/generic-client-conformance\.yml$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|scripts/(?:build-extension|package-contract|package-plugin|verify-package)\.mjs|skills/konclave-generic/SKILL\.md|src/generic-(?:cli|command)\.ts|src/service/(?:client|config|installed|operations|transcript)\.ts|tests/(?:generic-command|service-client)\.test\.ts)$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/tests/packaged_distribution_e2e\.rs$' -or
+                $_ -match '^docs/integrations/generic-client\.md$'
+              }
+            ).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - name: Install Node
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: generic-client-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify generic client contract
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run typecheck
+          npm exec -- eslint \
+            src/generic-cli.ts \
+            src/generic-command.ts \
+            src/service/installed.ts \
+            tests/generic-command.test.ts \
+            tests/service-client.test.ts
+          npm exec -- prettier --check \
+            src/generic-cli.ts \
+            src/generic-command.ts \
+            src/service/installed.ts \
+            tests/generic-command.test.ts \
+            tests/service-client.test.ts
+          npm exec -- vitest run \
+            tests/generic-command.test.ts \
+            tests/service-client.test.ts
+          npm run compile
+          npm run package
+          npm run verify:package
