@@ -47,6 +47,7 @@ jobs:
               $files | Where-Object {
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/workflows/generic-client-conformance\.yml$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/Cargo\.toml$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/src/(?:authorization_runtime|local_service)\.rs$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/tests/packaged_distribution_e2e\.rs$' -or
                 $_ -match '^crates/Konclave\.(?:LocalAuthorizationStore|LocalServiceTransport|SecretStorage|WindowsSecurity)/' -or
