@@ -1,26 +1,33 @@
 import type { LocalServiceClient } from './service/client.js';
 import { LocalServiceError, LocalServiceUpgradeRequiredError } from './service/client.js';
 import { ServiceConfigurationError } from './service/config.js';
-import { connectInstalledGenericService } from './service/installed.js';
+import {
+  connectInstalledGenericService,
+  GenericClientIdentityError,
+  validateGenericClientIdentity,
+  type GenericClientIdentity,
+  type GenericProfileMode,
+} from './service/installed.js';
 import { serviceOperations, toolOperations } from './service/operations.js';
 
 const requestDeadlineMs = 90_000;
 const allowedOperations = new Set<string>([...toolOperations, serviceOperations.status]);
 
-class GenericCommandUsageError extends Error {
-  readonly code: 'paved_profile_reserved';
-
-  constructor(code: 'paved_profile_reserved') {
-    super(code);
-    this.name = 'GenericCommandUsageError';
-    this.code = code;
-  }
-}
-
-export interface GenericCommandArguments {
-  readonly profile: string;
+export interface GenericCommandArguments extends GenericClientIdentity {
   readonly operation: string;
   readonly requestId?: Buffer;
+}
+
+export interface GenericCommandResult {
+  readonly integration: {
+    readonly kind: 'generic';
+    readonly label: string;
+  };
+  readonly profile: {
+    readonly alias: string;
+    readonly mode: GenericClientIdentity['profileMode'];
+  };
+  readonly result: unknown;
 }
 
 export interface GenericCommandDependencies {
@@ -33,51 +40,79 @@ export interface GenericCommandDependencies {
 
 export function parseGenericCommandArguments(values: readonly string[]): GenericCommandArguments {
   let profile: string | undefined;
+  let profileMode: GenericProfileMode | undefined;
+  let integrationLabel: string | undefined;
   let operation: string | undefined;
   let requestId: Buffer | undefined;
   for (let index = 0; index < values.length; index += 1) {
     const name = values[index];
     const value = values[index + 1];
-    if ((name === '--profile' || name === '--operation' || name === '--request-id') && value) {
+    if (
+      (name === '--profile' ||
+        name === '--profile-mode' ||
+        name === '--integration-label' ||
+        name === '--operation' ||
+        name === '--request-id') &&
+      value
+    ) {
       if (name === '--profile') {
         if (profile !== undefined) {
-          throw new Error('invalid_arguments');
+          throw new GenericClientIdentityError('invalid_arguments');
         }
         profile = value;
+      } else if (name === '--profile-mode') {
+        if (profileMode !== undefined || (value !== 'durable' && value !== 'ephemeral')) {
+          throw new GenericClientIdentityError('invalid_arguments');
+        }
+        profileMode = value;
+      } else if (name === '--integration-label') {
+        if (integrationLabel !== undefined) {
+          throw new GenericClientIdentityError('invalid_arguments');
+        }
+        integrationLabel = value;
       } else if (name === '--operation') {
         if (operation !== undefined) {
-          throw new Error('invalid_arguments');
+          throw new GenericClientIdentityError('invalid_arguments');
         }
         operation = value;
       } else if (requestId === undefined && /^[0-9a-f]{32}$/u.test(value)) {
         requestId = Buffer.from(value, 'hex');
       } else {
-        throw new Error('invalid_arguments');
+        throw new GenericClientIdentityError('invalid_arguments');
       }
       index += 1;
       continue;
     }
-    throw new Error('invalid_arguments');
+    throw new GenericClientIdentityError('invalid_arguments');
   }
-  if (!profile || !operation || !allowedOperations.has(operation)) {
-    throw new Error('invalid_arguments');
+  if (
+    !profile ||
+    !profileMode ||
+    !integrationLabel ||
+    !operation ||
+    !allowedOperations.has(operation)
+  ) {
+    throw new GenericClientIdentityError('invalid_arguments');
   }
-  if (profile.startsWith('session-')) {
-    throw new GenericCommandUsageError('paved_profile_reserved');
-  }
-  return requestId ? { profile, operation, requestId } : { profile, operation };
+  const identity = validateGenericClientIdentity({ profile, profileMode, integrationLabel });
+  const parsed = { ...identity, operation };
+  return requestId ? { ...parsed, requestId } : parsed;
 }
 
 export async function invokeGenericCommand(
   args: GenericCommandArguments,
   payload: unknown,
   dependencies: GenericCommandDependencies,
-): Promise<unknown> {
+): Promise<GenericCommandResult> {
   const connect = dependencies.connect ?? connectInstalledGenericService;
   const client: LocalServiceClient = await connect(
     dependencies.environment,
     dependencies.moduleDir,
-    args.profile,
+    {
+      profile: args.profile,
+      profileMode: args.profileMode,
+      integrationLabel: args.integrationLabel,
+    },
   );
   let operationSucceeded = false;
   try {
@@ -87,7 +122,17 @@ export async function invokeGenericCommand(
       requestId: args.requestId,
     });
     operationSucceeded = true;
-    return result;
+    return {
+      integration: {
+        kind: 'generic',
+        label: args.integrationLabel,
+      },
+      profile: {
+        alias: args.profile,
+        mode: args.profileMode,
+      },
+      result,
+    };
   } finally {
     try {
       await client.retire();
@@ -113,7 +158,7 @@ export function genericCommandFailure(error: unknown): {
   if (error instanceof LocalServiceUpgradeRequiredError) {
     return { error: error.code };
   }
-  if (error instanceof GenericCommandUsageError) {
+  if (error instanceof GenericClientIdentityError) {
     return { error: error.code };
   }
   return { error: 'generic_client_failed' };

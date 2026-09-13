@@ -9,6 +9,7 @@
 mod support;
 
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -30,11 +31,13 @@ use KonclaveA2AGateway::{
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveLocalServiceTransport::{
     AdapterKeyId, AdapterKeyVersion, LocalServiceInstallation, LocalServiceProfileCustody,
+    encode_lowercase_hex,
 };
 use KonclaveSecretStorage::{create_or_verify_owner_protected_file, open_owner_protected_file};
 use sha2::{Digest as _, Sha256};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::time::timeout;
+use zeroize::Zeroizing;
 
 use support::shared_service::{
     SessionConnectionRequest, SharedServiceProcess, complete_pairing, connect,
@@ -392,6 +395,70 @@ fn run_cli(paths: &AcceptancePaths, arguments: &[OsString], expect_success: bool
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("packaged CLI output must be UTF-8")
+}
+
+struct GenericInvocation<'a> {
+    profile: &'a str,
+    profile_mode: &'a str,
+    integration_label: &'a str,
+    operation: &'a str,
+    request_id: Option<&'a str>,
+    payload: serde_json::Value,
+}
+
+fn run_generic(
+    module: &Path,
+    invocation: GenericInvocation<'_>,
+    expect_success: bool,
+) -> serde_json::Value {
+    let mut command = Command::new("node");
+    command
+        .arg(module)
+        .args([
+            "--profile",
+            invocation.profile,
+            "--profile-mode",
+            invocation.profile_mode,
+            "--integration-label",
+            invocation.integration_label,
+            "--operation",
+            invocation.operation,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(request_id) = invocation.request_id {
+        command.args(["--request-id", request_id]);
+    }
+    let mut child = command.spawn().expect("packaged generic client must start");
+    let payload = serde_json::to_vec(&invocation.payload).unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&payload).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.success(),
+        expect_success,
+        "packaged generic client status was unexpected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(if expect_success {
+        &output.stdout
+    } else {
+        &output.stderr
+    })
+    .unwrap();
+    if !expect_success {
+        return document;
+    }
+    assert_eq!(document["integration"]["kind"], "generic");
+    assert_eq!(
+        document["integration"]["label"],
+        invocation.integration_label
+    );
+    assert_eq!(document["profile"]["alias"], invocation.profile);
+    assert_eq!(document["profile"]["mode"], invocation.profile_mode);
+    document["result"].clone()
 }
 
 fn assert_process_has_no_secret_input(process_id: u32, sentinels: &[&[u8]]) {
@@ -938,23 +1005,18 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     let issuer_identity = LocalServiceIdentity::from_signing_seed(&issuer_seed).unwrap();
 
     let service = SharedServiceProcess::start_with_inherited_stderr(&paths.service, &config_path);
-    let generic_output = Command::new("node")
-        .arg(&installed_generic)
-        .args([
-            "--profile",
-            "generic-packaged",
-            "--operation",
-            "get_identity",
-        ])
-        .output()
-        .expect("packaged generic client must start");
-    assert!(
-        generic_output.status.success(),
-        "packaged generic client failed: {}",
-        String::from_utf8_lossy(&generic_output.stderr)
+    let generic_identity = run_generic(
+        &installed_generic,
+        GenericInvocation {
+            profile: "generic-packaged",
+            profile_mode: "durable",
+            integration_label: "package-unknown-harness",
+            operation: "get_identity",
+            request_id: None,
+            payload: serde_json::json!({}),
+        },
+        true,
     );
-    let generic_identity: serde_json::Value =
-        serde_json::from_slice(&generic_output.stdout).unwrap();
     assert!(generic_identity["device_id"].as_str().is_some());
     let mut first = connect(
         installation.endpoint(),
@@ -980,6 +1042,207 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     let second_identity = identity(&mut second).await;
     assert_ne!(first_identity, second_identity);
     let (_pairing_id, conversation_id) = complete_pairing(&mut first, &mut second).await;
+
+    let generic_pairing = run_generic(
+        &installed_generic,
+        GenericInvocation {
+            profile: "generic-packaged",
+            profile_mode: "durable",
+            integration_label: "package-unknown-harness",
+            operation: "create_pairing_capability",
+            request_id: Some("71".repeat(16).as_str()),
+            payload: serde_json::json!({"requested_role": "member"}),
+        },
+        true,
+    );
+    let generic_pairing_id = generic_pairing["pairing"]["pairing_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let generic_capability =
+        Zeroizing::new(generic_pairing["capability"].as_str().unwrap().to_string());
+    drop(generic_pairing);
+    let redeemed = rpc(
+        &mut first,
+        "redeem_pairing_capability",
+        serde_json::json!({"capability": generic_capability.as_str()}),
+    )
+    .await;
+    assert_eq!(redeemed["pairing_id"], generic_pairing_id);
+    let generic_conversation = rpc(&mut first, "create_conversation", serde_json::json!({})).await;
+    let generic_conversation_id = generic_conversation["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rpc(
+        &mut first,
+        "authorize_pairing_joiner",
+        serde_json::json!({
+            "pairing_id": generic_pairing_id,
+            "conversation_id": generic_conversation_id,
+            "granted_role": "member"
+        }),
+    )
+    .await;
+    let mut generic_inviter_authorized = false;
+    let mut generic_pairing_completed = false;
+    for attempt in 0_u8..16 {
+        let sync_request_id = format!("{:02x}", 80 + attempt).repeat(16);
+        let mut generic_status = run_generic(
+            &installed_generic,
+            GenericInvocation {
+                profile: "generic-packaged",
+                profile_mode: "durable",
+                integration_label: "package-unknown-harness",
+                operation: "sync_pairing",
+                request_id: Some(&sync_request_id),
+                payload: serde_json::json!({"pairing_id": generic_pairing_id}),
+            },
+            true,
+        );
+        if !generic_inviter_authorized
+            && generic_status["pairing"]["phase"] == "joiner_awaiting_inviter_authorization"
+        {
+            let authorize_request_id = format!("{:02x}", 96 + attempt).repeat(16);
+            let pairing = &generic_status["pairing"];
+            generic_status = run_generic(
+                &installed_generic,
+                GenericInvocation {
+                    profile: "generic-packaged",
+                    profile_mode: "durable",
+                    integration_label: "package-unknown-harness",
+                    operation: "authorize_pairing_inviter",
+                    request_id: Some(&authorize_request_id),
+                    payload: serde_json::json!({
+                        "pairing_id": generic_pairing_id,
+                        "inviter_device_id": pairing["inviter_device_id"],
+                        "conversation_id": pairing["conversation_id"],
+                        "granted_role": pairing["granted_role"]
+                    }),
+                },
+                true,
+            );
+            generic_inviter_authorized = true;
+        }
+        let paved_status = rpc(
+            &mut first,
+            "sync_pairing",
+            serde_json::json!({"pairing_id": generic_pairing_id}),
+        )
+        .await;
+        if generic_status["pairing"]["phase"] == "completed"
+            && paved_status["pairing"]["phase"] == "completed"
+        {
+            generic_pairing_completed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        generic_pairing_completed,
+        "packaged Generic-to-paved pairing did not complete"
+    );
+
+    let generic_text = "packaged generic client message";
+    run_generic(
+        &installed_generic,
+        GenericInvocation {
+            profile: "generic-packaged",
+            profile_mode: "durable",
+            integration_label: "package-unknown-harness",
+            operation: "send_message",
+            request_id: Some("b1".repeat(16).as_str()),
+            payload: serde_json::json!({
+                "conversation_id": generic_conversation_id,
+                "message_id": "61".repeat(16),
+                "text": generic_text
+            }),
+        },
+        true,
+    );
+    timeout(Duration::from_secs(10), async {
+        loop {
+            rpc(
+                &mut first,
+                "sync_messages",
+                serde_json::json!({"conversation_id": generic_conversation_id}),
+            )
+            .await;
+            let history = rpc(
+                &mut first,
+                "read_messages",
+                serde_json::json!({"conversation_id": generic_conversation_id, "limit": 100}),
+            )
+            .await;
+            if history["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["text"] == generic_text)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("packaged generic client message was not delivered");
+    let generic_reply = "packaged paved-session reply";
+    rpc(
+        &mut first,
+        "send_message",
+        serde_json::json!({
+            "conversation_id": generic_conversation_id,
+            "message_id": "62".repeat(16),
+            "reply_to_message_id": "61".repeat(16),
+            "text": generic_reply
+        }),
+    )
+    .await;
+    timeout(Duration::from_secs(10), async {
+        for attempt in 0_u8..16 {
+            let sync_request_id = format!("{:02x}", 128 + attempt).repeat(16);
+            run_generic(
+                &installed_generic,
+                GenericInvocation {
+                    profile: "generic-packaged",
+                    profile_mode: "durable",
+                    integration_label: "package-unknown-harness",
+                    operation: "sync_messages",
+                    request_id: Some(&sync_request_id),
+                    payload: serde_json::json!({"conversation_id": generic_conversation_id}),
+                },
+                true,
+            );
+            let history = run_generic(
+                &installed_generic,
+                GenericInvocation {
+                    profile: "generic-packaged",
+                    profile_mode: "durable",
+                    integration_label: "package-unknown-harness",
+                    operation: "read_messages",
+                    request_id: None,
+                    payload: serde_json::json!({
+                        "conversation_id": generic_conversation_id,
+                        "limit": 100
+                    }),
+                },
+                true,
+            );
+            if history["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["text"] == generic_reply)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("generic client did not observe the paved-session reply");
+    })
+    .await
+    .expect("packaged paved-session reply was not delivered to the generic client");
 
     drop(second);
     let first_text = "packaged shared-service offline message";
@@ -1182,6 +1445,9 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     let sentinels = [
         first_text.as_bytes(),
         reply_text.as_bytes(),
+        generic_text.as_bytes(),
+        generic_reply.as_bytes(),
+        generic_capability.as_bytes(),
         policy_source.as_bytes(),
         protected_source.as_slice(),
     ];
@@ -1370,6 +1636,59 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
         &paths.relay_state,
         &[policy_request.as_bytes(), policy_reply.as_bytes()],
     );
+
+    let authorization_before = rpc(&mut first, "service.status", serde_json::json!({})).await;
+    let generation_before = authorization_before["authorizationGeneration"]
+        .as_u64()
+        .unwrap();
+    let issuer_key_id = encode_lowercase_hex(issuer.issuer_key_id().as_bytes());
+    let issuer_key_version = issuer.issuer_key_version().get().to_string();
+    let disable_output = run_cli(
+        &paths,
+        &[
+            OsString::from("authorization"),
+            OsString::from("disable-issuer"),
+            OsString::from("--profile-root"),
+            paths.profile_root.clone().into_os_string(),
+            OsString::from("--issuer-key-id"),
+            OsString::from(issuer_key_id),
+            OsString::from("--issuer-key-version"),
+            OsString::from(issuer_key_version),
+            OsString::from("--existing-grants"),
+            OsString::from("retain"),
+        ],
+        true,
+    );
+    assert!(disable_output.contains("issuer disablement: applied"));
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let status = rpc(&mut first, "service.status", serde_json::json!({})).await;
+            if status["authorizationGeneration"]
+                .as_u64()
+                .is_some_and(|generation| generation > generation_before)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shared service did not publish issuer disablement");
+    let disabled = run_generic(
+        &installed_generic,
+        GenericInvocation {
+            profile: "generic-packaged",
+            profile_mode: "durable",
+            integration_label: "package-unknown-harness",
+            operation: "get_identity",
+            request_id: None,
+            payload: serde_json::json!({}),
+        },
+        false,
+    );
+    assert_eq!(disabled["error"], "issuer_disabled");
+    assert_eq!(disabled["operation"], "authorization.grant.issue");
+
     drop((first, first_delivery, second, second_delivery));
     restarted.shutdown().await;
 

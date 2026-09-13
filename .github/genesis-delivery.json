@@ -9,6 +9,7 @@
     "A2A conformance",
     "Adapter conformance",
     "Authorization store conformance",
+    "Generic client conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
@@ -43,6 +44,7 @@
         "a2a-conformance",
         "adapter-conformance",
         "authorization-store-conformance",
+        "generic-client-conformance",
         "community-relay-container-ci",
         "container-ci",
         "delete-run-artifacts"
@@ -81,6 +83,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Authorization store conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/generic-client-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Generic client conformance"
       ]
     },
     {

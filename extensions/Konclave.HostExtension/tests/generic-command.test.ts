@@ -23,10 +23,35 @@ function client(request: LocalServiceClient['request']): LocalServiceClient {
 }
 
 describe('generic harness command', () => {
-  it('accepts one explicit profile and closed operation', () => {
-    expect(
-      parseGenericCommandArguments(['--profile', 'generic-test', '--operation', 'read_messages']),
-    ).toEqual({ profile: 'generic-test', operation: 'read_messages' });
+  it('accepts bounded labels and explicit durable or ephemeral profile modes', () => {
+    const durable = [
+      '--profile',
+      'generic-test',
+      '--profile-mode',
+      'durable',
+      '--integration-label',
+      'future-harness.v1',
+    ];
+    expect(parseGenericCommandArguments([...durable, '--operation', 'read_messages'])).toEqual({
+      profile: 'generic-test',
+      profileMode: 'durable',
+      integrationLabel: 'future-harness.v1',
+      operation: 'read_messages',
+    });
+    const ephemeral = [
+      '--profile',
+      `generic-${'01'.repeat(12)}`,
+      '--profile-mode',
+      'ephemeral',
+      '--integration-label',
+      'unknown-agent',
+    ];
+    expect(parseGenericCommandArguments([...ephemeral, '--operation', 'get_identity'])).toEqual({
+      profile: `generic-${'01'.repeat(12)}`,
+      profileMode: 'ephemeral',
+      integrationLabel: 'unknown-agent',
+      operation: 'get_identity',
+    });
     for (const operation of [
       'get_collaboration_policy_status',
       'inspect_collaboration_policy_proposal',
@@ -36,9 +61,12 @@ describe('generic harness command', () => {
       'reject_collaboration_policy',
       'revoke_collaboration_policy',
     ]) {
-      expect(
-        parseGenericCommandArguments(['--profile', 'generic-test', '--operation', operation]),
-      ).toEqual({ profile: 'generic-test', operation });
+      expect(parseGenericCommandArguments([...durable, '--operation', operation])).toEqual({
+        profile: 'generic-test',
+        profileMode: 'durable',
+        integrationLabel: 'future-harness.v1',
+        operation,
+      });
     }
     expect(
       parseGenericCommandArguments([
@@ -46,24 +74,50 @@ describe('generic harness command', () => {
         'service.status',
         '--profile',
         'generic-test',
+        '--profile-mode',
+        'durable',
+        '--integration-label',
+        'future-harness.v1',
         '--request-id',
         '01'.repeat(16),
       ]),
     ).toEqual({
       profile: 'generic-test',
+      profileMode: 'durable',
+      integrationLabel: 'future-harness.v1',
       operation: 'service.status',
       requestId: Buffer.alloc(16, 1),
     });
+  });
 
+  it('rejects ambiguous identity, evidence overclaim, and invalid metadata', () => {
+    const valid = [
+      '--profile',
+      'generic-test',
+      '--profile-mode',
+      'durable',
+      '--integration-label',
+      'future-harness.v1',
+      '--operation',
+      'get_identity',
+    ];
+    const withValue = (index: number, value: string): string[] =>
+      valid.map((entry, current) => (current === index ? value : entry));
     for (const invalid of [
       [],
       ['--profile', 'generic-test'],
-      ['--operation', 'unknown', '--profile', 'generic-test'],
-      ['--operation', 'collaboration.turn.authorize', '--profile', 'generic-test'],
-      ['--operation', 'collaboration.turn.complete', '--profile', 'generic-test'],
-      ['--operation', 'collaboration.action.evaluate', '--profile', 'generic-test'],
-      ['--profile', 'first', '--profile', 'second', '--operation', 'get_identity'],
-      ['--profile', 'generic-test', '--operation', 'get_identity', '--request-id', 'invalid'],
+      [...valid, '--profile', 'second'],
+      [...valid, '--profile-mode', 'ephemeral'],
+      [...valid, '--integration-label', 'second'],
+      [...valid, '--request-id', 'invalid'],
+      [...valid, '--harness', 'copilot'],
+      [...valid, '--subject', 'self-asserted'],
+      [...valid, '--evidence', 'harness_attested'],
+      withValue(7, 'unknown'),
+      withValue(5, ''),
+      withValue(5, 'A'),
+      withValue(5, 'a'.repeat(65)),
+      withValue(1, 'invalid/profile'),
       ['--other', 'value'],
     ]) {
       expect(() => parseGenericCommandArguments(invalid)).toThrow('invalid_arguments');
@@ -72,13 +126,29 @@ describe('generic harness command', () => {
       parseGenericCommandArguments([
         '--profile',
         'session-0123456789abcdef01234567',
+        '--profile-mode',
+        'durable',
+        '--integration-label',
+        'future-harness.v1',
         '--operation',
         'get_identity',
       ]),
     ).toThrow('paved_profile_reserved');
+    expect(() =>
+      parseGenericCommandArguments([
+        '--profile',
+        'generic-readable-name',
+        '--profile-mode',
+        'ephemeral',
+        '--integration-label',
+        'future-harness.v1',
+        '--operation',
+        'get_identity',
+      ]),
+    ).toThrow('ephemeral_profile_invalid');
   });
 
-  it('uses the generic connector, forwards cancellation, and retires cleanly', async () => {
+  it('keeps self-declared metadata outside authorization and retires cleanly', async () => {
     const request = vi.fn().mockResolvedValue({ messages: [] });
     const connected = client(request);
     const connect = vi.fn().mockResolvedValue(connected);
@@ -88,7 +158,12 @@ describe('generic harness command', () => {
 
     await expect(
       invokeGenericCommand(
-        { profile: 'generic-test', operation: 'read_messages' },
+        {
+          profile: 'generic-test',
+          profileMode: 'durable',
+          integrationLabel: 'future-harness.v1',
+          operation: 'read_messages',
+        },
         { conversation_id: 'ab', limit: 10 },
         {
           environment,
@@ -98,9 +173,23 @@ describe('generic harness command', () => {
           connect,
         },
       ),
-    ).resolves.toEqual({ messages: [] });
+    ).resolves.toEqual({
+      integration: {
+        kind: 'generic',
+        label: 'future-harness.v1',
+      },
+      profile: {
+        alias: 'generic-test',
+        mode: 'durable',
+      },
+      result: { messages: [] },
+    });
 
-    expect(connect).toHaveBeenCalledWith(environment, 'module', 'generic-test');
+    expect(connect).toHaveBeenCalledWith(environment, 'module', {
+      profile: 'generic-test',
+      profileMode: 'durable',
+      integrationLabel: 'future-harness.v1',
+    });
     expect(request).toHaveBeenCalledWith(
       'read_messages',
       { conversation_id: 'ab', limit: 10 },
@@ -117,7 +206,12 @@ describe('generic harness command', () => {
 
     await expect(
       invokeGenericCommand(
-        { profile: 'generic-test', operation: 'send_message' },
+        {
+          profile: 'generic-test',
+          profileMode: 'durable',
+          integrationLabel: 'future-harness.v1',
+          operation: 'send_message',
+        },
         {},
         {
           environment: {},
@@ -149,6 +243,10 @@ describe('generic harness command', () => {
       parseGenericCommandArguments([
         '--profile',
         'session-0123456789abcdef01234567',
+        '--profile-mode',
+        'durable',
+        '--integration-label',
+        'future-harness.v1',
         '--operation',
         'get_identity',
       ]);
@@ -157,6 +255,15 @@ describe('generic harness command', () => {
     }
     expect(genericCommandFailure(reserved)).toEqual({
       error: 'paved_profile_reserved',
+    });
+    let invalidArguments: unknown;
+    try {
+      parseGenericCommandArguments([]);
+    } catch (error) {
+      invalidArguments = error;
+    }
+    expect(genericCommandFailure(invalidArguments)).toEqual({
+      error: 'invalid_arguments',
     });
   });
 
@@ -167,7 +274,12 @@ describe('generic harness command', () => {
 
     await expect(
       invokeGenericCommand(
-        { profile: 'generic-test', operation: 'get_identity' },
+        {
+          profile: 'generic-test',
+          profileMode: 'durable',
+          integrationLabel: 'future-harness.v1',
+          operation: 'get_identity',
+        },
         {},
         {
           environment: {},
@@ -177,7 +289,17 @@ describe('generic harness command', () => {
           connect: vi.fn().mockResolvedValue(connected),
         },
       ),
-    ).resolves.toEqual({ device_id: 'aa' });
+    ).resolves.toEqual({
+      integration: {
+        kind: 'generic',
+        label: 'future-harness.v1',
+      },
+      profile: {
+        alias: 'generic-test',
+        mode: 'durable',
+      },
+      result: { device_id: 'aa' },
+    });
     expect(connected.close).toHaveBeenCalledTimes(1);
     expect(reportCleanupFailure).toHaveBeenCalledTimes(1);
   });

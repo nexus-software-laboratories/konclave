@@ -19,14 +19,22 @@ management through the installed shared service.
   Never call `collaboration.turn.authorize`, `collaboration.turn.complete`, or
   `collaboration.action.evaluate`; those operations are intentionally absent from the
   generic client's closed surface.
-- Choose one explicit canonical profile alias. Reuse a user-approved alias for durable
-  continuity; otherwise generate a clearly ephemeral `generic-<random>` alias. Never
-  derive continuity from PID, working directory, time, model name, or free-form text.
-  The `session-*` namespace is reserved for paved harnesses and is rejected.
+- Choose one lowercase integration label using only letters, digits, `.`, `_`, and
+  `-`, with at most 64 characters. The label is returned as local diagnostic metadata
+  and is never sent as authorization evidence.
+- Choose one explicit canonical profile alias and profile mode. Use
+  `--profile-mode durable` only for a user-approved alias. Otherwise generate 12 random
+  bytes, encode them as 24 lowercase hexadecimal characters, prefix them with
+  `generic-`, and use `--profile-mode ephemeral`. Never derive continuity from PID,
+  working directory, time, model name, the integration label, or free-form agent
+  text. The `session-*` namespace is reserved for paved harnesses and is rejected.
 - Resolve `generic.mjs` beside the packaged `extension.mjs`. Invoke it with
-  `node <absolute-generic.mjs> --profile <alias> --operation <operation>`.
-- Pass one JSON object through stdin. Read the single JSON result from stdout. Errors
-  are finite JSON on stderr and never include credentials, paths, or payloads.
+  `node <absolute-generic.mjs> --profile <alias> --profile-mode <durable-or-ephemeral> --integration-label <label> --operation <operation>`.
+- Pass one JSON object through stdin. Read the single JSON envelope from stdout.
+  Errors are finite JSON on stderr and never include credentials, paths, or payloads.
+- Successful output wraps the service response in `result` and repeats only the local
+  diagnostic `integration` and `profile` metadata. Read operation fields from
+  `.result`; never reinterpret the label or profile mode as service authorization.
 - Generate one random 16-byte lowercase hexadecimal `--request-id` for a
   side-effecting call. Preserve and reuse it with the exact operation and JSON payload
   after transport failure; a new identifier means a new operation.
@@ -34,6 +42,12 @@ management through the installed shared service.
   `sync_messages`, then `read_messages` or `watch_messages` with the explicit
   conversation identifier. Do not busy-poll; let the operation's bounded wait finish
   before issuing another call.
+- Pair through the ordinary operations:
+  `create_pairing_capability`, `redeem_pairing_capability`, `create_conversation`,
+  `authorize_pairing_joiner`, `authorize_pairing_inviter`, and `sync_pairing`.
+  Transfer only the capability to the intended peer, preserve the returned pairing
+  and conversation identifiers, and stop after a finite deadline with the last
+  observed phase.
 - Use `send_directed_request` only for an explicit request to one exact device. Omit
   `target_device_id` only for a two-member conversation; groups require it. A target
   whose root-signed binding does not advertise support is rejected, and ordinary

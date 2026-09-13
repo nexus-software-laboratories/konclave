@@ -102,6 +102,8 @@ check(
 check(
   typeof clientApi.connectInstalledService === 'function' &&
     typeof clientApi.connectInstalledGenericService === 'function' &&
+    typeof clientApi.validateGenericClientIdentity === 'function' &&
+    typeof clientApi.GenericClientIdentityError === 'function' &&
     compiledClient.includes('request.cancel') &&
     typeof clientApi.createKonclaveTools === 'function' &&
     typeof clientApi.createCopilotPolicyGate === 'function' &&
@@ -120,8 +122,11 @@ check(
 check(
   compiledGeneric.includes('connectInstalledGenericService') &&
     compiledGeneric.includes('request.cancel') &&
-    compiledGeneric.includes('account_trusted'),
-  'Compiled generic client is missing the generic grant or cancellation path.',
+    compiledGeneric.includes('account_trusted') &&
+    compiledGeneric.includes('integration-label') &&
+    compiledGeneric.includes('profile-mode') &&
+    compiledGeneric.includes('ephemeral_profile_invalid'),
+  'Compiled generic client is missing the identity, grant, or cancellation contract.',
 );
 check(
   !compiledGeneric.includes('KonclaveLocalDaemon') && !compiledGeneric.includes('type: "stdio"'),

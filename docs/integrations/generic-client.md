@@ -14,6 +14,8 @@ The generic client:
 
 - generates a memory-only session key;
 - uses the installed account issuer only to request one finite exact-profile grant;
+- sends `Generic` as its authorization metadata regardless of its self-declared
+  integration label;
 - pins and authenticates the installed service;
 - supports authenticated deadline and caller cancellation;
 - seals terminal request outcomes in the profile journal; and
@@ -34,14 +36,29 @@ explicit operation when the resolved target's root-signed credential advertises
 support; an omitted target resolves only in a two-member conversation. It does not
 give the generic harness an automatic response lifecycle.
 
+The caller supplies a bounded lowercase integration label using letters, digits,
+`.`, `_`, and `-`. The generic executable returns that label as local diagnostic
+metadata but never sends it to the service, stores it as evidence, or uses it to select
+a profile. Unknown labels are accepted because they are self-declared, not an
+allowlist.
+
+The packaged reference executable proves only `AccountTrusted`. Future
+provider-specific Generic adapters may present independently verified
+`UserPresence` or `WorkloadIdentity` evidence through the same grant architecture,
+but no Generic caller may self-assert those claims or `HarnessAttested`.
+
 ## Profile selection
 
-Pass one canonical lowercase profile alias. A user-approved alias can provide durable
-continuity across invocations. If no stable subject exists, use a random
-`generic-<suffix>` alias and treat it as explicitly ephemeral. Never derive continuity
-from a process identifier, working directory, timestamp, model name, or agent text.
-Aliases beginning with `session-` are reserved for paved harnesses and rejected by the
-Generic client.
+Pass one canonical lowercase profile alias and an explicit profile mode. A
+user-approved alias can use `--profile-mode durable` to provide continuity across
+invocations. If no stable subject exists, generate 12 random bytes, encode them as 24
+lowercase hexadecimal characters, prefix them with `generic-`, and use
+`--profile-mode ephemeral`. Never derive continuity from a process identifier, working
+directory, timestamp, model name, integration label, or agent text. Aliases beginning
+with `session-` are reserved for paved harnesses and rejected by the Generic client.
+Programmatic callers pass the same `{ profile, profileMode, integrationLabel }`
+identity to `connectInstalledGenericService`; the SDK validates it before reading
+installation configuration or opening a service connection.
 
 ## Invocation
 
@@ -61,7 +78,8 @@ It accepts one closed operation name and one JSON value over stdin:
 
 ```shell
 printf '%s' '{"conversation_id":"<conversation>","limit":100}' |
-  node <absolute-generic.mjs> --profile <profile-alias> --operation read_messages
+  node <absolute-generic.mjs> --profile <profile-alias> --profile-mode durable \
+    --integration-label <harness-label> --operation read_messages
 ```
 
 For a side-effecting call, generate one random 16-byte lowercase hexadecimal request
@@ -72,13 +90,23 @@ outcome rather than creating a new operation.
 PowerShell:
 
 ```powershell
-'{"conversation_id":"<conversation>","limit":100}' | node <absolute-generic.mjs> --profile <profile-alias> --operation read_messages --request-id <32-hex-characters>
+'{"conversation_id":"<conversation>","limit":100}' | node <absolute-generic.mjs> --profile <profile-alias> --profile-mode durable --integration-label <harness-label> --operation read_messages --request-id <32-hex-characters>
 ```
 
-Success is one JSON value on stdout. Failure is one finite JSON object on stderr.
+Success is one JSON object on stdout:
+
+```json
+{
+  "integration": { "kind": "generic", "label": "<harness-label>" },
+  "profile": { "alias": "<profile-alias>", "mode": "durable" },
+  "result": {}
+}
+```
+
+Read the service response from `result`. Failure is one finite JSON object on stderr.
 Credentials, paths, request payloads, and peer plaintext are never copied into an
 error. If the operation succeeded but clean grant retirement failed, the successful
-result is preserved and stderr receives the finite
+envelope is preserved and stderr receives the finite
 `{"warning":"grant_retirement_failed"}` diagnostic; expiry remains the cleanup
 backstop. The one-shot process is suitable for skill-driven best-effort integrations;
 paved clients remain preferable when a harness exposes reliable resume, fork,
@@ -87,6 +115,24 @@ subagent, shutdown, and delivery lifecycle events.
 For ongoing conversations, invoke `sync_messages`, then `read_messages` or
 `watch_messages` with an explicit conversation identifier. Let each bounded wait
 complete instead of busy-polling.
+
+## Reference pairing flow
+
+The Generic client uses the same durable pairing state machine as paved clients:
+
+1. One side calls `create_pairing_capability` and transfers only the returned
+   capability to the intended peer.
+2. The peer calls `redeem_pairing_capability`, `create_conversation`, and
+   `authorize_pairing_joiner`.
+3. Each side calls `sync_pairing`; when requested, the joiner calls
+   `authorize_pairing_inviter` with the exact authenticated values returned by the
+   service.
+4. Stop when both sides report `completed`, then use `send_message`,
+   `sync_messages`, and `read_messages` with the returned conversation identifier.
+
+Every side-effecting retry reuses its exact request identifier and byte-identical
+payload. Each polling loop has a finite deadline and reports its last observed phase
+instead of continuing in a detached background task.
 
 ## Collaboration policies
 
