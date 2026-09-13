@@ -16,6 +16,7 @@ use KonclaveSecretStorage::{
     SecretStorageError, ensure_owner_protected_directory, open_or_create_owner_protected_file,
     open_owner_protected_file,
 };
+use KonclaveUserPresence::{MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES, UserPresenceCredentialDigest};
 use rusqlite::config::DbConfig;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -29,11 +30,12 @@ use crate::{
     ExistingGrantDisposition, GrantIssuanceKey, GrantIssuanceResult,
     INSTALLATION_FINGERPRINT_LENGTH, InstallationFingerprint, IssuerAvailability,
     LOCAL_AUTHORIZATION_STORE_FILE, LocalAuthorizationStoreError, MAX_AUTHORIZATION_AUDIT_RECORDS,
-    MAX_GRANT_IDENTIFIERS, MAX_SUSPENDED_PROFILES, MAX_TERMINAL_GRANT_RECORDS, MutationEffect,
+    MAX_GRANT_IDENTIFIERS, MAX_SUSPENDED_PROFILES, MAX_TERMINAL_GRANT_RECORDS,
+    MAX_USER_PRESENCE_CREDENTIAL_IDENTIFIERS, MutationEffect, UserPresenceCredentialRecord,
 };
 
-const SCHEMA_VERSION: u32 = 1;
-const HARD_MAX_SCHEMA_OBJECT_COUNT: i64 = 24;
+const SCHEMA_VERSION: u32 = 2;
+const HARD_MAX_SCHEMA_OBJECT_COUNT: i64 = 32;
 const MAX_SCHEMA_IDENTIFIER_BYTES: i64 = 128;
 const MAX_SCHEMA_SQL_BYTES: i64 = 8_192;
 const _: () = assert!(INSTALLATION_FINGERPRINT_LENGTH == 32);
@@ -220,12 +222,40 @@ const CREATE_SCHEMA_SQL: &str = "
             issuance_request_id
         )
     );
+    CREATE TABLE authorization_user_presence_credential_identifier (
+        credential_digest BLOB PRIMARY KEY CHECK (
+            typeof(credential_digest) = 'blob' AND length(credential_digest) = 32
+        )
+    );
+    CREATE TABLE authorization_user_presence_credential (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        provider_id TEXT NOT NULL CHECK (
+            typeof(provider_id) = 'text'
+            AND length(CAST(provider_id AS BLOB)) >= 1
+            AND length(CAST(provider_id AS BLOB)) <= 64
+        ),
+        credential_id BLOB NOT NULL CHECK (
+            typeof(credential_id) = 'blob'
+            AND length(credential_id) >= 1
+            AND length(credential_id) <= 1024
+        ),
+        credential_digest BLOB NOT NULL UNIQUE CHECK (
+            typeof(credential_digest) = 'blob' AND length(credential_digest) = 32
+        ),
+        credential_document BLOB NOT NULL CHECK (
+            typeof(credential_document) = 'blob'
+            AND length(credential_document) >= 1
+            AND length(credential_document) <= 65536
+        ),
+        FOREIGN KEY (credential_digest)
+            REFERENCES authorization_user_presence_credential_identifier(credential_digest)
+    );
     CREATE TABLE authorization_audit (
         generation INTEGER PRIMARY KEY CHECK (
             typeof(generation) = 'integer' AND generation >= 1
         ),
         event_kind INTEGER NOT NULL CHECK (
-            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 11
+            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 14
         ),
         occurred_at_unix_milliseconds INTEGER NOT NULL CHECK (
             typeof(occurred_at_unix_milliseconds) = 'integer'
@@ -428,6 +458,7 @@ impl LocalAuthorizationStore {
             issuers: load_issuers(&transaction)?,
             suspended_profiles: load_suspended_profiles(&transaction)?,
             active_grants: load_active_grants(&transaction, now_unix_milliseconds)?,
+            user_presence_credential: load_user_presence_credential(&transaction)?,
         };
         validate_store(&transaction, self.installation_fingerprint)?;
         transaction.commit().map_err(map_write_error)?;
@@ -936,6 +967,118 @@ impl LocalAuthorizationStore {
         )
     }
 
+    /// Enrolls the first active user-presence credential.
+    ///
+    /// Repeating the exact active credential is unchanged. A different active
+    /// credential or reuse of a reserved credential identifier conflicts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite conflict, capacity, validation, or storage failure.
+    pub fn register_user_presence_credential(
+        &self,
+        credential: &UserPresenceCredentialRecord,
+        now_unix_milliseconds: u64,
+    ) -> Result<AuthorizationMutation, LocalAuthorizationStoreError> {
+        self.mutate(
+            now_unix_milliseconds,
+            AuthorizationAuditKind::UserPresenceCredentialRegistered,
+            |transaction, _generation| {
+                if let Some(existing) = load_user_presence_credential(transaction)? {
+                    return if existing == *credential {
+                        Ok(false)
+                    } else {
+                        Err(LocalAuthorizationStoreError::Conflict)
+                    };
+                }
+                reserve_user_presence_credential_identifier(
+                    transaction,
+                    credential.credential_digest(),
+                )?;
+                insert_user_presence_credential(transaction, credential)?;
+                Ok(true)
+            },
+        )
+    }
+
+    /// Replaces the active user-presence credential after external verification.
+    ///
+    /// The expected digest binds this mutation to the credential that authorized the
+    /// replacement. Identifier reservations remain for the installation lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite not-found, conflict, capacity, validation, or storage failure.
+    pub fn replace_user_presence_credential(
+        &self,
+        expected: UserPresenceCredentialDigest,
+        replacement: &UserPresenceCredentialRecord,
+        now_unix_milliseconds: u64,
+    ) -> Result<AuthorizationMutation, LocalAuthorizationStoreError> {
+        self.mutate(
+            now_unix_milliseconds,
+            AuthorizationAuditKind::UserPresenceCredentialReplaced,
+            |transaction, _generation| {
+                let existing = load_user_presence_credential(transaction)?
+                    .ok_or(LocalAuthorizationStoreError::NotFound)?;
+                if existing.credential_digest() != expected {
+                    return Err(LocalAuthorizationStoreError::Conflict);
+                }
+                if existing == *replacement {
+                    return Ok(false);
+                }
+                reserve_user_presence_credential_identifier(
+                    transaction,
+                    replacement.credential_digest(),
+                )?;
+                update_user_presence_credential(transaction, replacement)?;
+                Ok(true)
+            },
+        )
+    }
+
+    /// Removes the active user-presence credential after external authorization.
+    ///
+    /// The identifier reservation remains so a removed credential can never be
+    /// silently re-enrolled. Repeating removal for a reserved digest is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite not-found, conflict, validation, or storage failure.
+    pub fn remove_user_presence_credential(
+        &self,
+        expected: UserPresenceCredentialDigest,
+        now_unix_milliseconds: u64,
+    ) -> Result<AuthorizationMutation, LocalAuthorizationStoreError> {
+        self.mutate(
+            now_unix_milliseconds,
+            AuthorizationAuditKind::UserPresenceCredentialRemoved,
+            |transaction, _generation| {
+                let Some(existing) = load_user_presence_credential(transaction)? else {
+                    return if user_presence_credential_identifier_exists(transaction, expected)? {
+                        Ok(false)
+                    } else {
+                        Err(LocalAuthorizationStoreError::NotFound)
+                    };
+                };
+                if existing.credential_digest() != expected {
+                    return Err(LocalAuthorizationStoreError::Conflict);
+                }
+                let removed = transaction
+                    .execute(
+                        "DELETE FROM authorization_user_presence_credential
+                         WHERE singleton_id = 1",
+                        [],
+                    )
+                    .map_err(map_write_error)?;
+                if removed != 1 {
+                    return Err(LocalAuthorizationStoreError::InvalidStorage);
+                }
+                Ok(true)
+            },
+        )
+    }
+
     /// Loads bounded diagnostic counts after expiring stale grants.
     ///
     /// Issuer capacity is counted across all retained versions of `issuer_key_id`.
@@ -1390,7 +1533,7 @@ fn schema_objects(
             "SELECT type, name, tbl_name, sql
              FROM sqlite_schema
              ORDER BY type, name
-             LIMIT 25",
+             LIMIT 33",
         )
         .map_err(map_read_error)?;
     statement
@@ -1458,6 +1601,7 @@ fn validate_store(
     let issuers = load_issuers(connection)?;
     let suspended = load_suspended_profiles(connection)?;
     let grants = load_all_grants(connection)?;
+    let user_presence_credential = load_user_presence_credential(connection)?;
     let audit = load_audit_events_inner(connection, MAX_AUTHORIZATION_AUDIT_RECORDS)?;
 
     let active_grants = grants
@@ -1474,6 +1618,15 @@ fn validate_store(
             > MAX_TERMINAL_GRANT_RECORDS
         || audit.is_empty()
         || audit.len() > MAX_AUTHORIZATION_AUDIT_RECORDS
+        || count_rows(
+            connection,
+            "authorization_user_presence_credential_identifier",
+        )? > MAX_USER_PRESENCE_CREDENTIAL_IDENTIFIERS
+    {
+        return Err(LocalAuthorizationStoreError::InvalidStorage);
+    }
+    if let Some(credential) = user_presence_credential
+        && !user_presence_credential_identifier_exists(connection, credential.credential_digest())?
     {
         return Err(LocalAuthorizationStoreError::InvalidStorage);
     }
@@ -1643,6 +1796,34 @@ fn validate_row_bounds(connection: &Connection) -> Result<(), LocalAuthorization
         .checked_sub(active_count)
         .ok_or(LocalAuthorizationStoreError::InvalidStorage)?;
     let audit_count = count_rows(connection, "authorization_audit")?;
+    let user_presence_identifier_metrics: (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(length(credential_digest)), 0)
+             FROM authorization_user_presence_credential_identifier",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(map_read_error)?;
+    let user_presence_metrics: (i64, i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(MAX(length(CAST(provider_id AS BLOB))), 0),
+                    COALESCE(MAX(length(credential_id)), 0),
+                    COALESCE(MAX(length(credential_digest)), 0),
+                    COALESCE(MAX(length(credential_document)), 0)
+             FROM authorization_user_presence_credential",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(map_read_error)?;
     let unreserved_issuers: i64 = connection
         .query_row(
             "SELECT COUNT(*)
@@ -1696,6 +1877,19 @@ fn validate_row_bounds(connection: &Connection) -> Result<(), LocalAuthorization
         || terminal_count > i64::try_from(MAX_TERMINAL_GRANT_RECORDS).unwrap_or(i64::MAX)
         || audit_count == 0
         || audit_count > MAX_AUTHORIZATION_AUDIT_RECORDS
+        || user_presence_identifier_metrics.0
+            > i64::try_from(MAX_USER_PRESENCE_CREDENTIAL_IDENTIFIERS).unwrap_or(i64::MAX)
+        || (user_presence_identifier_metrics.0 > 0 && user_presence_identifier_metrics.1 != 32)
+        || user_presence_metrics.0 > 1
+        || (user_presence_metrics.0 > 0
+            && (user_presence_metrics.1 < 1
+                || user_presence_metrics.1 > 64
+                || user_presence_metrics.2 < 1
+                || user_presence_metrics.2 > 1024
+                || user_presence_metrics.3 != 32
+                || user_presence_metrics.4 < 1
+                || user_presence_metrics.4
+                    > i64::try_from(MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES).unwrap_or(i64::MAX)))
         || unreserved_issuers != 0
         || unreserved_grants != 0
     {
@@ -2042,6 +2236,136 @@ fn is_profile_suspended(
             |row| row.get(0),
         )
         .map_err(map_read_error)
+}
+
+type UserPresenceCredentialRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
+
+fn load_user_presence_credential(
+    connection: &Connection,
+) -> Result<Option<UserPresenceCredentialRecord>, LocalAuthorizationStoreError> {
+    let row: Option<UserPresenceCredentialRow> = connection
+        .query_row(
+            "SELECT provider_id,
+                    credential_id,
+                    credential_digest,
+                    credential_document
+             FROM authorization_user_presence_credential
+             WHERE singleton_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(map_read_error)?;
+    let Some((provider_id, credential_id, credential_digest, document)) = row else {
+        return Ok(None);
+    };
+    let record = UserPresenceCredentialRecord::from_document(document)
+        .map_err(|_| LocalAuthorizationStoreError::InvalidStorage)?;
+    if provider_id != record.provider_id().as_str()
+        || credential_id.as_slice() != record.credential_id().as_bytes()
+        || credential_digest.as_slice() != record.credential_digest().as_bytes()
+    {
+        return Err(LocalAuthorizationStoreError::InvalidStorage);
+    }
+    Ok(Some(record))
+}
+
+fn user_presence_credential_identifier_exists(
+    connection: &Connection,
+    digest: UserPresenceCredentialDigest,
+) -> Result<bool, LocalAuthorizationStoreError> {
+    connection
+        .query_row(
+            "SELECT 1
+             FROM authorization_user_presence_credential_identifier
+             WHERE credential_digest = ?1",
+            params![digest.as_bytes().as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(map_read_error)
+}
+
+fn reserve_user_presence_credential_identifier(
+    transaction: &Transaction<'_>,
+    digest: UserPresenceCredentialDigest,
+) -> Result<(), LocalAuthorizationStoreError> {
+    if user_presence_credential_identifier_exists(transaction, digest)? {
+        return Err(LocalAuthorizationStoreError::Conflict);
+    }
+    if count_rows(
+        transaction,
+        "authorization_user_presence_credential_identifier",
+    )? >= MAX_USER_PRESENCE_CREDENTIAL_IDENTIFIERS
+    {
+        return Err(LocalAuthorizationStoreError::Capacity);
+    }
+    let inserted = transaction
+        .execute(
+            "INSERT INTO authorization_user_presence_credential_identifier (
+                credential_digest
+             ) VALUES (?1)",
+            params![digest.as_bytes().as_slice()],
+        )
+        .map_err(map_write_error)?;
+    if inserted != 1 {
+        return Err(LocalAuthorizationStoreError::InvalidStorage);
+    }
+    Ok(())
+}
+
+fn insert_user_presence_credential(
+    transaction: &Transaction<'_>,
+    credential: &UserPresenceCredentialRecord,
+) -> Result<(), LocalAuthorizationStoreError> {
+    let inserted = transaction
+        .execute(
+            "INSERT INTO authorization_user_presence_credential (
+                singleton_id,
+                provider_id,
+                credential_id,
+                credential_digest,
+                credential_document
+             ) VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                credential.provider_id().as_str(),
+                credential.credential_id().as_bytes(),
+                credential.credential_digest().as_bytes().as_slice(),
+                credential.document()
+            ],
+        )
+        .map_err(map_write_error)?;
+    if inserted != 1 {
+        return Err(LocalAuthorizationStoreError::InvalidStorage);
+    }
+    Ok(())
+}
+
+fn update_user_presence_credential(
+    transaction: &Transaction<'_>,
+    credential: &UserPresenceCredentialRecord,
+) -> Result<(), LocalAuthorizationStoreError> {
+    let updated = transaction
+        .execute(
+            "UPDATE authorization_user_presence_credential
+             SET provider_id = ?1,
+                 credential_id = ?2,
+                 credential_digest = ?3,
+                 credential_document = ?4
+             WHERE singleton_id = 1",
+            params![
+                credential.provider_id().as_str(),
+                credential.credential_id().as_bytes(),
+                credential.credential_digest().as_bytes().as_slice(),
+                credential.document()
+            ],
+        )
+        .map_err(map_write_error)?;
+    if updated != 1 {
+        return Err(LocalAuthorizationStoreError::InvalidStorage);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2745,6 +3069,12 @@ fn load_status_inner(
         .map_err(map_read_error)?;
     let grant_identifiers = count_rows(connection, "authorization_grant_identifier")?;
     let audit_records = count_rows(connection, "authorization_audit")?;
+    let user_presence_credentials =
+        count_rows(connection, "authorization_user_presence_credential")?;
+    let user_presence_credential_identifiers = count_rows(
+        connection,
+        "authorization_user_presence_credential_identifier",
+    )?;
     let active_for_issuer: i64 = connection
         .query_row(
             "SELECT COUNT(*)
@@ -2778,6 +3108,8 @@ fn load_status_inner(
         terminal_grants: usize_from_sql(terminal_grants)?,
         grant_identifiers,
         audit_records,
+        user_presence_credentials,
+        user_presence_credential_identifiers,
         capacity: AuthorizationCapacity {
             active_global: usize_from_sql(active_grants)?,
             maximum_global: MAX_SESSION_GRANTS,
@@ -2838,6 +3170,12 @@ fn count_rows(
         "authorization_issuer" => "SELECT COUNT(*) FROM authorization_issuer",
         "authorization_suspended_profile" => "SELECT COUNT(*) FROM authorization_suspended_profile",
         "authorization_grant_identifier" => "SELECT COUNT(*) FROM authorization_grant_identifier",
+        "authorization_user_presence_credential_identifier" => {
+            "SELECT COUNT(*) FROM authorization_user_presence_credential_identifier"
+        }
+        "authorization_user_presence_credential" => {
+            "SELECT COUNT(*) FROM authorization_user_presence_credential"
+        }
         "authorization_audit" => "SELECT COUNT(*) FROM authorization_audit",
         _ => return Err(LocalAuthorizationStoreError::InvalidInput),
     };
@@ -2917,6 +3255,9 @@ const fn audit_kind_code(kind: AuthorizationAuditKind) -> i64 {
         AuthorizationAuditKind::IssuerRegistered => 9,
         AuthorizationAuditKind::IssuerRemoved => 10,
         AuthorizationAuditKind::GrantsExpired => 11,
+        AuthorizationAuditKind::UserPresenceCredentialRegistered => 12,
+        AuthorizationAuditKind::UserPresenceCredentialReplaced => 13,
+        AuthorizationAuditKind::UserPresenceCredentialRemoved => 14,
     }
 }
 
@@ -2935,6 +3276,9 @@ fn audit_kind_from_code(
         9 => Ok(AuthorizationAuditKind::IssuerRegistered),
         10 => Ok(AuthorizationAuditKind::IssuerRemoved),
         11 => Ok(AuthorizationAuditKind::GrantsExpired),
+        12 => Ok(AuthorizationAuditKind::UserPresenceCredentialRegistered),
+        13 => Ok(AuthorizationAuditKind::UserPresenceCredentialReplaced),
+        14 => Ok(AuthorizationAuditKind::UserPresenceCredentialRemoved),
         _ => Err(LocalAuthorizationStoreError::InvalidStorage),
     }
 }

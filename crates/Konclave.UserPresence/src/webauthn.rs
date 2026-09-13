@@ -19,7 +19,8 @@ const LOCAL_USER_NAME: &str = "konclave-local-user";
 const LOCAL_USER_DISPLAY_NAME: &str = "Konclave local user";
 const USER_ID_DOMAIN: &[u8] = b"konclave.user-presence.webauthn-user.v1\0";
 const CREDENTIAL_DOCUMENT_VERSION: u16 = 1;
-const MAX_WEBAUTHN_DOCUMENT_BYTES: usize = 64 * 1024;
+/// Largest accepted native WebAuthn request, response, or credential document.
+pub const MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES: usize = 64 * 1024;
 
 /// Stable failures from the native WebAuthn provider boundary.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -171,7 +172,7 @@ impl UserPresenceWebAuthnVerifier {
         credential: &mut NativeWebAuthnCredential,
         verified_at_unix_milliseconds: u64,
     ) -> Result<VerifiedUserPresenceAssertion, UserPresenceWebAuthnError> {
-        if response.is_empty() || response.len() > MAX_WEBAUTHN_DOCUMENT_BYTES {
+        if response.is_empty() || response.len() > MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES {
             return Err(UserPresenceWebAuthnError::InvalidAssertion);
         }
         let assertion_digest =
@@ -275,6 +276,7 @@ pub struct NativeWebAuthnAuthentication {
 #[derive(Clone)]
 pub struct NativeWebAuthnCredential {
     passkey: PasskeyCredential,
+    provider_id: UserPresenceProviderId,
     credential_id: UserPresenceCredentialId,
     user_handle: [u8; 16],
 }
@@ -288,6 +290,7 @@ impl NativeWebAuthnCredential {
             .map_err(|_| UserPresenceWebAuthnError::InvalidCredential)?;
         Ok(Self {
             passkey,
+            provider_id: provider_id()?,
             credential_id,
             user_handle,
         })
@@ -297,6 +300,12 @@ impl NativeWebAuthnCredential {
     #[must_use]
     pub const fn credential_id(&self) -> &UserPresenceCredentialId {
         &self.credential_id
+    }
+
+    /// Returns the installed provider identifier represented by this document.
+    #[must_use]
+    pub const fn provider_id(&self) -> &UserPresenceProviderId {
+        &self.provider_id
     }
 
     /// Encodes bounded credential state for owner-protected durable storage.
@@ -426,7 +435,7 @@ fn provider_id() -> Result<UserPresenceProviderId, UserPresenceWebAuthnError> {
 
 fn encode_bounded<T: Serialize>(value: &T) -> Result<Vec<u8>, UserPresenceWebAuthnError> {
     let bytes = serde_json::to_vec(value).map_err(|_| UserPresenceWebAuthnError::Encoding)?;
-    if bytes.is_empty() || bytes.len() > MAX_WEBAUTHN_DOCUMENT_BYTES {
+    if bytes.is_empty() || bytes.len() > MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES {
         return Err(UserPresenceWebAuthnError::Encoding);
     }
     Ok(bytes)
@@ -436,7 +445,7 @@ fn decode_bounded<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
     error: UserPresenceWebAuthnError,
 ) -> Result<T, UserPresenceWebAuthnError> {
-    if bytes.is_empty() || bytes.len() > MAX_WEBAUTHN_DOCUMENT_BYTES {
+    if bytes.is_empty() || bytes.len() > MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES {
         return Err(error);
     }
     serde_json::from_slice(bytes).map_err(|_| error)
@@ -550,7 +559,8 @@ mod tests {
             Some(UserPresenceWebAuthnError::InvalidRegistration)
         );
         assert_eq!(
-            NativeWebAuthnCredential::from_bytes(&vec![0; MAX_WEBAUTHN_DOCUMENT_BYTES + 1]).err(),
+            NativeWebAuthnCredential::from_bytes(&vec![0; MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES + 1])
+                .err(),
             Some(UserPresenceWebAuthnError::InvalidCredential)
         );
         #[cfg(not(windows))]

@@ -9,9 +9,11 @@ rust-version = "1.88"
 KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 KonclaveLocalServiceTransport = { path = "../Konclave.LocalServiceTransport" }
 KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features = false }
+KonclaveUserPresence = { path = "../Konclave.UserPresence" }
 rusqlite.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3.27.0"

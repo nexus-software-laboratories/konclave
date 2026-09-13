@@ -21,9 +21,9 @@ use thiserror::Error;
 mod webauthn;
 
 pub use webauthn::{
-    NativeWebAuthnAuthentication, NativeWebAuthnCredential, NativeWebAuthnEnrollment,
-    NativeWebAuthnRequest, UserPresenceWebAuthnError, UserPresenceWebAuthnVerifier,
-    perform_native_authentication, perform_native_registration,
+    MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES, NativeWebAuthnAuthentication, NativeWebAuthnCredential,
+    NativeWebAuthnEnrollment, NativeWebAuthnRequest, UserPresenceWebAuthnError,
+    UserPresenceWebAuthnVerifier, perform_native_authentication, perform_native_registration,
 };
 
 const BINDING_DOMAIN: &[u8] = b"konclave.user-presence.binding.v1\0";

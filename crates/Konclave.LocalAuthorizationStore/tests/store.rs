@@ -7,7 +7,7 @@ use KonclaveLocalAuthorizationStore::{
     AuthorizationAuditKind, ExistingGrantDisposition, GrantIssuanceKey, InstallationFingerprint,
     IssuerAvailability, LOCAL_AUTHORIZATION_STORE_FILE, LocalAuthorizationStore,
     LocalAuthorizationStoreError, MAX_AUTHORIZATION_AUDIT_RECORDS, MAX_TERMINAL_GRANT_RECORDS,
-    MutationEffect, authorization_store_path,
+    MutationEffect, UserPresenceCredentialRecord, authorization_store_path,
 };
 use KonclaveLocalServiceTransport::{
     AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
@@ -177,6 +177,28 @@ fn grant_with_evidence(
     .unwrap()
 }
 
+fn presence_credential(seed: u8) -> UserPresenceCredentialRecord {
+    let mut public_key_cose = vec![0xa4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21, 0x58, 0x20];
+    public_key_cose.extend_from_slice(&[seed; 32]);
+    let user_handle = vec![seed; 16];
+    let credential_id = vec![seed; 32];
+    let aaguid = vec![0; 16];
+    let document = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "provider": "windows-native-webauthn-v1",
+        "userHandle": user_handle,
+        "passkey": {
+            "id": credential_id,
+            "public_key_cose": public_key_cose,
+            "counter": 0,
+            "transports": ["internal"],
+            "aaguid": aaguid,
+        }
+    }))
+    .unwrap();
+    UserPresenceCredentialRecord::from_document(document).unwrap()
+}
+
 #[test]
 fn bootstrap_is_idempotent_and_reopen_preserves_administrative_state() {
     let fixture = Fixture::new();
@@ -203,6 +225,131 @@ fn bootstrap_is_idempotent_and_reopen_preserves_administrative_state() {
     assert_eq!(snapshot.generation().get(), 3);
     assert_eq!(snapshot.policy(), &stronger);
     assert_eq!(snapshot.suspended_profiles(), &[profile("alice")]);
+}
+
+#[test]
+fn user_presence_credentials_are_exact_reserved_and_audited() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let first = presence_credential(1);
+    let second = presence_credential(2);
+
+    assert!(
+        store
+            .load_snapshot(NOW, None)
+            .unwrap()
+            .user_presence_credential()
+            .is_none()
+    );
+    let registered = store
+        .register_user_presence_credential(&first, NOW + 1)
+        .unwrap();
+    assert_eq!(registered.effect(), MutationEffect::Applied);
+    assert_eq!(registered.generation().get(), 2);
+    assert_eq!(
+        store
+            .register_user_presence_credential(&first, NOW + 2)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+    assert_eq!(
+        store
+            .register_user_presence_credential(&second, NOW + 2)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    assert_eq!(
+        store
+            .replace_user_presence_credential(second.credential_digest(), &second, NOW + 2,)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+
+    let replaced = store
+        .replace_user_presence_credential(first.credential_digest(), &second, NOW + 2)
+        .unwrap();
+    assert_eq!(replaced.generation().get(), 3);
+    assert_eq!(
+        store
+            .load_snapshot(NOW + 2, None)
+            .unwrap()
+            .user_presence_credential(),
+        Some(&second)
+    );
+    assert_eq!(
+        store
+            .remove_user_presence_credential(first.credential_digest(), NOW + 3)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    let removed = store
+        .remove_user_presence_credential(second.credential_digest(), NOW + 3)
+        .unwrap();
+    assert_eq!(removed.generation().get(), 4);
+    assert_eq!(
+        store
+            .remove_user_presence_credential(second.credential_digest(), NOW + 4)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+    assert_eq!(
+        store
+            .register_user_presence_credential(&first, NOW + 4)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+
+    let audit = store.load_audit_events(8, None).unwrap();
+    assert_eq!(
+        audit.iter().map(|event| event.kind()).collect::<Vec<_>>(),
+        vec![
+            AuthorizationAuditKind::UserPresenceCredentialRemoved,
+            AuthorizationAuditKind::UserPresenceCredentialReplaced,
+            AuthorizationAuditKind::UserPresenceCredentialRegistered,
+            AuthorizationAuditKind::Bootstrap,
+        ]
+    );
+    let status = store
+        .load_status(
+            NOW + 4,
+            None,
+            IssuerKeyId::from_bytes([1; 16]),
+            &profile("alice"),
+        )
+        .unwrap();
+    assert_eq!(status.user_presence_credentials(), 0);
+    assert_eq!(status.user_presence_credential_identifiers(), 2);
+}
+
+#[test]
+fn malformed_user_presence_credential_fails_closed() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store
+        .register_user_presence_credential(&presence_credential(3), NOW + 1)
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(fixture.database_path()).unwrap();
+    connection
+        .pragma_update(None, "ignore_check_constraints", "ON")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE authorization_user_presence_credential
+             SET credential_document = X'00'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        LocalAuthorizationStore::open(&fixture.installation_path, fixture.fingerprint, None),
+        Err(LocalAuthorizationStoreError::InvalidStorage
+            | LocalAuthorizationStoreError::CorruptStorage)
+    ));
 }
 
 #[test]
@@ -317,7 +464,7 @@ fn unknown_schema_version_is_rejected_without_migration() {
     Connection::open(fixture.database_path())
         .unwrap()
         .execute(
-            "UPDATE authorization_store_meta SET schema_version = 2 WHERE singleton_id = 1",
+            "UPDATE authorization_store_meta SET schema_version = 3 WHERE singleton_id = 1",
             [],
         )
         .unwrap();

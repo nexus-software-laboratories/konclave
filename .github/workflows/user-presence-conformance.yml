@@ -48,7 +48,9 @@ jobs:
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/workflows/user-presence-conformance\.yml$' -or
                 $_ -match '^crates/Konclave\.DomainCore/' -or
+                $_ -match '^crates/Konclave\.LocalAuthorizationStore/' -or
                 $_ -match '^crates/Konclave\.LocalServiceTransport/' -or
+                $_ -match '^crates/Konclave\.SecretStorage/' -or
                 $_ -match '^crates/Konclave\.UserPresence/'
               }
             ).Count -ne 0
@@ -76,10 +78,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveUserPresence -- --check
-          cargo test --locked --package KonclaveUserPresence
+          cargo fmt \
+            --package KonclaveLocalAuthorizationStore \
+            --package KonclaveUserPresence \
+            -- \
+            --check
+          cargo test \
+            --locked \
+            --package KonclaveLocalAuthorizationStore \
+            --package KonclaveUserPresence
           cargo clippy \
             --locked \
+            --package KonclaveLocalAuthorizationStore \
             --package KonclaveUserPresence \
             --all-targets \
             -- \
