@@ -194,11 +194,15 @@ versions remain diagnostics.
 7. Check harness, extension identity/digest, session key, profile, and capabilities.
 8. Validate lifecycle and parent relationships.
 9. Apply provider revocation/generation state.
-10. Produce normalized claims and issue the ordinary exact-profile grant.
+10. Atomically consume the nonce and issue the ordinary exact-profile grant.
 
 Any failure returns a finite unavailable, invalid, expired, replay, or unauthorized
 result. Missing provider support returns `required_evidence_unavailable`. No path
 falls back to `AccountTrusted`.
+
+If the grant response is lost, an exact retry reuses the same issuer request
+identifier and assertion digest and returns the recorded grant. A different request
+or assertion cannot reuse the consumed challenge.
 
 ## Deterministic conformance cases
 

@@ -179,9 +179,10 @@ Providers should scope opaque subjects to the relying application or organizatio
 when possible. Konclave does not require a human email, account name, or globally
 correlatable identifier.
 
-An accepted assertion is consumed once. An ambiguous grant response uses the existing
-issuer request identifier for idempotent replay; it does not obtain or submit a
-different assertion silently.
+Nonce consumption and grant issuance occur atomically. An ambiguous grant response
+uses the existing issuer request identifier and exact assertion digest to recover the
+same durable result; a different request or assertion cannot reuse the consumed
+challenge.
 
 ### Define lifecycle semantics
 

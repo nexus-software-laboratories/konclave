@@ -15,6 +15,8 @@ evidence that implementations honor both.
 - install-scoped enrollment credentials and per-profile relay data-plane tokens;
 - installed authorization-issuer private keys, ephemeral session keys, exact-profile
   grants, authenticated service connections, and delivery leases;
+- harness-attestation verification roots, pending challenges, signed assertions, and
+  normalized session subjects;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;
@@ -201,6 +203,8 @@ Konclave considers:
 - a local unprivileged process attempting unauthorized daemon operations;
 - a local process attempting endpoint discovery, squatting, cross-profile attachment,
   capability replay, or stale lease acknowledgment;
+- a same-account process replaying or fabricating unsigned harness session,
+  lifecycle, extension, or process metadata;
 - an attacker with offline access to persisted files;
 - malformed, oversized, or adversarial protocol input;
 - model output attempting to misuse daemon tools;
