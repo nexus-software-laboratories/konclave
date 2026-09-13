@@ -59,18 +59,18 @@ unavailable.
 ## Provider-neutral challenge
 
 `konclave.harness-attestation.challenge.v1` is a logical, provider-independent value.
-A future implementation freezes a canonical encoding and test vector before enabling
-any provider.
+This contract freezes its canonical encoding and initial deterministic vectors before
+any provider is enabled.
 
 | Field | Bound | Purpose |
 | --- | --- | --- |
 | `version` | Exact value `1` | Prevent cross-version interpretation |
 | `nonce` | 32 random bytes, one use | Prevent replay |
+| `connection_id` | 16 random bytes | Bind the proof to one provisional connection |
 | `audience` | Exact ASCII `konclave.local-service` | Prevent cross-protocol reuse |
 | `installation_fingerprint` | 32 bytes | Prevent cross-installation reuse |
 | `local_service_public_key` | 32 bytes | Bind the authenticated service identity |
 | `request_id` | 16 bytes | Bind durable idempotent issuance |
-| `profile` | Canonical profile, at most 32 ASCII bytes | Bind exact authority |
 | `session_public_key` | 32-byte Ed25519 public key | Bind proof of possession |
 | `harness` | Closed `HarnessKind` | Prevent relabeling |
 | `capabilities` | Closed nonzero bitset | Prevent privilege expansion |
@@ -78,9 +78,9 @@ any provider.
 | `issued_at` | Unsigned milliseconds | Bound freshness |
 | `expires_at` | Greater than `issued_at`, within provider maximum | Bound challenge lifetime |
 
-The extension passes the service-issued challenge unchanged. It never supplies
-session subject, lifecycle, extension identity, evidence kind, issuer identity, or
-verified outcome.
+The extension passes the service-issued challenge unchanged. It never supplies a
+profile, session subject, lifecycle, extension identity, evidence kind, issuer
+identity, or verified outcome.
 
 Canonical challenge bytes begin with
 `utf8("konclave.harness-attestation.challenge.v1") || 0x00`, then encode the table
@@ -89,16 +89,22 @@ an unsigned two-byte big-endian length followed by their exact bytes. Version an
 harness use two bytes; capabilities and timestamps use eight bytes.
 
 The owner-restricted local service may issue this challenge before authorization, but
-it allocates no profile runtime and performs no profile side effect. Pending
-challenges are bounded globally and per connection, consumed once, and discarded on
-service restart.
+the client first verifies the pinned service signature. The assertion is accepted
+only on the same live provisional connection that received the challenge and proves
+the challenged ephemeral private key. The extension obtains and submits its own
+challenge internally; it never exposes attestation through a model tool, command,
+hook result, or signing oracle. Challenge issuance allocates no profile runtime,
+performs no profile side effect, and is bounded globally and per connection.
+Disconnect or service restart discards the pending challenge.
 
 Provider identifiers and extension policy identifiers are at most 64 canonical ASCII
-characters. Signing-key identifiers, opaque session subjects, session instances, and
-source-qualified extension identifiers are each at most 128 bytes. Challenge and
-extension digests are exactly 32 bytes. Opaque assertion carriers are at most 16 KiB.
-Challenges expire within 60 seconds. Each provider declares a finite maximum assertion
-lifetime, and grants never outlive their authorizing assertion.
+characters. Each provider declares tighter maxima for signing-key identifiers, opaque
+session subjects, session instances, source-qualified extension identifiers, and
+assertion carriers beneath global ceilings of 1 KiB per field and 64 KiB per
+assertion. Challenge and extension digests are exactly 32 bytes. Challenges expire
+within 60 seconds. Each provider declares a finite assertion lifetime and clock-skew
+tolerance; zero skew is the default, and uncertainty outside that tolerance fails
+closed. Grants never outlive their authorizing assertion.
 
 ## Normalized verified assertion
 
@@ -123,10 +129,10 @@ VerifiedHarnessAttestation
 ```
 
 The local service independently compares the normalized claims with its pending
-challenge and provider policy. It derives the installation-local profile from the
-verified session subject and rejects a caller-selected mismatch. Only this successful
-comparison adds `HarnessAttested` to the evidence set used by ordinary grant
-issuance.
+connection-bound challenge and provider policy. It derives the installation-local
+profile from the verified session subject; the caller does not provide a profile to
+this flow. Only this successful comparison adds `HarnessAttested` to the evidence set
+used by ordinary grant issuance.
 
 Provider adapters own token syntax, certificate chains, JWKS parsing, and vendor
 claims. The local-service grant protocol consumes only normalized validated claims.
@@ -134,7 +140,7 @@ claims. The local-service grant protocol consumes only normalized validated clai
 The provider boundary is equivalent to:
 
 ```text
-createChallenge(requestedProfile, sessionPublicKey, requestedCapabilities)
+createChallenge(sessionPublicKey, requestedCapabilities)
   -> PendingHarnessChallenge
 
 verifyAssertion(pendingChallenge, opaqueAssertion, now)
@@ -158,10 +164,12 @@ session- + first_24_hex(
 ```
 
 This keeps a provider subject stable across resume while preventing it from becoming
-a cross-installation identifier. The challenged profile must equal the derived value.
+a cross-installation identifier. The service returns the derived profile with the
+grant, so new and forked sessions do not need to know their subject in advance.
 Providers should scope subjects to the relying application or organization when
 possible; Konclave does not require a human email or globally correlatable account
-identifier.
+identifier. The verifier discards the raw subject after validation and derivation;
+durable state retains only the installation-local profile.
 
 The initial deterministic derivation vector is:
 
@@ -173,14 +181,15 @@ The initial deterministic derivation vector is:
 | SHA-256 digest | `dffe52852461b2e6a99f832aa1143a387ec8e69f30284f1aa4511890af92ae06` |
 | Derived profile | `session-dffe52852461b2e6a99f832a` |
 
-The initial challenge-digest vector uses that derived profile, version `1`, 32 bytes
-of `0x22` for the nonce, audience `konclave.local-service`, 32 bytes of `0x11` for the
-installation fingerprint, 32 bytes of `0x33` for the service public key, 16 bytes of
-`0x44` for the request identifier, 32 bytes of `0x55` for the session public key,
-Copilot harness wire value `1`, capabilities `15`, extension policy
-`github-copilot:konclave`, issued-at `1700000000000`, and expiry
-`1700000060000`. The encoded challenge is 297 bytes and its SHA-256 digest is
-`9406de81301a5b9d573797777e0bea3a6f09b801b3758863ef200628174150f7`.
+The initial challenge-digest vector uses version `1`, 32 bytes of `0x22` for the
+nonce, 16 bytes of `0x66` for the connection identifier, audience
+`konclave.local-service`, 32 bytes of `0x11` for the installation fingerprint, 32
+bytes of `0x33` for the service public key, 16 bytes of `0x44` for the request
+identifier, 32 bytes of `0x55` for the session public key, Copilot harness wire value
+`1`, capabilities `15`, extension policy `github-copilot:konclave`, issued-at
+`1700000000000`, and expiry `1700000060000`. The encoded challenge is 279 bytes and
+its SHA-256 digest is
+`5dddc0fcefedbfa7e0eb5c86da75338cb75c921d878113c8c9e0d2cc6c1cc664`.
 
 Provider key disablement uses the existing durable issuer lifecycle. New assertion
 verification fails after disablement, while existing grants follow the configured
@@ -232,8 +241,10 @@ for at least these cases:
 | --- | --- |
 | Exact challenge and valid assertion | Accept once |
 | Same assertion and consumed nonce | Replay rejection |
+| Assertion submitted on another provisional connection | Connection-binding rejection |
 | Different local-service audience | Audience rejection |
-| Different profile | Profile mismatch |
+| Caller injects a profile into the attestation request | Invalid request |
+| Issued grant names a profile other than the derived profile | Profile substitution rejection |
 | Different ephemeral session key | Key mismatch |
 | Expanded capability bitset | Capability mismatch |
 | Challenge or assertion expired | Expired |
@@ -257,11 +268,11 @@ Konclave needs one supported extension API:
 const assertion = await session.attest({
   contractVersion: 1,
   nonce,
+  connectionId,
   audience,
   installationFingerprint,
   localServicePublicKey,
   requestId,
-  profile,
   sessionPublicKey,
   requestedCapabilities,
   expectedExtensionPolicy,

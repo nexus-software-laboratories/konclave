@@ -16,7 +16,7 @@ evidence that implementations honor both.
 - installed authorization-issuer private keys, ephemeral session keys, exact-profile
   grants, authenticated service connections, and delivery leases;
 - harness-attestation verification roots, pending challenges, signed assertions, and
-  normalized session subjects;
+  transient normalized session subjects;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;

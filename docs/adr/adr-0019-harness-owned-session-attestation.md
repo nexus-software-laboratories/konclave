@@ -106,11 +106,12 @@ verified result; callers never submit an evidence enum or boolean.
 Before requesting an assertion, Konclave creates one bounded,
 single-use `konclave.harness-attestation.challenge.v1` value containing:
 
+- the contract version;
 - a random 256-bit nonce;
+- a random 128-bit provisional connection identifier;
 - the fixed `konclave.local-service` audience;
 - the exact 32-byte installation fingerprint and local-service public key;
 - the 16-byte issuer request identifier;
-- the requested canonical profile;
 - the client's ephemeral session public key;
 - the requested closed capability bitset;
 - the expected harness kind;
@@ -118,9 +119,14 @@ single-use `konclave.harness-attestation.challenge.v1` value containing:
 - issued-at and expiry timestamps inside a short challenge window.
 
 Challenge issuance may occur before session authorization because the proof does not
-yet exist. It remains on the owner-restricted local endpoint, allocates no profile
-runtime, performs no profile side effect, and is bounded globally and per connection.
-Restart invalidates every pending challenge.
+yet exist. The client first verifies the pinned service signature, and the service
+accepts the assertion only on the same live provisional connection that received the
+challenge and proves possession of the challenged ephemeral private key. The
+extension obtains and submits its own challenge internally; it never exposes
+attestation as a model tool, command, hook result, or signing oracle. The flow remains
+on the owner-restricted local endpoint, allocates no profile runtime, performs no
+profile side effect, and is bounded globally and per connection. Disconnect or
+restart invalidates every pending challenge.
 
 The canonical challenge bytes begin with
 `utf8("konclave.harness-attestation.challenge.v1") || 0x00`, followed by the fields
@@ -146,12 +152,13 @@ Konclave does not normalize or re-sign unverified claims. A provider adapter ver
 the carrier and maps it to the closed `VerifiedHarnessAttestation` shape.
 
 The provider identifier and extension policy identifier are at most 64 canonical
-ASCII characters. Signing-key identifiers, session subjects, session instances, and
-source-qualified extension identifiers are each at most 128 bytes. Extension digests
-and challenge digests are exactly 32 bytes. The opaque assertion carrier is at most
-16 KiB. Challenges expire within 60 seconds. Each provider declares a finite maximum
-assertion lifetime, and a resulting grant never outlives the assertion that authorized
-it.
+ASCII characters. Each provider declares tighter maxima for its signing-key
+identifiers, session subjects, session instances, extension identifiers, and opaque
+carrier beneath global ceilings of 1 KiB per field and 64 KiB per assertion.
+Extension digests and challenge digests are exactly 32 bytes. Challenges expire within
+60 seconds. Each provider also declares a finite assertion lifetime and clock-skew
+tolerance; zero skew is the default, and uncertainty beyond that tolerance fails
+closed. A resulting grant never outlives the assertion that authorized it.
 
 ### Verify before deriving profile continuity
 
@@ -166,8 +173,8 @@ A verifier must check:
 7. lifecycle and parent-subject consistency; and
 8. provider-specific revocation or generation state.
 
-After verification, Konclave derives the installation-local profile mapping from the
-opaque session subject:
+After verification, Konclave derives the installation-local profile from the opaque
+session subject:
 
 ```text
 session- + first_24_hex(
@@ -180,12 +187,15 @@ session- + first_24_hex(
 )
 ```
 
-It compares that value with the challenged profile. The caller cannot choose another
-session's profile merely by asking the harness to sign that string.
+The caller does not submit a profile to the attestation flow. The service returns the
+derived profile with the grant, so a new or forked session does not need to know its
+host-authoritative subject in advance.
 
 Providers should scope opaque subjects to the relying application or organization
 when possible. Konclave does not require a human email, account name, or globally
-correlatable identifier.
+correlatable identifier. The verifier uses the raw subject only for validation and
+profile derivation, then discards it; durable state retains the installation-local
+profile and no raw provider subject.
 
 Nonce consumption and grant issuance occur atomically. An ambiguous grant response
 uses the existing issuer request identifier and exact assertion digest to recover the
@@ -238,9 +248,11 @@ equivalent to:
 attestSession({
   contractVersion,
   nonce,
+  connectionId,
   audience,
+  installationFingerprint,
   localServicePublicKey,
-  profile,
+  requestId,
   sessionPublicKey,
   requestedCapabilities,
   expectedExtensionPolicy
@@ -249,9 +261,11 @@ attestSession({
 
 The host, not the extension, fills the session subject, instance, lifecycle, parent,
 harness, and loaded-extension claims. The signing key is not exportable to the
-extension. The vendor publishes a verification-key and rotation contract. The
-assertion is short-lived, challenge-bound, and valid only for the requesting
-installation.
+extension. The host returns the assertion only to the extension instance that
+requested it; the extension submits it on the same provisional service connection
+and does not expose a model-visible signing oracle. The vendor publishes a
+verification-key and rotation contract. The assertion is short-lived,
+challenge-bound, and valid only for the requesting installation.
 
 An API that only returns the current session ID, an unsigned metadata object, a bearer
 token not bound to the challenge, or a signature made with an extension-readable key
@@ -349,10 +363,12 @@ kind.
 Continued compliance requires:
 
 - deterministic challenge and normalized-claim vectors for every provider;
-- negative cases for wrong audience, nonce replay, stale challenge, expired assertion,
-  wrong profile, wrong session key, capability escalation, unknown key, disallowed
-  algorithm, extension mismatch, lifecycle substitution, fork-as-resume, and
-  independent-subagent fallback;
+- negative cases for wrong audience, nonce replay, different provisional connection,
+  stale challenge, expired assertion, caller-selected or substituted profile, wrong
+  session key, capability escalation, unknown key, disallowed algorithm, extension
+  mismatch, lifecycle substitution, fork-as-resume, and independent-subagent fallback;
+- boundary cases for every provider-declared size and clock-skew limit;
+- persistence and logging tests proving raw provider subjects are discarded;
 - provider tests proving the signing key is unavailable to extension code;
 - resume and restart tests preserving only the verified session subject;
 - fork and migration tests preventing silent profile reuse;
