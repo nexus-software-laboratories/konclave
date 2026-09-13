@@ -334,6 +334,49 @@ try {
             ) {
                 throw 'Extracted CLI did not report the release version.'
             }
+            $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+            try {
+                $helperOutput = ('x' * (64KB + 1)) |
+                    & $cli user-presence-helper authenticate 2>&1
+                $helperExitCode = $LASTEXITCODE
+                $global:LASTEXITCODE = 0
+            }
+            finally {
+                $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+            }
+            if (
+                $helperExitCode -eq 0 -or
+                ($helperOutput -join "`n") -notmatch 'native user-presence request is invalid'
+            ) {
+                throw 'Extracted CLI did not enforce native user-presence helper bounds.'
+            }
+            if ([string]$artifact.operatingSystem -cne 'windows') {
+                $presenceProfile = Join-Path $kindExtractRoot 'unsupported-presence-profile'
+                $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+                $PSNativeCommandUseErrorActionPreference = $false
+                try {
+                    $presenceOutput = & $cli init `
+                        --relay-endpoint 'https://relay.example.com' `
+                        --authorization-policy user-presence `
+                        --allow-no-recovery `
+                        --profile-root $presenceProfile 2>&1
+                    $presenceExitCode = $LASTEXITCODE
+                    $global:LASTEXITCODE = 0
+                }
+                finally {
+                    $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+                }
+                if (
+                    $presenceExitCode -eq 0 -or
+                    ($presenceOutput -join "`n") -notmatch (
+                        'UserPresence is unavailable on this platform'
+                    ) -or
+                    (Test-Path -LiteralPath $presenceProfile)
+                ) {
+                    throw 'Extracted CLI did not fail closed for unavailable UserPresence.'
+                }
+            }
             $doctorProfile = Join-Path $kindExtractRoot 'doctor-profile'
             $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
             $PSNativeCommandUseErrorActionPreference = $false
