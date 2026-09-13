@@ -380,6 +380,46 @@ fn stale_user_presence_credential_update_conflicts_without_mutation() {
 }
 
 #[test]
+fn user_presence_credential_update_requires_current_grant_authority() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let initial = presence_credential_with_counter(1, 0);
+    let updated = presence_credential_with_counter(1, 1);
+    let rejected = presence_credential_with_counter(1, 2);
+    store
+        .register_user_presence_credential(&initial, NOW + 1)
+        .unwrap();
+    store
+        .replace_policy(&user_presence_policy(2), NOW + 2)
+        .unwrap();
+    let candidate = grant(
+        91,
+        1,
+        1,
+        "alice",
+        AuthorizationEvidenceKind::UserPresence,
+        2,
+    );
+    store
+        .update_user_presence_credential_for_grant(&initial, &updated, &candidate, NOW + 3)
+        .unwrap();
+    store.replace_policy(&account_policy(3), NOW + 4).unwrap();
+    let snapshot_before = store.load_snapshot(NOW + 4, None).unwrap();
+    let audit_before = store.load_audit_events(16, None).unwrap();
+
+    assert_eq!(
+        store
+            .update_user_presence_credential_for_grant(&updated, &rejected, &candidate, NOW + 5,)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    let snapshot_after = store.load_snapshot(NOW + 5, None).unwrap();
+    assert_eq!(snapshot_after.generation(), snapshot_before.generation());
+    assert_eq!(snapshot_after.user_presence_credential(), Some(&updated));
+    assert_eq!(store.load_audit_events(16, None).unwrap(), audit_before);
+}
+
+#[test]
 fn malformed_user_presence_credential_fails_closed() {
     let fixture = Fixture::new();
     let store = fixture.open();

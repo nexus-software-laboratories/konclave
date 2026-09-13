@@ -217,7 +217,7 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
         } else {
             report.pass(
                 "authorization_provider",
-                "native Windows WebAuthn and an enrolled credential are available",
+                "native Windows WebAuthn support and an enrolled credential are configured; current authenticator availability requires a ceremony",
             );
         }
     } else {

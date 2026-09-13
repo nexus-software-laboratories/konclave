@@ -1011,6 +1011,34 @@ async fn complete_user_presence(
     {
         return Err(LocalServiceErrorCode::Conflict);
     }
+    {
+        let claims = pending.request.binding().claims();
+        let context = authorization.user_presence_context(
+            issuer.issuer_key_id,
+            issuer.issuer_key_version,
+            &claims.profile,
+            claims.harness,
+        );
+        let (installation_fingerprint, policy_version, evidence, current_credential) = match context
+        {
+            Ok(context) => context,
+            Err(error) => {
+                lock(user_presence).remove(pending_key);
+                return Err(error);
+            }
+        };
+        if installation_fingerprint.as_bytes() != &claims.installation_fingerprint
+            || policy_version != claims.policy_version
+            || evidence != claims.evidence
+        {
+            lock(user_presence).remove(pending_key);
+            return Err(LocalServiceErrorCode::RequiredEvidenceUnavailable);
+        }
+        if current_credential != pending.expected_credential {
+            lock(user_presence).remove(pending_key);
+            return Err(LocalServiceErrorCode::Conflict);
+        }
+    }
     let session_signature = Ed25519Signature::from_slice(
         &crate::mcp::decode_hex::<64>(&request.session_signature)
             .map_err(|_| LocalServiceErrorCode::InvalidRequest)?,
@@ -1061,7 +1089,14 @@ async fn complete_user_presence(
             issued_at_unix_milliseconds: claims.issued_at_unix_milliseconds,
             expires_at_unix_milliseconds: claims.grant_expires_at_unix_milliseconds,
         })
-        .await?;
+        .await;
+    let grant = match grant {
+        Ok(grant) => grant,
+        Err(error) => {
+            lock(user_presence).remove(pending_key);
+            return Err(error);
+        }
+    };
     lock(user_presence).remove(pending_key);
     encode_grant_result(&grant)
 }
@@ -5769,7 +5804,7 @@ mod tests {
         })
     }
 
-    async fn persisted_user_presence_counter(fixture: &Fixture) -> u64 {
+    async fn persisted_user_presence_state(fixture: &Fixture) -> (u64, u64, usize, usize) {
         let installation_path = fixture.installation_path.clone();
         let installation_fingerprint = fixture.installation_fingerprint;
         tokio::task::spawn_blocking(move || {
@@ -5782,10 +5817,19 @@ mod tests {
             let document: serde_json::Value =
                 serde_json::from_slice(snapshot.user_presence_credential().unwrap().document())
                     .unwrap();
-            document["passkey"]["counter"].as_u64().unwrap()
+            (
+                document["passkey"]["counter"].as_u64().unwrap(),
+                snapshot.generation().get(),
+                snapshot.active_grants().len(),
+                store.load_audit_events(64, None).unwrap().len(),
+            )
         })
         .await
         .unwrap()
+    }
+
+    async fn persisted_user_presence_counter(fixture: &Fixture) -> u64 {
+        persisted_user_presence_state(fixture).await.0
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5977,6 +6021,82 @@ mod tests {
             LocalServiceResponse::Success { .. }
         ));
         assert_eq!(persisted_user_presence_counter(&fixture).await, 3);
+
+        drop(issuer);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn user_presence_policy_change_invalidates_pending_without_mutation() {
+        let (fixture, mut authenticator) = Fixture::new_with_user_presence().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the presence issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(90) => stream,
+        };
+
+        let begin =
+            request_user_presence_begin(&fixture, &mut issuer, 91, "session-presence-policy").await;
+        let assertion = authenticator.authentication_response(&begin["webAuthnRequest"], true);
+        let completion = user_presence_completion_request(&fixture, &begin, assertion);
+        let completion_payload = serde_json::to_vec(&completion).unwrap();
+        let presence =
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).unwrap();
+        let replacement =
+            AuthorizationPolicy::new(AuthorizationPolicyVersion::new(2).unwrap(), vec![presence])
+                .unwrap();
+        fixture
+            .mutate_authorization(move |store, now| store.replace_policy(&replacement, now))
+            .await;
+        let after_policy_change = persisted_user_presence_state(&fixture).await;
+
+        assert!(matches!(
+            request(
+                &mut issuer,
+                92,
+                "authorization.user_presence.complete",
+                &completion_payload,
+            )
+            .await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::RequiredEvidenceUnavailable,
+                ..
+            }
+        ));
+        assert_eq!(
+            persisted_user_presence_state(&fixture).await,
+            after_policy_change
+        );
+        assert!(matches!(
+            request(
+                &mut issuer,
+                93,
+                "authorization.user_presence.complete",
+                &completion_payload,
+            )
+            .await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::Conflict,
+                ..
+            }
+        ));
+        assert_eq!(
+            persisted_user_presence_state(&fixture).await,
+            after_policy_change
+        );
 
         drop(issuer);
         stop_tx.send(()).unwrap();

@@ -165,8 +165,10 @@ options or returned assertion bytes: the verifier either resolves the original
 pending state or rejects the response.
 
 Challenges expire within 120 seconds. An unconsumed challenge is valid only on the
-issuer connection that received it and is removed on disconnect, service restart,
-policy change, issuer disablement, cancellation, or timeout.
+issuer connection that received it. Disconnect, service restart, cancellation, and
+timeout remove it. A policy, issuer, provider, or credential change invalidates it;
+completion revalidates those values before provider verification and removes a stale
+entry without changing credential or grant state.
 
 The grant's profile, key, harness, evidence, policy version, capability bitset, and
 expiry must exactly match the pending request. Grant expiry never exceeds one hour.

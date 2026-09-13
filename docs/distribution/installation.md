@@ -130,10 +130,12 @@ issuer, or replace the evidence policy. These are direct owner-authorized state
 changes and are not exposed as agent tools.
 
 `konclave doctor` reports the effective authorization path separately from provider
-availability. A UserPresence-only installation passes provider checks only when the
-credential is enrolled, the challenge issuer is enabled, and the CLI contains the
-native Windows adapter. Unsupported platforms report a finite failing provider check
-rather than describing the policy as AccountTrusted.
+configuration. A UserPresence-only installation passes that configuration check only
+when the credential is enrolled, the challenge issuer is enabled, and the CLI
+contains the native Windows adapter. It does not trigger a ceremony and therefore
+does not claim that Windows WebAuthn or a UV-capable authenticator is currently
+available. Unsupported platforms report a finite failing provider check rather than
+describing the policy as AccountTrusted.
 
 ## Run as a service
 

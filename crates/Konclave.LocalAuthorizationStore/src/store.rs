@@ -5,12 +5,13 @@ use std::time::Duration;
 
 use KonclaveDomainCore::Ed25519PublicKey;
 use KonclaveLocalServiceTransport::{
-    AuthorizationEvidenceSet, AuthorizationPolicy, AuthorizationPolicyVersion, ClientInstanceId,
-    HarnessKind, InstalledIssuerRegistration, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
-    LOCAL_SERVICE_INSTALLATION_FILE, MAX_ADAPTER_REGISTRATIONS, MAX_GRANTS_PER_ISSUER,
-    MAX_GRANTS_PER_PROFILE, MAX_POLICY_CLAUSES, MAX_PROFILE_ID_LENGTH, MAX_SESSION_GRANTS,
-    ProfileAuthorization, REQUEST_ID_LENGTH, RequestId, SESSION_GRANT_ID_LENGTH, ServiceProfileId,
-    SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationPolicyVersion, ClientInstanceId, HarnessKind, InstalledIssuerRegistration,
+    IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LOCAL_SERVICE_INSTALLATION_FILE,
+    MAX_ADAPTER_REGISTRATIONS, MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_POLICY_CLAUSES,
+    MAX_PROFILE_ID_LENGTH, MAX_SESSION_GRANTS, ProfileAuthorization, REQUEST_ID_LENGTH, RequestId,
+    SESSION_GRANT_ID_LENGTH, ServiceProfileId, SessionCapabilities, SessionGrant,
+    SessionGrantClaims, SessionGrantId,
 };
 use KonclaveSecretStorage::{
     SecretStorageError, ensure_owner_protected_directory, open_or_create_owner_protected_file,
@@ -593,31 +594,7 @@ impl LocalAuthorizationStore {
         if count_rows(&transaction, "authorization_grant_identifier")? >= MAX_GRANT_IDENTIFIERS {
             return Err(LocalAuthorizationStoreError::Capacity);
         }
-        if is_profile_suspended(&transaction, candidate.profile())? {
-            return Err(LocalAuthorizationStoreError::ProfileSuspended);
-        }
-        let issuer = load_issuer(
-            &transaction,
-            candidate.issuer_key_id(),
-            candidate.issuer_key_version(),
-        )?
-        .ok_or(LocalAuthorizationStoreError::NotFound)?;
-        if issuer.availability == IssuerAvailability::Disabled {
-            return Err(LocalAuthorizationStoreError::IssuerDisabled);
-        }
-        if (issuer.registration.harness() != candidate.harness()
-            && issuer.registration.harness() != HarnessKind::Generic)
-            || !issuer.registration.profiles().permits(candidate.profile())
-        {
-            return Err(LocalAuthorizationStoreError::Conflict);
-        }
-        let policy = load_policy(&transaction)?;
-        if candidate.policy_version() != policy.version() {
-            return Err(LocalAuthorizationStoreError::Conflict);
-        }
-        if !policy.accepts(candidate.evidence()) {
-            return Err(LocalAuthorizationStoreError::RequiredEvidenceUnavailable);
-        }
+        validate_grant_authority(&transaction, candidate)?;
         enforce_grant_capacity(&transaction, candidate, now_unix_milliseconds)?;
         reserve_grant_identifier(&transaction, candidate.grant_id())?;
         insert_grant(&transaction, request_key, candidate)?;
@@ -1123,20 +1100,38 @@ impl LocalAuthorizationStore {
             now_unix_milliseconds,
             AuthorizationAuditKind::UserPresenceCredentialUpdated,
             |transaction, _generation| {
-                let existing = load_user_presence_credential(transaction)?
-                    .ok_or(LocalAuthorizationStoreError::NotFound)?;
-                if existing != *expected
-                    || expected.credential_digest() != updated.credential_digest()
-                    || expected.provider_id() != updated.provider_id()
-                    || expected.credential_id() != updated.credential_id()
-                {
-                    return Err(LocalAuthorizationStoreError::Conflict);
-                }
-                if existing == *updated {
-                    return Ok(false);
-                }
-                update_user_presence_credential(transaction, updated)?;
-                Ok(true)
+                advance_user_presence_credential(transaction, expected, updated)
+            },
+        )
+    }
+
+    /// Advances verifier state only while one exact grant authority remains current.
+    ///
+    /// The policy version, evidence, issuer state, harness, profile scope, suspension,
+    /// and complete begin-time credential are checked in the same transaction as the
+    /// credential update.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite authorization, conflict, validation, or storage failure.
+    pub fn update_user_presence_credential_for_grant(
+        &self,
+        expected: &UserPresenceCredentialRecord,
+        updated: &UserPresenceCredentialRecord,
+        grant: &SessionGrant,
+        now_unix_milliseconds: u64,
+    ) -> Result<AuthorizationMutation, LocalAuthorizationStoreError> {
+        let presence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence])
+            .map_err(|_| LocalAuthorizationStoreError::InvalidInput)?;
+        if !grant.evidence().satisfies(presence) {
+            return Err(LocalAuthorizationStoreError::InvalidInput);
+        }
+        self.mutate(
+            now_unix_milliseconds,
+            AuthorizationAuditKind::UserPresenceCredentialUpdated,
+            |transaction, _generation| {
+                validate_grant_authority(transaction, grant)?;
+                advance_user_presence_credential(transaction, expected, updated)
             },
         )
     }
@@ -2399,6 +2394,59 @@ fn load_suspended_profiles(
                 .map_err(|_| LocalAuthorizationStoreError::InvalidStorage)
         })
         .collect()
+}
+
+fn validate_grant_authority(
+    connection: &Connection,
+    candidate: &SessionGrant,
+) -> Result<(), LocalAuthorizationStoreError> {
+    if is_profile_suspended(connection, candidate.profile())? {
+        return Err(LocalAuthorizationStoreError::ProfileSuspended);
+    }
+    let issuer = load_issuer(
+        connection,
+        candidate.issuer_key_id(),
+        candidate.issuer_key_version(),
+    )?
+    .ok_or(LocalAuthorizationStoreError::NotFound)?;
+    if issuer.availability == IssuerAvailability::Disabled {
+        return Err(LocalAuthorizationStoreError::IssuerDisabled);
+    }
+    if (issuer.registration.harness() != candidate.harness()
+        && issuer.registration.harness() != HarnessKind::Generic)
+        || !issuer.registration.profiles().permits(candidate.profile())
+    {
+        return Err(LocalAuthorizationStoreError::Conflict);
+    }
+    let policy = load_policy(connection)?;
+    if candidate.policy_version() != policy.version() {
+        return Err(LocalAuthorizationStoreError::Conflict);
+    }
+    if !policy.accepts(candidate.evidence()) {
+        return Err(LocalAuthorizationStoreError::RequiredEvidenceUnavailable);
+    }
+    Ok(())
+}
+
+fn advance_user_presence_credential(
+    connection: &Transaction<'_>,
+    expected: &UserPresenceCredentialRecord,
+    updated: &UserPresenceCredentialRecord,
+) -> Result<bool, LocalAuthorizationStoreError> {
+    let existing =
+        load_user_presence_credential(connection)?.ok_or(LocalAuthorizationStoreError::NotFound)?;
+    if existing != *expected
+        || expected.credential_digest() != updated.credential_digest()
+        || expected.provider_id() != updated.provider_id()
+        || expected.credential_id() != updated.credential_id()
+    {
+        return Err(LocalAuthorizationStoreError::Conflict);
+    }
+    if existing == *updated {
+        return Ok(false);
+    }
+    update_user_presence_credential(connection, updated)?;
+    Ok(true)
 }
 
 fn is_profile_suspended(

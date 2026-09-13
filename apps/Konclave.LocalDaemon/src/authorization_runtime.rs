@@ -363,11 +363,26 @@ impl LiveAuthorizationRuntime {
                 .map_err(|_| LocalServiceErrorCode::Internal)?,
         )
         .map_err(|_| LocalServiceErrorCode::Internal)?;
+        let candidate = SessionGrant::new(SessionGrantClaims {
+            grant_id,
+            issuer_key_id,
+            issuer_key_version,
+            profile: profile.clone(),
+            session_public_key,
+            harness,
+            evidence,
+            policy_version,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+            capabilities,
+        })
+        .map_err(|_| LocalServiceErrorCode::Internal)?;
         let store = Arc::clone(&self.store);
         let mutation = tokio::task::spawn_blocking(move || {
-            store.update_user_presence_credential(
+            store.update_user_presence_credential_for_grant(
                 &expected_credential,
                 &updated_record,
+                &candidate,
                 issued_at_unix_milliseconds,
             )
         })
