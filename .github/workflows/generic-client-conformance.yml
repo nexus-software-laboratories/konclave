@@ -101,6 +101,7 @@ jobs:
             -- \
             --check
           cargo test --locked --package KonclaveLocalAuthorizationStore quota
+          cargo test --locked --package KonclaveLocalAuthorizationStore issuer_disablement
           cargo test --locked --package KonclaveLocalServiceTransport
           cargo test \
             --locked \

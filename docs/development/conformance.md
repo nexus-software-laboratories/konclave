@@ -27,9 +27,9 @@ harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, full extension formatting and lint,
 type checking, compilation, and package verification. Its relevance covers the full
 extension plus the authorization store, transport, platform storage, and daemon
-authorization boundaries. It runs Generic issuer disablement, quota, and transport
-coverage and compiles the packaged acceptance harness before packaged daemon or skill
-integration relies on that contract.
+authorization boundaries. It runs Generic quota and issuer-state store coverage,
+live daemon disablement, transport coverage, and packaged-acceptance compilation
+before packaged daemon or skill integration relies on that contract.
 
 ### Release evidence
 
