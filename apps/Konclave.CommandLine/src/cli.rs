@@ -20,6 +20,8 @@ pub enum Command {
     RelayBootstrap(RelayBootstrapArgs),
     /// Check installation, custody, profile, and relay health
     Doctor(DoctorArgs),
+    /// Inspect and update durable local authorization state
+    Authorization(AuthorizationArgs),
     /// Create, validate, inspect, compile, diff, and list collaboration policies
     Policy(PolicyArgs),
 }
@@ -83,6 +85,125 @@ pub struct DoctorArgs {
     /// Installation root containing bin/ and share/konclave/
     #[arg(long)]
     pub install_root: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct AuthorizationArgs {
+    #[command(subcommand)]
+    pub command: AuthorizationCommand,
+}
+
+#[derive(Subcommand)]
+pub enum AuthorizationCommand {
+    /// Show bounded live authorization status
+    Status(AuthorizationStateArgs),
+    /// Revoke one exact session grant
+    RevokeGrant(AuthorizationGrantArgs),
+    /// Suspend new and active grants for one exact profile
+    SuspendProfile(AuthorizationProfileArgs),
+    /// Permit new grants for one previously suspended profile
+    ResumeProfile(AuthorizationProfileArgs),
+    /// Disable new grants from one exact issuer key version
+    DisableIssuer(AuthorizationIssuerDispositionArgs),
+    /// Re-enable one exact issuer key version
+    EnableIssuer(AuthorizationIssuerArgs),
+    /// Register one higher issuer key version before rotating clients
+    RegisterIssuer(AuthorizationIssuerRegistrationArgs),
+    /// Remove one exact issuer key version from the installation
+    RemoveIssuer(AuthorizationIssuerDispositionArgs),
+    /// Replace the evidence policy with a strictly newer generation
+    ReplacePolicy(AuthorizationPolicyArgs),
+}
+
+#[derive(Args)]
+pub struct AuthorizationStateArgs {
+    /// Shared profile root; defaults to the platform data directory
+    #[arg(long)]
+    pub profile_root: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct AuthorizationGrantArgs {
+    /// Shared profile root; defaults to the platform data directory
+    #[arg(long)]
+    pub profile_root: Option<PathBuf>,
+    /// Exact 16-byte grant identifier as 32 lowercase hexadecimal characters
+    #[arg(long)]
+    pub grant_id: String,
+}
+
+#[derive(Args)]
+pub struct AuthorizationProfileArgs {
+    /// Shared profile root; defaults to the platform data directory
+    #[arg(long)]
+    pub profile_root: Option<PathBuf>,
+    /// Exact canonical profile identifier
+    #[arg(long)]
+    pub profile: String,
+}
+
+#[derive(Args)]
+pub struct AuthorizationIssuerArgs {
+    /// Shared profile root; defaults to the platform data directory
+    #[arg(long)]
+    pub profile_root: Option<PathBuf>,
+    /// Exact 16-byte issuer identifier as 32 lowercase hexadecimal characters
+    #[arg(long)]
+    pub issuer_key_id: String,
+    /// Exact nonzero issuer key version
+    #[arg(long)]
+    pub issuer_key_version: u32,
+}
+
+#[derive(Args)]
+pub struct AuthorizationIssuerDispositionArgs {
+    #[command(flatten)]
+    pub issuer: AuthorizationIssuerArgs,
+    /// Treatment of grants already issued by this key version
+    #[arg(long, value_enum)]
+    pub existing_grants: ExistingGrantDispositionChoice,
+}
+
+#[derive(Args)]
+pub struct AuthorizationIssuerRegistrationArgs {
+    #[command(flatten)]
+    pub issuer: AuthorizationIssuerArgs,
+    /// Exact Ed25519 public key as 64 lowercase hexadecimal characters
+    #[arg(long)]
+    pub public_key: String,
+    /// Harness metadata authorized for this issuer
+    #[arg(long, value_enum)]
+    pub harness: AuthorizationHarnessChoice,
+    /// Profile scope: all, profile:<id>, or namespace:<prefix>
+    #[arg(long)]
+    pub profile_scope: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AuthorizationHarnessChoice {
+    Copilot,
+    ClaudeCode,
+    Codex,
+    Generic,
+    A2aGateway,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ExistingGrantDispositionChoice {
+    /// Keep existing grants valid until expiry or another terminal condition
+    Retain,
+    /// Revoke existing grants in the same durable transaction
+    Revoke,
+}
+
+#[derive(Args)]
+pub struct AuthorizationPolicyArgs {
+    /// Shared profile root; defaults to the platform data directory
+    #[arg(long)]
+    pub profile_root: Option<PathBuf>,
+    /// One all-of evidence clause; repeat for OR and join evidence with '+'
+    #[arg(long = "clause", required = true)]
+    pub clauses: Vec<String>,
 }
 
 #[derive(Args)]

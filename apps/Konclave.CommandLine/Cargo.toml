@@ -9,6 +9,7 @@ KonclaveCollaborationPolicies = { path = "../../crates/Konclave.CollaborationPol
 KonclaveClientLibrary = { path = "../../crates/Konclave.ClientLibrary" }
 KonclaveCryptographicCore = { path = "../../crates/Konclave.CryptographicCore" }
 KonclaveDomainCore = { path = "../../crates/Konclave.DomainCore" }
+KonclaveLocalAuthorizationStore = { path = "../../crates/Konclave.LocalAuthorizationStore" }
 KonclaveLocalServiceTransport = { path = "../../crates/Konclave.LocalServiceTransport" }
 KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
 anyhow = "1.0.104"

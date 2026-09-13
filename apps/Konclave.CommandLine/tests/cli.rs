@@ -4,6 +4,7 @@ use base64::Engine as _;
 use predicates::prelude::PredicateBooleanExt as _;
 use predicates::str::contains;
 use KonclaveClientLibrary::{RelayEndpoint, RelayEnrollmentCredential};
+use KonclaveLocalAuthorizationStore::authorization_store_path;
 
 #[test]
 fn version_subcommand_prints_version() {
@@ -80,6 +81,13 @@ fn external_init_is_idempotent_and_conflicts_fail() {
             .stdout(predicates::str::contains("BwcHB").not());
     }
     assert!(source.is_file());
+    let installation_path = directory
+        .path()
+        .join("service")
+        .join(KonclaveLocalServiceTransport::LOCAL_SERVICE_INSTALLATION_FILE);
+    assert!(authorization_store_path(&installation_path)
+        .unwrap()
+        .is_file());
     assert!(!std::fs::read(root.join("relay-installation.conf"))
         .unwrap()
         .windows(encoded_credential.len())
@@ -192,6 +200,7 @@ fn doctor_checks_installation_source_layout_and_relay() {
         .stdout(contains("PASS local_service_binary"))
         .stdout(contains("PASS copilot_plugin"))
         .stdout(contains("PASS local_service_config"))
+        .stdout(contains("PASS authorization_state"))
         .stdout(contains("PASS local_service_running"))
         .stdout(contains("WARN profiles"));
     server.join().unwrap();

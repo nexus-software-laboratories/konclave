@@ -1,9 +1,11 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
 use rusqlite::{Connection, OpenFlags};
 use KonclaveClientLibrary::{check_relay_health, RelayInstallationConfig};
+use KonclaveLocalAuthorizationStore::{installation_fingerprint, LocalAuthorizationStore};
 use KonclaveLocalServiceTransport::{
     connect_local_service, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
     LocalServiceInstallation, ProfileAuthorization, LOCAL_SERVICE_INSTALLATION_FILE,
@@ -128,19 +130,54 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
         return;
     }
     report.pass("local_service_config", "configuration is valid");
+    let fingerprint = match installation_fingerprint(&installation) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            report.fail(
+                "authorization_state",
+                "installation fingerprint is unavailable",
+            );
+            return;
+        }
+    };
+    let installation_path = path.clone();
+    let authorization = tokio::task::spawn_blocking(move || {
+        let store = LocalAuthorizationStore::open(&installation_path, fingerprint, None)?;
+        store.load_snapshot(current_unix_milliseconds()?, None)
+    })
+    .await;
+    let Ok(Ok(authorization)) = authorization else {
+        report.fail(
+            "authorization_state",
+            "durable authorization state is unavailable or invalid",
+        );
+        return;
+    };
+    report.pass(
+        "authorization_state",
+        format!(
+            "generation {}; issuers {}; suspended profiles {}; active grants {}",
+            authorization.generation().get(),
+            authorization.issuers().len(),
+            authorization.suspended_profiles().len(),
+            authorization.active_grants().len()
+        ),
+    );
     let account_trusted =
         AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
-            .is_ok_and(|evidence| installation.authorization_policy().accepts(evidence));
+            .is_ok_and(|evidence| authorization.policy().accepts(evidence));
     if account_trusted {
         report.pass(
             "authorization_policy",
             "AccountTrusted; same-account processes are trusted; no same-user isolation",
         );
-        let providers = installation
+        let providers = authorization
             .issuers()
             .iter()
             .filter(|issuer| {
-                issuer.registration().harness() == HarnessKind::Generic
+                issuer.availability()
+                    == KonclaveLocalAuthorizationStore::IssuerAvailability::Enabled
+                    && issuer.registration().harness() == HarnessKind::Generic
                     && issuer.registration().profiles() == &ProfileAuthorization::All
             })
             .count();
@@ -155,6 +192,7 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
                 "AccountTrusted issuer is available to paved and generic clients",
             );
         }
+
         report.pass(
             "grant_limits",
             format!(
@@ -185,6 +223,15 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
             "shared local service is unavailable",
         ),
     }
+}
+
+fn current_unix_milliseconds(
+) -> Result<u64, KonclaveLocalAuthorizationStore::LocalAuthorizationStoreError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| KonclaveLocalAuthorizationStore::LocalAuthorizationStoreError::InvalidInput)?;
+    u64::try_from(duration.as_millis())
+        .map_err(|_| KonclaveLocalAuthorizationStore::LocalAuthorizationStoreError::InvalidInput)
 }
 
 fn valid_plugin_manifest(path: &Path) -> bool {

@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveDomainCore::Ed25519PublicKey;
+use KonclaveLocalAuthorizationStore::{installation_fingerprint, LocalAuthorizationStore};
 use KonclaveLocalServiceTransport::{
     AuthorizationPolicy, CopilotServiceConfig, HarnessKind, InstalledIssuerRegistration,
     IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LocalServiceEndpoint,
@@ -18,6 +20,8 @@ use KonclaveSecretStorage::{
 
 #[cfg(any(windows, test))]
 use crate::encoding::encode_hex;
+#[cfg(test)]
+use KonclaveLocalAuthorizationStore::authorization_store_path;
 
 const ACCOUNT_ISSUER_KEY_FILE: &str = "account-issuer.key";
 const SERVICE_DIRECTORY: &str = "service";
@@ -120,6 +124,15 @@ fn install_with(
     };
     let issuer_key_version =
         IssuerKeyVersion::new(1).map_err(|_| anyhow::anyhow!("issuer key version is invalid"))?;
+    let issuers = vec![InstalledIssuerRegistration::new(
+        issuer_key_id,
+        issuer_key_version,
+        IssuerRegistration::new(
+            issuer_identity.public_key(),
+            HarnessKind::Generic,
+            ProfileAuthorization::All,
+        ),
+    )];
     let installation = LocalServiceInstallation::new(
         endpoint.clone(),
         profile_root.to_path_buf(),
@@ -127,26 +140,35 @@ fn install_with(
         service_identity_source,
         profile_custody,
         authorization_policy.clone(),
-        vec![InstalledIssuerRegistration::new(
-            issuer_key_id,
-            issuer_key_version,
-            IssuerRegistration::new(
-                issuer_identity.public_key(),
-                HarnessKind::Generic,
-                ProfileAuthorization::All,
-            ),
-        )],
+        issuers.clone(),
     )
     .context("building local-service installation")?;
+    let installation_path = service_root.join(LOCAL_SERVICE_INSTALLATION_FILE);
+    let fingerprint = installation_fingerprint(&installation)
+        .context("binding durable authorization state to the installation")?;
+    let now_unix_milliseconds = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("reading system time")?
+            .as_millis(),
+    )
+    .context("converting system time")?;
+    drop(
+        LocalAuthorizationStore::bootstrap(
+            &installation_path,
+            fingerprint,
+            &authorization_policy,
+            &issuers,
+            now_unix_milliseconds,
+        )
+        .context("bootstrapping durable local authorization state")?,
+    );
     let mut service_config = Vec::new();
     installation
         .write_to(&mut service_config)
         .context("encoding local-service installation")?;
-    create_or_verify_owner_protected_file(
-        &service_root.join(LOCAL_SERVICE_INSTALLATION_FILE),
-        &service_config,
-    )
-    .context("persisting local-service installation")?;
+    create_or_verify_owner_protected_file(&installation_path, &service_config)
+        .context("persisting local-service installation")?;
 
     let extension_root = extension_root.map_or_else(default_extension_root, absolute_path)?;
     ensure_owner_protected_directory(&extension_root)
@@ -333,6 +355,7 @@ mod tests {
             .join(SERVICE_DIRECTORY)
             .join(LOCAL_SERVICE_INSTALLATION_FILE);
         let first_service = std::fs::read(&service_path).unwrap();
+        assert!(authorization_store_path(&service_path).unwrap().is_file());
         let first_adapter = std::fs::read(
             root.path()
                 .join(SERVICE_DIRECTORY)
