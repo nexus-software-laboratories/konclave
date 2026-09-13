@@ -6108,10 +6108,10 @@ mod tests {
     }
 
     fn decode_test_hex(value: &str) -> Vec<u8> {
-        assert_eq!(value.len() % 2, 0);
-        value
-            .as_bytes()
-            .chunks_exact(2)
+        let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+        assert!(remainder.is_empty());
+        pairs
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
