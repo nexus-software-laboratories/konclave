@@ -117,6 +117,14 @@ jobs:
             --locked `
             --release `
             --target '${{ matrix.target }}' `
+            -p KonclaveLocalAuthorizationStore
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows durable authorization tests failed.'
+          }
+          cargo test `
+            --locked `
+            --release `
+            --target '${{ matrix.target }}' `
             -p KonclaveLocalServiceTransport `
             --test windows_endpoint
           if ($LASTEXITCODE -ne 0) {

@@ -47,6 +47,7 @@ jobs:
               $files | Where-Object {
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/workflows/authorization-store-conformance\.yml$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/src/(?:authorization_runtime|local_service)\.rs$' -or
                 $_ -match '^crates/Konclave\.LocalAuthorizationStore/' -or
                 $_ -match '^crates/Konclave\.LocalServiceTransport/src/grant\.rs$' -or
                 $_ -match '^crates/Konclave\.SecretStorage/src/(?:lib|owner_file)\.rs$' -or
@@ -78,10 +79,27 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveLocalAuthorizationStore -- --check
+          cargo fmt --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveLocalAuthorizationStore
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            authorization_runtime::tests
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            local_service::tests
           cargo clippy \
             --locked \
             --package KonclaveLocalAuthorizationStore \
             --all-targets \
+            -- \
+            -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
             -- \
             -D warnings

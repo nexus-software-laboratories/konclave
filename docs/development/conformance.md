@@ -18,8 +18,9 @@ and include the suites below once their corresponding surfaces exist.
 
 `Authorization store conformance` is the focused draft-capable gate for
 `Konclave.LocalAuthorizationStore`. It runs the crate's exact format, integration
-test, and Clippy commands before daemon, client, administration, or package
-integration relies on new store behavior.
+test, and Clippy commands plus the daemon's authorization-runtime and local-service
+tests before client, administration, or package integration relies on new store
+behavior.
 
 ### Release evidence
 
@@ -150,6 +151,10 @@ crash or excessive-allocation case becomes a permanent regression input.
 - authenticate protocol-v2 issuer and session roles with exact key versions, exact
   profile/session-key grants, policy and evidence claims, fresh challenges, pinned
   service identity, and uniform signed rejection;
+- refuse startup without a valid installation-bound authorization store, preserve
+  grants across service restart, and observe exact revocation, profile suspension,
+  issuer disablement, policy invalidation, and reload failure within the documented
+  one-second live-state bound, including an in-flight long delivery claim;
 - prove the issuer cannot invoke operational methods, grants expire without active
   eviction, quota exhaustion denies, and active-registration checks close revoked
   connections;
