@@ -270,10 +270,12 @@ async fn serve_client(
         } => {
             serve_issuer_client(
                 stream,
-                authorization,
-                ledger,
-                user_presence,
-                identity.public_key(),
+                IssuerClientDependencies {
+                    authorization,
+                    ledger,
+                    user_presence,
+                    service_public_key: identity.public_key(),
+                },
                 IssuerConnection {
                     issuer_key_id,
                     issuer_key_version,
@@ -596,18 +598,28 @@ impl IssuerConnection {
     }
 }
 
-async fn serve_issuer_client(
-    stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
+struct IssuerClientDependencies {
     authorization: Arc<LiveAuthorizationRuntime>,
     ledger: Arc<Mutex<RequestLedger>>,
     user_presence: Arc<Mutex<UserPresenceRegistry>>,
     service_public_key: KonclaveDomainCore::Ed25519PublicKey,
+}
+
+async fn serve_issuer_client(
+    stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
+    dependencies: IssuerClientDependencies,
     issuer: IssuerConnection,
     mut stop: watch::Receiver<bool>,
     mut authorization_status: watch::Receiver<
         crate::authorization_runtime::AuthorizationRuntimeStatus,
     >,
 ) -> anyhow::Result<()> {
+    let IssuerClientDependencies {
+        authorization,
+        ledger,
+        user_presence,
+        service_public_key,
+    } = dependencies;
     if !issuer.registration_is_present(&authorization) {
         return Ok(());
     }
