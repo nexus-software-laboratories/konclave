@@ -3748,11 +3748,7 @@ mod tests {
             let issuer = InstalledIssuerRegistration::new(
                 adapter_key_id,
                 adapter_key_version,
-                AdapterRegistration::new(
-                    client_identity.public_key(),
-                    issuer_harness,
-                    profiles,
-                ),
+                AdapterRegistration::new(client_identity.public_key(), issuer_harness, profiles),
             );
             let installation_path = root
                 .path()
