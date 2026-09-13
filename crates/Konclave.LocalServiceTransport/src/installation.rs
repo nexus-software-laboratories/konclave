@@ -930,11 +930,7 @@ mod tests {
         });
         let conflict = client_config(2);
         for (canonical, legacy, expected) in [
-            (
-                None,
-                None,
-                Ok(ClientRuntimeConfigAction::CreateCanonical),
-            ),
+            (None, None, Ok(ClientRuntimeConfigAction::CreateCanonical)),
             (
                 Some(&desired),
                 None,
@@ -1059,10 +1055,8 @@ mod tests {
             );
         }
         assert_eq!(
-            CopilotServiceConfig::from_reader(
-                vec![0_u8; MAX_CLIENT_CONFIG_BYTES + 1].as_slice()
-            )
-            .err(),
+            CopilotServiceConfig::from_reader(vec![0_u8; MAX_CLIENT_CONFIG_BYTES + 1].as_slice())
+                .err(),
             Some(LocalServiceInstallationError::TooLarge)
         );
     }

@@ -87,8 +87,8 @@ pub use installation::{
     COPILOT_SERVICE_CONFIG_FILE, ClientRuntimeConfigAction, ClientRuntimeConfigPathError,
     ClientRuntimeConfigReconciliationError, CopilotServiceConfig, InstalledIssuerRegistration,
     LOCAL_SERVICE_INSTALLATION_FILE, LocalServiceIdentitySource, LocalServiceInstallation,
-    LocalServiceInstallationError, LocalServiceProfileCustody,
-    default_client_runtime_config_path, reconcile_client_runtime_config,
+    LocalServiceInstallationError, LocalServiceProfileCustody, default_client_runtime_config_path,
+    reconcile_client_runtime_config,
 };
 pub use message::{HandshakeMessage, MAX_HANDSHAKE_FRAME_BYTES};
 pub use registry::{InMemoryAdapterRegistry, MAX_ADAPTER_REGISTRATIONS};
