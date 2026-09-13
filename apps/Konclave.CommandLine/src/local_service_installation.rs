@@ -47,10 +47,16 @@ pub(crate) fn install(
     profile_key_directory: Option<PathBuf>,
     authorization_policy: AuthorizationPolicy,
 ) -> anyhow::Result<InstalledLocalService> {
-    let client_config_path = match client_config_path {
-        Some(path) => require_absolute_path(path, "client configuration path")?,
-        None => default_client_runtime_config_path()
-            .context("resolving canonical client configuration path")?,
+    let (client_config_path, client_config_uses_default) = match client_config_path {
+        Some(path) => (
+            require_absolute_path(path, "client configuration path")?,
+            false,
+        ),
+        None => (
+            default_client_runtime_config_path()
+                .context("resolving canonical client configuration path")?,
+            true,
+        ),
     };
     let legacy_extension_root = match legacy_extension_root {
         Some(path) => Some(absolute_path(path)?),
@@ -62,6 +68,7 @@ pub(crate) fn install(
             profile_root,
             legacy_extension_root,
             client_config_path,
+            client_config_uses_default,
             endpoint_override,
             service_identity_file,
             profile_key_directory,
@@ -91,6 +98,7 @@ struct LocalServiceInstallRequest<'a> {
     profile_root: &'a Path,
     legacy_extension_root: Option<PathBuf>,
     client_config_path: PathBuf,
+    client_config_uses_default: bool,
     endpoint_override: Option<&'a str>,
     service_identity_file: Option<PathBuf>,
     profile_key_directory: Option<PathBuf>,
@@ -105,6 +113,7 @@ fn install_with(
         profile_root,
         legacy_extension_root,
         client_config_path,
+        client_config_uses_default,
         endpoint_override,
         service_identity_file,
         profile_key_directory,
@@ -237,10 +246,11 @@ fn install_with(
     let client_config_parent = client_config_path
         .parent()
         .context("client configuration path has no parent")?;
-    if client_config_parent != service_root {
-        ensure_owner_protected_directory(client_config_parent)
-            .context("protecting canonical client configuration root")?;
-    }
+    prepare_client_config_parent(
+        client_config_parent,
+        &service_root,
+        client_config_uses_default,
+    )?;
     let canonical = load_optional_client_config(&client_config_path)?;
     let legacy_client_config_path = legacy_extension_root
         .map(|root| root.join(COPILOT_SERVICE_CONFIG_FILE))
@@ -392,6 +402,30 @@ fn default_legacy_extension_root() -> Option<PathBuf> {
     )
 }
 
+fn prepare_client_config_parent(
+    client_config_parent: &Path,
+    service_root: &Path,
+    uses_default_path: bool,
+) -> anyhow::Result<()> {
+    if client_config_parent == service_root {
+        return Ok(());
+    }
+    if uses_default_path {
+        let konclave_root = client_config_parent
+            .parent()
+            .context("canonical client configuration root has no parent")?;
+        let platform_data_root = konclave_root
+            .parent()
+            .context("canonical platform data root has no parent")?;
+        std::fs::create_dir_all(platform_data_root)
+            .context("creating platform data parent for client configuration")?;
+        ensure_owner_protected_directory(konclave_root)
+            .context("protecting canonical Konclave data root")?;
+    }
+    ensure_owner_protected_directory(client_config_parent)
+        .context("protecting canonical client configuration root")
+}
+
 fn load_optional_legacy_client_config(path: &Path) -> anyhow::Result<Option<CopilotServiceConfig>> {
     let parent = path
         .parent()
@@ -473,6 +507,27 @@ mod tests {
     }
 
     #[test]
+    fn default_client_config_parent_creates_only_the_owned_konclave_subtree() {
+        let root = tempfile::tempdir().unwrap();
+        let platform_data_root = root.path().join("ambient").join("share");
+        let konclave_root = platform_data_root.join("konclave");
+        let client_config_parent = konclave_root.join(SERVICE_DIRECTORY);
+        let unrelated_service_root = root.path().join("other-service");
+
+        prepare_client_config_parent(&client_config_parent, &unrelated_service_root, true).unwrap();
+
+        assert!(platform_data_root.is_dir());
+        assert!(konclave_root.is_dir());
+        assert!(client_config_parent.is_dir());
+        assert!(prepare_client_config_parent(
+            &root.path().join("missing").join(SERVICE_DIRECTORY),
+            &unrelated_service_root,
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn repeated_install_is_exact_and_conflicting_endpoint_fails() {
         let root = tempfile::tempdir().unwrap();
         let profile_root = root.path().join("profiles");
@@ -500,6 +555,7 @@ mod tests {
                 profile_root: &profile_root,
                 legacy_extension_root: Some(legacy_extension_root.clone()),
                 client_config_path: client_config_path.clone(),
+                client_config_uses_default: false,
                 endpoint_override: Some(&endpoint),
                 service_identity_file: None,
                 profile_key_directory: Some(profile_keys.clone()),
@@ -528,6 +584,7 @@ mod tests {
                 profile_root: &profile_root,
                 legacy_extension_root: Some(legacy_extension_root.clone()),
                 client_config_path: client_config_path.clone(),
+                client_config_uses_default: false,
                 endpoint_override: Some(&endpoint),
                 service_identity_file: None,
                 profile_key_directory: Some(profile_keys.clone()),
@@ -584,6 +641,7 @@ mod tests {
                 profile_root: &profile_root,
                 legacy_extension_root: Some(legacy_extension_root),
                 client_config_path,
+                client_config_uses_default: false,
                 endpoint_override: Some(&conflict),
                 service_identity_file: None,
                 profile_key_directory: Some(root.path().join("profile-keys")),
@@ -623,6 +681,7 @@ mod tests {
                 profile_root: &profile_root,
                 legacy_extension_root: Some(legacy_extension_root.clone()),
                 client_config_path: client_config_path.clone(),
+                client_config_uses_default: false,
                 endpoint_override: Some(&endpoint),
                 service_identity_file: None,
                 profile_key_directory: Some(profile_keys.clone()),
@@ -642,6 +701,7 @@ mod tests {
                 profile_root: &profile_root,
                 legacy_extension_root: Some(legacy_extension_root),
                 client_config_path: client_config_path.clone(),
+                client_config_uses_default: false,
                 endpoint_override: Some(&endpoint),
                 service_identity_file: None,
                 profile_key_directory: Some(profile_keys.clone()),
@@ -673,6 +733,7 @@ mod tests {
                 profile_root: &profile_root,
                 legacy_extension_root: Some(conflicting_extension_root),
                 client_config_path,
+                client_config_uses_default: false,
                 endpoint_override: Some(&endpoint),
                 service_identity_file: None,
                 profile_key_directory: Some(profile_keys),
