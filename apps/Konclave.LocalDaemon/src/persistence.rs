@@ -98,13 +98,40 @@ const MAX_LOCAL_REQUEST_OUTCOMES: usize = 256;
 const MAX_LOCAL_REQUEST_OUTCOME_BYTES: usize =
     1 + 4 + MAX_RPC_FRAME_BYTES + 4 + MAX_RPC_FRAME_BYTES;
 #[cfg(test)]
-static LOCAL_REQUEST_OUTCOME_READ_FAILURES: OnceLock<Mutex<BTreeMap<String, usize>>> =
-    OnceLock::new();
+type LocalRequestOutcomeFailures = OnceLock<Mutex<BTreeMap<String, usize>>>;
+
+#[cfg(test)]
+static LOCAL_REQUEST_OUTCOME_READ_FAILURES: LocalRequestOutcomeFailures = OnceLock::new();
+
+#[cfg(test)]
+static LOCAL_REQUEST_OUTCOME_WRITE_FAILURES: LocalRequestOutcomeFailures = OnceLock::new();
 
 #[cfg(test)]
 pub(crate) fn inject_local_request_outcome_read_failures(profile_id: &str, count: usize) {
+    inject_local_request_outcome_failures(
+        &LOCAL_REQUEST_OUTCOME_READ_FAILURES,
+        profile_id,
+        count,
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn inject_local_request_outcome_write_failures(profile_id: &str, count: usize) {
+    inject_local_request_outcome_failures(
+        &LOCAL_REQUEST_OUTCOME_WRITE_FAILURES,
+        profile_id,
+        count,
+    );
+}
+
+#[cfg(test)]
+fn inject_local_request_outcome_failures(
+    failures: &LocalRequestOutcomeFailures,
+    profile_id: &str,
+    count: usize,
+) {
     assert!(count > 0);
-    LOCAL_REQUEST_OUTCOME_READ_FAILURES
+    failures
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .unwrap()
@@ -113,7 +140,20 @@ pub(crate) fn inject_local_request_outcome_read_failures(profile_id: &str, count
 
 #[cfg(test)]
 fn take_local_request_outcome_read_failure(profile_id: &str) -> bool {
-    let mut failures = LOCAL_REQUEST_OUTCOME_READ_FAILURES
+    take_local_request_outcome_failure(&LOCAL_REQUEST_OUTCOME_READ_FAILURES, profile_id)
+}
+
+#[cfg(test)]
+fn take_local_request_outcome_write_failure(profile_id: &str) -> bool {
+    take_local_request_outcome_failure(&LOCAL_REQUEST_OUTCOME_WRITE_FAILURES, profile_id)
+}
+
+#[cfg(test)]
+fn take_local_request_outcome_failure(
+    failures: &LocalRequestOutcomeFailures,
+    profile_id: &str,
+) -> bool {
+    let mut failures = failures
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .unwrap();
@@ -492,6 +532,10 @@ impl ProfileStore {
     ) -> Result<(), ProfileStoreError> {
         if plaintext.is_empty() || plaintext.len() > MAX_LOCAL_REQUEST_OUTCOME_BYTES {
             return Err(ProfileStoreError::CorruptData);
+        }
+        #[cfg(test)]
+        if take_local_request_outcome_write_failure(self.locked_profile.profile_id.as_str()) {
+            return Err(ProfileStoreError::Storage);
         }
         let context = local_request_outcome_context(
             &self.locked_profile.profile_id,

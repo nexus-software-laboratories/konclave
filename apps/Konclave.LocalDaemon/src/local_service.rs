@@ -294,10 +294,28 @@ async fn serve_session_client(
     if !authorization.grant_is_active(&grant) {
         return Ok(());
     }
-    let lease = supervisor
-        .attach(grant.profile().as_str())
-        .await
-        .context("attaching a shared local client profile")?;
+    let mut attach = Box::pin(supervisor.attach(grant.profile().as_str()));
+    let lease = loop {
+        tokio::select! {
+            biased;
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return Ok(());
+                }
+            }
+            changed = authorization_status.changed() => {
+                if changed.is_err() || !authorization.grant_is_active(&grant) {
+                    return Ok(());
+                }
+            }
+            result = &mut attach => {
+                break result.context("attaching a shared local client profile")?;
+            }
+        }
+    };
+    if *stop.borrow() || !authorization.grant_is_active(&grant) {
+        return Ok(());
+    }
     let services = lease.services().context("loading bound profile services")?;
     let handler = operation_handler(&services);
     let store = services.conversations().store();
@@ -3649,7 +3667,7 @@ mod collaboration_policy_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
     use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
@@ -3681,8 +3699,8 @@ mod tests {
     use crate::clock::{SystemUnixClock, UnixClock};
     use crate::profile_runtime::{ProfileHost, ProfileHostOptions};
     use crate::profile_supervisor::ProfileSupervisorConfig;
-    use crate::runtime::initialize_profile;
-    use crate::test_support::TestProfileRoot;
+    use crate::runtime::{ProfileSource, initialize_profile};
+    use crate::test_support::{TestProfileRoot, TestProfileSettings};
 
     const TEST_STARTUP_DEADLINE: Duration = Duration::from_secs(5);
     const TEST_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
@@ -3698,6 +3716,56 @@ mod tests {
         authorization: Arc<LiveAuthorizationRuntime>,
         installation_path: PathBuf,
         installation_fingerprint: InstallationFingerprint,
+    }
+
+    struct BlockingProfileSource {
+        inner: TestProfileSettings,
+        started: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl ProfileSource for BlockingProfileSource {
+        fn configure(
+            &self,
+            profile: &crate::persistence::ProfileId,
+        ) -> anyhow::Result<crate::runtime::ProfileConfig> {
+            self.started
+                .send(())
+                .map_err(|_| anyhow::anyhow!("profile-open observer was dropped"))?;
+            self.release
+                .lock()
+                .map_err(|_| anyhow::anyhow!("profile-open release was poisoned"))?
+                .recv()
+                .map_err(|_| anyhow::anyhow!("profile-open release was dropped"))?;
+            self.inner.configure(profile)
+        }
+
+        fn host_options(
+            &self,
+            profile: &crate::persistence::ProfileId,
+        ) -> ProfileHostOptions {
+            self.inner.host_options(profile)
+        }
+    }
+
+    struct ProfileOpenRelease(Option<mpsc::Sender<()>>);
+
+    impl ProfileOpenRelease {
+        fn new(release: mpsc::Sender<()>) -> Self {
+            Self(Some(release))
+        }
+
+        fn release(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    impl Drop for ProfileOpenRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
     }
 
     impl Fixture {
@@ -3780,11 +3848,19 @@ mod tests {
             &self,
             authorization: Arc<LiveAuthorizationRuntime>,
         ) -> SharedLocalServiceConfig {
+            self.config_with_profile_source(authorization, Arc::new(self.root.settings()))
+        }
+
+        fn config_with_profile_source(
+            &self,
+            authorization: Arc<LiveAuthorizationRuntime>,
+            profile_source: Arc<dyn ProfileSource>,
+        ) -> SharedLocalServiceConfig {
             SharedLocalServiceConfig {
                 endpoint: self.endpoint.clone(),
                 service_identity: Arc::clone(&self.service_identity),
                 authorization,
-                profile_source: Arc::new(self.root.settings()),
+                profile_source,
                 supervisor: ProfileSupervisorConfig::default(),
             }
         }
@@ -4715,22 +4791,10 @@ mod tests {
             }
             stream = fixture.connect("session-write-failure", 26) => stream,
         };
-        let database = wait_for_outcome_database(&fixture.root, "session-write-failure").await;
-        let fault_database = database.clone();
-        tokio::task::spawn_blocking(move || {
-            rusqlite::Connection::open(fault_database)
-                .unwrap()
-                .execute_batch(
-                    "CREATE TRIGGER fail_local_request_outcome_insert
-                     BEFORE INSERT ON daemon_local_request_outcome
-                     BEGIN
-                         SELECT RAISE(FAIL, 'injected outcome write failure');
-                     END;",
-                )
-                .unwrap();
-        })
-        .await
-        .unwrap();
+        crate::persistence::inject_local_request_outcome_write_failures(
+            "session-write-failure",
+            usize::from(super::OUTCOME_PERSIST_ATTEMPTS),
+        );
 
         assert!(matches!(
             request(&mut client, 26, "get_identity", b"{}").await,
@@ -4739,15 +4803,6 @@ mod tests {
                 ..
             }
         ));
-
-        tokio::task::spawn_blocking(move || {
-            rusqlite::Connection::open(database)
-                .unwrap()
-                .execute("DROP TRIGGER fail_local_request_outcome_insert", [])
-                .unwrap();
-        })
-        .await
-        .unwrap();
         assert!(matches!(
             request(&mut client, 26, "get_identity", b"{}").await,
             LocalServiceResponse::Success { .. }
@@ -5030,9 +5085,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn profile_suspension_closes_all_matching_grants_and_blocks_issuance() {
         let fixture = Fixture::new().await;
+        let (open_started_tx, open_started_rx) = mpsc::sync_channel(1);
+        let (open_release_tx, open_release_rx) = mpsc::channel();
+        let profile_source = Arc::new(BlockingProfileSource {
+            inner: fixture.root.settings(),
+            started: open_started_tx,
+            release: Mutex::new(open_release_rx),
+        });
+        let config = fixture.config_with_profile_source(
+            Arc::clone(&fixture.authorization),
+            profile_source,
+        );
+        let mut release = ProfileOpenRelease::new(open_release_tx);
         let (stop_tx, stop_rx) = oneshot::channel();
         let mut service = tokio::spawn(run_shared_local_service_until(
-            fixture.config(),
+            config,
             async move {
                 let _ = stop_rx.await;
             },
@@ -5045,6 +5112,10 @@ mod tests {
         };
         let mut second = fixture.connect("session-suspended", 42).await;
         let mut issuer = fixture.connect_issuer(43).await;
+        tokio::task::spawn_blocking(move || open_started_rx.recv_timeout(TEST_STARTUP_DEADLINE))
+            .await
+            .unwrap()
+            .expect("profile open did not reach the configured barrier");
 
         fixture
             .mutate_authorization(|store, now| {
@@ -5058,6 +5129,7 @@ mod tests {
         );
         assert!(first_closed.unwrap().is_err());
         assert!(second_closed.unwrap().is_err());
+        release.release();
         assert_eq!(
             issue_grant(&fixture, &mut issuer, 43, "session-suspended").await,
             Err(LocalServiceErrorCode::ProfileSuspended)
