@@ -16,6 +16,11 @@ GitHub-hosted runners own complete workspace, integration, packaging, and hosted
 evidence for this public repository. Merge gates grow with implemented capabilities
 and include the suites below once their corresponding surfaces exist.
 
+`Authorization store conformance` is the focused draft-capable gate for
+`Konclave.LocalAuthorizationStore`. It runs the crate's exact format, integration
+test, and Clippy commands before daemon, client, administration, or package
+integration relies on new store behavior.
+
 ### Release evidence
 
 A release records exact dependency versions, supported protocol versions, fixture
