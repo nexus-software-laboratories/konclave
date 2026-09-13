@@ -7,9 +7,10 @@ use rusqlite::{Connection, OpenFlags};
 use KonclaveClientLibrary::{check_relay_health, RelayInstallationConfig};
 use KonclaveLocalAuthorizationStore::{installation_fingerprint, LocalAuthorizationStore};
 use KonclaveLocalServiceTransport::{
-    connect_local_service, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
-    LocalServiceInstallation, ProfileAuthorization, LOCAL_SERVICE_INSTALLATION_FILE,
-    MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_SESSION_GRANTS,
+    connect_local_service, default_client_runtime_config_path, AuthorizationEvidenceKind,
+    AuthorizationEvidenceSet, CopilotServiceConfig, HarnessKind, LocalServiceInstallation,
+    ProfileAuthorization, LOCAL_SERVICE_INSTALLATION_FILE, MAX_GRANTS_PER_ISSUER,
+    MAX_GRANTS_PER_PROFILE, MAX_SESSION_GRANTS,
 };
 use KonclaveSecretStorage::{open_owner_protected_file, NativeWrappingKeyProvider};
 use KonclaveUserPresence::native_user_presence_supported;
@@ -22,18 +23,57 @@ const MAX_PROFILE_ROOT_ENTRIES: usize = 1024;
 const MAX_PLUGIN_MANIFEST_BYTES: u64 = 64 * 1024;
 
 pub(crate) async fn run(args: DoctorArgs) -> anyhow::Result<()> {
-    let profile_root = installation::resolve_profile_root(args.profile_root)?;
-    let install_root = match args.install_root {
+    let DoctorArgs {
+        profile_root,
+        install_root,
+        local_service_client_config,
+    } = args;
+    let profile_root = installation::resolve_profile_root(profile_root)?;
+    let install_root = match install_root {
         Some(root) if root.is_absolute() => root,
         Some(root) => std::env::current_dir()?.join(root),
         None => default_install_root()?,
     };
     let mut report = DoctorReport::default();
     check_installation_layout(&install_root, &mut report);
+    check_client_runtime_config(local_service_client_config, &mut report);
     let config = match installation::load(&profile_root) {
         Ok(Some(config)) => {
             report.pass("installation_config", "configuration is valid");
             Some(config)
+        }
+
+        fn check_client_runtime_config(path: Option<PathBuf>, report: &mut DoctorReport) {
+            let path = match path {
+                Some(path) if path.is_absolute() => path,
+                Some(_) => {
+                    report.fail(
+                        "client_runtime_config",
+                        "configuration override must be absolute",
+                    );
+                    return;
+                }
+                None => match default_client_runtime_config_path() {
+                    Ok(path) => path,
+                    Err(_) => {
+                        report.fail(
+                            "client_runtime_config",
+                            "canonical configuration location is unavailable",
+                        );
+                        return;
+                    }
+                },
+            };
+            let config = open_owner_protected_file(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|file| CopilotServiceConfig::from_reader(file).map_err(anyhow::Error::from));
+            match config {
+                Ok(_) => report.pass("client_runtime_config", "configuration is valid"),
+                Err(_) => report.fail(
+                    "client_runtime_config",
+                    "configuration is unavailable or invalid",
+                ),
+            }
         }
         Ok(None) => {
             report.fail("installation_config", "run `konclave init`");
@@ -480,6 +520,17 @@ mod tests {
         report.fail("three", "fail");
         assert_eq!(report.failures, 1);
         assert_eq!(report.checks.len(), 3);
+    }
+
+    #[test]
+    fn relative_client_configuration_override_fails_closed() {
+        let mut report = DoctorReport::default();
+        check_client_runtime_config(Some(PathBuf::from("relative.json")), &mut report);
+        assert!(report.checks.iter().any(|check| {
+            check.status == "FAIL"
+                && check.code == "client_runtime_config"
+                && check.message.contains("absolute")
+        }));
     }
 
     #[test]

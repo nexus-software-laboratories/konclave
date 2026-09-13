@@ -97,9 +97,32 @@ jobs:
           set -euo pipefail
           cargo fmt --package KonclaveLocalServiceTransport -- --check
           cargo test --locked --package KonclaveLocalServiceTransport
+          cargo fmt --package KonclaveCommandLine -- --check
+          cargo test \
+            --locked \
+            --package KonclaveCommandLine \
+            local_service_installation
+          cargo test \
+            --locked \
+            --package KonclaveCommandLine \
+            doctor
+          cargo check \
+            --locked \
+            --package KonclaveCommandLine \
+            --test cli
+          cargo check \
+            --locked \
+            --package KonclaveCommandLine \
+            --test authorization
           cargo clippy \
             --locked \
             --package KonclaveLocalServiceTransport \
+            --all-targets \
+            -- \
+            -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveCommandLine \
             --all-targets \
             -- \
             -D warnings

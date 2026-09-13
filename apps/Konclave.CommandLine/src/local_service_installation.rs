@@ -1,7 +1,8 @@
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Context as _;
+use anyhow::{bail, Context as _};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
@@ -10,11 +11,12 @@ use KonclaveLocalAuthorizationStore::{
     installation_fingerprint, LocalAuthorizationStore, UserPresenceCredentialRecord,
 };
 use KonclaveLocalServiceTransport::{
-    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy, CopilotServiceConfig,
-    HarnessKind, InstalledIssuerRegistration, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
-    LocalServiceEndpoint, LocalServiceIdentitySource, LocalServiceInstallation,
-    LocalServiceProfileCustody, ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE,
-    LOCAL_SERVICE_INSTALLATION_FILE,
+    default_client_runtime_config_path, reconcile_client_runtime_config,
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    ClientRuntimeConfigAction, CopilotServiceConfig, HarnessKind, InstalledIssuerRegistration,
+    IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LocalServiceEndpoint,
+    LocalServiceIdentitySource, LocalServiceInstallation, LocalServiceProfileCustody,
+    ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE, LOCAL_SERVICE_INSTALLATION_FILE,
 };
 use KonclaveSecretStorage::{
     create_or_verify_owner_protected_file, ensure_owner_protected_directory,
@@ -33,24 +35,37 @@ const ACCOUNT_ISSUER_KEY_FILE: &str = "account-issuer.key";
 const SERVICE_DIRECTORY: &str = "service";
 
 pub(crate) struct InstalledLocalService {
-    pub(crate) extension_root: PathBuf,
+    pub(crate) client_config_path: PathBuf,
 }
 
 pub(crate) fn install(
     profile_root: &Path,
-    extension_root: Option<PathBuf>,
+    legacy_extension_root: Option<PathBuf>,
+    client_config_path: Option<PathBuf>,
     endpoint_override: Option<&str>,
     service_identity_file: Option<PathBuf>,
     profile_key_directory: Option<PathBuf>,
     authorization_policy: AuthorizationPolicy,
 ) -> anyhow::Result<InstalledLocalService> {
+    let client_config_path = match client_config_path {
+        Some(path) => require_absolute_path(path, "client configuration path")?,
+        None => default_client_runtime_config_path()
+            .context("resolving canonical client configuration path")?,
+    };
+    let legacy_extension_root = match legacy_extension_root {
+        Some(path) => Some(absolute_path(path)?),
+        None => default_legacy_extension_root(),
+    };
     install_with(
         &NativeServiceIdentityStore,
-        profile_root,
-        extension_root,
-        endpoint_override,
-        service_identity_file,
-        profile_key_directory,
+        LocalServiceInstallRequest {
+            profile_root,
+            legacy_extension_root,
+            client_config_path,
+            endpoint_override,
+            service_identity_file,
+            profile_key_directory,
+        },
         authorization_policy,
     )
 }
@@ -72,15 +87,28 @@ impl ServiceIdentityStore for NativeServiceIdentityStore {
     }
 }
 
-fn install_with(
-    identity_store: &impl ServiceIdentityStore,
-    profile_root: &Path,
-    extension_root: Option<PathBuf>,
-    endpoint_override: Option<&str>,
+struct LocalServiceInstallRequest<'a> {
+    profile_root: &'a Path,
+    legacy_extension_root: Option<PathBuf>,
+    client_config_path: PathBuf,
+    endpoint_override: Option<&'a str>,
     service_identity_file: Option<PathBuf>,
     profile_key_directory: Option<PathBuf>,
+}
+
+fn install_with(
+    identity_store: &impl ServiceIdentityStore,
+    request: LocalServiceInstallRequest<'_>,
     authorization_policy: AuthorizationPolicy,
 ) -> anyhow::Result<InstalledLocalService> {
+    let LocalServiceInstallRequest {
+        profile_root,
+        legacy_extension_root,
+        client_config_path,
+        endpoint_override,
+        service_identity_file,
+        profile_key_directory,
+    } = request;
     let service_root = profile_root
         .parent()
         .context("profile root has no installation parent")?
@@ -188,9 +216,6 @@ fn install_with(
     create_or_verify_owner_protected_file(&installation_path, &service_config)
         .context("persisting local-service installation")?;
 
-    let extension_root = extension_root.map_or_else(default_extension_root, absolute_path)?;
-    ensure_owner_protected_directory(&extension_root)
-        .context("creating owner-protected Copilot extension root")?;
     let client = CopilotServiceConfig::new(
         endpoint,
         issuer_key_id,
@@ -209,13 +234,32 @@ fn install_with(
     client
         .write_to(&mut client_config)
         .context("encoding Copilot local-service configuration")?;
-    create_or_verify_owner_protected_file(
-        &extension_root.join(COPILOT_SERVICE_CONFIG_FILE),
-        &client_config,
-    )
-    .context("persisting Copilot local-service configuration")?;
+    let client_config_parent = client_config_path
+        .parent()
+        .context("client configuration path has no parent")?;
+    ensure_owner_protected_directory(client_config_parent)
+        .context("protecting canonical client configuration root")?;
+    let canonical = load_optional_client_config(&client_config_path)?;
+    let legacy_client_config_path = legacy_extension_root
+        .map(|root| root.join(COPILOT_SERVICE_CONFIG_FILE))
+        .filter(|path| path != &client_config_path);
+    let legacy = legacy_client_config_path
+        .as_deref()
+        .map(load_optional_legacy_client_config)
+        .transpose()?
+        .flatten();
+    let action =
+        reconcile_client_runtime_config(&client, canonical.as_ref(), legacy.as_ref())
+            .context("reconciling installed client configuration")?;
+    if matches!(
+        action,
+        ClientRuntimeConfigAction::CreateCanonical | ClientRuntimeConfigAction::MigrateLegacy
+    ) {
+        create_or_verify_owner_protected_file(&client_config_path, &client_config)
+            .context("persisting canonical client configuration")?;
+    }
 
-    Ok(InstalledLocalService { extension_root })
+    Ok(InstalledLocalService { client_config_path })
 }
 
 fn policy_requires_user_presence(policy: &AuthorizationPolicy) -> bool {
@@ -336,14 +380,54 @@ fn default_endpoint(
     .context("building Unix local-service endpoint")
 }
 
-fn default_extension_root() -> anyhow::Result<PathBuf> {
+fn default_legacy_extension_root() -> Option<PathBuf> {
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .filter(|value| !value.is_empty())
-        .context("user home is unavailable")?;
-    Ok(PathBuf::from(home)
+        .filter(|value| !value.is_empty())?;
+    Some(
+        PathBuf::from(home)
         .join(".copilot")
         .join("extensions")
-        .join("konclave"))
+            .join("konclave"),
+    )
+}
+
+fn load_optional_legacy_client_config(
+    path: &Path,
+) -> anyhow::Result<Option<CopilotServiceConfig>> {
+    let parent = path
+        .parent()
+        .context("legacy client configuration path has no parent")?;
+    match std::fs::symlink_metadata(parent) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("inspecting legacy client configuration root");
+        }
+        Ok(_) => {}
+    }
+    ensure_owner_protected_directory(parent)
+        .context("validating legacy client configuration root")?;
+    load_optional_client_config(path)
+}
+
+fn load_optional_client_config(path: &Path) -> anyhow::Result<Option<CopilotServiceConfig>> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("inspecting installed client configuration"),
+        Ok(_) => {
+            let file = open_owner_protected_file(path)
+                .context("opening installed client configuration")?;
+            CopilotServiceConfig::from_reader(file)
+                .map(Some)
+                .context("validating installed client configuration")
+        }
+    }
+}
+
+fn require_absolute_path(path: PathBuf, what: &str) -> anyhow::Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("{what} must be absolute");
+    }
+    Ok(path)
 }
 
 fn absolute_path(path: PathBuf) -> anyhow::Result<PathBuf> {
@@ -393,7 +477,11 @@ mod tests {
     fn repeated_install_is_exact_and_conflicting_endpoint_fails() {
         let root = tempfile::tempdir().unwrap();
         let profile_root = root.path().join("profiles");
-        let extension_root = root.path().join("extension");
+        let legacy_extension_root = root.path().join("extension");
+        let client_config_path = root
+            .path()
+            .join("client-config")
+            .join(COPILOT_SERVICE_CONFIG_FILE);
         std::fs::create_dir(&profile_root).unwrap();
         let endpoint = if cfg!(windows) {
             format!(r"\\.\pipe\konclave-install-test-{}", std::process::id())
@@ -409,14 +497,20 @@ mod tests {
 
         install_with(
             &store,
-            &profile_root,
-            Some(extension_root.clone()),
-            Some(&endpoint),
-            None,
-            Some(profile_keys.clone()),
+            LocalServiceInstallRequest {
+                profile_root: &profile_root,
+                legacy_extension_root: Some(legacy_extension_root.clone()),
+                client_config_path: client_config_path.clone(),
+                endpoint_override: Some(&endpoint),
+                service_identity_file: None,
+                profile_key_directory: Some(profile_keys.clone()),
+            },
             AuthorizationPolicy::account_trusted(),
         )
         .unwrap();
+        assert!(!legacy_extension_root
+            .join(COPILOT_SERVICE_CONFIG_FILE)
+            .exists());
         let service_path = root
             .path()
             .join(SERVICE_DIRECTORY)
@@ -431,11 +525,14 @@ mod tests {
         .unwrap();
         install_with(
             &store,
-            &profile_root,
-            Some(extension_root.clone()),
-            Some(&endpoint),
-            None,
-            Some(profile_keys.clone()),
+            LocalServiceInstallRequest {
+                profile_root: &profile_root,
+                legacy_extension_root: Some(legacy_extension_root.clone()),
+                client_config_path: client_config_path.clone(),
+                endpoint_override: Some(&endpoint),
+                service_identity_file: None,
+                profile_key_directory: Some(profile_keys.clone()),
+            },
             AuthorizationPolicy::account_trusted(),
         )
         .unwrap();
@@ -462,7 +559,7 @@ mod tests {
             .profiles()
             .permits(&ServiceProfileId::parse("session-example").unwrap()));
         let client: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(extension_root.join(COPILOT_SERVICE_CONFIG_FILE)).unwrap(),
+            &std::fs::read(&client_config_path).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -486,14 +583,112 @@ mod tests {
         };
         assert!(install_with(
             &store,
-            &profile_root,
-            Some(extension_root),
-            Some(&conflict),
-            None,
-            Some(root.path().join("profile-keys")),
+            LocalServiceInstallRequest {
+                profile_root: &profile_root,
+                legacy_extension_root: Some(legacy_extension_root),
+                client_config_path,
+                endpoint_override: Some(&conflict),
+                service_identity_file: None,
+                profile_key_directory: Some(root.path().join("profile-keys")),
+            },
             AuthorizationPolicy::account_trusted(),
         )
         .is_err());
         assert_eq!(std::fs::read(service_path).unwrap(), first_service);
+    }
+
+    #[test]
+    fn equal_legacy_configuration_migrates_and_conflicts_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        let legacy_extension_root = root.path().join("legacy-extension");
+        let conflicting_extension_root = root.path().join("conflicting-extension");
+        let client_config_path = root
+            .path()
+            .join("client-config")
+            .join(COPILOT_SERVICE_CONFIG_FILE);
+        std::fs::create_dir(&profile_root).unwrap();
+        let endpoint = if cfg!(windows) {
+            format!(
+                r"\\.\pipe\konclave-migration-test-{}",
+                std::process::id()
+            )
+        } else {
+            root.path()
+                .join("service.sock")
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let profile_keys = root.path().join("profile-keys");
+        let store = MemoryIdentityStore::default();
+
+        install_with(
+            &store,
+            LocalServiceInstallRequest {
+                profile_root: &profile_root,
+                legacy_extension_root: Some(legacy_extension_root.clone()),
+                client_config_path: client_config_path.clone(),
+                endpoint_override: Some(&endpoint),
+                service_identity_file: None,
+                profile_key_directory: Some(profile_keys.clone()),
+            },
+            AuthorizationPolicy::account_trusted(),
+        )
+        .unwrap();
+        let expected = std::fs::read(&client_config_path).unwrap();
+        std::fs::remove_file(&client_config_path).unwrap();
+        ensure_owner_protected_directory(&legacy_extension_root).unwrap();
+        let legacy_path = legacy_extension_root.join(COPILOT_SERVICE_CONFIG_FILE);
+        create_or_verify_owner_protected_file(&legacy_path, &expected).unwrap();
+
+        install_with(
+            &store,
+            LocalServiceInstallRequest {
+                profile_root: &profile_root,
+                legacy_extension_root: Some(legacy_extension_root),
+                client_config_path: client_config_path.clone(),
+                endpoint_override: Some(&endpoint),
+                service_identity_file: None,
+                profile_key_directory: Some(profile_keys.clone()),
+            },
+            AuthorizationPolicy::account_trusted(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&client_config_path).unwrap(), expected);
+        assert_eq!(std::fs::read(legacy_path).unwrap(), expected);
+
+        let mut conflict: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+        conflict["endpoint"] = serde_json::json!(if cfg!(windows) {
+            format!(
+                r"\\.\pipe\konclave-migration-conflict-{}",
+                std::process::id()
+            )
+        } else {
+            root.path()
+                .join("other.sock")
+                .to_str()
+                .unwrap()
+                .to_string()
+        });
+        ensure_owner_protected_directory(&conflicting_extension_root).unwrap();
+        create_or_verify_owner_protected_file(
+            &conflicting_extension_root.join(COPILOT_SERVICE_CONFIG_FILE),
+            conflict.to_string().as_bytes(),
+        )
+        .unwrap();
+        assert!(install_with(
+            &store,
+            LocalServiceInstallRequest {
+                profile_root: &profile_root,
+                legacy_extension_root: Some(conflicting_extension_root),
+                client_config_path,
+                endpoint_override: Some(&endpoint),
+                service_identity_file: None,
+                profile_key_directory: Some(profile_keys),
+            },
+            AuthorizationPolicy::account_trusted(),
+        )
+        .is_err());
     }
 }
