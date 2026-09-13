@@ -7,6 +7,7 @@ use KonclaveLocalAuthorizationStore::{
     AuthorizationGeneration, AuthorizationIssuerRecord, AuthorizationMutation,
     AuthorizationSnapshot, GrantIssuanceKey, InstallationFingerprint, IssuerAvailability,
     LocalAuthorizationStore, LocalAuthorizationStoreError, MutationEffect,
+    UserPresenceCredentialRecord,
 };
 use KonclaveLocalServiceTransport::{
     AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
@@ -16,6 +17,7 @@ use KonclaveLocalServiceTransport::{
     ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
     SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
 };
+use KonclaveUserPresence::NativeWebAuthnCredential;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, watch};
 
@@ -50,6 +52,7 @@ struct AuthorizationProjection {
     policy: AuthorizationPolicy,
     issuers: Vec<AuthorizationIssuerRecord>,
     suspended_profiles: Vec<ServiceProfileId>,
+    user_presence_credential: Option<UserPresenceCredentialRecord>,
     failure: Option<AuthorizationRuntimeError>,
 }
 
@@ -71,10 +74,43 @@ pub(crate) struct AccountTrustedGrantRequest {
     pub(crate) expires_at_unix_milliseconds: u64,
 }
 
+pub(crate) struct UserPresenceGrantRequest {
+    pub(crate) issuer_key_id: IssuerKeyId,
+    pub(crate) issuer_key_version: IssuerKeyVersion,
+    pub(crate) request_key: GrantIssuanceKey,
+    pub(crate) grant_id: SessionGrantId,
+    pub(crate) profile: ServiceProfileId,
+    pub(crate) session_public_key: Ed25519PublicKey,
+    pub(crate) harness: HarnessKind,
+    pub(crate) policy_version: AuthorizationPolicyVersion,
+    pub(crate) evidence: AuthorizationEvidenceSet,
+    pub(crate) capabilities: SessionCapabilities,
+    pub(crate) expected_credential: UserPresenceCredentialRecord,
+    pub(crate) updated_credential: NativeWebAuthnCredential,
+    pub(crate) issued_at_unix_milliseconds: u64,
+    pub(crate) expires_at_unix_milliseconds: u64,
+}
+
+struct GrantRequest {
+    issuer_key_id: IssuerKeyId,
+    issuer_key_version: IssuerKeyVersion,
+    request_key: GrantIssuanceKey,
+    grant_id: Option<SessionGrantId>,
+    profile: ServiceProfileId,
+    session_public_key: Ed25519PublicKey,
+    harness: HarnessKind,
+    evidence: AuthorizationEvidenceSet,
+    policy_version: Option<AuthorizationPolicyVersion>,
+    capabilities: SessionCapabilities,
+    issued_at_unix_milliseconds: u64,
+    expires_at_unix_milliseconds: u64,
+}
+
 pub(crate) struct LiveAuthorizationRuntime {
     store: Arc<LocalAuthorizationStore>,
     registry: InMemorySessionAuthorizationRegistry,
     projection: RwLock<AuthorizationProjection>,
+    installation_fingerprint: InstallationFingerprint,
     operations: Mutex<()>,
     status: watch::Sender<AuthorizationRuntimeStatus>,
     reload_requested: Notify,
@@ -106,6 +142,7 @@ impl LiveAuthorizationRuntime {
         snapshot: AuthorizationSnapshot,
         now_unix_milliseconds: u64,
     ) -> Result<Arc<Self>, AuthorizationRuntimeError> {
+        let installation_fingerprint = store.installation_fingerprint();
         let registry = InMemorySessionAuthorizationRegistry::new();
         replace_registry(&registry, &snapshot, now_unix_milliseconds)?;
         let generation = snapshot.generation();
@@ -118,8 +155,10 @@ impl LiveAuthorizationRuntime {
                 policy: snapshot.policy().clone(),
                 issuers: snapshot.issuers().to_vec(),
                 suspended_profiles: snapshot.suspended_profiles().to_vec(),
+                user_presence_credential: snapshot.user_presence_credential().cloned(),
                 failure: None,
             }),
+            installation_fingerprint,
             operations: Mutex::new(()),
             status,
             reload_requested: Notify::new(),
@@ -221,9 +260,208 @@ impl LiveAuthorizationRuntime {
             issued_at_unix_milliseconds,
             expires_at_unix_milliseconds,
         } = request;
-        let request_key = GrantIssuanceKey::new(issuer_client_instance, request_id);
         let evidence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
             .map_err(|_| LocalServiceErrorCode::Internal)?;
+        self.issue_grant_locked(GrantRequest {
+            issuer_key_id,
+            issuer_key_version,
+            request_key: GrantIssuanceKey::new(issuer_client_instance, request_id),
+            grant_id: None,
+            profile,
+            session_public_key,
+            harness,
+            evidence,
+            policy_version: None,
+            capabilities: SessionCapabilities::ALL,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+        })
+        .await
+    }
+
+    pub(crate) fn user_presence_context(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+        profile: &ServiceProfileId,
+        harness: HarnessKind,
+    ) -> Result<
+        (
+            InstallationFingerprint,
+            AuthorizationPolicyVersion,
+            AuthorizationEvidenceSet,
+            UserPresenceCredentialRecord,
+        ),
+        LocalServiceErrorCode,
+    > {
+        let presence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence])
+            .map_err(|_| LocalServiceErrorCode::Internal)?;
+        let (context, evidence) = match self.issuance_context(
+            issuer_key_id,
+            issuer_key_version,
+            profile,
+            harness,
+            presence,
+        ) {
+            Ok(context) => (context, presence),
+            Err(LocalServiceErrorCode::RequiredEvidenceUnavailable) => {
+                let combined = AuthorizationEvidenceSet::new([
+                    AuthorizationEvidenceKind::AccountTrusted,
+                    AuthorizationEvidenceKind::UserPresence,
+                ])
+                .map_err(|_| LocalServiceErrorCode::Internal)?;
+                (
+                    self.issuance_context(
+                        issuer_key_id,
+                        issuer_key_version,
+                        profile,
+                        harness,
+                        combined,
+                    )?,
+                    combined,
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        let projection = read(&self.projection);
+        let credential = projection
+            .user_presence_credential
+            .clone()
+            .ok_or(LocalServiceErrorCode::RequiredEvidenceUnavailable)?;
+        Ok((
+            self.installation_fingerprint,
+            context.policy_version,
+            evidence,
+            credential,
+        ))
+    }
+
+    pub(crate) async fn issue_user_presence_grant(
+        &self,
+        request: UserPresenceGrantRequest,
+    ) -> Result<SessionGrant, LocalServiceErrorCode> {
+        let _operation = self.operations.lock().await;
+        let UserPresenceGrantRequest {
+            issuer_key_id,
+            issuer_key_version,
+            request_key,
+            grant_id,
+            profile,
+            session_public_key,
+            harness,
+            policy_version,
+            evidence,
+            capabilities,
+            expected_credential,
+            updated_credential,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+        } = request;
+        let updated_record = UserPresenceCredentialRecord::from_document(
+            updated_credential
+                .to_bytes()
+                .map_err(|_| LocalServiceErrorCode::Internal)?,
+        )
+        .map_err(|_| LocalServiceErrorCode::Internal)?;
+        let candidate = SessionGrant::new(SessionGrantClaims {
+            grant_id,
+            issuer_key_id,
+            issuer_key_version,
+            profile: profile.clone(),
+            session_public_key,
+            harness,
+            evidence,
+            policy_version,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+            capabilities,
+        })
+        .map_err(|_| LocalServiceErrorCode::Internal)?;
+        let store = Arc::clone(&self.store);
+        let mutation = tokio::task::spawn_blocking(move || {
+            store.update_user_presence_credential_for_grant(
+                &expected_credential,
+                &updated_record,
+                &candidate,
+                issued_at_unix_milliseconds,
+            )
+        })
+        .await
+        .map_err(|_| {
+            self.fail_closed(AuthorizationRuntimeError::BlockingOperationFailed);
+            LocalServiceErrorCode::Internal
+        })?
+        .map_err(|error| self.map_mutation_error(error))?;
+        self.refresh_after_mutation(mutation, issued_at_unix_milliseconds)
+            .await
+            .map_err(|_| LocalServiceErrorCode::Internal)?;
+        self.issue_grant_locked(GrantRequest {
+            issuer_key_id,
+            issuer_key_version,
+            request_key,
+            grant_id: Some(grant_id),
+            profile,
+            session_public_key,
+            harness,
+            evidence,
+            policy_version: Some(policy_version),
+            capabilities,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+        })
+        .await
+    }
+
+    pub(crate) async fn recover_user_presence_grant(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+        request_key: GrantIssuanceKey,
+        now_unix_milliseconds: u64,
+    ) -> Result<Option<SessionGrant>, LocalServiceErrorCode> {
+        let _operation = self.operations.lock().await;
+        let store = Arc::clone(&self.store);
+        let grant = tokio::task::spawn_blocking(move || {
+            store.active_grant_for_request(
+                issuer_key_id,
+                issuer_key_version,
+                request_key,
+                now_unix_milliseconds,
+            )
+        })
+        .await
+        .map_err(|_| {
+            self.fail_closed(AuthorizationRuntimeError::BlockingOperationFailed);
+            LocalServiceErrorCode::Internal
+        })?
+        .map_err(|error| self.map_mutation_error(error))?;
+        let high_water = self
+            .current_generation()
+            .ok_or(LocalServiceErrorCode::Internal)?;
+        self.refresh_locked(now_unix_milliseconds, high_water)
+            .await
+            .map_err(|_| LocalServiceErrorCode::Internal)?;
+        Ok(grant)
+    }
+
+    async fn issue_grant_locked(
+        &self,
+        request: GrantRequest,
+    ) -> Result<SessionGrant, LocalServiceErrorCode> {
+        let GrantRequest {
+            issuer_key_id,
+            issuer_key_version,
+            request_key,
+            grant_id,
+            profile,
+            session_public_key,
+            harness,
+            evidence,
+            policy_version,
+            capabilities,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+        } = request;
         let mut context = self.issuance_context(
             issuer_key_id,
             issuer_key_version,
@@ -231,13 +469,26 @@ impl LiveAuthorizationRuntime {
             harness,
             evidence,
         )?;
-
-        for _ in 0..GRANT_IDENTIFIER_ATTEMPTS {
-            let mut identifier = [0_u8; 16];
-            KonclaveCryptographicCore::fill_random(&mut identifier)
-                .map_err(|_| LocalServiceErrorCode::Internal)?;
+        if policy_version.is_some_and(|expected| expected != context.policy_version) {
+            return Err(LocalServiceErrorCode::Conflict);
+        }
+        let attempts = if grant_id.is_some() {
+            1
+        } else {
+            GRANT_IDENTIFIER_ATTEMPTS
+        };
+        for _ in 0..attempts {
+            let grant_id = match grant_id {
+                Some(grant_id) => grant_id,
+                None => {
+                    let mut identifier = [0_u8; 16];
+                    KonclaveCryptographicCore::fill_random(&mut identifier)
+                        .map_err(|_| LocalServiceErrorCode::Internal)?;
+                    SessionGrantId::from_bytes(identifier)
+                }
+            };
             let grant = SessionGrant::new(SessionGrantClaims {
-                grant_id: SessionGrantId::from_bytes(identifier),
+                grant_id,
                 issuer_key_id,
                 issuer_key_version,
                 profile: profile.clone(),
@@ -247,7 +498,7 @@ impl LiveAuthorizationRuntime {
                 policy_version: context.policy_version,
                 issued_at_unix_milliseconds,
                 expires_at_unix_milliseconds,
-                capabilities: SessionCapabilities::ALL,
+                capabilities,
             })
             .map_err(|_| LocalServiceErrorCode::Internal)?;
             let store = Arc::clone(&self.store);
@@ -279,6 +530,9 @@ impl LiveAuthorizationRuntime {
                         harness,
                         evidence,
                     )?;
+                    if policy_version.is_some_and(|expected| expected != context.policy_version) {
+                        return Err(LocalServiceErrorCode::Conflict);
+                    }
                 }
                 Err(error) => {
                     if should_refresh_after_mutation_error(error) {
@@ -403,6 +657,7 @@ impl LiveAuthorizationRuntime {
         projection.policy = snapshot.policy().clone();
         projection.issuers = snapshot.issuers().to_vec();
         projection.suspended_profiles = snapshot.suspended_profiles().to_vec();
+        projection.user_presence_credential = snapshot.user_presence_credential().cloned();
         projection.failure = None;
         let generation = projection.generation;
         drop(projection);

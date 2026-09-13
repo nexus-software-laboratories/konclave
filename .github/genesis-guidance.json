@@ -145,6 +145,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0020-native-webauthn-user-presence.md",
+        "title": "ADR 0020: Native WebAuthn user presence",
+        "section": "Architecture",
+        "order": 200,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

@@ -31,6 +31,15 @@ authorization boundaries. It runs Generic quota and issuer-state store coverage,
 live daemon disablement, transport coverage, and packaged-acceptance compilation
 before packaged daemon or skill integration relies on that contract.
 
+`User presence conformance` is the focused draft-capable gate for native
+UserPresence authorization. It runs the pure request-binding and lifecycle tables,
+WebAuthn verification vectors, exact schema-1-to-2 migration and credential-store
+tests, CLI policy/helper bounds, local-service transport, daemon issuance/restart
+recovery, TypeScript policy selection, bounded native-helper process behavior, exact
+completion retry, extension coverage, compilation, and plugin package verification.
+Its relevance includes every Rust, sidecar, extension, workflow, and release-package
+surface that can alter this evidence path.
+
 ### Release evidence
 
 A release records exact dependency versions, supported protocol versions, fixture
@@ -160,6 +169,15 @@ crash or excessive-allocation case becomes a permanent regression input.
 - authenticate protocol-v2 issuer and session roles with exact key versions, exact
   profile/session-key grants, policy and evidence claims, fresh challenges, pinned
   service identity, and uniform signed rejection;
+- verify UserPresence registration and assertion challenge, relying party, origin,
+  credential, signature, UP/UV flags, user handle, and counter state; bind the exact
+  installation, service, issuer connection and request, policy, profile, ephemeral
+  session key, harness, evidence, capabilities, and expiries; require the session-key
+  signature; recover only an already-issued exact completion; reject replay,
+  substitution, stale challenges, changed assertions, unsupported platforms, and
+  silent AccountTrusted fallback; and complete overlapping valid assertions out of
+  order to prove stale credential state cannot regress the durable counter or issue a
+  second grant;
 - refuse startup without a valid installation-bound authorization store, preserve
   grants across service restart, and observe exact revocation, profile suspension,
   issuer disablement, policy invalidation, and reload failure within the documented

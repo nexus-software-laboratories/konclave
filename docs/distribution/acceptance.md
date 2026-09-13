@@ -13,6 +13,9 @@ The job proves:
   endpoint-bound enrollment source without printing or passing the raw credential;
 - one `init` command configures all later session profiles without per-session relay
   variables;
+- every extracted client CLI enforces the native UserPresence helper's input bound,
+  and Linux/macOS candidates reject UserPresence initialization before creating
+  profile state;
 - `doctor` recognizes the extracted daemon and plugin and reaches the relay through a
   locally generated certificate chain trusted by the client process;
 - one packaged shared-service process hosts independently enrolled profiles and the
@@ -65,7 +68,9 @@ Because this is the first packaged prerelease, no earlier release exists for a
 cross-version schema migration. The job covers replacement-install mechanics by
 restarting a durable profile through a second clean extraction. It covers the
 documented archive uninstall path by removing both installation roots while
-confirming the separate profile state remains.
+confirming the separate profile state remains. The focused UserPresence component
+gate separately constructs an exact authorization-store schema-1 database and proves
+its transactional schema-2 migration preserves live state.
 
 ## Proprietary Copilot boundary
 

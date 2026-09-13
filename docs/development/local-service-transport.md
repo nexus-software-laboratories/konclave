@@ -24,6 +24,27 @@ isolate mutually hostile same-account processes. Exact grants add profile bindin
 expiry, auditability, quotas, and connection containment without overstating that
 boundary.
 
+`UserPresence` uses that issuer only to authenticate
+`authorization.user_presence.begin`. The service returns one bounded WebAuthn request
+whose random challenge represents a canonical binding of the installation, service,
+issuer connection and request, policy, exact profile, ephemeral session public key,
+harness, evidence, capabilities, enrolled credential, and finite timestamps. The
+client invokes only the absolute `userPresenceHelper` path in the owner-protected
+installation sidecar, without a shell. The helper returns a standard native assertion;
+the daemon independently verifies challenge, relying party, origin, credential,
+signature, user-presence and user-verification flags, user handle, and counter state.
+The ephemeral session key signs the same canonical binding before grant issuance.
+The verified credential update compares the complete begin-time record with current
+durable state inside the write transaction. Overlapping ceremonies cannot overwrite a
+newer counter; a stale completion returns conflict before grant issuance.
+
+Completion normally occurs on the issuer connection that received the challenge. If
+the service durably issued the grant but the response was lost, the client reconnects
+with the same issuer client instance, completion request identifier, binding,
+signature, and assertion. The service may return only that already-active grant;
+changed completion bytes cannot mint replacement authority. A disconnect before
+durable issuance requires a new ceremony.
+
 `KonclaveCryptographicCore::LocalServiceIdentity` generates the key pair through the
 project's configured provider and signs already-canonical bytes. It is deliberately
 not `Clone`, not `Debug`, and not serializable, so the private key cannot be copied by
@@ -53,6 +74,12 @@ empty, corrupt, unsafe, mismatched, unsupported, or process-lifetime rolled-back
 state prevents endpoint binding. The endpoint, service identity, profile root, and
 custody configuration remain installation-owned and are never reloaded from mutable
 authorization state.
+
+An exact schema-1 database migrates to schema 2 inside one immediate transaction.
+The migration preserves every existing authorization row, adds empty credential
+reservation and active-credential tables, widens the closed audit-kind range, and
+updates the version last. A modified schema-1 shape, unknown version, or failed
+transaction is rejected without partial publication.
 
 One validated durable snapshot supplies the issuer projection, active grants,
 suspensions, generation, and effective evidence policy. Publication replaces the
@@ -91,12 +118,14 @@ commands inspect bounded state, revoke one exact grant, suspend or resume one ex
 profile, register a strictly newer issuer key version, enable, disable, or remove one
 exact issuer key version, and replace the evidence policy with a strictly newer
 version. Rotation registers and activates the replacement public key before clients
-switch credentials and the prior key is disabled or removed. A policy that omits
-AccountTrusted cannot be installed through this owner-account CLI. Stronger policy
-administration remains unavailable until a provider-authenticated administrative or
-recovery boundary exists. These commands mutate the owner-protected authorization
-database directly; they are not local-service operations available to agent or model
-tools.
+switch credentials and the prior key is disabled or removed.
+`authorization replace-policy` cannot remove AccountTrusted through this
+owner-account boundary. A fresh Windows `init --authorization-policy user-presence
+--allow-no-recovery` performs native registration and confirmation before publishing
+the installation, but the first delivery exposes no in-place enrollment or
+presence-authorized downgrade command. These commands mutate the owner-protected
+authorization database directly; they are not local-service operations available to
+agent or model tools.
 
 Examples:
 

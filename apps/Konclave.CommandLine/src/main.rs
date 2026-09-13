@@ -7,6 +7,7 @@ mod installation;
 mod local_service_installation;
 mod policy;
 mod relay_bootstrap;
+mod user_presence;
 
 use std::process::ExitCode;
 
@@ -33,6 +34,7 @@ async fn run() -> anyhow::Result<()> {
         Command::Doctor(args) => doctor::run(args).await?,
         Command::Authorization(args) => authorization::run(args)?,
         Command::Policy(args) => policy::run(args)?,
+        Command::UserPresenceHelper(args) => user_presence::run(args)?,
     }
     Ok(())
 }

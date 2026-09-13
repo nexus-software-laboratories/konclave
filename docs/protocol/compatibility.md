@@ -87,6 +87,15 @@ pre-release cut rather than a v1 compatibility mode. A supported release require
 journaled migration and rollback machinery defined by ADR 0009 before changing this
 schema again.
 
+The separate mutable local-authorization database advances from schema 1 to schema 2
+through a one-way immediate transaction. Migration is permitted only when the
+complete schema-1 object set and immutable installation fingerprint validate
+exactly. It preserves policy, issuers, suspensions, grants, identifier reservations,
+and audit rows; adds empty UserPresence credential tables; recreates the audit table
+with append-only event kinds `12` through `15`; and updates the schema version last.
+Unknown versions and modified version-1 shapes fail closed. This storage migration
+does not add a protocol-v1 negotiation path.
+
 ### Harness-adapter API
 
 Harness-adapter API v1 is the typed claim, acknowledge, release, heartbeat, and status

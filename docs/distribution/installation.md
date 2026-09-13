@@ -42,6 +42,10 @@ Copilot discovers user-scoped extensions under
 `~/.copilot/extensions/konclave/`. A complete installation contains `extension.mjs`, the reusable `client.mjs`, and the
 one-shot `generic.mjs` fallback plus the installer-created `konclave.service.json`
 sidecar. No native executable lives under the extension directory.
+UserPresence sidecars record the absolute packaged CLI path as
+`userPresenceHelper`; clients never discover or launch an arbitrary executable.
+AccountTrusted-only sidecars omit that field, preserving the prior document exactly,
+but cannot satisfy UserPresence.
 
 The [Local Copilot demo](local-demo.md) performs this installation atomically on
 Windows and enables experimental extension support when necessary. Direct
@@ -84,22 +88,54 @@ per-profile wrapping-key custody are also explicit:
   --local-service-profile-key-directory /run/secrets/konclave-profile-keys
 ```
 
+On supported Windows systems, a fresh installation can require native user
+verification for every new client process:
+
+```powershell
+<install-root>\bin\konclave.exe init --relay-endpoint https://relay.example.com --authorization-policy user-presence --allow-no-recovery
+```
+
+The installer performs one Windows WebAuthn registration and one confirmation
+assertion before publishing installation state. Windows Hello or a compatible FIDO2
+authenticator must satisfy `userVerification: required`. Each later process receives
+one Windows-owned modal ceremony for its exact profile, ephemeral session public key,
+harness, capability set, policy, and finite grant binding. The broker identifies the
+Konclave relying party but does not display every bound field. Linux and macOS reject
+this policy as unavailable and do not fall back to AccountTrusted. The explicit flag
+acknowledges that losing every enrolled credential can strand a no-recovery
+installation.
+
 `init` creates or verifies one service identity, one AccountTrusted issuer identity,
 the finite issuer registration, the explicit evidence policy, the owner-protected
 `konclave-local-authorization.sqlite3` authority database, the immutable service
-configuration, and the extension sidecar. A Copilot process uses the issuer only to
-obtain a finite exact-profile grant for a memory-only session key. The issuer cannot
-invoke profile operations directly. The authority database is created before the
-immutable installation record is published; once that record exists, a missing or
-empty authority database fails closed instead of being recreated. Repeating the exact
-command is idempotent; a conflicting endpoint, policy, custody source, or existing
-file fails without replacement.
+configuration, and the extension sidecar. Under UserPresence, the AccountTrusted
+issuer authenticates only the challenge request; it cannot satisfy the policy without
+the independently verified assertion. A Copilot process obtains a finite
+exact-profile grant for a memory-only session key, and the issuer cannot invoke
+profile operations directly. The authority database is created before the immutable
+installation record is published; once that record exists, a missing or empty
+authority database fails closed instead of being recreated. Repeating the exact
+command is idempotent and does not repeat enrollment when the credential is already
+valid; a conflicting endpoint, policy, custody source, or existing file fails without
+replacement.
+
+The first UserPresence delivery supports fresh setup only. It does not expose an
+in-place enrollment or downgrade-authorized administration flow for an existing
+AccountTrusted installation.
 
 Use `konclave authorization status` to inspect the current generation and bounded
 counts. Operator-only subcommands can revoke an exact grant, suspend or resume a
 profile, register a higher issuer key version, enable or disable an issuer, remove an
 issuer, or replace the evidence policy. These are direct owner-authorized state
 changes and are not exposed as agent tools.
+
+`konclave doctor` reports the effective authorization path separately from provider
+configuration. A UserPresence-only installation passes that configuration check only
+when the credential is enrolled, the challenge issuer is enabled, and the CLI
+contains the native Windows adapter. It does not trigger a ceremony and therefore
+does not claim that Windows WebAuthn or a UV-capable authenticator is currently
+available. Unsupported platforms report a finite failing provider check rather than
+describing the policy as AccountTrusted.
 
 ## Run as a service
 
@@ -122,13 +158,18 @@ existing conflicting definition.
 ## Upgrade and rollback
 
 The current unsigned prerelease has no supported external installation base.
-Protocol-v2/schema-v2 setup is therefore a clean development transition, not a
-customer migration contract. Close old harness sessions, stop the exact recorded
-service, install the complete new archive, rerun the exact `init` command with the
-same explicit policy, and then start the shared service. The demo's `-Refresh` path
-replaces only the obsolete development authorization record, issuer key, sidecar,
-authority database, and package after stopping that service; durable profiles remain
-separate.
+Protocol-v2 remains a clean development transition rather than a customer migration
+contract. Authorization-store schema 1 is upgraded transactionally to schema 2 on
+open after its complete schema and installation fingerprint are verified. The
+migration preserves policy, issuer, suspension, grant, reservation, and audit state,
+then adds the empty UserPresence credential tables and widens the closed audit-kind
+range. Unknown or modified schema-1 shapes fail closed.
+
+Close old harness sessions, stop the exact recorded service, install the complete new
+archive, rerun the exact `init` command with the same explicit policy, and then start
+the shared service. The demo's `-Refresh` path replaces only obsolete development
+authorization state and package files after stopping that service; durable profiles
+remain separate.
 Existing conversation credential bindings remain valid for ordinary text but do not
 gain directed-request capability retroactively. Create new membership with the
 upgraded clients before using `send_directed_request` or `/konclave request`.
@@ -139,7 +180,9 @@ file is owner protected and each profile resolves only its own canonical name; a
 missing or wrong key fails closed without replacing identity or state. Never point
 multiple profiles at one launch-scoped key as a migration shortcut.
 
-Rollback for this pre-release transition is source/package rollback after stopping
+Authorization-store schema migration is one-way for this prerelease. Rolling back to
+a binary that understands only schema 1 requires restoring a pre-migration authority
+database or intentionally recreating development authorization state after stopping
 the service; protocol v2 never negotiates down to v1. Before a supported release
 creates compatibility obligations, packaging must provide a journaled
 preview/apply/recovery/rollback migration engine. Profile databases, native custody,

@@ -4,6 +4,10 @@ use KonclaveLocalServiceTransport::{
     AuthorizationPolicy, AuthorizationPolicyVersion, ClientInstanceId, IssuerKeyId,
     IssuerKeyVersion, IssuerRegistration, RequestId, ServiceProfileId, SessionGrant,
 };
+use KonclaveUserPresence::{
+    NativeWebAuthnCredential, UserPresenceCredentialDigest, UserPresenceCredentialId,
+    UserPresenceProviderId,
+};
 
 use crate::LocalAuthorizationStoreError;
 
@@ -24,6 +28,9 @@ pub const MAX_AUTHORIZATION_AUDIT_RECORDS: usize = 256;
 
 /// Maximum exact profiles that may be suspended concurrently.
 pub const MAX_SUSPENDED_PROFILES: usize = 256;
+
+/// Maximum credential identifiers reserved during one installation lifetime.
+pub const MAX_USER_PRESENCE_CREDENTIAL_IDENTIFIERS: usize = 256;
 
 /// SQLite busy timeout used by every store connection.
 pub const AUTHORIZATION_STORE_BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -163,6 +170,7 @@ pub struct AuthorizationSnapshot {
     pub(crate) issuers: Vec<AuthorizationIssuerRecord>,
     pub(crate) suspended_profiles: Vec<ServiceProfileId>,
     pub(crate) active_grants: Vec<SessionGrant>,
+    pub(crate) user_presence_credential: Option<UserPresenceCredentialRecord>,
 }
 
 impl AuthorizationSnapshot {
@@ -195,6 +203,12 @@ impl AuthorizationSnapshot {
     pub fn active_grants(&self) -> &[SessionGrant] {
         &self.active_grants
     }
+
+    /// Returns the active user-presence credential, when one is enrolled.
+    #[must_use]
+    pub const fn user_presence_credential(&self) -> Option<&UserPresenceCredentialRecord> {
+        self.user_presence_credential.as_ref()
+    }
 }
 
 impl fmt::Debug for AuthorizationSnapshot {
@@ -206,7 +220,77 @@ impl fmt::Debug for AuthorizationSnapshot {
             .field("issuer_count", &self.issuers.len())
             .field("suspended_profile_count", &self.suspended_profiles.len())
             .field("active_grant_count", &self.active_grants.len())
+            .field(
+                "user_presence_credential",
+                &self.user_presence_credential.is_some(),
+            )
             .finish()
+    }
+}
+
+/// One validated active native WebAuthn credential retained as public verifier state.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UserPresenceCredentialRecord {
+    provider_id: UserPresenceProviderId,
+    credential_id: UserPresenceCredentialId,
+    credential_digest: UserPresenceCredentialDigest,
+    document: Vec<u8>,
+}
+
+impl UserPresenceCredentialRecord {
+    /// Decodes and validates one bounded native WebAuthn credential document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalAuthorizationStoreError::InvalidInput`] when the document is
+    /// malformed, unsupported, or inconsistent with its embedded credential.
+    pub fn from_document(document: Vec<u8>) -> Result<Self, LocalAuthorizationStoreError> {
+        let credential = NativeWebAuthnCredential::from_bytes(&document)
+            .map_err(|_| LocalAuthorizationStoreError::InvalidInput)?;
+        let provider_id = credential.provider_id().clone();
+        let credential_id = credential.credential_id().clone();
+        let credential_digest = credential_id.digest();
+        Ok(Self {
+            provider_id,
+            credential_id,
+            credential_digest,
+            document,
+        })
+    }
+
+    /// Returns the exact provider identifier.
+    #[must_use]
+    pub const fn provider_id(&self) -> &UserPresenceProviderId {
+        &self.provider_id
+    }
+
+    /// Returns the opaque credential identifier.
+    #[must_use]
+    pub const fn credential_id(&self) -> &UserPresenceCredentialId {
+        &self.credential_id
+    }
+
+    /// Returns the fixed credential digest used for replacement checks.
+    #[must_use]
+    pub const fn credential_digest(&self) -> UserPresenceCredentialDigest {
+        self.credential_digest
+    }
+
+    /// Returns the validated public credential document.
+    #[must_use]
+    pub fn document(&self) -> &[u8] {
+        &self.document
+    }
+}
+
+impl fmt::Debug for UserPresenceCredentialRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserPresenceCredentialRecord")
+            .field("provider_id", &self.provider_id)
+            .field("credential_id_length", &self.credential_id.as_bytes().len())
+            .field("document_length", &self.document.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -335,6 +419,14 @@ pub enum AuthorizationAuditKind {
     IssuerRemoved,
     /// Expired active grants were moved to bounded terminal history.
     GrantsExpired,
+    /// One user-presence credential was enrolled.
+    UserPresenceCredentialRegistered,
+    /// The active user-presence credential was replaced.
+    UserPresenceCredentialReplaced,
+    /// The active user-presence credential was removed.
+    UserPresenceCredentialRemoved,
+    /// Mutable WebAuthn counter state advanced for the active credential.
+    UserPresenceCredentialUpdated,
 }
 
 /// One non-sensitive retained authorization mutation event.
@@ -427,6 +519,8 @@ pub struct AuthorizationStoreStatus {
     pub(crate) terminal_grants: usize,
     pub(crate) grant_identifiers: usize,
     pub(crate) audit_records: usize,
+    pub(crate) user_presence_credentials: usize,
+    pub(crate) user_presence_credential_identifiers: usize,
     pub(crate) capacity: AuthorizationCapacity,
 }
 
@@ -501,6 +595,18 @@ impl AuthorizationStoreStatus {
     #[must_use]
     pub const fn audit_records(self) -> usize {
         self.audit_records
+    }
+
+    /// Returns zero or one active user-presence credentials.
+    #[must_use]
+    pub const fn user_presence_credentials(self) -> usize {
+        self.user_presence_credentials
+    }
+
+    /// Returns identifiers reserved for the installation lifetime.
+    #[must_use]
+    pub const fn user_presence_credential_identifiers(self) -> usize {
+        self.user_presence_credential_identifiers
     }
 
     /// Returns global and queried-scope active grant usage.

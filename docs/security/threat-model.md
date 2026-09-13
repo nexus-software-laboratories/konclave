@@ -15,6 +15,8 @@ evidence that implementations honor both.
 - install-scoped enrollment credentials and per-profile relay data-plane tokens;
 - installed authorization-issuer private keys, ephemeral session keys, exact-profile
   grants, authenticated service connections, and delivery leases;
+- UserPresence credential public state, reservations, WebAuthn counters, pending
+  challenges, canonical request bindings, and verified assertion digests;
 - harness-attestation verification roots, pending challenges, signed assertions, and
   transient normalized session subjects;
 - relay bearer credentials and authorization policy;
@@ -55,11 +57,33 @@ TCP listener and is never reachable from the network. Platform peer credentials 
 endpoint policy reject other operating-system users.
 
 The configured authorization policy determines what evidence may obtain profile
-access. The initial `AccountTrusted` provider explicitly trusts every process running
+access. The `AccountTrusted` provider explicitly trusts every process running
 under the configured operating-system account. Its owner-protected Ed25519 key is an
 issuer credential only: it may request policy-permitted grants but cannot invoke
 profile operations. This excludes other accounts but intentionally does not isolate
 mutually hostile same-account processes.
+
+The Windows `UserPresence` provider requires a native WebAuthn assertion with both
+user presence and user verification for one exact canonical grant binding. The
+Konclave helper and extension are untrusted adapters: they receive bounded standard
+request JSON, launch no shell or listener, and cannot grant authority from a success
+status. The daemon independently verifies the relying party, synthetic native origin,
+challenge, credential, signature, flags, user handle, and counter transition before
+persisting counter state and issuing evidence bit `2`. Linux and macOS report
+`required_evidence_unavailable`; no terminal prompt, software key, or AccountTrusted
+fallback sets that bit.
+Credential persistence compares the complete begin-time record with current durable
+state, so an older concurrent ceremony cannot regress a newer authenticator counter
+or issue a grant after losing that race.
+
+The broker identifies the Konclave relying party but does not display every bound
+profile, harness, capability, and expiry field. A hostile same-account process can
+trigger a legitimate ceremony and may gain its own exact grant if the user approves
+that ceremony. UserPresence proves fresh authenticator-mediated verification and
+request integrity, not correct human interpretation, legal identity, or presence for
+every later operation. One approved memory-only session key may use its finite grant
+until expiry. Complete installation rollback or executable replacement across daemon
+restart remains outside this first provider's guarantee.
 
 Each client generates a memory-only session key. An issued finite grant binds its
 public key to one exact profile, harness metadata, verified evidence set, policy
@@ -205,6 +229,8 @@ Konclave considers:
   capability replay, or stale lease acknowledgment;
 - a same-account process replaying or fabricating unsigned harness session,
   lifecycle, extension, or process metadata;
+- a same-account process triggering a legitimate UserPresence prompt, replaying an
+  assertion, substituting a bound session key, or attempting to downgrade policy;
 - an attacker with offline access to persisted files;
 - malformed, oversized, or adversarial protocol input;
 - model output attempting to misuse daemon tools;

@@ -12,6 +12,7 @@ $contracts = [ordered]@{
     'adapter-conformance.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
     'authorization-store-conformance.yml' = '    types: [opened, edited, synchronize, reopened]'
     'generic-client-conformance.yml' = '    types: [opened, edited, synchronize, reopened]'
+    'user-presence-conformance.yml' = '    types: [opened, edited, synchronize, reopened]'
     'package-validation.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'pr-title.yml' = '    types: [opened, edited, synchronize, reopened]'
     'pr-base.yml' = '    types: [opened, edited, synchronize, reopened]'

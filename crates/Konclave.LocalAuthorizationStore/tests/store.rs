@@ -7,7 +7,7 @@ use KonclaveLocalAuthorizationStore::{
     AuthorizationAuditKind, ExistingGrantDisposition, GrantIssuanceKey, InstallationFingerprint,
     IssuerAvailability, LOCAL_AUTHORIZATION_STORE_FILE, LocalAuthorizationStore,
     LocalAuthorizationStoreError, MAX_AUTHORIZATION_AUDIT_RECORDS, MAX_TERMINAL_GRANT_RECORDS,
-    MutationEffect, authorization_store_path,
+    MutationEffect, UserPresenceCredentialRecord, authorization_store_path,
 };
 use KonclaveLocalServiceTransport::{
     AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
@@ -177,6 +177,32 @@ fn grant_with_evidence(
     .unwrap()
 }
 
+fn presence_credential(seed: u8) -> UserPresenceCredentialRecord {
+    presence_credential_with_counter(seed, 0)
+}
+
+fn presence_credential_with_counter(seed: u8, counter: u32) -> UserPresenceCredentialRecord {
+    let mut public_key_cose = vec![0xa4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21, 0x58, 0x20];
+    public_key_cose.extend_from_slice(&[seed; 32]);
+    let user_handle = vec![seed; 16];
+    let credential_id = vec![seed; 32];
+    let aaguid = vec![0; 16];
+    let document = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "provider": "windows-native-webauthn-v1",
+        "userHandle": user_handle,
+        "passkey": {
+            "id": credential_id,
+            "public_key_cose": public_key_cose,
+            "counter": counter,
+            "transports": ["internal"],
+            "aaguid": aaguid,
+        }
+    }))
+    .unwrap();
+    UserPresenceCredentialRecord::from_document(document).unwrap()
+}
+
 #[test]
 fn bootstrap_is_idempotent_and_reopen_preserves_administrative_state() {
     let fixture = Fixture::new();
@@ -203,6 +229,223 @@ fn bootstrap_is_idempotent_and_reopen_preserves_administrative_state() {
     assert_eq!(snapshot.generation().get(), 3);
     assert_eq!(snapshot.policy(), &stronger);
     assert_eq!(snapshot.suspended_profiles(), &[profile("alice")]);
+}
+
+#[test]
+fn user_presence_credentials_are_exact_reserved_and_audited() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let first = presence_credential(1);
+    let first_updated = presence_credential_with_counter(1, 1);
+    let second = presence_credential(2);
+
+    assert!(
+        store
+            .load_snapshot(NOW, None)
+            .unwrap()
+            .user_presence_credential()
+            .is_none()
+    );
+    let registered = store
+        .register_user_presence_credential(&first, NOW + 1)
+        .unwrap();
+    assert_eq!(registered.effect(), MutationEffect::Applied);
+    assert_eq!(registered.generation().get(), 2);
+    assert_eq!(
+        store
+            .register_user_presence_credential(&first, NOW + 2)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+    assert_eq!(
+        store
+            .register_user_presence_credential(&second, NOW + 2)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    assert_eq!(
+        store
+            .replace_user_presence_credential(second.credential_digest(), &second, NOW + 2,)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    assert_eq!(
+        store
+            .update_user_presence_credential(&first, &first, NOW + 2)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+    let updated = store
+        .update_user_presence_credential(&first, &first_updated, NOW + 2)
+        .unwrap();
+    assert_eq!(updated.generation().get(), 3);
+    assert_eq!(
+        store
+            .update_user_presence_credential(&first_updated, &first_updated, NOW + 3,)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+
+    let replaced = store
+        .replace_user_presence_credential(first.credential_digest(), &second, NOW + 3)
+        .unwrap();
+    assert_eq!(replaced.generation().get(), 4);
+    assert_eq!(
+        store
+            .load_snapshot(NOW + 3, None)
+            .unwrap()
+            .user_presence_credential(),
+        Some(&second)
+    );
+    assert_eq!(
+        store
+            .remove_user_presence_credential(first.credential_digest(), NOW + 4)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    let removed = store
+        .remove_user_presence_credential(second.credential_digest(), NOW + 4)
+        .unwrap();
+    assert_eq!(removed.generation().get(), 5);
+    assert_eq!(
+        store
+            .remove_user_presence_credential(second.credential_digest(), NOW + 5)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+    assert_eq!(
+        store
+            .register_user_presence_credential(&first, NOW + 5)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+
+    let audit = store.load_audit_events(8, None).unwrap();
+    assert_eq!(
+        audit.iter().map(|event| event.kind()).collect::<Vec<_>>(),
+        vec![
+            AuthorizationAuditKind::UserPresenceCredentialRemoved,
+            AuthorizationAuditKind::UserPresenceCredentialReplaced,
+            AuthorizationAuditKind::UserPresenceCredentialUpdated,
+            AuthorizationAuditKind::UserPresenceCredentialRegistered,
+            AuthorizationAuditKind::Bootstrap,
+        ]
+    );
+    let status = store
+        .load_status(
+            NOW + 5,
+            None,
+            IssuerKeyId::from_bytes([1; 16]),
+            &profile("alice"),
+        )
+        .unwrap();
+    assert_eq!(status.user_presence_credentials(), 0);
+    assert_eq!(status.user_presence_credential_identifiers(), 2);
+}
+
+#[test]
+fn stale_user_presence_credential_update_conflicts_without_mutation() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let initial = presence_credential_with_counter(1, 0);
+    let stale = presence_credential_with_counter(1, 1);
+    let newer = presence_credential_with_counter(1, 2);
+
+    store
+        .register_user_presence_credential(&initial, NOW + 1)
+        .unwrap();
+    let advanced = store
+        .update_user_presence_credential(&initial, &newer, NOW + 2)
+        .unwrap();
+    let audit_before_conflict = store.load_audit_events(8, None).unwrap();
+
+    assert_eq!(
+        store
+            .update_user_presence_credential(&initial, &stale, NOW + 3)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+
+    let snapshot = store.load_snapshot(NOW + 3, None).unwrap();
+    assert_eq!(snapshot.generation(), advanced.generation());
+    assert_eq!(snapshot.user_presence_credential(), Some(&newer));
+    assert_eq!(
+        store.load_audit_events(8, None).unwrap(),
+        audit_before_conflict
+    );
+}
+
+#[test]
+fn user_presence_credential_update_requires_current_grant_authority() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let initial = presence_credential_with_counter(1, 0);
+    let updated = presence_credential_with_counter(1, 1);
+    let rejected = presence_credential_with_counter(1, 2);
+    store
+        .register_user_presence_credential(&initial, NOW + 1)
+        .unwrap();
+    store
+        .replace_policy(&user_presence_policy(2), NOW + 2)
+        .unwrap();
+    let candidate = grant(
+        91,
+        1,
+        1,
+        "alice",
+        AuthorizationEvidenceKind::UserPresence,
+        2,
+    );
+    store
+        .update_user_presence_credential_for_grant(&initial, &updated, &candidate, NOW + 3)
+        .unwrap();
+    store.replace_policy(&account_policy(3), NOW + 4).unwrap();
+    let snapshot_before = store.load_snapshot(NOW + 4, None).unwrap();
+    let audit_before = store.load_audit_events(16, None).unwrap();
+
+    assert_eq!(
+        store
+            .update_user_presence_credential_for_grant(&updated, &rejected, &candidate, NOW + 5,)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+    let snapshot_after = store.load_snapshot(NOW + 5, None).unwrap();
+    assert_eq!(snapshot_after.generation(), snapshot_before.generation());
+    assert_eq!(snapshot_after.user_presence_credential(), Some(&updated));
+    assert_eq!(store.load_audit_events(16, None).unwrap(), audit_before);
+}
+
+#[test]
+fn malformed_user_presence_credential_fails_closed() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store
+        .register_user_presence_credential(&presence_credential(3), NOW + 1)
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(fixture.database_path()).unwrap();
+    connection
+        .pragma_update(None, "ignore_check_constraints", "ON")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE authorization_user_presence_credential
+             SET credential_document = X'00'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        LocalAuthorizationStore::open(&fixture.installation_path, fixture.fingerprint, None),
+        Err(LocalAuthorizationStoreError::InvalidStorage
+            | LocalAuthorizationStoreError::CorruptStorage)
+    ));
 }
 
 #[test]
@@ -311,13 +554,95 @@ fn unknown_schema_and_corrupt_bytes_are_rejected() {
 }
 
 #[test]
+fn schema_v1_is_migrated_transactionally_without_losing_authorization_state() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.suspend_profile(&profile("alice"), NOW + 1).unwrap();
+    drop(store);
+
+    let connection = Connection::open(fixture.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE authorization_audit RENAME TO authorization_audit_v2;
+             CREATE TABLE authorization_audit (
+        generation INTEGER PRIMARY KEY CHECK (
+            typeof(generation) = 'integer' AND generation >= 1
+        ),
+        event_kind INTEGER NOT NULL CHECK (
+            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 11
+        ),
+        occurred_at_unix_milliseconds INTEGER NOT NULL CHECK (
+            typeof(occurred_at_unix_milliseconds) = 'integer'
+            AND occurred_at_unix_milliseconds >= 0
+        )
+    );
+             INSERT INTO authorization_audit (
+                generation,
+                event_kind,
+                occurred_at_unix_milliseconds
+             )
+             SELECT generation, event_kind, occurred_at_unix_milliseconds
+             FROM authorization_audit_v2;
+             DROP TABLE authorization_audit_v2;
+             DROP TABLE authorization_user_presence_credential;
+             DROP TABLE authorization_user_presence_credential_identifier;
+             UPDATE authorization_store_meta
+             SET schema_version = 1
+             WHERE singleton_id = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let migrated =
+        LocalAuthorizationStore::open(&fixture.installation_path, fixture.fingerprint, None)
+            .unwrap();
+    let snapshot = migrated.load_snapshot(NOW + 1, None).unwrap();
+    assert_eq!(snapshot.generation().get(), 2);
+    assert!(snapshot.suspended_profiles().contains(&profile("alice")));
+    assert!(snapshot.user_presence_credential().is_none());
+    migrated
+        .register_user_presence_credential(&presence_credential(7), NOW + 2)
+        .unwrap();
+    drop(migrated);
+
+    let connection = Connection::open(fixture.database_path()).unwrap();
+    let schema_version: i64 = connection
+        .query_row(
+            "SELECT schema_version
+             FROM authorization_store_meta
+             WHERE singleton_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, 2);
+}
+
+#[test]
+fn schema_v1_label_on_an_unrecognized_shape_fails_closed() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    Connection::open(fixture.database_path())
+        .unwrap()
+        .execute(
+            "UPDATE authorization_store_meta SET schema_version = 1 WHERE singleton_id = 1",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        LocalAuthorizationStore::open(&fixture.installation_path, fixture.fingerprint, None,),
+        Err(LocalAuthorizationStoreError::InvalidStorage)
+    ));
+}
+
+#[test]
 fn unknown_schema_version_is_rejected_without_migration() {
     let fixture = Fixture::new();
     drop(fixture.open());
     Connection::open(fixture.database_path())
         .unwrap()
         .execute(
-            "UPDATE authorization_store_meta SET schema_version = 2 WHERE singleton_id = 1",
+            "UPDATE authorization_store_meta SET schema_version = 3 WHERE singleton_id = 1",
             [],
         )
         .unwrap();
@@ -512,6 +837,17 @@ fn issuer_request_replay_returns_the_original_durable_grant() {
         .unwrap();
     assert_eq!(replayed.mutation().effect(), MutationEffect::Unchanged);
     assert_eq!(replayed.grant(), &original);
+    assert_eq!(
+        store
+            .active_grant_for_request(
+                original.issuer_key_id(),
+                original.issuer_key_version(),
+                request_key,
+                NOW + 1,
+            )
+            .unwrap(),
+        Some(original.clone())
+    );
 
     let conflicting = grant(3, 1, 1, "bob", AuthorizationEvidenceKind::AccountTrusted, 1);
     assert_eq!(
@@ -519,6 +855,20 @@ fn issuer_request_replay_returns_the_original_durable_grant() {
             .issue_grant_for_request(request_key, &conflicting, NOW + 1)
             .unwrap_err(),
         LocalAuthorizationStoreError::Conflict
+    );
+    assert!(
+        store
+            .active_grant_for_request(
+                original.issuer_key_id(),
+                original.issuer_key_version(),
+                GrantIssuanceKey::new(
+                    ClientInstanceId::from_bytes([9; 16]),
+                    RequestId::from_bytes([9; 16]),
+                ),
+                NOW + 1,
+            )
+            .unwrap()
+            .is_none()
     );
 }
 

@@ -31,6 +31,8 @@ export interface LocalServiceRuntimeConfig {
   readonly serviceKey: Buffer;
   /** Owner-protected file holding the AccountTrusted issuer seed. */
   readonly issuerKeyFile: string;
+  /** Installed native helper used only for a UserPresence ceremony. */
+  readonly userPresenceHelper?: string;
   /** Effective installation policy accepted by this client build. */
   readonly authorizationPolicy: {
     readonly version: number;
@@ -209,6 +211,14 @@ export function resolveLocalServiceConfig(
   if (!issuerKeyFile || !isAbsolute(issuerKeyFile)) {
     throw new ServiceConfigurationError('Konclave issuer key file must be absolute.');
   }
+  const userPresenceHelper =
+    typeof parsed.userPresenceHelper === 'string' ? parsed.userPresenceHelper.trim() : undefined;
+  if (
+    parsed.userPresenceHelper !== undefined &&
+    (!userPresenceHelper || !isAbsolute(userPresenceHelper))
+  ) {
+    throw new ServiceConfigurationError('Konclave user-presence helper must be absolute.');
+  }
   const authorizationPolicy = parseAuthorizationPolicy(parsed.authorizationPolicy);
 
   return {
@@ -218,6 +228,7 @@ export function resolveLocalServiceConfig(
     harness,
     serviceKey: requireHex(parsed.serviceKey, hex64, 'service key'),
     issuerKeyFile,
+    userPresenceHelper,
     authorizationPolicy,
   };
 }
@@ -283,11 +294,5 @@ function parseAuthorizationPolicy(
     }
     return [...clause] as readonly string[];
   });
-  if (!clauses.some((clause) => clause.length === 1 && clause[0] === 'account_trusted')) {
-    throw new ServiceConfigurationError(
-      'Konclave authorization policy requires unavailable evidence.',
-      'required_evidence_unavailable',
-    );
-  }
   return { version, acceptedEvidence: clauses };
 }

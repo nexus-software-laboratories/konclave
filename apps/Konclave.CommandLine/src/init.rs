@@ -5,14 +5,20 @@ use zeroize::Zeroizing;
 use KonclaveClientLibrary::{
     RelayEndpoint, RelayEnrollmentCredential, RelayEnrollmentSourceConfig, RelayInstallationConfig,
 };
+use KonclaveLocalServiceTransport::{
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationPolicyVersion,
+};
 use KonclaveSecretStorage::NativeEnrollmentCredentialStore;
+use KonclaveUserPresence::native_user_presence_supported;
 
 use crate::cli::{AuthorizationPolicyChoice, InitArgs};
 use crate::installation;
 use crate::local_service_installation;
 
 pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
-    let authorization_policy = select_authorization_policy(args.authorization_policy)?;
+    let authorization_policy =
+        select_authorization_policy(args.authorization_policy, args.allow_no_recovery)?;
     let root = installation::resolve_profile_root(args.profile_root)?;
     let endpoint =
         RelayEndpoint::parse(&args.relay_endpoint).context("validating relay endpoint")?;
@@ -87,10 +93,14 @@ pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
 
 fn select_authorization_policy(
     choice: Option<AuthorizationPolicyChoice>,
-) -> anyhow::Result<KonclaveLocalServiceTransport::AuthorizationPolicy> {
+    allow_no_recovery: bool,
+) -> anyhow::Result<AuthorizationPolicy> {
     match choice {
         Some(AuthorizationPolicyChoice::AccountTrusted) => {
-            Ok(KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted())
+            Ok(AuthorizationPolicy::account_trusted())
+        }
+        Some(AuthorizationPolicyChoice::UserPresence) => {
+            require_user_presence_selection(allow_no_recovery, native_user_presence_supported())
         }
         None if !std::io::stdin().is_terminal() => {
             bail!("--authorization-policy is required for noninteractive initialization")
@@ -101,16 +111,44 @@ fn select_authorization_policy(
             eprintln!("   Automatic session access.");
             eprintln!("   All processes under this OS account are trusted.");
             eprintln!("   This does not provide same-user session isolation.");
+            if native_user_presence_supported() {
+                eprintln!("2. UserPresence");
+                eprintln!("   Windows requires native user verification for each new process.");
+                eprintln!("   Losing the credential can strand administration without recovery.");
+                eprintln!("   Selection requires --allow-no-recovery.");
+            }
             let mut value = String::new();
             std::io::stdin()
                 .read_line(&mut value)
                 .context("reading authorization policy")?;
-            if value.trim() != "1" {
-                bail!("authorization policy selection is invalid");
+            match value.trim() {
+                "1" => Ok(AuthorizationPolicy::account_trusted()),
+                "2" if native_user_presence_supported() => {
+                    require_user_presence_selection(allow_no_recovery, true)
+                }
+                _ => bail!("authorization policy selection is invalid"),
             }
-            Ok(KonclaveLocalServiceTransport::AuthorizationPolicy::account_trusted())
         }
     }
+}
+
+fn require_user_presence_selection(
+    allow_no_recovery: bool,
+    native_supported: bool,
+) -> anyhow::Result<AuthorizationPolicy> {
+    if !allow_no_recovery {
+        bail!("--allow-no-recovery is required for a UserPresence-only installation")
+    }
+    if !native_supported {
+        bail!("UserPresence is unavailable on this platform")
+    }
+    let evidence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence])
+        .context("constructing UserPresence evidence")?;
+    AuthorizationPolicy::new(
+        AuthorizationPolicyVersion::new(1).context("constructing policy version")?,
+        vec![evidence],
+    )
+    .context("constructing UserPresence policy")
 }
 
 fn read_enrollment_credential() -> anyhow::Result<RelayEnrollmentCredential> {
@@ -182,5 +220,21 @@ mod tests {
             installation::native_installation_id(&first, &endpoint),
             installation::native_installation_id(&second, &endpoint)
         );
+    }
+
+    #[test]
+    fn user_presence_selection_requires_recovery_acknowledgement_and_native_support() {
+        assert!(require_user_presence_selection(false, true)
+            .unwrap_err()
+            .to_string()
+            .contains("--allow-no-recovery"));
+        assert!(require_user_presence_selection(true, false)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        let policy = require_user_presence_selection(true, true).unwrap();
+        let presence =
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).unwrap();
+        assert!(policy.accepts(presence));
     }
 }

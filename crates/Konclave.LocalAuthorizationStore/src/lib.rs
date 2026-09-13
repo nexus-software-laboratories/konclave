@@ -21,6 +21,7 @@ pub use model::{
     ExistingGrantDisposition, GrantIssuanceKey, GrantIssuanceResult,
     INSTALLATION_FINGERPRINT_LENGTH, InstallationFingerprint, IssuerAvailability,
     LOCAL_AUTHORIZATION_STORE_FILE, MAX_AUTHORIZATION_AUDIT_RECORDS, MAX_GRANT_IDENTIFIERS,
-    MAX_SUSPENDED_PROFILES, MAX_TERMINAL_GRANT_RECORDS, MutationEffect,
+    MAX_SUSPENDED_PROFILES, MAX_TERMINAL_GRANT_RECORDS, MAX_USER_PRESENCE_CREDENTIAL_IDENTIFIERS,
+    MutationEffect, UserPresenceCredentialRecord,
 };
 pub use store::{LocalAuthorizationStore, authorization_store_path, installation_fingerprint};

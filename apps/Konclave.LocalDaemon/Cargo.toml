@@ -34,6 +34,7 @@ KonclaveLocalAuthorizationStore = { path = "../../crates/Konclave.LocalAuthoriza
 KonclaveLocalServiceTransport = { path = "../../crates/Konclave.LocalServiceTransport" }
 KonclaveProtocolContracts = { path = "../../crates/Konclave.ProtocolContracts" }
 KonclaveSecretStorage = { path = "../../crates/Konclave.SecretStorage" }
+KonclaveUserPresence = { path = "../../crates/Konclave.UserPresence" }
 anyhow = "1.0.104"
 base64.workspace = true
 fs4.workspace = true
@@ -60,6 +61,8 @@ zeroize.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 base64.workspace = true
+ciborium.workspace = true
+ed25519-dalek.workspace = true
 KonclaveA2AContracts = { path = "../../crates/Konclave.A2AContracts" }
 KonclaveA2ADomain = { path = "../../crates/Konclave.A2ADomain" }
 KonclaveA2AGateway = { path = "../../crates/Konclave.A2AGateway" }
