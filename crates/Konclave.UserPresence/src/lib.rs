@@ -12,8 +12,9 @@ use core::fmt;
 
 use KonclaveDomainCore::Ed25519PublicKey;
 use KonclaveLocalServiceTransport::{
-    AuthorizationPolicyVersion, ClientInstanceId, HarnessKind, IssuerKeyId, IssuerKeyVersion,
-    RequestId, ServiceProfileId, SessionCapabilities, SessionGrantId,
+    AuthorizationEvidenceSet, AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
+    IssuerKeyId, IssuerKeyVersion, RequestId, ServiceProfileId, SessionCapabilities,
+    SessionGrantId,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -208,6 +209,14 @@ define_digest!(
     UserPresenceAssertionDigest
 );
 
+impl UserPresenceAssertionDigest {
+    /// Hashes one complete assertion carrier for exact retry identity.
+    #[must_use]
+    pub fn sha256(assertion: &[u8]) -> Self {
+        Self::from_bytes(Sha256::digest(assertion).into())
+    }
+}
+
 /// Canonical identifier of one installed user-presence provider.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UserPresenceProviderId(String);
@@ -310,6 +319,8 @@ pub struct UserPresenceBindingClaims {
     pub session_public_key: Ed25519PublicKey,
     /// Exact harness metadata recorded in the grant.
     pub harness: HarnessKind,
+    /// Exact verified evidence set recorded in the grant.
+    pub evidence: AuthorizationEvidenceSet,
     /// Exact capability bitset recorded in the grant.
     pub capabilities: SessionCapabilities,
     /// Installed provider selected by the service.
@@ -685,6 +696,7 @@ fn encode_binding(claims: &UserPresenceBindingClaims) -> Result<Vec<u8>, UserPre
     append_length_prefixed(&mut bytes, claims.profile.as_str().as_bytes())?;
     bytes.extend_from_slice(claims.session_public_key.as_bytes());
     bytes.extend_from_slice(&claims.harness.wire_value().to_be_bytes());
+    bytes.push(claims.evidence.bits());
     bytes.extend_from_slice(&claims.capabilities.bits().to_be_bytes());
     append_length_prefixed(&mut bytes, claims.provider_id.as_str().as_bytes())?;
     bytes.extend_from_slice(claims.credential_digest.as_bytes());
@@ -749,6 +761,10 @@ mod tests {
             profile: ServiceProfileId::parse("session-test").unwrap(),
             session_public_key: Ed25519PublicKey::from_bytes([0x08; 32]),
             harness: HarnessKind::Copilot,
+            evidence: AuthorizationEvidenceSet::new([
+                KonclaveLocalServiceTransport::AuthorizationEvidenceKind::UserPresence,
+            ])
+            .unwrap(),
             capabilities: SessionCapabilities::ALL,
             provider_id: UserPresenceProviderId::parse("windows-native-webauthn-v1").unwrap(),
             credential_digest: credential().digest(),
@@ -853,13 +869,13 @@ mod tests {
     #[test]
     fn canonical_binding_vector_is_stable() {
         let binding = UserPresenceBinding::new(claims()).unwrap();
-        assert_eq!(binding.canonical_bytes().len(), 348);
+        assert_eq!(binding.canonical_bytes().len(), 349);
         assert_eq!(
             binding.digest().as_bytes(),
             &[
-                0x4c, 0xff, 0x3d, 0x4c, 0xea, 0x1f, 0x7f, 0x46, 0x97, 0x98, 0x4f, 0x85, 0xcc, 0x0e,
-                0x91, 0xc2, 0x5c, 0x51, 0xb2, 0xe1, 0x04, 0x81, 0x19, 0x4a, 0xc6, 0x67, 0x43, 0xb3,
-                0xe0, 0x6f, 0x05, 0x0e,
+                0x83, 0x6f, 0x5d, 0x2f, 0xe8, 0x8d, 0xbb, 0x3c, 0x1b, 0xea, 0x0e, 0x08, 0x5d, 0xb7,
+                0xaa, 0x0a, 0x20, 0xbe, 0x8e, 0x47, 0x9b, 0x0c, 0x8e, 0xc3, 0xa5, 0xf5, 0x4d, 0xdd,
+                0xa1, 0x5b, 0x44, 0xf2,
             ]
         );
     }

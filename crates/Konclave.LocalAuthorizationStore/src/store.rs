@@ -299,6 +299,12 @@ pub struct LocalAuthorizationStore {
 }
 
 impl LocalAuthorizationStore {
+    /// Returns the immutable installation fingerprint this store is bound to.
+    #[must_use]
+    pub const fn installation_fingerprint(&self) -> InstallationFingerprint {
+        self.installation_fingerprint
+    }
+
     /// Explicitly bootstraps the database beside `installation_record_path`.
     ///
     /// Existing valid state is retained without reapplying bootstrap values. This is
@@ -619,6 +625,46 @@ impl LocalAuthorizationStore {
             },
             candidate.clone(),
         ))
+    }
+
+    /// Loads one active grant previously issued for an exact request key.
+    ///
+    /// This is the recovery-only half of idempotent issuance: it never creates
+    /// authority. Expired grants are terminalized before the lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite storage, validation, rollback, or capacity failure.
+    pub fn active_grant_for_request(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+        request_key: GrantIssuanceKey,
+        now_unix_milliseconds: u64,
+    ) -> Result<Option<SessionGrant>, LocalAuthorizationStoreError> {
+        validate_timestamp(now_unix_milliseconds)?;
+        let mut connection = self.lock()?;
+        let mut observed_high_water = self.lock_high_water()?;
+        let transaction = immediate_transaction(&mut connection)?;
+        verify_identity_and_high_water(
+            &transaction,
+            self.installation_fingerprint,
+            Some(*observed_high_water),
+        )?;
+        verify_integrity(&transaction)?;
+        validate_store(&transaction, self.installation_fingerprint)?;
+        let generation = expire_for_read(&transaction, now_unix_milliseconds)?;
+        let grant =
+            load_grant_by_issuance(&transaction, issuer_key_id, issuer_key_version, request_key)?
+                .filter(|stored| {
+                    stored.state == GrantState::Active
+                        && stored.grant.expires_at_unix_milliseconds() > now_unix_milliseconds
+                })
+                .map(|stored| stored.grant);
+        validate_store(&transaction, self.installation_fingerprint)?;
+        transaction.commit().map_err(map_write_error)?;
+        *observed_high_water = generation;
+        Ok(grant)
     }
 
     /// Retires one exact grant without affecting any other grant.

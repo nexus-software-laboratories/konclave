@@ -175,8 +175,7 @@ impl UserPresenceWebAuthnVerifier {
         if response.is_empty() || response.len() > MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES {
             return Err(UserPresenceWebAuthnError::InvalidAssertion);
         }
-        let assertion_digest =
-            UserPresenceAssertionDigest::from_bytes(Sha256::digest(response).into());
+        let assertion_digest = UserPresenceAssertionDigest::sha256(response);
         let response = authentication_response(response)?;
         let result = self
             .webauthn
@@ -260,12 +259,14 @@ struct PublicKeyRequest<'a, T> {
 }
 
 /// Opaque server-side state paired with one registration challenge.
+#[derive(Clone)]
 pub struct NativeWebAuthnEnrollment {
     state: RegistrationState,
     user_handle: [u8; 16],
 }
 
 /// Opaque server-side state paired with one authentication challenge.
+#[derive(Clone)]
 pub struct NativeWebAuthnAuthentication {
     state: AuthenticationState,
     challenge: UserPresenceChallenge,

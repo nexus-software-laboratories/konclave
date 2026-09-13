@@ -47,6 +47,7 @@ jobs:
               $files | Where-Object {
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/workflows/user-presence-conformance\.yml$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:authorization_runtime|local_service)\.rs)$' -or
                 $_ -match '^crates/Konclave\.DomainCore/' -or
                 $_ -match '^crates/Konclave\.LocalAuthorizationStore/' -or
                 $_ -match '^crates/Konclave\.LocalServiceTransport/' -or
@@ -79,6 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt \
+            --package KonclaveLocalDaemon \
             --package KonclaveLocalAuthorizationStore \
             --package KonclaveUserPresence \
             -- \
@@ -87,10 +89,21 @@ jobs:
             --locked \
             --package KonclaveLocalAuthorizationStore \
             --package KonclaveUserPresence
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            user_presence_issues_one_exact_grant_and_recovers_after_restart
           cargo clippy \
             --locked \
             --package KonclaveLocalAuthorizationStore \
             --package KonclaveUserPresence \
             --all-targets \
+            -- \
+            -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
             -- \
             -D warnings

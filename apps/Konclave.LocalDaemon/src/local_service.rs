@@ -3,20 +3,33 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use KonclaveCryptographicCore::{LocalServiceIdentity, derive_local_service_session_consumer_id};
+use KonclaveCryptographicCore::{
+    LocalServiceIdentity, derive_local_service_session_consumer_id, verify_local_service_signature,
+};
 use KonclaveDomainCore::{
     AdapterConsumerId, ApplicationContent, CollaborationPolicyBundle, CollaborationPolicyCost,
     CollaborationPolicyDecision, CollaborationPolicyEffect, CollaborationPolicyEvaluationContext,
     CollaborationPolicyEvaluationRequest, CollaborationPolicyResponseOutcome,
     CollaborationPolicyTarget, CollaborationPolicyUsage, ConversationId, ConversationRole,
-    DeviceId, NotificationId, evaluate_collaboration_policy,
+    DeviceId, Ed25519Signature, NotificationId, evaluate_collaboration_policy,
 };
+use KonclaveLocalAuthorizationStore::GrantIssuanceKey;
 use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
     LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
     LocalServiceResponse, MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES,
     MAX_SESSION_GRANTS, RequestId, ServiceProfileId, SessionCapabilities, SessionGrant,
     complete_authorization_service_handshake, read_request, write_response,
+};
+use KonclaveUserPresence::{
+    MAX_USER_PRESENCE_CHALLENGE_MILLISECONDS, MAX_USER_PRESENCE_GRANT_MILLISECONDS,
+    MAX_USER_PRESENCE_RECOVERY_MILLISECONDS, NativeWebAuthnAuthentication,
+    NativeWebAuthnCredential, PendingUserPresenceRequest, UserPresenceAssertionDigest,
+    UserPresenceBinding, UserPresenceBindingClaims, UserPresenceBindingDigest,
+    UserPresenceChallenge, UserPresenceCompletionDecision, UserPresenceConnectionId,
+    UserPresenceError, UserPresencePresentation, UserPresenceRequestRecord,
+    UserPresenceWebAuthnError, UserPresenceWebAuthnVerifier, classify_completion,
+    commit_verified_assertion,
 };
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -28,6 +41,7 @@ use zeroize::Zeroizing;
 use crate::adapter::{DeliveryAttachment, DeliveryWaitOutcome};
 use crate::authorization_runtime::{
     AccountTrustedGrantRequest, AuthorizationRuntimeError, LiveAuthorizationRuntime,
+    UserPresenceGrantRequest,
 };
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
@@ -58,6 +72,7 @@ const COPILOT_HARNESS_CLAIMS: [&str; 4] = [
 ];
 const MAX_COLLABORATION_SEND_AUTHORIZATIONS: usize = 16;
 const COLLABORATION_SEND_AUTHORIZATION_TTL: Duration = Duration::from_secs(60);
+const MAX_PENDING_USER_PRESENCE_REQUESTS: usize = 32;
 
 /// Validated inputs loaded before the shared service can start.
 ///
@@ -92,6 +107,7 @@ where
         .await
         .context("binding the shared local endpoint")?;
     let ledger = Arc::new(Mutex::new(RequestLedger::default()));
+    let user_presence = Arc::new(Mutex::new(UserPresenceRegistry::default()));
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut clients = JoinSet::new();
     let mut authorization_reload =
@@ -120,6 +136,7 @@ where
                         let identity = Arc::clone(&config.service_identity);
                         let supervisor = Arc::clone(&supervisor);
                         let ledger = Arc::clone(&ledger);
+                        let user_presence = Arc::clone(&user_presence);
                         let stop = stop_rx.clone();
                         clients.spawn(async move {
                             serve_client(
@@ -128,6 +145,7 @@ where
                                 identity,
                                 supervisor,
                                 ledger,
+                                user_presence,
                                 stop,
                             )
                             .await
@@ -207,6 +225,7 @@ async fn serve_client(
     identity: Arc<LocalServiceIdentity>,
     supervisor: Arc<ProfileSupervisor>,
     ledger: Arc<Mutex<RequestLedger>>,
+    user_presence: Arc<Mutex<UserPresenceRegistry>>,
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut authorization_status = authorization.subscribe();
@@ -253,12 +272,15 @@ async fn serve_client(
                 stream,
                 authorization,
                 ledger,
+                user_presence,
+                identity.public_key(),
                 IssuerConnection {
                     issuer_key_id,
                     issuer_key_version,
                     issuer_public_key,
                     client_instance,
                     harness,
+                    presence_connection_id: new_user_presence_connection_id()?,
                 },
                 stop,
                 authorization_status,
@@ -470,6 +492,89 @@ async fn serve_session_client(
     result
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct UserPresencePendingKey {
+    issuer_key_id: KonclaveLocalServiceTransport::IssuerKeyId,
+    issuer_key_version: KonclaveLocalServiceTransport::IssuerKeyVersion,
+    issuer_client_instance: KonclaveLocalServiceTransport::ClientInstanceId,
+    request_id: RequestId,
+}
+
+#[derive(Clone)]
+struct PendingUserPresenceContext {
+    request: PendingUserPresenceRequest,
+    authentication: NativeWebAuthnAuthentication,
+    credential: NativeWebAuthnCredential,
+}
+
+#[derive(Default)]
+struct UserPresenceRegistry {
+    pending: Vec<(UserPresencePendingKey, PendingUserPresenceContext)>,
+}
+
+impl UserPresenceRegistry {
+    fn insert(
+        &mut self,
+        key: UserPresencePendingKey,
+        context: PendingUserPresenceContext,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), LocalServiceErrorCode> {
+        self.prune(now_unix_milliseconds);
+        if self.pending.iter().any(|(candidate, _)| *candidate == key) {
+            return Err(LocalServiceErrorCode::Conflict);
+        }
+        if self.pending.len() >= MAX_PENDING_USER_PRESENCE_REQUESTS {
+            return Err(LocalServiceErrorCode::Capacity);
+        }
+        self.pending.push((key, context));
+        Ok(())
+    }
+
+    fn get(
+        &mut self,
+        key: UserPresencePendingKey,
+        now_unix_milliseconds: u64,
+    ) -> Option<PendingUserPresenceContext> {
+        self.prune(now_unix_milliseconds);
+        self.pending
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, context)| context.clone())
+    }
+
+    fn remove(&mut self, key: UserPresencePendingKey) {
+        self.pending.retain(|(candidate, _)| *candidate != key);
+    }
+
+    fn remove_connection(&mut self, connection_id: UserPresenceConnectionId) {
+        self.pending.retain(|(_, context)| {
+            context.request.binding().claims().connection_id != connection_id
+        });
+    }
+
+    fn prune(&mut self, now_unix_milliseconds: u64) {
+        self.pending.retain(|(_, context)| {
+            context
+                .request
+                .binding()
+                .claims()
+                .challenge_expires_at_unix_milliseconds
+                > now_unix_milliseconds
+        });
+    }
+}
+
+struct UserPresenceConnectionGuard {
+    registry: Arc<Mutex<UserPresenceRegistry>>,
+    connection_id: UserPresenceConnectionId,
+}
+
+impl Drop for UserPresenceConnectionGuard {
+    fn drop(&mut self) {
+        lock(&self.registry).remove_connection(self.connection_id);
+    }
+}
+
 #[derive(Clone)]
 struct IssuerConnection {
     issuer_key_id: KonclaveLocalServiceTransport::IssuerKeyId,
@@ -477,6 +582,7 @@ struct IssuerConnection {
     issuer_public_key: KonclaveDomainCore::Ed25519PublicKey,
     client_instance: KonclaveLocalServiceTransport::ClientInstanceId,
     harness: HarnessKind,
+    presence_connection_id: UserPresenceConnectionId,
 }
 
 impl IssuerConnection {
@@ -494,6 +600,8 @@ async fn serve_issuer_client(
     stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
     authorization: Arc<LiveAuthorizationRuntime>,
     ledger: Arc<Mutex<RequestLedger>>,
+    user_presence: Arc<Mutex<UserPresenceRegistry>>,
+    service_public_key: KonclaveDomainCore::Ed25519PublicKey,
     issuer: IssuerConnection,
     mut stop: watch::Receiver<bool>,
     mut authorization_status: watch::Receiver<
@@ -503,6 +611,10 @@ async fn serve_issuer_client(
     if !issuer.registration_is_present(&authorization) {
         return Ok(());
     }
+    let _presence_guard = UserPresenceConnectionGuard {
+        registry: Arc::clone(&user_presence),
+        connection_id: issuer.presence_connection_id,
+    };
     let mut stream = Some(stream);
     loop {
         let active_stream = stream
@@ -532,11 +644,34 @@ async fn serve_issuer_client(
         let execution_authorization = Arc::clone(&authorization);
         let execution_issuer = issuer.clone();
         let execution_ledger = Arc::clone(&ledger);
+        let execution_user_presence = Arc::clone(&user_presence);
+        let direct = request
+            .operation()
+            .as_str()
+            .starts_with("authorization.user_presence.");
         let mut execution = tokio::spawn(async move {
-            execute_idempotent(execution_ledger, key, &request, || async {
-                dispatch_issuer_request(&execution_authorization, &execution_issuer, &request).await
-            })
-            .await
+            if direct {
+                dispatch_issuer_request(
+                    &execution_authorization,
+                    &execution_user_presence,
+                    service_public_key,
+                    &execution_issuer,
+                    &request,
+                )
+                .await
+            } else {
+                execute_idempotent(execution_ledger, key, &request, || async {
+                    dispatch_issuer_request(
+                        &execution_authorization,
+                        &execution_user_presence,
+                        service_public_key,
+                        &execution_issuer,
+                        &request,
+                    )
+                    .await
+                })
+                .await
+            }
         });
         let response = loop {
             tokio::select! {
@@ -582,6 +717,41 @@ struct GrantIssueRequest {
     harness: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UserPresenceBeginRequest {
+    profile: String,
+    session_public_key: String,
+    harness: String,
+    capabilities: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserPresenceBeginResult {
+    begin_request_id: String,
+    binding: String,
+    binding_digest: String,
+    challenge: String,
+    provider: String,
+    credential_digest: String,
+    policy_version: u64,
+    issued_at_unix_milliseconds: u64,
+    challenge_expires_at_unix_milliseconds: u64,
+    grant_expires_at_unix_milliseconds: u64,
+    web_authn_request: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UserPresenceCompleteRequest {
+    begin_request_id: String,
+    binding_digest: String,
+    challenge: String,
+    session_signature: String,
+    assertion: serde_json::Value,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GrantIssueResult {
@@ -600,6 +770,8 @@ struct GrantIssueResult {
 
 async fn dispatch_issuer_request(
     authorization: &LiveAuthorizationRuntime,
+    user_presence: &Arc<Mutex<UserPresenceRegistry>>,
+    service_public_key: KonclaveDomainCore::Ed25519PublicKey,
     issuer: &IssuerConnection,
     request: &LocalServiceRequest,
 ) -> LocalServiceResponse {
@@ -612,6 +784,17 @@ async fn dispatch_issuer_request(
                 request.payload(),
             )
             .await
+        }
+        "authorization.user_presence.begin" => begin_user_presence(
+            authorization,
+            user_presence,
+            service_public_key,
+            issuer,
+            request.request_id(),
+            request.payload(),
+        ),
+        "authorization.user_presence.complete" => {
+            complete_user_presence(authorization, user_presence, issuer, request.payload()).await
         }
         _ => Err(LocalServiceErrorCode::UnknownOperation),
     };
@@ -661,6 +844,215 @@ async fn issue_account_trusted_grant(
             expires_at_unix_milliseconds: expires,
         })
         .await?;
+    encode_grant_result(&grant)
+}
+
+fn begin_user_presence(
+    authorization: &LiveAuthorizationRuntime,
+    user_presence: &Arc<Mutex<UserPresenceRegistry>>,
+    service_public_key: KonclaveDomainCore::Ed25519PublicKey,
+    issuer: &IssuerConnection,
+    request_id: RequestId,
+    payload: &[u8],
+) -> Result<Vec<u8>, LocalServiceErrorCode> {
+    let request: UserPresenceBeginRequest =
+        serde_json::from_slice(payload).map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let profile = ServiceProfileId::parse(&request.profile)
+        .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let harness = parse_harness(&request.harness).ok_or(LocalServiceErrorCode::InvalidRequest)?;
+    let session_public_key = crate::mcp::decode_hex::<32>(&request.session_public_key)
+        .map(KonclaveDomainCore::Ed25519PublicKey::from_bytes)
+        .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let capabilities = SessionCapabilities::from_bits(request.capabilities)
+        .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let (installation_fingerprint, policy_version, evidence, credential_record) = authorization
+        .user_presence_context(
+            issuer.issuer_key_id,
+            issuer.issuer_key_version,
+            &profile,
+            harness,
+        )?;
+    let credential = NativeWebAuthnCredential::from_bytes(credential_record.document())
+        .map_err(map_user_presence_provider_error)?;
+    let verifier = UserPresenceWebAuthnVerifier::new();
+    let (web_authn_request, authentication) = verifier
+        .begin_authentication(&credential)
+        .map_err(map_user_presence_provider_error)?;
+    let now = SystemUnixClock.now_unix_milliseconds();
+    let challenge_expires_at_unix_milliseconds = now
+        .checked_add(MAX_USER_PRESENCE_CHALLENGE_MILLISECONDS)
+        .ok_or(LocalServiceErrorCode::Internal)?;
+    let grant_expires_at_unix_milliseconds = now
+        .checked_add(MAX_USER_PRESENCE_GRANT_MILLISECONDS)
+        .ok_or(LocalServiceErrorCode::Internal)?;
+    let binding = UserPresenceBinding::new(UserPresenceBindingClaims {
+        connection_id: issuer.presence_connection_id,
+        challenge: web_authn_request.challenge(),
+        installation_fingerprint: *installation_fingerprint.as_bytes(),
+        service_public_key,
+        issuer_key_id: issuer.issuer_key_id,
+        issuer_key_version: issuer.issuer_key_version,
+        issuer_client_instance: issuer.client_instance,
+        request_id,
+        policy_version,
+        profile,
+        session_public_key,
+        harness,
+        evidence,
+        capabilities,
+        provider_id: credential_record.provider_id().clone(),
+        credential_digest: credential_record.credential_digest(),
+        issued_at_unix_milliseconds: now,
+        challenge_expires_at_unix_milliseconds,
+        grant_expires_at_unix_milliseconds,
+    })
+    .map_err(map_user_presence_error)?;
+    let web_authn_value: serde_json::Value = serde_json::from_slice(web_authn_request.as_json())
+        .map_err(|_| LocalServiceErrorCode::Internal)?;
+    let result = UserPresenceBeginResult {
+        begin_request_id: crate::mcp::encode_hex(request_id.as_bytes()),
+        binding: crate::mcp::encode_hex(binding.canonical_bytes()),
+        binding_digest: crate::mcp::encode_hex(binding.digest().as_bytes()),
+        challenge: crate::mcp::encode_hex(binding.claims().challenge.as_bytes()),
+        provider: binding.claims().provider_id.as_str().to_string(),
+        credential_digest: crate::mcp::encode_hex(binding.claims().credential_digest.as_bytes()),
+        policy_version: binding.claims().policy_version.get(),
+        issued_at_unix_milliseconds: now,
+        challenge_expires_at_unix_milliseconds,
+        grant_expires_at_unix_milliseconds,
+        web_authn_request: web_authn_value,
+    };
+    let key = user_presence_pending_key(issuer, request_id);
+    lock(user_presence).insert(
+        key,
+        PendingUserPresenceContext {
+            request: PendingUserPresenceRequest::new(binding),
+            authentication,
+            credential,
+        },
+        now,
+    )?;
+    serde_json::to_vec(&result).map_err(|_| LocalServiceErrorCode::Internal)
+}
+
+async fn complete_user_presence(
+    authorization: &LiveAuthorizationRuntime,
+    user_presence: &Arc<Mutex<UserPresenceRegistry>>,
+    issuer: &IssuerConnection,
+    payload: &[u8],
+) -> Result<Vec<u8>, LocalServiceErrorCode> {
+    let request: UserPresenceCompleteRequest =
+        serde_json::from_slice(payload).map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let begin_request_id = RequestId::from_bytes(
+        crate::mcp::decode_hex::<16>(&request.begin_request_id)
+            .map_err(|_| LocalServiceErrorCode::InvalidRequest)?,
+    );
+    let binding_digest = UserPresenceBindingDigest::from_bytes(
+        crate::mcp::decode_hex::<32>(&request.binding_digest)
+            .map_err(|_| LocalServiceErrorCode::InvalidRequest)?,
+    );
+    let challenge = UserPresenceChallenge::from_bytes(
+        crate::mcp::decode_hex::<32>(&request.challenge)
+            .map_err(|_| LocalServiceErrorCode::InvalidRequest)?,
+    );
+    let assertion = serde_json::to_vec(&request.assertion)
+        .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    let assertion_digest = UserPresenceAssertionDigest::sha256(&assertion);
+    let request_key = user_presence_grant_request_key(binding_digest, assertion_digest);
+    let now = SystemUnixClock.now_unix_milliseconds();
+    let pending_key = user_presence_pending_key(issuer, begin_request_id);
+    let pending = lock(user_presence).get(pending_key, now);
+    let Some(mut pending) = pending else {
+        let grant = authorization
+            .recover_user_presence_grant(
+                issuer.issuer_key_id,
+                issuer.issuer_key_version,
+                request_key,
+                now,
+            )
+            .await?
+            .ok_or(LocalServiceErrorCode::Conflict)?;
+        let recovery_expires = grant
+            .issued_at_unix_milliseconds()
+            .checked_add(MAX_USER_PRESENCE_RECOVERY_MILLISECONDS)
+            .ok_or(LocalServiceErrorCode::Internal)?;
+        if now >= recovery_expires {
+            return Err(LocalServiceErrorCode::Conflict);
+        }
+        return encode_grant_result(&grant);
+    };
+    let presentation = UserPresencePresentation::new(
+        issuer.presence_connection_id,
+        binding_digest,
+        challenge,
+        assertion_digest,
+    );
+    if classify_completion(
+        &UserPresenceRequestRecord::Pending(Box::new(pending.request.clone())),
+        presentation,
+        now,
+    )
+    .map_err(map_user_presence_error)?
+        != UserPresenceCompletionDecision::VerifyProvider
+    {
+        return Err(LocalServiceErrorCode::Conflict);
+    }
+    let session_signature = Ed25519Signature::from_slice(
+        &crate::mcp::decode_hex::<64>(&request.session_signature)
+            .map_err(|_| LocalServiceErrorCode::InvalidRequest)?,
+    )
+    .map_err(|_| LocalServiceErrorCode::InvalidRequest)?;
+    verify_local_service_signature(
+        pending.request.binding().claims().session_public_key,
+        pending.request.binding().canonical_bytes(),
+        &session_signature,
+    )
+    .map_err(|_| LocalServiceErrorCode::NotAuthorized)?;
+    let verified = UserPresenceWebAuthnVerifier::new()
+        .finish_authentication(
+            &assertion,
+            &pending.authentication,
+            &mut pending.credential,
+            now,
+        )
+        .map_err(map_user_presence_provider_error)?;
+    let grant_id = new_session_grant_id()?;
+    let recovery_expires_at_unix_milliseconds = now
+        .checked_add(MAX_USER_PRESENCE_RECOVERY_MILLISECONDS)
+        .ok_or(LocalServiceErrorCode::Internal)?;
+    let committed = commit_verified_assertion(
+        pending.request.clone(),
+        presentation,
+        verified,
+        grant_id,
+        now,
+        recovery_expires_at_unix_milliseconds,
+    )
+    .map_err(map_user_presence_error)?;
+    let claims = pending.request.binding().claims();
+    let grant = authorization
+        .issue_user_presence_grant(UserPresenceGrantRequest {
+            issuer_key_id: issuer.issuer_key_id,
+            issuer_key_version: issuer.issuer_key_version,
+            request_key,
+            grant_id: committed.grant_id(),
+            profile: claims.profile.clone(),
+            session_public_key: claims.session_public_key,
+            harness: claims.harness,
+            policy_version: claims.policy_version,
+            evidence: claims.evidence,
+            capabilities: claims.capabilities,
+            credential_digest: claims.credential_digest,
+            updated_credential: pending.credential,
+            issued_at_unix_milliseconds: claims.issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds: claims.grant_expires_at_unix_milliseconds,
+        })
+        .await?;
+    lock(user_presence).remove(pending_key);
+    encode_grant_result(&grant)
+}
+
+fn encode_grant_result(grant: &SessionGrant) -> Result<Vec<u8>, LocalServiceErrorCode> {
     serde_json::to_vec(&GrantIssueResult {
         grant_id: crate::mcp::encode_hex(grant.grant_id().as_bytes()),
         issuer_key_id: crate::mcp::encode_hex(grant.issuer_key_id().as_bytes()),
@@ -675,6 +1067,88 @@ async fn issue_account_trusted_grant(
         capabilities: grant.capabilities().bits(),
     })
     .map_err(|_| LocalServiceErrorCode::Internal)
+}
+
+fn user_presence_pending_key(
+    issuer: &IssuerConnection,
+    request_id: RequestId,
+) -> UserPresencePendingKey {
+    UserPresencePendingKey {
+        issuer_key_id: issuer.issuer_key_id,
+        issuer_key_version: issuer.issuer_key_version,
+        issuer_client_instance: issuer.client_instance,
+        request_id,
+    }
+}
+
+fn user_presence_grant_request_key(
+    binding_digest: UserPresenceBindingDigest,
+    assertion_digest: UserPresenceAssertionDigest,
+) -> GrantIssuanceKey {
+    let mut client_instance = [0_u8; 16];
+    client_instance.copy_from_slice(&binding_digest.as_bytes()[..16]);
+    let mut request_id = [0_u8; 16];
+    request_id.copy_from_slice(&assertion_digest.as_bytes()[..16]);
+    GrantIssuanceKey::new(
+        KonclaveLocalServiceTransport::ClientInstanceId::from_bytes(client_instance),
+        RequestId::from_bytes(request_id),
+    )
+}
+
+fn new_user_presence_connection_id() -> anyhow::Result<UserPresenceConnectionId> {
+    let mut identifier = [0_u8; 16];
+    KonclaveCryptographicCore::fill_random(&mut identifier)
+        .context("generating a user-presence connection identifier")?;
+    Ok(UserPresenceConnectionId::from_bytes(identifier))
+}
+
+fn new_session_grant_id()
+-> Result<KonclaveLocalServiceTransport::SessionGrantId, LocalServiceErrorCode> {
+    let mut identifier = [0_u8; 16];
+    KonclaveCryptographicCore::fill_random(&mut identifier)
+        .map_err(|_| LocalServiceErrorCode::Internal)?;
+    Ok(KonclaveLocalServiceTransport::SessionGrantId::from_bytes(
+        identifier,
+    ))
+}
+
+const fn map_user_presence_error(error: UserPresenceError) -> LocalServiceErrorCode {
+    match error {
+        UserPresenceError::InvalidProviderId
+        | UserPresenceError::InvalidCredentialId
+        | UserPresenceError::InvalidTimeWindow
+        | UserPresenceError::InvalidEncoding
+        | UserPresenceError::InvalidTransition => LocalServiceErrorCode::InvalidRequest,
+        UserPresenceError::NotYetValid | UserPresenceError::ChallengeExpired => {
+            LocalServiceErrorCode::DeadlineExceeded
+        }
+        UserPresenceError::ConnectionMismatch
+        | UserPresenceError::BindingMismatch
+        | UserPresenceError::ChallengeMismatch
+        | UserPresenceError::ProviderMismatch
+        | UserPresenceError::CredentialMismatch
+        | UserPresenceError::AssertionMismatch
+        | UserPresenceError::Replay
+        | UserPresenceError::RecoveryExpired => LocalServiceErrorCode::Conflict,
+        UserPresenceError::Cancelled => LocalServiceErrorCode::Cancelled,
+        UserPresenceError::Invalidated => LocalServiceErrorCode::RequiredEvidenceUnavailable,
+    }
+}
+
+const fn map_user_presence_provider_error(
+    error: UserPresenceWebAuthnError,
+) -> LocalServiceErrorCode {
+    match error {
+        UserPresenceWebAuthnError::Encoding => LocalServiceErrorCode::Internal,
+        UserPresenceWebAuthnError::InvalidRegistration
+        | UserPresenceWebAuthnError::InvalidAssertion
+        | UserPresenceWebAuthnError::InvalidCredential => LocalServiceErrorCode::NotAuthorized,
+        UserPresenceWebAuthnError::ProviderUnavailable => {
+            LocalServiceErrorCode::RequiredEvidenceUnavailable
+        }
+        UserPresenceWebAuthnError::Cancelled => LocalServiceErrorCode::Cancelled,
+        UserPresenceWebAuthnError::ProviderFailed => LocalServiceErrorCode::Internal,
+    }
 }
 
 fn parse_harness(value: &str) -> Option<HarnessKind> {
@@ -2181,8 +2655,8 @@ async fn service_status(
             pending_events,
             claimed_events,
             delivery_degraded: services.health().is_degraded(),
-            authorization_policy: "AccountTrusted",
-            authorization_provider: "AccountTrusted",
+            authorization_policy: authorization_policy_name(&effective_policy),
+            authorization_provider: authorization_provider_name(grant.evidence()),
             authorization_evidence: evidence_names(grant.evidence()),
             authorization_generation: authorization_generation.get(),
             authorization_policy_version: effective_policy.version().get(),
@@ -2214,6 +2688,27 @@ fn evidence_names(evidence: AuthorizationEvidenceSet) -> Vec<&'static str> {
     })
     .map(AuthorizationEvidenceKind::as_str)
     .collect()
+}
+
+fn authorization_policy_name(
+    policy: &KonclaveLocalServiceTransport::AuthorizationPolicy,
+) -> &'static str {
+    let account = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted]).ok();
+    let presence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).ok();
+    match policy.clauses() {
+        clauses if account.is_some_and(|account| clauses == [account]) => "AccountTrusted",
+        clauses if presence.is_some_and(|presence| clauses == [presence]) => "UserPresence",
+        _ => "Composite",
+    }
+}
+
+fn authorization_provider_name(evidence: AuthorizationEvidenceSet) -> &'static str {
+    let presence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).ok();
+    if presence.is_some_and(|presence| evidence.satisfies(presence)) {
+        "WindowsNativeWebAuthn"
+    } else {
+        "AccountTrusted"
+    }
 }
 
 #[derive(Deserialize)]
@@ -3130,6 +3625,9 @@ mod collaboration_policy_tests {
             issuer_public_key: Ed25519PublicKey::from_bytes([3; 32]),
             client_instance: ClientInstanceId::from_bytes([4; 16]),
             harness: HarnessKind::Generic,
+            presence_connection_id: KonclaveUserPresence::UserPresenceConnectionId::from_bytes(
+                [6; 16],
+            ),
         };
         let second = super::IssuerConnection {
             client_instance: ClientInstanceId::from_bytes([5; 16]),
@@ -3675,7 +4173,7 @@ mod tests {
     use KonclaveLocalAuthorizationStore::{
         AuthorizationGeneration, AuthorizationMutation, ExistingGrantDisposition,
         InstallationFingerprint, IssuerAvailability, LocalAuthorizationStore,
-        LocalAuthorizationStoreError,
+        LocalAuthorizationStoreError, UserPresenceCredentialRecord,
     };
     use KonclaveLocalServiceTransport::{
         AdapterKeyId, AdapterKeyVersion, AdapterRegistration, AuthorizationEvidenceKind,
@@ -3691,6 +4189,11 @@ mod tests {
     use KonclaveSecretStorage::{
         create_or_verify_owner_protected_file, ensure_owner_protected_directory,
     };
+    use KonclaveUserPresence::{NativeWebAuthnRequest, UserPresenceWebAuthnVerifier};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use ed25519_dalek::Signer as _;
+    use sha2::Digest as _;
     use tokio::sync::oneshot;
 
     use super::{SharedLocalServiceConfig, run_shared_local_service_until};
@@ -3706,6 +4209,158 @@ mod tests {
     const TEST_STARTUP_DEADLINE: Duration = Duration::from_secs(5);
     const TEST_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
     const TEST_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
+    const TEST_PRESENCE_FINGERPRINT: [u8; 32] = [9; 32];
+    const TEST_FLAG_USER_PRESENT: u8 = 1;
+    const TEST_FLAG_USER_VERIFIED: u8 = 1 << 2;
+    const TEST_FLAG_ATTESTED_DATA: u8 = 1 << 6;
+
+    struct TestWebAuthnAuthenticator {
+        signing_key: ed25519_dalek::SigningKey,
+        credential_id: Vec<u8>,
+        counter: u32,
+    }
+
+    impl TestWebAuthnAuthenticator {
+        fn new() -> Self {
+            Self {
+                signing_key: ed25519_dalek::SigningKey::from_bytes(&[0x41; 32]),
+                credential_id: b"konclave-daemon-test-credential".to_vec(),
+                counter: 0,
+            }
+        }
+
+        fn registration_response(&self, request: &NativeWebAuthnRequest) -> Vec<u8> {
+            let value: serde_json::Value = serde_json::from_slice(request.as_json()).unwrap();
+            let challenge = value["publicKey"]["challenge"].as_str().unwrap();
+            let (_, client_data_json) = test_client_data("webauthn.create", challenge);
+            let mut authenticator_data = Vec::new();
+            authenticator_data.extend_from_slice(&sha2::Sha256::digest(b"konclave.local"));
+            authenticator_data
+                .push(TEST_FLAG_USER_PRESENT | TEST_FLAG_USER_VERIFIED | TEST_FLAG_ATTESTED_DATA);
+            authenticator_data.extend_from_slice(&0_u32.to_be_bytes());
+            authenticator_data.extend_from_slice(&[0_u8; 16]);
+            authenticator_data.extend_from_slice(
+                &u16::try_from(self.credential_id.len())
+                    .unwrap()
+                    .to_be_bytes(),
+            );
+            authenticator_data.extend_from_slice(&self.credential_id);
+            authenticator_data.extend_from_slice(&self.cose_public_key());
+            let attestation = ciborium::value::Value::Map(vec![
+                (
+                    ciborium::value::Value::Text("fmt".into()),
+                    ciborium::value::Value::Text("none".into()),
+                ),
+                (
+                    ciborium::value::Value::Text("attStmt".into()),
+                    ciborium::value::Value::Map(Vec::new()),
+                ),
+                (
+                    ciborium::value::Value::Text("authData".into()),
+                    ciborium::value::Value::Bytes(authenticator_data),
+                ),
+            ]);
+            let mut attestation_bytes = Vec::new();
+            ciborium::ser::into_writer(&attestation, &mut attestation_bytes).unwrap();
+            serde_json::to_vec(&serde_json::json!({
+                "id": URL_SAFE_NO_PAD.encode(&self.credential_id),
+                "rawId": URL_SAFE_NO_PAD.encode(&self.credential_id),
+                "type": "public-key",
+                "response": {
+                    "attestationObject": URL_SAFE_NO_PAD.encode(attestation_bytes),
+                    "clientDataJSON": client_data_json,
+                    "transports": ["internal"],
+                }
+            }))
+            .unwrap()
+        }
+
+        fn authentication_response(
+            &mut self,
+            request: &serde_json::Value,
+            user_verified: bool,
+        ) -> serde_json::Value {
+            self.counter += 1;
+            let challenge = request["publicKey"]["challenge"].as_str().unwrap();
+            let (client_data_json, encoded_client_data) =
+                test_client_data("webauthn.get", challenge);
+            let mut authenticator_data = Vec::new();
+            authenticator_data.extend_from_slice(&sha2::Sha256::digest(b"konclave.local"));
+            authenticator_data.push(
+                TEST_FLAG_USER_PRESENT
+                    | if user_verified {
+                        TEST_FLAG_USER_VERIFIED
+                    } else {
+                        0
+                    },
+            );
+            authenticator_data.extend_from_slice(&self.counter.to_be_bytes());
+            let mut signed = authenticator_data.clone();
+            signed.extend_from_slice(&sha2::Sha256::digest(&client_data_json));
+            let signature = self.signing_key.sign(&signed).to_bytes();
+            serde_json::json!({
+                "id": URL_SAFE_NO_PAD.encode(&self.credential_id),
+                "rawId": URL_SAFE_NO_PAD.encode(&self.credential_id),
+                "type": "public-key",
+                "response": {
+                    "authenticatorData": URL_SAFE_NO_PAD.encode(authenticator_data),
+                    "clientDataJSON": encoded_client_data,
+                    "signature": URL_SAFE_NO_PAD.encode(signature),
+                    "userHandle": URL_SAFE_NO_PAD.encode(test_presence_user_handle()),
+                }
+            })
+        }
+
+        fn cose_public_key(&self) -> Vec<u8> {
+            let value = ciborium::value::Value::Map(vec![
+                (
+                    ciborium::value::Value::Integer(1.into()),
+                    ciborium::value::Value::Integer(1.into()),
+                ),
+                (
+                    ciborium::value::Value::Integer(3.into()),
+                    ciborium::value::Value::Integer((-8).into()),
+                ),
+                (
+                    ciborium::value::Value::Integer((-1).into()),
+                    ciborium::value::Value::Integer(6.into()),
+                ),
+                (
+                    ciborium::value::Value::Integer((-2).into()),
+                    ciborium::value::Value::Bytes(
+                        self.signing_key.verifying_key().to_bytes().to_vec(),
+                    ),
+                ),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        }
+    }
+
+    fn test_client_data(kind: &str, challenge: &str) -> (Vec<u8>, String) {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "type": kind,
+            "challenge": challenge,
+            "origin": "https://konclave.local",
+            "crossOrigin": false,
+        }))
+        .unwrap();
+        let encoded = URL_SAFE_NO_PAD.encode(&bytes);
+        (bytes, encoded)
+    }
+
+    fn test_presence_user_handle() -> [u8; 16] {
+        let mut digest = sha2::Sha256::new();
+        digest.update(b"konclave.user-presence.webauthn-user.v1\0");
+        digest.update(TEST_PRESENCE_FINGERPRINT);
+        let digest = digest.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        bytes
+    }
 
     struct Fixture {
         root: TestProfileRoot,
@@ -3772,6 +4427,38 @@ mod tests {
         }
 
         async fn new_with_policy(policy: AuthorizationPolicy) -> Self {
+            Self::new_with_policy_and_credential(policy, None).await
+        }
+
+        async fn new_with_user_presence() -> (Self, TestWebAuthnAuthenticator) {
+            let verifier = UserPresenceWebAuthnVerifier::new();
+            let (request, enrollment) = verifier
+                .begin_enrollment(TEST_PRESENCE_FINGERPRINT, None)
+                .unwrap();
+            let authenticator = TestWebAuthnAuthenticator::new();
+            let response = authenticator.registration_response(&request);
+            let credential = verifier.finish_enrollment(&response, &enrollment).unwrap();
+            let record =
+                UserPresenceCredentialRecord::from_document(credential.to_bytes().unwrap())
+                    .unwrap();
+            let policy = AuthorizationPolicy::new(
+                AuthorizationPolicyVersion::new(1).unwrap(),
+                vec![
+                    AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence])
+                        .unwrap(),
+                ],
+            )
+            .unwrap();
+            (
+                Self::new_with_policy_and_credential(policy, Some(record)).await,
+                authenticator,
+            )
+        }
+
+        async fn new_with_policy_and_credential(
+            policy: AuthorizationPolicy,
+            credential: Option<UserPresenceCredentialRecord>,
+        ) -> Self {
             let root = TestProfileRoot::new();
             let endpoint = LocalServiceEndpoint::parse(
                 root.path()
@@ -3801,22 +4488,28 @@ mod tests {
                 .path()
                 .join("service")
                 .join(LOCAL_SERVICE_INSTALLATION_FILE);
-            let installation_fingerprint = InstallationFingerprint::from_bytes([9; 32]);
+            let installation_fingerprint =
+                InstallationFingerprint::from_bytes(TEST_PRESENCE_FINGERPRINT);
             let setup_path = installation_path.clone();
             let setup_issuer = issuer.clone();
             let setup_policy = policy.clone();
+            let setup_credential = credential;
             tokio::task::spawn_blocking(move || {
                 ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
-                drop(
-                    LocalAuthorizationStore::bootstrap(
-                        &setup_path,
-                        installation_fingerprint,
-                        &setup_policy,
-                        &[setup_issuer],
-                        1,
-                    )
-                    .unwrap(),
-                );
+                let store = LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    installation_fingerprint,
+                    &setup_policy,
+                    &[setup_issuer],
+                    1,
+                )
+                .unwrap();
+                if let Some(credential) = setup_credential {
+                    store
+                        .register_user_presence_credential(&credential, 2)
+                        .unwrap();
+                }
+                drop(store);
                 create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
             })
             .await
@@ -4079,50 +4772,44 @@ mod tests {
         }))
         .unwrap();
         match request(issuer, seed, "authorization.grant.issue", &payload).await {
-            LocalServiceResponse::Success { payload, .. } => {
-                let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-                let grant_id =
-                    crate::mcp::decode_hex::<16>(value["grantId"].as_str().unwrap()).unwrap();
-                let issuer_key_id =
-                    crate::mcp::decode_hex::<16>(value["issuerKeyId"].as_str().unwrap()).unwrap();
-                let session_public_key =
-                    crate::mcp::decode_hex::<32>(value["sessionPublicKey"].as_str().unwrap())
-                        .unwrap();
-                Ok(SessionGrant::new(SessionGrantClaims {
-                    grant_id: SessionGrantId::from_bytes(grant_id),
-                    issuer_key_id: AdapterKeyId::from_bytes(issuer_key_id),
-                    issuer_key_version: AdapterKeyVersion::new(
-                        u32::try_from(value["issuerKeyVersion"].as_u64().unwrap()).unwrap(),
-                    )
-                    .unwrap(),
-                    profile: ServiceProfileId::parse(value["profile"].as_str().unwrap()).unwrap(),
-                    session_public_key: KonclaveDomainCore::Ed25519PublicKey::from_bytes(
-                        session_public_key,
-                    ),
-                    harness: super::parse_harness(value["harness"].as_str().unwrap()).unwrap(),
-                    evidence: AuthorizationEvidenceSet::from_bits(
-                        u8::try_from(value["evidence"].as_u64().unwrap()).unwrap(),
-                    )
-                    .unwrap(),
-                    policy_version: AuthorizationPolicyVersion::new(
-                        value["policyVersion"].as_u64().unwrap(),
-                    )
-                    .unwrap(),
-                    issued_at_unix_milliseconds: value["issuedAtUnixMilliseconds"]
-                        .as_u64()
-                        .unwrap(),
-                    expires_at_unix_milliseconds: value["expiresAtUnixMilliseconds"]
-                        .as_u64()
-                        .unwrap(),
-                    capabilities: SessionCapabilities::from_bits(
-                        value["capabilities"].as_u64().unwrap(),
-                    )
-                    .unwrap(),
-                })
-                .unwrap())
-            }
+            LocalServiceResponse::Success { payload, .. } => Ok(parse_grant_payload(&payload)),
             LocalServiceResponse::Failure { code, .. } => Err(code),
         }
+    }
+
+    fn parse_grant_payload(payload: &[u8]) -> SessionGrant {
+        let value: serde_json::Value = serde_json::from_slice(payload).unwrap();
+        let grant_id = crate::mcp::decode_hex::<16>(value["grantId"].as_str().unwrap()).unwrap();
+        let issuer_key_id =
+            crate::mcp::decode_hex::<16>(value["issuerKeyId"].as_str().unwrap()).unwrap();
+        let session_public_key =
+            crate::mcp::decode_hex::<32>(value["sessionPublicKey"].as_str().unwrap()).unwrap();
+        SessionGrant::new(SessionGrantClaims {
+            grant_id: SessionGrantId::from_bytes(grant_id),
+            issuer_key_id: AdapterKeyId::from_bytes(issuer_key_id),
+            issuer_key_version: AdapterKeyVersion::new(
+                u32::try_from(value["issuerKeyVersion"].as_u64().unwrap()).unwrap(),
+            )
+            .unwrap(),
+            profile: ServiceProfileId::parse(value["profile"].as_str().unwrap()).unwrap(),
+            session_public_key: KonclaveDomainCore::Ed25519PublicKey::from_bytes(
+                session_public_key,
+            ),
+            harness: super::parse_harness(value["harness"].as_str().unwrap()).unwrap(),
+            evidence: AuthorizationEvidenceSet::from_bits(
+                u8::try_from(value["evidence"].as_u64().unwrap()).unwrap(),
+            )
+            .unwrap(),
+            policy_version: AuthorizationPolicyVersion::new(
+                value["policyVersion"].as_u64().unwrap(),
+            )
+            .unwrap(),
+            issued_at_unix_milliseconds: value["issuedAtUnixMilliseconds"].as_u64().unwrap(),
+            expires_at_unix_milliseconds: value["expiresAtUnixMilliseconds"].as_u64().unwrap(),
+            capabilities: SessionCapabilities::from_bits(value["capabilities"].as_u64().unwrap())
+                .unwrap(),
+        })
+        .unwrap()
     }
 
     async fn wait_for_active_delivery(root: &TestProfileRoot, profile: &str) {
@@ -5022,6 +5709,148 @@ mod tests {
             .expect("restarted shared service shutdown exceeded the test deadline")
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn user_presence_issues_one_exact_grant_and_recovers_after_restart() {
+        let (fixture, mut authenticator) = Fixture::new_with_user_presence().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the presence issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(70) => stream,
+        };
+        let begin_payload = serde_json::to_vec(&serde_json::json!({
+            "profile": "session-presence",
+            "sessionPublicKey": crate::mcp::encode_hex(
+                fixture.client_identity.public_key().as_bytes()
+            ),
+            "harness": "copilot",
+            "capabilities": SessionCapabilities::ALL.bits(),
+        }))
+        .unwrap();
+        let LocalServiceResponse::Success {
+            payload: begin_payload,
+            ..
+        } = request(
+            &mut issuer,
+            71,
+            "authorization.user_presence.begin",
+            &begin_payload,
+        )
+        .await
+        else {
+            panic!("user-presence challenge failed");
+        };
+        let begin: serde_json::Value = serde_json::from_slice(&begin_payload).unwrap();
+        let binding = decode_test_hex(begin["binding"].as_str().unwrap());
+        let session_signature = fixture.client_identity.sign(&binding).unwrap();
+        let assertion = authenticator.authentication_response(&begin["webAuthnRequest"], true);
+        let complete = serde_json::json!({
+            "beginRequestId": begin["beginRequestId"],
+            "bindingDigest": begin["bindingDigest"],
+            "challenge": begin["challenge"],
+            "sessionSignature": crate::mcp::encode_hex(session_signature.as_bytes()),
+            "assertion": assertion,
+        });
+        let complete_payload = serde_json::to_vec(&complete).unwrap();
+        let LocalServiceResponse::Success { payload, .. } = request(
+            &mut issuer,
+            72,
+            "authorization.user_presence.complete",
+            &complete_payload,
+        )
+        .await
+        else {
+            panic!("user-presence completion failed");
+        };
+        let grant = parse_grant_payload(&payload);
+        assert_eq!(
+            grant.evidence(),
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).unwrap()
+        );
+        assert_eq!(grant.capabilities(), SessionCapabilities::ALL);
+        let mut session = fixture.connect_grant(grant.clone(), 73).await;
+        assert!(matches!(
+            request(&mut session, 73, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop((issuer, session));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+
+        let (restart_tx, restart_rx) = oneshot::channel();
+        let mut restarted = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = restart_rx.await;
+            },
+        ));
+        let mut retrying_issuer = tokio::select! {
+            result = &mut restarted => {
+                panic!("restarted service exited before the presence retry: {result:?}")
+            }
+            stream = fixture.connect_issuer(70) => stream,
+        };
+        let LocalServiceResponse::Success {
+            payload: recovered, ..
+        } = request(
+            &mut retrying_issuer,
+            74,
+            "authorization.user_presence.complete",
+            &complete_payload,
+        )
+        .await
+        else {
+            panic!("exact user-presence retry did not recover its grant");
+        };
+        assert_eq!(parse_grant_payload(&recovered), grant);
+
+        let mut variant = complete;
+        variant["assertion"]["untrustedExtra"] = serde_json::Value::Bool(true);
+        let variant = serde_json::to_vec(&variant).unwrap();
+        assert!(matches!(
+            request(
+                &mut retrying_issuer,
+                75,
+                "authorization.user_presence.complete",
+                &variant,
+            )
+            .await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::Conflict,
+                ..
+            }
+        ));
+
+        drop(retrying_issuer);
+        restart_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, restarted)
+            .await
+            .expect("restarted shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    fn decode_test_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0);
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

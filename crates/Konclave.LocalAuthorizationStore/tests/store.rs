@@ -676,6 +676,17 @@ fn issuer_request_replay_returns_the_original_durable_grant() {
         .unwrap();
     assert_eq!(replayed.mutation().effect(), MutationEffect::Unchanged);
     assert_eq!(replayed.grant(), &original);
+    assert_eq!(
+        store
+            .active_grant_for_request(
+                original.issuer_key_id(),
+                original.issuer_key_version(),
+                request_key,
+                NOW + 1,
+            )
+            .unwrap(),
+        Some(original.clone())
+    );
 
     let conflicting = grant(3, 1, 1, "bob", AuthorizationEvidenceKind::AccountTrusted, 1);
     assert_eq!(
@@ -683,6 +694,20 @@ fn issuer_request_replay_returns_the_original_durable_grant() {
             .issue_grant_for_request(request_key, &conflicting, NOW + 1)
             .unwrap_err(),
         LocalAuthorizationStoreError::Conflict
+    );
+    assert!(
+        store
+            .active_grant_for_request(
+                original.issuer_key_id(),
+                original.issuer_key_version(),
+                GrantIssuanceKey::new(
+                    ClientInstanceId::from_bytes([9; 16]),
+                    RequestId::from_bytes([9; 16]),
+                ),
+                NOW + 1,
+            )
+            .unwrap()
+            .is_none()
     );
 }
 
