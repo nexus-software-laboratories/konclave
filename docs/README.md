@@ -43,6 +43,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Node dependency installation](development/node-dependencies.md)
 - [Rust service composition](development/rust-services.md)
 - [Conformance and security evidence](development/conformance.md)
+- [Security-sensitive component delivery](development/security-sensitive-delivery.md)
 - [A2A conformance profile](development/a2a-conformance.md)
 - [Sealed secret storage](development/secret-storage.md)
 - [Opaque relay storage](development/relay-storage.md)

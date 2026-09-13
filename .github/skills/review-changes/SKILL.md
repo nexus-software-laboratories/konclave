@@ -114,6 +114,19 @@ Read each changed file and inspect:
 Use the current governing source for the exact rule. These categories are not a
 second standards checklist.
 
+When the diff adds a crate or a security-sensitive state machine, also read
+`.github/skills/security-sensitive-delivery/SKILL.md` and verify:
+
+- the component and its focused tests arrived in a bounded foundation commit;
+- a focused GitHub-hosted component workflow was added before integration commits;
+- that focused check passed on the exact foundation head before integration began;
+- error classifiers and state transitions are pure and table-tested; and
+- every validation claim names a command or check that actually executed the
+  relevant tests.
+
+Missing focused evidence or integration that precedes the focused green check is a
+blocker, not an unrun-check disclosure.
+
 ## 5. Reflect on guidance
 
 Treat review as a bounded feedback loop, not a default instruction-edit trigger.

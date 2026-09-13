@@ -30,8 +30,11 @@ Secure, durable communication for software agents.
 - Use feature branches and pull requests. Target the default branch unless project
   delivery documentation explicitly enables same-repository stacked pull requests.
   Local commits remain unrestricted checkpoints.
-- Run targeted checks while iterating; complete suites and hosted/platform validation
-  belong to the repository's configured CI and PitCrew capacity when present.
+- Before adding a crate or security-sensitive state machine, follow
+  [security-sensitive-delivery](.github/skills/security-sensitive-delivery/SKILL.md);
+  its focused hosted gate must pass before integration work begins.
+- Run targeted checks while iterating; complete suites and platform validation belong
+  to the repository's configured hosted CI.
 - Before delivery, run
   [review-changes](.github/skills/review-changes/SKILL.md). It reads repository
   workflows and `.github/genesis-delivery.json`, requires a conventional title, and
