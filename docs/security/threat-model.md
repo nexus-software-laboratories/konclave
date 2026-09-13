@@ -15,6 +15,8 @@ evidence that implementations honor both.
 - install-scoped enrollment credentials and per-profile relay data-plane tokens;
 - installed authorization-issuer private keys, ephemeral session keys, exact-profile
   grants, authenticated service connections, and delivery leases;
+- harness-attestation verification roots, pending challenges, signed assertions, and
+  transient normalized session subjects;
 - relay bearer credentials and authorization policy;
 - membership integrity and administrator policy;
 - message authenticity, ordering, acknowledgment, and replay state;
@@ -75,6 +77,16 @@ installation record pins the derived service public key, so missing or substitut
 custody fails before the endpoint opens. AccountTrusted session keys are re-created
 after client restart. Session grants are durable service state and survive service
 restart until expiry or an explicit terminal transition.
+
+`HarnessAttested` is not currently available from any shipped provider. Session IDs,
+hook payloads, environment variables, process ancestry, executable paths, extension
+manifests, and caller-declared host metadata are not accepted as attestation. A future
+provider must return a harness-owned signed assertion bound to a fresh Konclave
+challenge, the local-service installation, exact profile, ephemeral session key,
+capabilities, verified session lifecycle, and the digest of the extension code the
+harness actually loaded. Provider signing keys remain unavailable to extensions and
+arbitrary same-account processes. Missing or unverifiable support returns
+`required_evidence_unavailable` without falling back to `AccountTrusted`.
 
 Active grants are bounded globally, per issuer, and per profile. Revocation removes
 one exact grant and closes its connections; AccountTrusted can issue a replacement
@@ -191,6 +203,8 @@ Konclave considers:
 - a local unprivileged process attempting unauthorized daemon operations;
 - a local process attempting endpoint discovery, squatting, cross-profile attachment,
   capability replay, or stale lease acknowledgment;
+- a same-account process replaying or fabricating unsigned harness session,
+  lifecycle, extension, or process metadata;
 - an attacker with offline access to persisted files;
 - malformed, oversized, or adversarial protocol input;
 - model output attempting to misuse daemon tools;

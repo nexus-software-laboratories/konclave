@@ -23,6 +23,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0016: A2A streaming projection](adr/adr-0016-a2a-streaming-projection.md)
 - [ADR 0017: Bounded A2A artifact profile](adr/adr-0017-a2a-artifact-profile.md)
 - [ADR 0018: Fail-closed protected A2A handoff](adr/adr-0018-fail-closed-protected-a2a-handoff.md)
+- [ADR 0019: Harness-owned session attestation](adr/adr-0019-harness-owned-session-attestation.md)
 
 ## Protocol
 
@@ -44,6 +45,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Rust service composition](development/rust-services.md)
 - [Conformance and security evidence](development/conformance.md)
 - [Security-sensitive component delivery](development/security-sensitive-delivery.md)
+- [Harness attestation provider contract](development/harness-attestation.md)
 - [A2A conformance profile](development/a2a-conformance.md)
 - [Sealed secret storage](development/secret-storage.md)
 - [Opaque relay storage](development/relay-storage.md)
