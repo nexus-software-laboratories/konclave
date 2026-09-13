@@ -47,11 +47,11 @@ jobs:
               $files | Where-Object {
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/workflows/generic-client-conformance\.yml$' -or
-                $_ -match '^apps/Konclave\.LocalDaemon/src/local_service\.rs$' -or
-                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|scripts/(?:build-extension|package-contract|package-plugin|verify-package)\.mjs|skills/konclave-generic/SKILL\.md|src/client-api\.ts|src/generic-(?:cli|command)\.ts|src/service/(?:client|config|installed|operations|transcript)\.ts|tests/(?:generic-command|service-client|service-config)\.test\.ts)$' -or
-                $_ -match '^crates/Konclave\.LocalAuthorizationStore/tests/store\.rs$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/src/(?:authorization_runtime|local_service)\.rs$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/tests/packaged_distribution_e2e\.rs$' -or
-                $_ -match '^docs/integrations/generic-client\.md$'
+                $_ -match '^crates/Konclave\.(?:LocalAuthorizationStore|LocalServiceTransport|SecretStorage|WindowsSecurity)/' -or
+                $_ -match '^docs/integrations/generic-client\.md$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/'
               }
             ).Count -ne 0
           }
@@ -93,8 +93,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveLocalAuthorizationStore --package KonclaveLocalDaemon -- --check
+          cargo fmt \
+            --package KonclaveLocalAuthorizationStore \
+            --package KonclaveLocalServiceTransport \
+            --package KonclaveLocalDaemon \
+            -- \
+            --check
           cargo test --locked --package KonclaveLocalAuthorizationStore quota
+          cargo test --locked --package KonclaveLocalServiceTransport
           cargo test \
             --locked \
             --package KonclaveLocalDaemon \
@@ -106,6 +112,13 @@ jobs:
             --test packaged_distribution_e2e
           cargo clippy \
             --locked \
+            --package KonclaveLocalAuthorizationStore \
+            --package KonclaveLocalServiceTransport \
+            --all-targets \
+            -- \
+            -D warnings
+          cargo clippy \
+            --locked \
             --package KonclaveLocalDaemon \
             --lib \
             -- \
@@ -115,23 +128,9 @@ jobs:
         working-directory: extensions/Konclave.HostExtension
         run: |
           npm ci
+          npm run format:check
+          npm run lint
           npm run typecheck
-          npm exec -- eslint \
-            src/generic-cli.ts \
-            src/generic-command.ts \
-            src/client-api.ts \
-            src/service/installed.ts \
-            tests/generic-command.test.ts \
-            tests/service-client.test.ts \
-            tests/service-config.test.ts
-          npm exec -- prettier --check \
-            src/generic-cli.ts \
-            src/generic-command.ts \
-            src/client-api.ts \
-            src/service/installed.ts \
-            tests/generic-command.test.ts \
-            tests/service-client.test.ts \
-            tests/service-config.test.ts
           npm exec -- vitest run \
             tests/generic-command.test.ts \
             tests/service-client.test.ts \
