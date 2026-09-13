@@ -294,7 +294,8 @@ async fn serve_session_client(
     if !authorization.grant_is_active(&grant) {
         return Ok(());
     }
-    let mut attach = Box::pin(supervisor.attach(grant.profile().as_str()));
+    let profile = grant.profile().clone();
+    let mut attach = Box::pin(supervisor.attach(profile.as_str()));
     let lease = loop {
         tokio::select! {
             biased;
