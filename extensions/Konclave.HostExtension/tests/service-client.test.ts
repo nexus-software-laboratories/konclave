@@ -32,7 +32,10 @@ import {
   type HarnessKind,
   type SessionGrantRecord,
 } from '../src/service/transcript.js';
-import { connectInstalledGenericService } from '../src/service/installed.js';
+import {
+  connectInstalledGenericService,
+  validateGenericClientIdentity,
+} from '../src/service/installed.js';
 
 const handshakeFrameLimit = 256;
 const rpcFrameLimit = 1_048_662;
@@ -563,17 +566,27 @@ describe('shared local service client', () => {
       { mode: 0o600 },
     );
 
+    let suppliedProfile = 'generic-test';
+    const identity = {
+      get profile() {
+        return suppliedProfile;
+      },
+      get profileMode() {
+        suppliedProfile = 'session-0123456789abcdef01234567';
+        return 'durable' as const;
+      },
+      get integrationLabel() {
+        return 'future-harness.v1';
+      },
+    };
     const client = await connectInstalledGenericService(
       { KONCLAVE_SERVICE_CONFIG_FILE: serviceConfigFile },
       directory,
-      {
-        profile: 'generic-test',
-        profileMode: 'durable',
-        integrationLabel: 'future-harness.v1',
-      },
+      identity,
     );
 
     await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ac' });
+    expect(suppliedProfile).toBe('session-0123456789abcdef01234567');
     expect(grantRequests).toHaveLength(1);
     expect(grantRequests[0]?.operation).toBe('authorization.grant.issue');
     expect(grantRequests[0]?.payload).toMatchObject({
@@ -602,6 +615,27 @@ describe('shared local service client', () => {
         integrationLabel: 'future-harness.v1',
       }),
     ).rejects.toMatchObject({ code: 'ephemeral_profile_invalid' });
+    for (const invalid of [
+      {
+        profile: 'generic-test',
+        profileMode: 'unknown',
+        integrationLabel: 'future-harness.v1',
+      },
+      {
+        profile: 'generic-test',
+        profileMode: 'durable',
+        integrationLabel: 7,
+      },
+      {
+        profile: 7,
+        profileMode: 'durable',
+        integrationLabel: 'future-harness.v1',
+      },
+    ]) {
+      expect(() => Reflect.apply(validateGenericClientIdentity, undefined, [invalid])).toThrow(
+        'invalid_arguments',
+      );
+    }
   });
 
   it('redacts an unavailable endpoint from connection errors', async () => {

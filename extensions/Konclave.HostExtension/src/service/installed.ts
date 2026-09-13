@@ -36,21 +36,29 @@ export class GenericClientIdentityError extends Error {
 export function validateGenericClientIdentity(
   identity: GenericClientIdentity,
 ): GenericClientIdentity {
-  if (!genericIntegrationLabelPattern.test(identity.integrationLabel)) {
+  const profile: unknown = identity.profile;
+  const profileMode: unknown = identity.profileMode;
+  const integrationLabel: unknown = identity.integrationLabel;
+  if (
+    typeof profile !== 'string' ||
+    typeof integrationLabel !== 'string' ||
+    (profileMode !== 'durable' && profileMode !== 'ephemeral') ||
+    !genericIntegrationLabelPattern.test(integrationLabel)
+  ) {
     throw new GenericClientIdentityError('invalid_arguments');
   }
   try {
-    assertCanonicalProfile(identity.profile);
+    assertCanonicalProfile(profile);
   } catch {
     throw new GenericClientIdentityError('invalid_arguments');
   }
-  if (identity.profile.startsWith('session-')) {
+  if (profile.startsWith('session-')) {
     throw new GenericClientIdentityError('paved_profile_reserved');
   }
-  if (identity.profileMode === 'ephemeral' && !ephemeralProfilePattern.test(identity.profile)) {
+  if (profileMode === 'ephemeral' && !ephemeralProfilePattern.test(profile)) {
     throw new GenericClientIdentityError('ephemeral_profile_invalid');
   }
-  return identity;
+  return { profile, profileMode, integrationLabel };
 }
 
 /**
