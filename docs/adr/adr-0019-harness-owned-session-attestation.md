@@ -115,6 +115,11 @@ single-use `konclave.harness-attestation.challenge.v1` value containing:
 - the expected extension policy identifier; and
 - issued-at and expiry timestamps inside a short challenge window.
 
+Challenge issuance may occur before session authorization because the proof does not
+yet exist. It remains on the owner-restricted local endpoint, allocates no profile
+runtime, performs no profile side effect, and is bounded globally and per connection.
+Restart invalidates every pending challenge.
+
 The harness receives the complete challenge. A successful assertion must bind its
 digest and add host-authoritative claims that the caller cannot choose:
 
@@ -199,6 +204,10 @@ do not change session identity.
 A provider registration contains a stable provider identifier, accepted algorithms,
 verification roots or a signed key-set root, validity policy, and supported lifecycle
 claims. Installation is an explicit owner action.
+
+Its extension policy pins exact executable digests or a signed publisher provenance
+chain that resolves to the digest the host reports. A name, path, manifest, or
+caller-declared version never substitutes for that check.
 
 Key rotation is accepted only through a signature chaining to an already trusted root
 or another explicit owner update. Outbound key-set refresh may update a bounded cache,
@@ -315,6 +324,8 @@ kind.
 - Vendor support is required before the strongest automatic path can ship.
 - Verification-key distribution and rotation become provider responsibilities.
 - Short-lived assertions require renewal and explicit handling of offline expiry.
+- Extension updates require an explicit digest/publisher-policy transition before the
+  new code can receive attested grants.
 
 ### Neutral
 

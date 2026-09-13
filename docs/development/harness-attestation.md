@@ -78,6 +78,11 @@ any provider.
 The caller may supply only the challenge fields. It never supplies session subject,
 lifecycle, extension identity, evidence kind, issuer identity, or verified outcome.
 
+The owner-restricted local service may issue this challenge before authorization, but
+it allocates no profile runtime and performs no profile side effect. Pending
+challenges are bounded globally and per connection, consumed once, and discarded on
+service restart.
+
 Provider identifiers and extension policy identifiers are at most 64 canonical ASCII
 characters. Signing-key identifiers, opaque session subjects, session instances, and
 source-qualified extension identifiers are each at most 128 bytes. Challenge and
@@ -161,6 +166,9 @@ The initial deterministic derivation vector is:
 Provider key disablement uses the existing durable issuer lifecycle. New assertion
 verification fails after disablement, while existing grants follow the configured
 retain-or-revoke disposition and the daemon's existing one-second observation bound.
+Extension policy pins an exact loaded-code digest or a signed publisher provenance
+chain that resolves to that digest. File paths, manifests, names, and caller-declared
+versions remain diagnostics.
 
 ## Lifecycle requirements
 
