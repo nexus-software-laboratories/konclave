@@ -8,12 +8,12 @@ use KonclaveLocalServiceClient::{
     LocalServiceIssuerCredential, LocalServiceJsonClient, LocalServiceJsonClientConfig,
 };
 use KonclaveLocalServiceTransport::{
-    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicyVersion, HarnessKind,
-    InMemorySessionAuthorizationRegistry, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
-    LocalServiceEndpoint, LocalServiceListener, LocalServiceResponse, ProfileAuthorization,
-    RequestId, ServiceProfileId, SessionCapabilities, SessionGrant, SessionGrantClaims,
-    SessionGrantId, complete_authorization_service_handshake, decode_lowercase_hex,
-    encode_lowercase_hex, read_request, write_response,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet,
+    AuthorizationPolicyVersion, HarnessKind, InMemorySessionAuthorizationRegistry, IssuerKeyId,
+    IssuerKeyVersion, IssuerRegistration, LocalServiceEndpoint, LocalServiceListener,
+    LocalServiceResponse, ProfileAuthorization, RequestId, ServiceProfileId, SessionCapabilities,
+    SessionGrant, SessionGrantClaims, SessionGrantId, complete_authorization_service_handshake,
+    decode_lowercase_hex, encode_lowercase_hex, read_request, write_response,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -153,6 +153,126 @@ async fn client_issues_a_grant_and_retries_an_ambiguous_session_request_exactly(
             .await
             .unwrap();
         assert_eq!(response, br#"{"device_id":"01"}"#);
+    };
+
+    let ((), ()) = tokio::join!(service, client);
+}
+
+#[tokio::test]
+async fn client_reuses_the_issuer_instance_after_a_lost_grant_response() {
+    let (endpoint, _endpoint_root) = endpoint("json-client-grant-retry");
+    let mut listener = LocalServiceListener::bind(&endpoint).await.unwrap();
+    let service_identity = LocalServiceIdentity::generate().unwrap();
+    let service_public_key = service_identity.public_key();
+    let issuer_identity = LocalServiceIdentity::generate().unwrap();
+    let issuer_public_key = issuer_identity.public_key();
+    let issuer_key_id = IssuerKeyId::from_bytes([11; 16]);
+    let issuer_key_version = IssuerKeyVersion::new(1).unwrap();
+    let registry = InMemorySessionAuthorizationRegistry::new();
+    registry
+        .register_issuer(
+            issuer_key_id,
+            issuer_key_version,
+            IssuerRegistration::new(
+                issuer_public_key,
+                HarnessKind::Generic,
+                ProfileAuthorization::All,
+            ),
+        )
+        .unwrap();
+
+    let service = async move {
+        let mut first_stream = listener.accept().await.unwrap();
+        let first_channel = complete_authorization_service_handshake(
+            &mut first_stream,
+            &registry,
+            &service_identity,
+            1,
+        )
+        .await
+        .unwrap();
+        let first_instance = match first_channel.binding() {
+            AuthorizationBinding::Issuer {
+                client_instance, ..
+            } => *client_instance,
+            AuthorizationBinding::Session { .. } => panic!("expected issuer binding"),
+        };
+        let first_request = read_request(&mut first_stream).await.unwrap();
+        drop(first_stream);
+
+        let mut second_stream = listener.accept().await.unwrap();
+        let second_channel = complete_authorization_service_handshake(
+            &mut second_stream,
+            &registry,
+            &service_identity,
+            2,
+        )
+        .await
+        .unwrap();
+        let second_instance = match second_channel.binding() {
+            AuthorizationBinding::Issuer {
+                client_instance, ..
+            } => *client_instance,
+            AuthorizationBinding::Session { .. } => panic!("expected issuer binding"),
+        };
+        let second_request = read_request(&mut second_stream).await.unwrap();
+        assert_eq!(first_instance, second_instance);
+        assert_eq!(first_request, second_request);
+
+        let requested: GrantRequest = serde_json::from_slice(second_request.payload()).unwrap();
+        let session_public_key = Ed25519PublicKey::from_bytes(
+            decode_lowercase_hex::<32>(&requested.session_public_key).unwrap(),
+        );
+        let grant = SessionGrant::new(SessionGrantClaims {
+            grant_id: SessionGrantId::from_bytes([12; 16]),
+            issuer_key_id,
+            issuer_key_version,
+            profile: ServiceProfileId::parse(&requested.profile).unwrap(),
+            session_public_key,
+            harness: HarnessKind::A2AGateway,
+            evidence: AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+                .unwrap(),
+            policy_version: AuthorizationPolicyVersion::new(1).unwrap(),
+            issued_at_unix_milliseconds: 1,
+            expires_at_unix_milliseconds: u64::MAX,
+            capabilities: SessionCapabilities::ALL,
+        })
+        .unwrap();
+        registry.issue_grant(grant.clone(), 1).unwrap();
+        let payload = serde_json::to_vec(&json!({
+            "grantId": encode_lowercase_hex(grant.grant_id().as_bytes()),
+            "issuerKeyId": encode_lowercase_hex(grant.issuer_key_id().as_bytes()),
+            "issuerKeyVersion": grant.issuer_key_version().get(),
+            "profile": grant.profile().as_str(),
+            "sessionPublicKey": encode_lowercase_hex(grant.session_public_key().as_bytes()),
+            "harness": grant.harness().as_str(),
+            "evidence": grant.evidence().bits(),
+            "policyVersion": grant.policy_version().get(),
+            "issuedAtUnixMilliseconds": grant.issued_at_unix_milliseconds(),
+            "expiresAtUnixMilliseconds": grant.expires_at_unix_milliseconds(),
+            "capabilities": grant.capabilities().bits()
+        }))
+        .unwrap();
+        write_response(
+            &mut second_stream,
+            &LocalServiceResponse::success(second_request.request_id(), payload).unwrap(),
+        )
+        .await
+        .unwrap();
+    };
+
+    let client = async move {
+        let config = LocalServiceJsonClientConfig::new(
+            endpoint,
+            LocalServiceIssuerCredential::new(issuer_key_id, issuer_key_version, issuer_identity),
+            service_public_key,
+            ServiceProfileId::parse("a2a-gateway").unwrap(),
+            HarnessKind::A2AGateway,
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        LocalServiceJsonClient::connect(config).await.unwrap();
     };
 
     let ((), ()) = tokio::join!(service, client);

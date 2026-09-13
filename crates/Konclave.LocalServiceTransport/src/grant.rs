@@ -472,6 +472,84 @@ impl InMemorySessionAuthorizationRegistry {
         }
     }
 
+    /// Atomically replaces the complete live issuer and grant projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same finite validation and capacity failures as incremental
+    /// registration and issuance. The current projection is unchanged on failure.
+    pub fn replace(
+        &self,
+        issuers: Vec<crate::InstalledIssuerRegistration>,
+        grants: Vec<SessionGrant>,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), LocalServiceTransportError> {
+        if issuers.len() > crate::MAX_ADAPTER_REGISTRATIONS {
+            return Err(LocalServiceTransportError::RegistrationLimitReached);
+        }
+        let mut replacement = GrantState::default();
+        for issuer in issuers {
+            let key = (issuer.issuer_key_id(), issuer.issuer_key_version());
+            if replacement
+                .issuers
+                .iter()
+                .any(|(id, version, _)| (*id, *version) == key)
+            {
+                return Err(LocalServiceTransportError::DuplicateRegistration);
+            }
+            replacement
+                .issuers
+                .push((key.0, key.1, issuer.registration().clone()));
+        }
+        for grant in grants {
+            if grant.expires_at_unix_milliseconds <= now_unix_milliseconds {
+                return Err(LocalServiceTransportError::InvalidGrant);
+            }
+            let registration = replacement
+                .issuers
+                .iter()
+                .find(|(id, version, _)| {
+                    *id == grant.issuer_key_id && *version == grant.issuer_key_version
+                })
+                .map(|(_, _, registration)| registration)
+                .ok_or(LocalServiceTransportError::UnknownAdapterRegistration)?;
+            if registration.harness() != grant.harness
+                && registration.harness() != HarnessKind::Generic
+            {
+                return Err(LocalServiceTransportError::HarnessNotAuthorized);
+            }
+            if !registration.profiles().permits(&grant.profile) {
+                return Err(LocalServiceTransportError::ProfileNotAuthorized);
+            }
+            if replacement
+                .grants
+                .iter()
+                .any(|existing| existing.grant_id == grant.grant_id)
+            {
+                return Err(LocalServiceTransportError::DuplicateGrant);
+            }
+            if replacement.grants.len() >= MAX_SESSION_GRANTS
+                || replacement
+                    .grants
+                    .iter()
+                    .filter(|existing| existing.issuer_key_id == grant.issuer_key_id)
+                    .count()
+                    >= MAX_GRANTS_PER_ISSUER
+                || replacement
+                    .grants
+                    .iter()
+                    .filter(|existing| existing.profile == grant.profile)
+                    .count()
+                    >= MAX_GRANTS_PER_PROFILE
+            {
+                return Err(LocalServiceTransportError::GrantLimitReached);
+            }
+            replacement.grants.push(grant);
+        }
+        *lock(&self.state) = replacement;
+        Ok(())
+    }
+
     /// Registers one exact active account issuer.
     ///
     /// # Errors
@@ -617,7 +695,7 @@ mod tests {
     use KonclaveDomainCore::Ed25519PublicKey;
 
     use super::*;
-    use crate::{IssuerRegistration, ProfileAuthorization};
+    use crate::{InstalledIssuerRegistration, IssuerRegistration, ProfileAuthorization};
 
     fn profile(value: &str) -> ServiceProfileId {
         ServiceProfileId::parse(value).unwrap()
@@ -789,6 +867,73 @@ mod tests {
                 IssuerKeyVersion::new(1).unwrap()
             ),
             Some(registration)
+        );
+    }
+
+    #[test]
+    fn a_complete_projection_replaces_atomically() {
+        let registry = InMemorySessionAuthorizationRegistry::new();
+        registry
+            .register_issuer(
+                IssuerKeyId::from_bytes([1; 16]),
+                IssuerKeyVersion::new(1).unwrap(),
+                IssuerRegistration::new(
+                    Ed25519PublicKey::from_bytes([1; 32]),
+                    HarnessKind::Generic,
+                    ProfileAuthorization::All,
+                ),
+            )
+            .unwrap();
+        registry.issue_grant(grant(1, "old", 1), 10).unwrap();
+
+        let replacement_issuer = InstalledIssuerRegistration::new(
+            IssuerKeyId::from_bytes([2; 16]),
+            IssuerKeyVersion::new(1).unwrap(),
+            IssuerRegistration::new(
+                Ed25519PublicKey::from_bytes([2; 32]),
+                HarnessKind::Generic,
+                ProfileAuthorization::All,
+            ),
+        );
+        let replacement_grant = grant(2, "new", 2);
+        registry
+            .replace(
+                vec![replacement_issuer.clone()],
+                vec![replacement_grant.clone()],
+                10,
+            )
+            .unwrap();
+        assert!(
+            registry
+                .active_issuer(
+                    IssuerKeyId::from_bytes([1; 16]),
+                    IssuerKeyVersion::new(1).unwrap(),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            registry.active_issuer(
+                replacement_issuer.issuer_key_id(),
+                replacement_issuer.issuer_key_version(),
+            ),
+            Some(replacement_issuer.registration().clone())
+        );
+        assert_eq!(
+            registry.active_grant(replacement_grant.grant_id(), 10),
+            Some(replacement_grant)
+        );
+
+        assert_eq!(
+            registry.replace(Vec::new(), vec![grant(3, "invalid", 3)], 10),
+            Err(LocalServiceTransportError::UnknownAdapterRegistration)
+        );
+        assert!(
+            registry
+                .active_issuer(
+                    replacement_issuer.issuer_key_id(),
+                    replacement_issuer.issuer_key_version(),
+                )
+                .is_some()
         );
     }
 }

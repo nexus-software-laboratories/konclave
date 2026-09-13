@@ -1,0 +1,901 @@
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Duration;
+
+use KonclaveDomainCore::Ed25519PublicKey;
+use KonclaveLocalAuthorizationStore::{
+    AuthorizationGeneration, AuthorizationIssuerRecord, AuthorizationMutation,
+    AuthorizationSnapshot, GrantIssuanceKey, InstallationFingerprint, IssuerAvailability,
+    LocalAuthorizationStore, LocalAuthorizationStoreError, MutationEffect,
+};
+use KonclaveLocalServiceTransport::{
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
+    InMemorySessionAuthorizationRegistry, InstalledIssuerRegistration, IssuerKeyId,
+    IssuerKeyVersion, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
+    ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
+    SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
+};
+use thiserror::Error;
+use tokio::sync::{Mutex, Notify, watch};
+
+use crate::clock::{SystemUnixClock, UnixClock};
+
+pub(crate) const AUTHORIZATION_RELOAD_INTERVAL: Duration = Duration::from_millis(500);
+const AUTHORIZATION_RELOAD_DEADLINE: Duration = Duration::from_millis(500);
+#[cfg(test)]
+pub(crate) const AUTHORIZATION_OBSERVATION_BOUND: Duration = Duration::from_secs(1);
+const GRANT_IDENTIFIER_ATTEMPTS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub(crate) enum AuthorizationRuntimeError {
+    #[error("{0}")]
+    Store(LocalAuthorizationStoreError),
+    #[error("local authorization projection is invalid")]
+    InvalidProjection,
+    #[error("local authorization blocking operation failed")]
+    BlockingOperationFailed,
+    #[error("local authorization runtime stopped unexpectedly")]
+    UnexpectedStop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthorizationRuntimeStatus {
+    Active(AuthorizationGeneration),
+    Failed(AuthorizationRuntimeError),
+}
+
+struct AuthorizationProjection {
+    generation: AuthorizationGeneration,
+    policy: AuthorizationPolicy,
+    issuers: Vec<AuthorizationIssuerRecord>,
+    suspended_profiles: Vec<ServiceProfileId>,
+    failure: Option<AuthorizationRuntimeError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GrantIssuanceContext {
+    generation: AuthorizationGeneration,
+    policy_version: AuthorizationPolicyVersion,
+}
+
+pub(crate) struct AccountTrustedGrantRequest {
+    pub(crate) issuer_key_id: IssuerKeyId,
+    pub(crate) issuer_key_version: IssuerKeyVersion,
+    pub(crate) issuer_client_instance: ClientInstanceId,
+    pub(crate) request_id: RequestId,
+    pub(crate) profile: ServiceProfileId,
+    pub(crate) session_public_key: Ed25519PublicKey,
+    pub(crate) harness: HarnessKind,
+    pub(crate) issued_at_unix_milliseconds: u64,
+    pub(crate) expires_at_unix_milliseconds: u64,
+}
+
+pub(crate) struct LiveAuthorizationRuntime {
+    store: Arc<LocalAuthorizationStore>,
+    registry: InMemorySessionAuthorizationRegistry,
+    projection: RwLock<AuthorizationProjection>,
+    operations: Mutex<()>,
+    status: watch::Sender<AuthorizationRuntimeStatus>,
+    reload_requested: Notify,
+    #[cfg(test)]
+    fail_next_reload: std::sync::atomic::AtomicBool,
+}
+
+impl LiveAuthorizationRuntime {
+    pub(crate) async fn open(
+        installation_path: &Path,
+        installation_fingerprint: InstallationFingerprint,
+    ) -> Result<Arc<Self>, AuthorizationRuntimeError> {
+        let installation_path = PathBuf::from(installation_path);
+        let now_unix_milliseconds = SystemUnixClock.now_unix_milliseconds();
+        let opened = tokio::task::spawn_blocking(move || {
+            let store =
+                LocalAuthorizationStore::open(installation_path, installation_fingerprint, None)?;
+            let snapshot = store.load_snapshot(now_unix_milliseconds, None)?;
+            Ok::<_, LocalAuthorizationStoreError>((store, snapshot))
+        })
+        .await
+        .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)?
+        .map_err(AuthorizationRuntimeError::Store)?;
+        Self::from_snapshot(opened.0, opened.1, now_unix_milliseconds)
+    }
+
+    fn from_snapshot(
+        store: LocalAuthorizationStore,
+        snapshot: AuthorizationSnapshot,
+        now_unix_milliseconds: u64,
+    ) -> Result<Arc<Self>, AuthorizationRuntimeError> {
+        let registry = InMemorySessionAuthorizationRegistry::new();
+        replace_registry(&registry, &snapshot, now_unix_milliseconds)?;
+        let generation = snapshot.generation();
+        let (status, _) = watch::channel(AuthorizationRuntimeStatus::Active(generation));
+        Ok(Arc::new(Self {
+            store: Arc::new(store),
+            registry,
+            projection: RwLock::new(AuthorizationProjection {
+                generation,
+                policy: snapshot.policy().clone(),
+                issuers: snapshot.issuers().to_vec(),
+                suspended_profiles: snapshot.suspended_profiles().to_vec(),
+                failure: None,
+            }),
+            operations: Mutex::new(()),
+            status,
+            reload_requested: Notify::new(),
+            #[cfg(test)]
+            fail_next_reload: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<AuthorizationRuntimeStatus> {
+        self.status.subscribe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_reload(&self) {
+        self.reload_requested.notify_one();
+    }
+
+    pub(crate) async fn run_reload_loop(
+        self: Arc<Self>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), AuthorizationRuntimeError> {
+        let start = tokio::time::Instant::now() + AUTHORIZATION_RELOAD_INTERVAL;
+        let mut interval = tokio::time::interval_at(start, AUTHORIZATION_RELOAD_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+                () = self.reload_requested.notified() => {
+                    self.reload_once().await?;
+                }
+                _ = interval.tick() => {
+                    self.reload_once().await?;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn issuer_is_known(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+        issuer_public_key: Ed25519PublicKey,
+        harness: HarnessKind,
+    ) -> bool {
+        self.active_issuer(issuer_key_id, issuer_key_version)
+            .is_some_and(|registration| {
+                registration.public_key() == issuer_public_key
+                    && (registration.harness() == harness
+                        || registration.harness() == HarnessKind::Generic)
+            })
+    }
+
+    pub(crate) fn grant_is_active(&self, grant: &SessionGrant) -> bool {
+        self.active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
+            .is_some_and(|active| &active == grant)
+    }
+
+    pub(crate) fn status_snapshot(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        profile: &ServiceProfileId,
+    ) -> Option<(
+        AuthorizationGeneration,
+        SessionGrantCapacity,
+        AuthorizationPolicy,
+    )> {
+        let projection = read(&self.projection);
+        projection.failure.is_none().then(|| {
+            (
+                projection.generation,
+                self.registry.grant_capacity(
+                    issuer_key_id,
+                    profile,
+                    SystemUnixClock.now_unix_milliseconds(),
+                ),
+                projection.policy.clone(),
+            )
+        })
+    }
+
+    pub(crate) async fn issue_account_trusted_grant(
+        &self,
+        request: AccountTrustedGrantRequest,
+    ) -> Result<SessionGrant, LocalServiceErrorCode> {
+        let _operation = self.operations.lock().await;
+        let AccountTrustedGrantRequest {
+            issuer_key_id,
+            issuer_key_version,
+            issuer_client_instance,
+            request_id,
+            profile,
+            session_public_key,
+            harness,
+            issued_at_unix_milliseconds,
+            expires_at_unix_milliseconds,
+        } = request;
+        let request_key = GrantIssuanceKey::new(issuer_client_instance, request_id);
+        let evidence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+            .map_err(|_| LocalServiceErrorCode::Internal)?;
+        let mut context = self.issuance_context(
+            issuer_key_id,
+            issuer_key_version,
+            &profile,
+            harness,
+            evidence,
+        )?;
+
+        for _ in 0..GRANT_IDENTIFIER_ATTEMPTS {
+            let mut identifier = [0_u8; 16];
+            KonclaveCryptographicCore::fill_random(&mut identifier)
+                .map_err(|_| LocalServiceErrorCode::Internal)?;
+            let grant = SessionGrant::new(SessionGrantClaims {
+                grant_id: SessionGrantId::from_bytes(identifier),
+                issuer_key_id,
+                issuer_key_version,
+                profile: profile.clone(),
+                session_public_key,
+                harness,
+                evidence,
+                policy_version: context.policy_version,
+                issued_at_unix_milliseconds,
+                expires_at_unix_milliseconds,
+                capabilities: SessionCapabilities::ALL,
+            })
+            .map_err(|_| LocalServiceErrorCode::Internal)?;
+            let store = Arc::clone(&self.store);
+            let candidate = grant.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                store.issue_grant_for_request(request_key, &candidate, issued_at_unix_milliseconds)
+            })
+            .await
+            .map_err(|_| {
+                self.fail_closed(AuthorizationRuntimeError::BlockingOperationFailed);
+                LocalServiceErrorCode::Internal
+            })?;
+            match result {
+                Ok(issuance) => {
+                    self.refresh_after_mutation(issuance.mutation(), issued_at_unix_milliseconds)
+                        .await
+                        .map_err(|_| LocalServiceErrorCode::Internal)?;
+                    return Ok(issuance.into_grant());
+                }
+                Err(LocalAuthorizationStoreError::Conflict) => {
+                    let prior_generation = context.generation;
+                    self.refresh_locked(issued_at_unix_milliseconds, prior_generation)
+                        .await
+                        .map_err(|_| LocalServiceErrorCode::Internal)?;
+                    context = self.issuance_context(
+                        issuer_key_id,
+                        issuer_key_version,
+                        &profile,
+                        harness,
+                        evidence,
+                    )?;
+                }
+                Err(error) => {
+                    if should_refresh_after_mutation_error(error) {
+                        let high_water = context.generation;
+                        self.refresh_locked(issued_at_unix_milliseconds, high_water)
+                            .await
+                            .map_err(|_| LocalServiceErrorCode::Internal)?;
+                    }
+                    return Err(self.map_mutation_error(error));
+                }
+            }
+        }
+        Err(LocalServiceErrorCode::Conflict)
+    }
+
+    pub(crate) async fn retire_grant(
+        &self,
+        grant_id: SessionGrantId,
+        now_unix_milliseconds: u64,
+    ) -> Result<bool, LocalServiceErrorCode> {
+        let _operation = self.operations.lock().await;
+        let store = Arc::clone(&self.store);
+        let result = tokio::task::spawn_blocking(move || {
+            store.retire_grant(grant_id, now_unix_milliseconds)
+        })
+        .await
+        .map_err(|_| {
+            self.fail_closed(AuthorizationRuntimeError::BlockingOperationFailed);
+            LocalServiceErrorCode::Internal
+        })?;
+        match result {
+            Ok(mutation) => {
+                self.refresh_after_mutation(mutation, now_unix_milliseconds)
+                    .await
+                    .map_err(|_| LocalServiceErrorCode::Internal)?;
+                Ok(mutation.effect() == MutationEffect::Applied)
+            }
+            Err(LocalAuthorizationStoreError::NotFound) => {
+                let high_water = self
+                    .current_generation()
+                    .ok_or(LocalServiceErrorCode::Internal)?;
+                self.refresh_locked(now_unix_milliseconds, high_water)
+                    .await
+                    .map_err(|_| LocalServiceErrorCode::Internal)?;
+                Ok(false)
+            }
+            Err(error) => Err(self.map_mutation_error(error)),
+        }
+    }
+
+    async fn reload_once(&self) -> Result<(), AuthorizationRuntimeError> {
+        if let Some(error) = self.current_failure() {
+            return Err(error);
+        }
+        #[cfg(test)]
+        if self
+            .fail_next_reload
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let error =
+                AuthorizationRuntimeError::Store(LocalAuthorizationStoreError::StorageUnavailable);
+            self.fail_closed(error);
+            return Err(error);
+        }
+
+        let high_water = self
+            .current_generation()
+            .ok_or(AuthorizationRuntimeError::UnexpectedStop)?;
+        self.refresh_locked(SystemUnixClock.now_unix_milliseconds(), high_water)
+            .await
+    }
+
+    async fn refresh_after_mutation(
+        &self,
+        mutation: AuthorizationMutation,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), AuthorizationRuntimeError> {
+        self.refresh_locked(now_unix_milliseconds, mutation.generation())
+            .await
+    }
+
+    async fn refresh_locked(
+        &self,
+        now_unix_milliseconds: u64,
+        high_water: AuthorizationGeneration,
+    ) -> Result<(), AuthorizationRuntimeError> {
+        let store = Arc::clone(&self.store);
+        let snapshot = tokio::time::timeout(
+            AUTHORIZATION_RELOAD_DEADLINE,
+            tokio::task::spawn_blocking(move || {
+                store.load_snapshot(now_unix_milliseconds, Some(high_water))
+            }),
+        )
+        .await
+        .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)
+        .and_then(|result| result.map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed))
+        .and_then(|result| result.map_err(AuthorizationRuntimeError::Store));
+        match snapshot {
+            Ok(snapshot) => self.publish(snapshot, now_unix_milliseconds),
+            Err(error) => {
+                self.fail_closed(error);
+                Err(error)
+            }
+        }
+    }
+
+    fn publish(
+        &self,
+        snapshot: AuthorizationSnapshot,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), AuthorizationRuntimeError> {
+        let mut projection = write(&self.projection);
+        if snapshot.generation() < projection.generation {
+            return Ok(());
+        }
+        if replace_registry(&self.registry, &snapshot, now_unix_milliseconds).is_err() {
+            let error = AuthorizationRuntimeError::InvalidProjection;
+            self.fail_closed_locked(&mut projection, error);
+            return Err(error);
+        }
+        projection.generation = snapshot.generation();
+        projection.policy = snapshot.policy().clone();
+        projection.issuers = snapshot.issuers().to_vec();
+        projection.suspended_profiles = snapshot.suspended_profiles().to_vec();
+        projection.failure = None;
+        let generation = projection.generation;
+        drop(projection);
+        self.status
+            .send_replace(AuthorizationRuntimeStatus::Active(generation));
+        Ok(())
+    }
+
+    fn issuance_context(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+        profile: &ServiceProfileId,
+        harness: HarnessKind,
+        evidence: AuthorizationEvidenceSet,
+    ) -> Result<GrantIssuanceContext, LocalServiceErrorCode> {
+        let projection = read(&self.projection);
+        if projection.failure.is_some() {
+            return Err(LocalServiceErrorCode::Internal);
+        }
+        if projection
+            .suspended_profiles
+            .iter()
+            .any(|candidate| candidate == profile)
+        {
+            return Err(LocalServiceErrorCode::ProfileSuspended);
+        }
+        let issuer = projection
+            .issuers
+            .iter()
+            .find(|issuer| {
+                issuer.issuer_key_id() == issuer_key_id
+                    && issuer.issuer_key_version() == issuer_key_version
+            })
+            .ok_or(LocalServiceErrorCode::NotAuthorized)?;
+        if issuer.availability() == IssuerAvailability::Disabled {
+            return Err(LocalServiceErrorCode::IssuerDisabled);
+        }
+        if !issuer.registration().profiles().permits(profile)
+            || (issuer.registration().harness() != harness
+                && issuer.registration().harness() != HarnessKind::Generic)
+        {
+            return Err(LocalServiceErrorCode::NotAuthorized);
+        }
+        if !projection.policy.accepts(evidence) {
+            return Err(LocalServiceErrorCode::RequiredEvidenceUnavailable);
+        }
+        Ok(GrantIssuanceContext {
+            generation: projection.generation,
+            policy_version: projection.policy.version(),
+        })
+    }
+
+    fn current_generation(&self) -> Option<AuthorizationGeneration> {
+        let projection = read(&self.projection);
+        projection
+            .failure
+            .is_none()
+            .then_some(projection.generation)
+    }
+
+    fn current_failure(&self) -> Option<AuthorizationRuntimeError> {
+        read(&self.projection).failure
+    }
+
+    fn map_mutation_error(&self, error: LocalAuthorizationStoreError) -> LocalServiceErrorCode {
+        match error {
+            LocalAuthorizationStoreError::ProfileSuspended => {
+                LocalServiceErrorCode::ProfileSuspended
+            }
+            LocalAuthorizationStoreError::IssuerDisabled => LocalServiceErrorCode::IssuerDisabled,
+            LocalAuthorizationStoreError::RequiredEvidenceUnavailable => {
+                LocalServiceErrorCode::RequiredEvidenceUnavailable
+            }
+            LocalAuthorizationStoreError::Capacity => LocalServiceErrorCode::Capacity,
+            LocalAuthorizationStoreError::Conflict => LocalServiceErrorCode::Conflict,
+            LocalAuthorizationStoreError::NotFound => LocalServiceErrorCode::NotAuthorized,
+            LocalAuthorizationStoreError::InvalidInput => LocalServiceErrorCode::Internal,
+            LocalAuthorizationStoreError::StorageUnavailable
+            | LocalAuthorizationStoreError::InvalidStorage
+            | LocalAuthorizationStoreError::CorruptStorage
+            | LocalAuthorizationStoreError::UnsafeStorage
+            | LocalAuthorizationStoreError::UnsupportedSchema
+            | LocalAuthorizationStoreError::InstallationMismatch
+            | LocalAuthorizationStoreError::GenerationRollback => {
+                self.fail_closed(AuthorizationRuntimeError::Store(error));
+                LocalServiceErrorCode::Internal
+            }
+        }
+    }
+
+    fn fail_closed(&self, error: AuthorizationRuntimeError) {
+        let mut projection = write(&self.projection);
+        self.fail_closed_locked(&mut projection, error);
+    }
+
+    fn fail_closed_locked(
+        &self,
+        projection: &mut AuthorizationProjection,
+        error: AuthorizationRuntimeError,
+    ) {
+        projection.failure = Some(error);
+        self.status
+            .send_replace(AuthorizationRuntimeStatus::Failed(error));
+        self.reload_requested.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn persist_grant_for_test(
+        &self,
+        grant: SessionGrant,
+        now_unix_milliseconds: u64,
+    ) -> Result<(), AuthorizationRuntimeError> {
+        let _operation = self.operations.lock().await;
+        let store = Arc::clone(&self.store);
+        let mutation =
+            tokio::task::spawn_blocking(move || store.issue_grant(&grant, now_unix_milliseconds))
+                .await
+                .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)?
+                .map_err(AuthorizationRuntimeError::Store)?;
+        self.refresh_after_mutation(mutation, now_unix_milliseconds)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_reload_for_test(&self) {
+        self.fail_next_reload
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl SessionAuthorizationRegistry for LiveAuthorizationRuntime {
+    fn active_issuer(
+        &self,
+        issuer_key_id: IssuerKeyId,
+        issuer_key_version: IssuerKeyVersion,
+    ) -> Option<KonclaveLocalServiceTransport::IssuerRegistration> {
+        let projection = read(&self.projection);
+        if projection.failure.is_some() {
+            return None;
+        }
+        self.registry
+            .active_issuer(issuer_key_id, issuer_key_version)
+    }
+
+    fn active_grant(
+        &self,
+        grant_id: SessionGrantId,
+        now_unix_milliseconds: u64,
+    ) -> Option<SessionGrant> {
+        let projection = read(&self.projection);
+        if projection.failure.is_some() {
+            return None;
+        }
+        self.registry.active_grant(grant_id, now_unix_milliseconds)
+    }
+}
+
+fn replace_registry(
+    registry: &InMemorySessionAuthorizationRegistry,
+    snapshot: &AuthorizationSnapshot,
+    now_unix_milliseconds: u64,
+) -> Result<(), AuthorizationRuntimeError> {
+    let issuers = snapshot
+        .issuers()
+        .iter()
+        .map(|issuer| {
+            InstalledIssuerRegistration::new(
+                issuer.issuer_key_id(),
+                issuer.issuer_key_version(),
+                issuer.registration().clone(),
+            )
+        })
+        .collect();
+    registry
+        .replace(
+            issuers,
+            snapshot.active_grants().to_vec(),
+            now_unix_milliseconds,
+        )
+        .map_err(|_error: LocalServiceTransportError| AuthorizationRuntimeError::InvalidProjection)
+}
+
+const fn should_refresh_after_mutation_error(error: LocalAuthorizationStoreError) -> bool {
+    matches!(
+        error,
+        LocalAuthorizationStoreError::ProfileSuspended
+            | LocalAuthorizationStoreError::IssuerDisabled
+            | LocalAuthorizationStoreError::RequiredEvidenceUnavailable
+            | LocalAuthorizationStoreError::Capacity
+            | LocalAuthorizationStoreError::NotFound
+    )
+}
+
+fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    use KonclaveDomainCore::Ed25519PublicKey;
+    use KonclaveLocalAuthorizationStore::{
+        LocalAuthorizationStore, LocalAuthorizationStoreError, authorization_store_path,
+    };
+    use KonclaveLocalServiceTransport::{
+        AuthorizationPolicy, ClientInstanceId, HarnessKind, InstalledIssuerRegistration,
+        IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LOCAL_SERVICE_INSTALLATION_FILE,
+        LocalServiceErrorCode, ProfileAuthorization, RequestId, ServiceProfileId,
+    };
+    use KonclaveSecretStorage::{
+        create_or_verify_owner_protected_file, ensure_owner_protected_directory,
+        open_or_create_owner_protected_file,
+    };
+    use tokio::sync::watch;
+
+    use super::{
+        AUTHORIZATION_RELOAD_INTERVAL, AccountTrustedGrantRequest, AuthorizationRuntimeError,
+        AuthorizationRuntimeStatus, InstallationFingerprint, LiveAuthorizationRuntime,
+    };
+    use crate::clock::{SystemUnixClock, UnixClock};
+
+    fn issuer() -> InstalledIssuerRegistration {
+        InstalledIssuerRegistration::new(
+            IssuerKeyId::from_bytes([7; 16]),
+            IssuerKeyVersion::new(1).unwrap(),
+            IssuerRegistration::new(
+                Ed25519PublicKey::from_bytes([8; 32]),
+                HarnessKind::Copilot,
+                ProfileAuthorization::All,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_missing_empty_and_corrupt_authorization_state() {
+        for (kind, expected) in [
+            ("missing", LocalAuthorizationStoreError::StorageUnavailable),
+            ("empty", LocalAuthorizationStoreError::InvalidStorage),
+            ("corrupt", LocalAuthorizationStoreError::CorruptStorage),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let installation_path = root.path().join(kind).join(LOCAL_SERVICE_INSTALLATION_FILE);
+            let setup_path = installation_path.clone();
+            tokio::task::spawn_blocking(move || {
+                ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+                create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+                if kind == "empty" {
+                    drop(
+                        open_or_create_owner_protected_file(
+                            &authorization_store_path(&setup_path).unwrap(),
+                        )
+                        .unwrap(),
+                    );
+                } else if kind == "corrupt" {
+                    let mut file = open_or_create_owner_protected_file(
+                        &authorization_store_path(&setup_path).unwrap(),
+                    )
+                    .unwrap();
+                    file.write_all(b"not a sqlite database").unwrap();
+                    file.sync_all().unwrap();
+                }
+            })
+            .await
+            .unwrap();
+
+            assert!(matches!(
+                LiveAuthorizationRuntime::open(
+                    &installation_path,
+                    InstallationFingerprint::from_bytes([9; 32]),
+                )
+                .await,
+                Err(AuthorizationRuntimeError::Store(error)) if error == expected
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_issuer_request_reuse_returns_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_path = root
+            .path()
+            .join("service")
+            .join(LOCAL_SERVICE_INSTALLATION_FILE);
+        let fingerprint = InstallationFingerprint::from_bytes([11; 32]);
+        let setup_path = installation_path.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+            drop(
+                LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    fingerprint,
+                    &AuthorizationPolicy::account_trusted(),
+                    &[issuer()],
+                    1,
+                )
+                .unwrap(),
+            );
+            create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+        })
+        .await
+        .unwrap();
+        let runtime = LiveAuthorizationRuntime::open(&installation_path, fingerprint)
+            .await
+            .unwrap();
+        let now = SystemUnixClock.now_unix_milliseconds();
+        let issuer_client_instance = ClientInstanceId::from_bytes([12; 16]);
+        let request_id = RequestId::from_bytes([13; 16]);
+        runtime
+            .issue_account_trusted_grant(AccountTrustedGrantRequest {
+                issuer_key_id: IssuerKeyId::from_bytes([7; 16]),
+                issuer_key_version: IssuerKeyVersion::new(1).unwrap(),
+                issuer_client_instance,
+                request_id,
+                profile: ServiceProfileId::parse("session-first").unwrap(),
+                session_public_key: Ed25519PublicKey::from_bytes([14; 32]),
+                harness: HarnessKind::Copilot,
+                issued_at_unix_milliseconds: now,
+                expires_at_unix_milliseconds: now + 1_000,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .issue_account_trusted_grant(AccountTrustedGrantRequest {
+                    issuer_key_id: IssuerKeyId::from_bytes([7; 16]),
+                    issuer_key_version: IssuerKeyVersion::new(1).unwrap(),
+                    issuer_client_instance,
+                    request_id,
+                    profile: ServiceProfileId::parse("session-conflict").unwrap(),
+                    session_public_key: Ed25519PublicKey::from_bytes([14; 32]),
+                    harness: HarnessKind::Copilot,
+                    issued_at_unix_milliseconds: now,
+                    expires_at_unix_milliseconds: now + 1_000,
+                })
+                .await,
+            Err(LocalServiceErrorCode::Conflict)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn polling_publishes_a_durable_generation_without_a_wall_clock_sleep() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_path = root
+            .path()
+            .join("service")
+            .join(LOCAL_SERVICE_INSTALLATION_FILE);
+        let fingerprint = InstallationFingerprint::from_bytes([9; 32]);
+        let setup_path = installation_path.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+            drop(
+                LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    fingerprint,
+                    &AuthorizationPolicy::account_trusted(),
+                    &[issuer()],
+                    1,
+                )
+                .unwrap(),
+            );
+            create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+        })
+        .await
+        .unwrap();
+        let runtime = LiveAuthorizationRuntime::open(&installation_path, fingerprint)
+            .await
+            .unwrap();
+        let mut status = runtime.subscribe();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let reload = tokio::spawn(Arc::clone(&runtime).run_reload_loop(shutdown_rx));
+        tokio::task::yield_now().await;
+
+        let mutation_path = installation_path.clone();
+        let mutation = tokio::task::spawn_blocking(move || {
+            LocalAuthorizationStore::open(mutation_path, fingerprint, None)
+                .unwrap()
+                .suspend_profile(
+                    &ServiceProfileId::parse("session-poll").unwrap(),
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        tokio::time::advance(AUTHORIZATION_RELOAD_INTERVAL).await;
+        loop {
+            match *status.borrow_and_update() {
+                AuthorizationRuntimeStatus::Active(generation)
+                    if generation >= mutation.generation() =>
+                {
+                    break;
+                }
+                AuthorizationRuntimeStatus::Failed(error) => {
+                    panic!("authorization reload failed: {error}")
+                }
+                AuthorizationRuntimeStatus::Active(_) => {}
+            }
+            status.changed().await.unwrap();
+        }
+
+        let now = SystemUnixClock.now_unix_milliseconds();
+        assert_eq!(
+            runtime
+                .issue_account_trusted_grant(AccountTrustedGrantRequest {
+                    issuer_key_id: IssuerKeyId::from_bytes([7; 16]),
+                    issuer_key_version: IssuerKeyVersion::new(1).unwrap(),
+                    issuer_client_instance: ClientInstanceId::from_bytes([9; 16]),
+                    request_id: RequestId::from_bytes([10; 16]),
+                    profile: ServiceProfileId::parse("session-poll").unwrap(),
+                    session_public_key: Ed25519PublicKey::from_bytes([10; 32]),
+                    harness: HarnessKind::Copilot,
+                    issued_at_unix_milliseconds: now,
+                    expires_at_unix_milliseconds: now + 1_000,
+                })
+                .await,
+            Err(LocalServiceErrorCode::ProfileSuspended)
+        );
+
+        shutdown_tx.send_replace(true);
+        reload.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_observes_external_revocation_while_a_local_mutation_is_queued() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_path = root
+            .path()
+            .join("service")
+            .join(LOCAL_SERVICE_INSTALLATION_FILE);
+        let fingerprint = InstallationFingerprint::from_bytes([10; 32]);
+        let setup_path = installation_path.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+            drop(
+                LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    fingerprint,
+                    &AuthorizationPolicy::account_trusted(),
+                    &[issuer()],
+                    1,
+                )
+                .unwrap(),
+            );
+            create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+        })
+        .await
+        .unwrap();
+        let runtime = LiveAuthorizationRuntime::open(&installation_path, fingerprint)
+            .await
+            .unwrap();
+        let mut status = runtime.subscribe();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let reload = tokio::spawn(Arc::clone(&runtime).run_reload_loop(shutdown_rx));
+        let mutation_guard = runtime.operations.lock().await;
+
+        let mutation_path = installation_path.clone();
+        let mutation = tokio::task::spawn_blocking(move || {
+            LocalAuthorizationStore::open(mutation_path, fingerprint, None)
+                .unwrap()
+                .suspend_profile(
+                    &ServiceProfileId::parse("session-blocked-mutation").unwrap(),
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        runtime.request_reload();
+        loop {
+            match *status.borrow_and_update() {
+                AuthorizationRuntimeStatus::Active(generation)
+                    if generation >= mutation.generation() =>
+                {
+                    break;
+                }
+                AuthorizationRuntimeStatus::Failed(error) => {
+                    panic!("authorization reload failed: {error}")
+                }
+                AuthorizationRuntimeStatus::Active(_) => {}
+            }
+            status.changed().await.unwrap();
+        }
+
+        drop(mutation_guard);
+        shutdown_tx.send_replace(true);
+        reload.await.unwrap().unwrap();
+    }
+}

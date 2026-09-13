@@ -272,6 +272,8 @@ impl LocalServiceJsonClient {
 
     async fn issue_grant(&self) -> Result<SessionGrant, LocalServiceJsonClientError> {
         let request_id = RequestId::from_bytes(self.derived_id(GRANT_REQUEST_DOMAIN)?);
+        let client_instance =
+            ClientInstanceId::from_bytes(self.derived_id(CLIENT_INSTANCE_DOMAIN)?);
         let request = LocalServiceRequest::new(
             request_id,
             OperationName::parse(GRANT_ISSUE_OPERATION)
@@ -286,10 +288,10 @@ impl LocalServiceJsonClient {
             .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)?,
         )
         .map_err(|_| LocalServiceJsonClientError::InvalidConfiguration)?;
-        let payload = match self.invoke_issuer_once(&request).await {
+        let payload = match self.invoke_issuer_once(&request, client_instance).await {
             Ok(payload) => payload,
             Err(LocalServiceJsonClientError::Transport) => {
-                self.invoke_issuer_once(&request).await?
+                self.invoke_issuer_once(&request, client_instance).await?
             }
             Err(error) => return Err(error),
         };
@@ -299,9 +301,8 @@ impl LocalServiceJsonClient {
     async fn invoke_issuer_once(
         &self,
         request: &LocalServiceRequest,
+        client_instance: ClientInstanceId,
     ) -> Result<Vec<u8>, LocalServiceJsonClientError> {
-        let client_instance =
-            ClientInstanceId::from_bytes(self.derived_id(CLIENT_INSTANCE_DOMAIN)?);
         timeout(self.config.request_timeout, async {
             let mut stream = connect_local_service(self.config.endpoint())
                 .await

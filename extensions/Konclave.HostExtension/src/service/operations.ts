@@ -113,6 +113,7 @@ export interface ServiceStatusResult {
   readonly authorizationPolicy: string;
   readonly authorizationProvider: string;
   readonly authorizationEvidence: readonly string[];
+  readonly authorizationGeneration: number;
   readonly authorizationPolicyVersion: number;
   readonly grantExpiresAtUnixMilliseconds: number;
   readonly grantCapabilities: number;

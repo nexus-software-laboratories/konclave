@@ -30,7 +30,7 @@ impl AuthorizationBinding {
         SESSION_GRANT_PROTOCOL_VERSION
     }
 
-    /// Returns the fresh connection instance.
+    /// Returns the client instance bound into this handshake.
     #[must_use]
     pub const fn client_instance(&self) -> ClientInstanceId {
         match self {

@@ -177,6 +177,7 @@ export function parseServiceStatus(value: unknown): ServiceStatusResult {
     authorizationPolicy: value.authorizationPolicy,
     authorizationProvider: value.authorizationProvider,
     authorizationEvidence: value.authorizationEvidence,
+    authorizationGeneration: integer(value.authorizationGeneration),
     authorizationPolicyVersion: integer(value.authorizationPolicyVersion),
     grantExpiresAtUnixMilliseconds: integer(value.grantExpiresAtUnixMilliseconds),
     grantCapabilities: integer(value.grantCapabilities),
@@ -238,6 +239,7 @@ export function createLocalServiceDeliveryChannel(client: LocalServiceClient): A
           return {
             kind: 'status',
             status: {
+              authorizationGeneration: result.authorizationGeneration,
               pendingEvents: result.pendingEvents,
               claimedEvents: result.claimedEvents,
               watchedConversations: result.watchedConversations,

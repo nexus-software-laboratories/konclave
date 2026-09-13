@@ -91,6 +91,7 @@ export type AdapterRequest =
   | { readonly kind: 'status' };
 
 export interface AdapterStatus {
+  readonly authorizationGeneration: number;
   readonly pendingEvents: number;
   readonly claimedEvents: number;
   readonly watchedConversations: number;

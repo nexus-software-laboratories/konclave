@@ -185,6 +185,8 @@ impl DeliverySettlement {
 /// Current bounded delivery health for one profile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AdapterStatus {
+    /// Durable authorization generation observed by the service.
+    pub authorization_generation: u64,
     /// Events ready for a consumer.
     pub pending_events: u32,
     /// Events currently held by the active consumer lease.

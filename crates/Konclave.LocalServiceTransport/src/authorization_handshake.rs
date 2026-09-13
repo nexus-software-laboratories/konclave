@@ -24,7 +24,7 @@ pub struct IssuerHandshakeRequest {
     pub issuer_key_id: IssuerKeyId,
     /// Installed issuer key version.
     pub issuer_key_version: IssuerKeyVersion,
-    /// Fresh connection instance.
+    /// Client instance, reused only across retries of one ambiguous issuer request.
     pub client_instance: ClientInstanceId,
     /// Integration using this issuer.
     pub harness: HarnessKind,
@@ -35,7 +35,7 @@ pub struct IssuerHandshakeRequest {
 pub struct SessionHandshakeRequest {
     /// Complete service-issued grant claims.
     pub grant: SessionGrant,
-    /// Fresh connection instance.
+    /// Fresh session connection instance.
     pub client_instance: ClientInstanceId,
 }
 

@@ -243,7 +243,11 @@ impl DeliveryAttachment {
         match outcome {
             WaitForClaimOutcome::Value(events) => Ok(DeliveryWaitOutcome::Events(events)),
             WaitForClaimOutcome::AuthorizationLost => {
-                self.release(store.as_ref())?;
+                let attachment = self.clone();
+                let store = std::sync::Arc::clone(store);
+                tokio::task::spawn_blocking(move || attachment.release(store.as_ref()))
+                    .await
+                    .map_err(|_| ProfileStoreError::Storage)??;
                 Ok(DeliveryWaitOutcome::AuthorizationLost)
             }
         }

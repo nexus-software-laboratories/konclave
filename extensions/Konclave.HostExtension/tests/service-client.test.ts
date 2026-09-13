@@ -12,6 +12,7 @@ import {
   LocalServiceProtocolError,
   LocalServiceUpgradeRequiredError,
   isDeliveryLaneOperation,
+  localServiceErrorCodes,
   type LocalServiceClientOptions,
 } from '../src/service/client.js';
 import { FrameError, FrameReader, writeFrame } from '../src/service/framing.js';
@@ -60,8 +61,17 @@ interface ReceivedRequest {
 
 interface TestService {
   readonly endpoint: string;
+  issuedGrantCount(): number;
+  disconnectClients(): Promise<void>;
   resetAuthorization(): Promise<void>;
   close(): Promise<void>;
+}
+
+interface TestServiceOptions {
+  readonly grantLifetimeMs?: number;
+  readonly maximumGrantIssues?: number;
+  readonly grantResponsesToDrop?: number;
+  readonly observeIssuerClientInstance?: (clientInstance: Buffer) => void;
 }
 
 function endpoint(): string {
@@ -194,6 +204,11 @@ async function serveConnection(
   action: (request: ReceivedRequest) => RequestAction,
   grants: Map<string, SessionGrantRecord>,
   observeControl: ((request: ReceivedRequest) => void) | undefined,
+  observeGrantIssued: () => void,
+  grantLifetimeMs: number,
+  grantIssueAllowed: () => boolean,
+  dropGrantResponse: () => boolean,
+  observeIssuerClientInstance: ((clientInstance: Buffer) => void) | undefined,
 ): Promise<void> {
   const reader = new FrameReader(socket, handshakeFrameLimit + 4);
   const helloFrame = await reader.read(handshakeFrameLimit);
@@ -210,6 +225,7 @@ async function serveConnection(
   let accepted = true;
   if (helloFrame.readUInt8(0) === 5) {
     const hello = decodeIssuerHello(helloFrame);
+    observeIssuerClientInstance?.(hello.clientInstance);
     transcript = encodeIssuerTranscript({
       ...hello,
       serviceChallenge,
@@ -262,6 +278,10 @@ async function serveConnection(
       throw new Error('grant request was malformed');
     }
     const values = request.payload as Record<string, unknown>;
+    if (!grantIssueAllowed()) {
+      await writeFrame(socket, failure(request.requestId, 13), rpcFrameLimit);
+      return;
+    }
     const profile = String(values.profile);
     const sessionPublicKey = Buffer.from(String(values.sessionPublicKey), 'hex');
     const grant: SessionGrantRecord = {
@@ -274,10 +294,15 @@ async function serveConnection(
       evidence: 1,
       policyVersion: 1n,
       issuedAtUnixMilliseconds: BigInt(Date.now()),
-      expiresAtUnixMilliseconds: BigInt(Date.now() + 3_600_000),
+      expiresAtUnixMilliseconds: BigInt(Date.now() + grantLifetimeMs),
       capabilities: 15n,
     };
+    observeGrantIssued();
     grants.set(grant.grantId.toString('hex'), grant);
+    if (dropGrantResponse()) {
+      socket.destroy();
+      return;
+    }
     await writeFrame(
       socket,
       success(request.requestId, Buffer.from(JSON.stringify(grantJson(grant)), 'utf8')),
@@ -365,11 +390,14 @@ async function serveConnection(
 async function startService(
   action: (request: ReceivedRequest, connection: number) => RequestAction,
   observeControl?: (request: ReceivedRequest) => void,
+  options: TestServiceOptions = {},
 ): Promise<TestService> {
   const path = endpoint();
   const sockets = new Set<Socket>();
   const tasks: Promise<void>[] = [];
   const grants = new Map<string, SessionGrantRecord>();
+  let issuedGrantCount = 0;
+  let droppedGrantResponses = 0;
   let sessionConnections = 0;
   const server: Server = createServer((socket) => {
     sockets.add(socket);
@@ -384,6 +412,20 @@ async function startService(
         },
         grants,
         observeControl,
+        () => {
+          issuedGrantCount += 1;
+        },
+        options.grantLifetimeMs ?? 3_600_000,
+        () =>
+          options.maximumGrantIssues === undefined || issuedGrantCount < options.maximumGrantIssues,
+        () => {
+          if (droppedGrantResponses >= (options.grantResponsesToDrop ?? 0)) {
+            return false;
+          }
+          droppedGrantResponses += 1;
+          return true;
+        },
+        options.observeIssuerClientInstance,
       ).catch((error: unknown) => {
         if (error instanceof FrameError && error.failure === 'closed') {
           return;
@@ -395,16 +437,22 @@ async function startService(
   server.listen(path);
   await once(server, 'listening');
 
+  const disconnectClients = async () => {
+    const closing = [...sockets].map(async (socket) => {
+      const closed = once(socket, 'close');
+      socket.destroy();
+      await closed;
+    });
+    await Promise.all(closing);
+  };
+
   return {
     endpoint: path,
+    issuedGrantCount: () => issuedGrantCount,
+    disconnectClients,
     async resetAuthorization() {
       grants.clear();
-      const closing = [...sockets].map(async (socket) => {
-        const closed = once(socket, 'close');
-        socket.destroy();
-        await closed;
-      });
-      await Promise.all(closing);
+      await disconnectClients();
     },
     async close() {
       for (const socket of sockets) {
@@ -435,6 +483,8 @@ async function startLegacyService(): Promise<TestService> {
   await once(server, 'listening');
   return {
     endpoint: path,
+    issuedGrantCount: () => 0,
+    async disconnectClients() {},
     async resetAuthorization() {},
     async close() {
       for (const socket of sockets) {
@@ -516,6 +566,8 @@ describe('shared local service client', () => {
   it('redacts an unavailable endpoint from connection errors', async () => {
     const unavailable: TestService = {
       endpoint: endpoint(),
+      issuedGrantCount: () => 0,
+      disconnectClients: async () => {},
       resetAuthorization: async () => {},
       close: async () => {},
     };
@@ -559,6 +611,27 @@ describe('shared local service client', () => {
     await service.close();
   });
 
+  it('reuses the issuer client instance after a lost grant response', async () => {
+    const issuerInstances: Buffer[] = [];
+    const service = await startService(
+      () => ({ kind: 'respond', value: { device_id: 'af' } }),
+      undefined,
+      {
+        grantResponsesToDrop: 1,
+        observeIssuerClientInstance: (clientInstance) => {
+          issuerInstances.push(Buffer.from(clientInstance));
+        },
+      },
+    );
+    const client = await connectLocalService(clientOptions(service));
+
+    expect(issuerInstances).toHaveLength(2);
+    expect(issuerInstances[0]).toEqual(issuerInstances[1]);
+
+    client.close();
+    await service.close();
+  });
+
   it('accepts an explicit request identifier for caller-driven reconciliation', async () => {
     const requests: ReceivedRequest[] = [];
     const service = await startService((request) => {
@@ -591,6 +664,29 @@ describe('shared local service client', () => {
 
     await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ad' });
     await client.retire();
+    await service.close();
+  });
+
+  it('reconnects with a retained near-expiry grant without requesting a replacement', async () => {
+    const service = await startService(
+      () => ({
+        kind: 'respond',
+        value: { device_id: 'ad' },
+      }),
+      undefined,
+      {
+        grantLifetimeMs: 30_000,
+        maximumGrantIssues: 1,
+      },
+    );
+    const client = await connectLocalService(clientOptions(service));
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ad' });
+
+    await service.disconnectClients();
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ad' });
+    expect(service.issuedGrantCount()).toBe(1);
+    client.close();
     await service.close();
   });
 
@@ -692,6 +788,19 @@ describe('shared local service client', () => {
     await service.close();
   });
 
+  it('never issues a replacement grant while retiring an authorization-lost session', async () => {
+    const service = await startService(() => ({ kind: 'respond', value: {} }));
+    const client = await connectLocalService(clientOptions(service));
+    expect(service.issuedGrantCount()).toBe(1);
+
+    await service.resetAuthorization();
+    await client.retire();
+
+    expect(service.issuedGrantCount()).toBe(1);
+    expect(client.connected).toBe(false);
+    await service.close();
+  });
+
   it('destroys a malformed-response stream before reconnecting', async () => {
     const service = await startService((_request, connection) =>
       connection === 0
@@ -768,15 +877,44 @@ describe('shared local service client', () => {
   });
 
   it('surfaces finite service failures without treating them as protocol text', async () => {
-    const service = await startService(() => ({ kind: 'failure', wireCode: 5 }));
-    const client = await connectLocalService(clientOptions(service));
+    expect(localServiceErrorCodes).toEqual({
+      1: 'invalid_request',
+      2: 'unknown_operation',
+      3: 'not_authorized',
+      4: 'profile_unavailable',
+      5: 'busy',
+      6: 'deadline_exceeded',
+      7: 'payload_too_large',
+      8: 'conflict',
+      9: 'internal',
+      10: 'cancelled',
+      11: 'reconciliation_pending',
+      12: 'profile_suspended',
+      13: 'issuer_disabled',
+      14: 'required_evidence_unavailable',
+      15: 'capacity',
+    });
+    const cases = [
+      [5, 'busy'],
+      [12, 'profile_suspended'],
+      [13, 'issuer_disabled'],
+      [14, 'required_evidence_unavailable'],
+      [15, 'capacity'],
+    ] as const;
+    for (const [wireCode, code] of cases) {
+      const service = await startService(() => ({
+        kind: 'failure',
+        wireCode,
+      }));
+      const client = await connectLocalService(clientOptions(service));
 
-    await expect(client.request('get_identity', {})).rejects.toEqual(
-      new LocalServiceError('get_identity', 'busy'),
-    );
+      await expect(client.request('get_identity', {})).rejects.toEqual(
+        new LocalServiceError('get_identity', code),
+      );
 
-    client.close();
-    await service.close();
+      client.close();
+      await service.close();
+    }
   });
 
   it('measures every valid JSON string and primitive shape before sending', async () => {
