@@ -24,6 +24,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0017: Bounded A2A artifact profile](adr/adr-0017-a2a-artifact-profile.md)
 - [ADR 0018: Fail-closed protected A2A handoff](adr/adr-0018-fail-closed-protected-a2a-handoff.md)
 - [ADR 0019: Harness-owned session attestation](adr/adr-0019-harness-owned-session-attestation.md)
+- [ADR 0020: Native WebAuthn user presence](adr/adr-0020-native-webauthn-user-presence.md)
 
 ## Protocol
 
