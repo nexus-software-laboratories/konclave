@@ -108,20 +108,12 @@ static LOCAL_REQUEST_OUTCOME_WRITE_FAILURES: LocalRequestOutcomeFailures = OnceL
 
 #[cfg(test)]
 pub(crate) fn inject_local_request_outcome_read_failures(profile_id: &str, count: usize) {
-    inject_local_request_outcome_failures(
-        &LOCAL_REQUEST_OUTCOME_READ_FAILURES,
-        profile_id,
-        count,
-    );
+    inject_local_request_outcome_failures(&LOCAL_REQUEST_OUTCOME_READ_FAILURES, profile_id, count);
 }
 
 #[cfg(test)]
 pub(crate) fn inject_local_request_outcome_write_failures(profile_id: &str, count: usize) {
-    inject_local_request_outcome_failures(
-        &LOCAL_REQUEST_OUTCOME_WRITE_FAILURES,
-        profile_id,
-        count,
-    );
+    inject_local_request_outcome_failures(&LOCAL_REQUEST_OUTCOME_WRITE_FAILURES, profile_id, count);
 }
 
 #[cfg(test)]

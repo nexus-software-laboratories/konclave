@@ -3740,10 +3740,7 @@ mod tests {
             self.inner.configure(profile)
         }
 
-        fn host_options(
-            &self,
-            profile: &crate::persistence::ProfileId,
-        ) -> ProfileHostOptions {
+        fn host_options(&self, profile: &crate::persistence::ProfileId) -> ProfileHostOptions {
             self.inner.host_options(profile)
         }
     }
@@ -5092,18 +5089,13 @@ mod tests {
             started: open_started_tx,
             release: Mutex::new(open_release_rx),
         });
-        let config = fixture.config_with_profile_source(
-            Arc::clone(&fixture.authorization),
-            profile_source,
-        );
+        let config =
+            fixture.config_with_profile_source(Arc::clone(&fixture.authorization), profile_source);
         let mut release = ProfileOpenRelease::new(open_release_tx);
         let (stop_tx, stop_rx) = oneshot::channel();
-        let mut service = tokio::spawn(run_shared_local_service_until(
-            config,
-            async move {
-                let _ = stop_rx.await;
-            },
-        ));
+        let mut service = tokio::spawn(run_shared_local_service_until(config, async move {
+            let _ = stop_rx.await;
+        }));
         let mut first = tokio::select! {
             result = &mut service => {
                 panic!("shared service exited before the first session connected: {result:?}")
