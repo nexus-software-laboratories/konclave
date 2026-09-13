@@ -227,6 +227,9 @@ crash or excessive-allocation case becomes a permanent regression input.
   while continuing to reject different local or remote content under that identifier;
 - prove tools expose no raw identity key, MLS secret, or storage wrapping key;
 - test cancellation, backpressure, bounded watches, reconnect, and daemon restart;
+- prove an absent or connection-accepted-but-silent local service cannot hold Copilot
+  extension startup beyond the installed transport budget, while ordinary operation
+  deadlines and the UserPresence ceremony window remain independent;
 - verify CLI and Copilot adapters produce the same domain outcomes through the public
   client contract.
 - verify the outbound relay client refuses insecure remote endpoints and redirects,

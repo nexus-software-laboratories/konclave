@@ -77,6 +77,7 @@ interface TestServiceOptions {
   readonly maximumGrantIssues?: number;
   readonly grantResponsesToDrop?: number;
   readonly userPresenceResponsesToDrop?: number;
+  readonly stallUserPresenceBegin?: boolean;
   readonly userPresenceBeginResult?: (value: Record<string, unknown>) => unknown;
   readonly observeIssuerClientInstance?: (clientInstance: Buffer) => void;
   readonly observeGrantRequest?: (request: ReceivedRequest) => void;
@@ -235,6 +236,7 @@ async function serveConnection(
   observeIssuerClientInstance: ((clientInstance: Buffer) => void) | undefined,
   observeGrantRequest: ((request: ReceivedRequest) => void) | undefined,
   observeUserPresenceRequest: ((request: ReceivedRequest) => void) | undefined,
+  stallUserPresenceBegin: boolean,
   userPresenceBeginResult: ((value: Record<string, unknown>) => unknown) | undefined,
   pendingUserPresence: Map<string, PendingUserPresence>,
   completedUserPresence: Map<string, CompletedUserPresence>,
@@ -340,6 +342,10 @@ async function serveConnection(
       };
       const response =
         userPresenceBeginResult === undefined ? beginResult : userPresenceBeginResult(beginResult);
+      if (stallUserPresenceBegin) {
+        await once(socket, 'close');
+        return;
+      }
       await writeFrame(
         socket,
         success(request.requestId, Buffer.from(JSON.stringify(response), 'utf8')),
@@ -597,6 +603,7 @@ async function startService(
         options.observeIssuerClientInstance,
         options.observeGrantRequest,
         options.observeUserPresenceRequest,
+        options.stallUserPresenceBegin ?? false,
         options.userPresenceBeginResult,
         pendingUserPresence,
         completedUserPresence,
@@ -668,6 +675,29 @@ async function startLegacyService(): Promise<TestService> {
       }
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await Promise.all(tasks);
+    },
+  };
+}
+
+async function startStalledService(): Promise<TestService> {
+  const path = endpoint();
+  const sockets = new Set<Socket>();
+  const server: Server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  server.listen(path);
+  await once(server, 'listening');
+  return {
+    endpoint: path,
+    issuedGrantCount: () => 0,
+    async disconnectClients() {},
+    async resetAuthorization() {},
+    async close() {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
 }
@@ -789,6 +819,46 @@ describe('shared local service client', () => {
     await service.close();
   });
 
+  it('bounds installed startup when a local endpoint accepts but never handshakes', async () => {
+    const service = await startStalledService();
+    const installed = writeInstalledConfig(service, [['account_trusted']], false);
+    const started = Date.now();
+
+    await expect(
+      connectInstalledService(
+        { KONCLAVE_SERVICE_CONFIG_FILE: installed.serviceConfigFile },
+        installed.directory,
+        'session-test',
+        process.platform,
+      ),
+    ).rejects.toMatchObject({
+      operation: 'handshake',
+      code: 'deadline_exceeded',
+    });
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await service.close();
+  });
+
+  it('keeps operation deadlines independent from the startup transport budget', async () => {
+    const service = await startService(() => ({
+      kind: 'delay',
+      milliseconds: 75,
+      value: { device_id: 'startup-budget' },
+    }));
+    const client = await connectLocalService({
+      ...clientOptions(service),
+      startupDeadlineMs: 25,
+    });
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({
+      device_id: 'startup-budget',
+    });
+
+    client.close();
+    await service.close();
+  });
+
   it('connects an unsupported harness through the installed generic issuer', async () => {
     const grantRequests: ReceivedRequest[] = [];
     const service = await startService(
@@ -897,6 +967,34 @@ describe('shared local service client', () => {
         'invalid_arguments',
       );
     }
+  });
+
+  it('bounds a stalled UserPresence challenge exchange without shortening the ceremony', async () => {
+    let ceremonyRequests = 0;
+    const service = await startService(() => ({ kind: 'respond', value: {} }), undefined, {
+      stallUserPresenceBegin: true,
+    });
+    const started = Date.now();
+
+    await expect(
+      connectLocalService({
+        ...clientOptions(service),
+        grantEvidence: 'user_presence',
+        grantDeadlineMs: 1_000,
+        startupDeadlineMs: 25,
+        requestUserPresence: async () => {
+          ceremonyRequests += 1;
+          return {};
+        },
+      }),
+    ).rejects.toMatchObject({
+      operation: 'authorization.user_presence.begin',
+      code: 'deadline_exceeded',
+    });
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(ceremonyRequests).toBe(0);
+    await service.close();
   });
 
   it('completes UserPresence on the challenge connection and uses evidence bit two', async () => {
@@ -1447,6 +1545,9 @@ describe('shared local service client', () => {
     await expect(
       connectLocalService({ ...clientOptions(service), reconnectDelayMs: -1 }),
     ).rejects.toThrow('reconnect settings are invalid');
+    await expect(
+      connectLocalService({ ...clientOptions(service), startupDeadlineMs: 0 }),
+    ).rejects.toThrow('startup deadline is invalid');
     await expect(
       connectLocalService({ ...clientOptions(service), serviceKey: Buffer.alloc(32, 9) }),
     ).rejects.toBeInstanceOf(LocalServiceProtocolError);

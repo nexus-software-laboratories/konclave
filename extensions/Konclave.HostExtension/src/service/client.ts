@@ -144,6 +144,8 @@ export interface LocalServiceClientOptions {
   readonly requestUserPresence?: (request: unknown) => Promise<unknown>;
   /** Deadline covering challenge, native ceremony, and exact completion retry. */
   readonly grantDeadlineMs?: number;
+  /** Deadline for initial authorization and session transport before the client is usable. */
+  readonly startupDeadlineMs?: number;
   /** Default handshake and request-cancellation deadline. */
   readonly deadlineMs?: number;
   /** Number of reconnects attempted after an early transport failure. */
@@ -687,6 +689,7 @@ async function issueSessionGrant(
   options: LocalServiceClientOptions,
   sessionKey: KeyObject,
   deadlineMs: number,
+  transportDeadlineMs: number,
   reconnectAttempts: number,
   reconnectDelayMs: number,
   sleep: (milliseconds: number) => Promise<void>,
@@ -697,6 +700,7 @@ async function issueSessionGrant(
       options,
       sessionKey,
       options.grantDeadlineMs ?? 180_000,
+      transportDeadlineMs,
       reconnectAttempts,
       reconnectDelayMs,
       sleep,
@@ -787,6 +791,7 @@ async function issueUserPresenceGrant(
   options: LocalServiceClientOptions,
   sessionKey: KeyObject,
   deadlineMs: number,
+  transportDeadlineMs: number,
   reconnectAttempts: number,
   reconnectDelayMs: number,
   sleep: (milliseconds: number) => Promise<void>,
@@ -804,7 +809,7 @@ async function issueUserPresenceGrant(
   const expiresAt = Date.now() + deadlineMs;
   const clientInstance = randomBytes(clientInstanceLength);
   const beginRequestId = randomBytes(requestIdLength);
-  let issuer = await openConnection(options, deadlineMs, {
+  let issuer = await openConnection(options, Math.min(deadlineMs, transportDeadlineMs), {
     kind: 'issuer',
     key: options.signingKey,
     clientInstance,
@@ -818,7 +823,7 @@ async function issueUserPresenceGrant(
     });
     const beginResult = await withDeadline(
       issuer.invoke(beginRequestId, 'authorization.user_presence.begin', beginPayload),
-      remainingGrantTime(expiresAt, 'authorization.user_presence.begin'),
+      transportGrantTime(expiresAt, transportDeadlineMs, 'authorization.user_presence.begin'),
       'authorization.user_presence.begin',
       issuer.close,
     );
@@ -844,7 +849,11 @@ async function issueUserPresenceGrant(
       try {
         const result = await withDeadline(
           issuer.invoke(completeRequestId, 'authorization.user_presence.complete', completePayload),
-          remainingGrantTime(expiresAt, 'authorization.user_presence.complete'),
+          transportGrantTime(
+            expiresAt,
+            transportDeadlineMs,
+            'authorization.user_presence.complete',
+          ),
           'authorization.user_presence.complete',
           issuer.close,
         );
@@ -860,7 +869,11 @@ async function issueUserPresenceGrant(
         }
         issuer = await openConnection(
           options,
-          remainingGrantTime(expiresAt, 'authorization.user_presence.complete'),
+          transportGrantTime(
+            expiresAt,
+            transportDeadlineMs,
+            'authorization.user_presence.complete',
+          ),
           {
             kind: 'issuer',
             key: options.signingKey,
@@ -921,6 +934,14 @@ function remainingGrantTime(expiresAt: number, operation: string): number {
     throw new LocalServiceError(operation, 'deadline_exceeded');
   }
   return remaining;
+}
+
+function transportGrantTime(
+  expiresAt: number,
+  transportDeadlineMs: number,
+  operation: string,
+): number {
+  return Math.min(remainingGrantTime(expiresAt, operation), transportDeadlineMs);
 }
 
 function parseIssuedGrant(
@@ -1058,8 +1079,16 @@ export async function connectLocalService(
   options: LocalServiceClientOptions,
 ): Promise<LocalServiceClient> {
   const deadlineMs = options.deadlineMs ?? defaultDeadlineMs;
+  const startupDeadlineMs = options.startupDeadlineMs ?? deadlineMs;
   const reconnectAttempts = options.reconnectAttempts ?? defaultReconnectAttempts;
   const reconnectDelayMs = options.reconnectDelayMs ?? defaultReconnectDelayMs;
+  if (
+    !Number.isInteger(startupDeadlineMs) ||
+    startupDeadlineMs <= 0 ||
+    startupDeadlineMs > 300_000
+  ) {
+    throw new Error('local service startup deadline is invalid');
+  }
   if (
     !Number.isInteger(reconnectAttempts) ||
     reconnectAttempts < 0 ||
@@ -1080,7 +1109,8 @@ export async function connectLocalService(
   let grant = await issueSessionGrant(
     options,
     sessionKey,
-    deadlineMs,
+    startupDeadlineMs,
+    startupDeadlineMs,
     reconnectAttempts,
     reconnectDelayMs,
     sleep,
@@ -1091,6 +1121,7 @@ export async function connectLocalService(
       options,
       sessionKey,
       deadlineMs,
+      deadlineMs,
       reconnectAttempts,
       reconnectDelayMs,
       sleep,
@@ -1100,7 +1131,7 @@ export async function connectLocalService(
     return grantRefresh;
   };
   const interactiveLane: ConnectionLane = {
-    connection: await openConnection(options, deadlineMs, {
+    connection: await openConnection(options, startupDeadlineMs, {
       kind: 'session',
       key: sessionKey,
       grant,
