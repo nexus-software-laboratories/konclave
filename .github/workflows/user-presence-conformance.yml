@@ -115,7 +115,7 @@ jobs:
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
-            user_presence_issues_one_exact_grant_and_recovers_after_restart
+            user_presence_
           cargo clippy \
             --locked \
             --package KonclaveCommandLine \

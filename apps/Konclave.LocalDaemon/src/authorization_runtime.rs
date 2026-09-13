@@ -17,7 +17,7 @@ use KonclaveLocalServiceTransport::{
     ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
     SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
 };
-use KonclaveUserPresence::{NativeWebAuthnCredential, UserPresenceCredentialDigest};
+use KonclaveUserPresence::NativeWebAuthnCredential;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, watch};
 
@@ -85,7 +85,7 @@ pub(crate) struct UserPresenceGrantRequest {
     pub(crate) policy_version: AuthorizationPolicyVersion,
     pub(crate) evidence: AuthorizationEvidenceSet,
     pub(crate) capabilities: SessionCapabilities,
-    pub(crate) credential_digest: UserPresenceCredentialDigest,
+    pub(crate) expected_credential: UserPresenceCredentialRecord,
     pub(crate) updated_credential: NativeWebAuthnCredential,
     pub(crate) issued_at_unix_milliseconds: u64,
     pub(crate) expires_at_unix_milliseconds: u64,
@@ -352,7 +352,7 @@ impl LiveAuthorizationRuntime {
             policy_version,
             evidence,
             capabilities,
-            credential_digest,
+            expected_credential,
             updated_credential,
             issued_at_unix_milliseconds,
             expires_at_unix_milliseconds,
@@ -366,7 +366,7 @@ impl LiveAuthorizationRuntime {
         let store = Arc::clone(&self.store);
         let mutation = tokio::task::spawn_blocking(move || {
             store.update_user_presence_credential(
-                credential_digest,
+                &expected_credential,
                 &updated_record,
                 issued_at_unix_milliseconds,
             )

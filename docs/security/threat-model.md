@@ -72,6 +72,9 @@ challenge, credential, signature, flags, user handle, and counter transition bef
 persisting counter state and issuing evidence bit `2`. Linux and macOS report
 `required_evidence_unavailable`; no terminal prompt, software key, or AccountTrusted
 fallback sets that bit.
+Credential persistence compares the complete begin-time record with current durable
+state, so an older concurrent ceremony cannot regress a newer authenticator counter
+or issue a grant after losing that race.
 
 The broker identifies the Konclave relying party but does not display every bound
 profile, harness, capability, and expiry field. A hostile same-account process can

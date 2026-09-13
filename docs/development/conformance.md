@@ -175,7 +175,9 @@ crash or excessive-allocation case becomes a permanent regression input.
   session key, harness, evidence, capabilities, and expiries; require the session-key
   signature; recover only an already-issued exact completion; reject replay,
   substitution, stale challenges, changed assertions, unsupported platforms, and
-  silent AccountTrusted fallback;
+  silent AccountTrusted fallback; and complete overlapping valid assertions out of
+  order to prove stale credential state cannot regress the durable counter or issue a
+  second grant;
 - refuse startup without a valid installation-bound authorization store, preserve
   grants across service restart, and observe exact revocation, profile suspension,
   issuer disablement, policy invalidation, and reload failure within the documented

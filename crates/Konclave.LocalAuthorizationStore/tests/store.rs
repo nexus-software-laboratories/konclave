@@ -270,13 +270,20 @@ fn user_presence_credentials_are_exact_reserved_and_audited() {
             .err(),
         Some(LocalAuthorizationStoreError::Conflict)
     );
+    assert_eq!(
+        store
+            .update_user_presence_credential(&first, &first, NOW + 2)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
     let updated = store
-        .update_user_presence_credential(first.credential_digest(), &first_updated, NOW + 2)
+        .update_user_presence_credential(&first, &first_updated, NOW + 2)
         .unwrap();
     assert_eq!(updated.generation().get(), 3);
     assert_eq!(
         store
-            .update_user_presence_credential(first.credential_digest(), &first_updated, NOW + 3,)
+            .update_user_presence_credential(&first_updated, &first_updated, NOW + 3,)
             .unwrap()
             .effect(),
         MutationEffect::Unchanged
@@ -338,6 +345,38 @@ fn user_presence_credentials_are_exact_reserved_and_audited() {
         .unwrap();
     assert_eq!(status.user_presence_credentials(), 0);
     assert_eq!(status.user_presence_credential_identifiers(), 2);
+}
+
+#[test]
+fn stale_user_presence_credential_update_conflicts_without_mutation() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let initial = presence_credential_with_counter(1, 0);
+    let stale = presence_credential_with_counter(1, 1);
+    let newer = presence_credential_with_counter(1, 2);
+
+    store
+        .register_user_presence_credential(&initial, NOW + 1)
+        .unwrap();
+    let advanced = store
+        .update_user_presence_credential(&initial, &newer, NOW + 2)
+        .unwrap();
+    let audit_before_conflict = store.load_audit_events(8, None).unwrap();
+
+    assert_eq!(
+        store
+            .update_user_presence_credential(&initial, &stale, NOW + 3)
+            .err(),
+        Some(LocalAuthorizationStoreError::Conflict)
+    );
+
+    let snapshot = store.load_snapshot(NOW + 3, None).unwrap();
+    assert_eq!(snapshot.generation(), advanced.generation());
+    assert_eq!(snapshot.user_presence_credential(), Some(&newer));
+    assert_eq!(
+        store.load_audit_events(8, None).unwrap(),
+        audit_before_conflict
+    );
 }
 
 #[test]

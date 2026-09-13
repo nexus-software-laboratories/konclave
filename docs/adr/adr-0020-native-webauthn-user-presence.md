@@ -116,6 +116,13 @@ verification required. Pending registration and authentication state remains
 service-side and is never accepted from the client. Credential state is serialized
 only in the owner-protected durable authorization store.
 
+Credential advancement is an exact compare-and-swap against the complete durable
+record used to create and verify that ceremony. If another completion advanced the
+credential first, the stale completion fails without changing the credential,
+generation, audit history, or grants. Authenticators that legitimately report no
+counter advance remain valid because the comparison does not require a numeric
+increment.
+
 The first provider identifier is `windows-native-webauthn-v1`. Its relying-party ID is
 `konclave.local` and its synthetic native-application origin is
 `https://konclave.local`. These values are protocol constants. They do not imply DNS,

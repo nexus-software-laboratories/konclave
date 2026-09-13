@@ -34,6 +34,9 @@ installation sidecar, without a shell. The helper returns a standard native asse
 the daemon independently verifies challenge, relying party, origin, credential,
 signature, user-presence and user-verification flags, user handle, and counter state.
 The ephemeral session key signs the same canonical binding before grant issuance.
+The verified credential update compares the complete begin-time record with current
+durable state inside the write transaction. Overlapping ceremonies cannot overwrite a
+newer counter; a stale completion returns conflict before grant issuance.
 
 Completion normally occurs on the issuer connection that received the challenge. If
 the service durably issued the grant but the response was lost, the client reconnects

@@ -13,7 +13,7 @@ use KonclaveDomainCore::{
     CollaborationPolicyTarget, CollaborationPolicyUsage, ConversationId, ConversationRole,
     DeviceId, Ed25519Signature, NotificationId, evaluate_collaboration_policy,
 };
-use KonclaveLocalAuthorizationStore::GrantIssuanceKey;
+use KonclaveLocalAuthorizationStore::{GrantIssuanceKey, UserPresenceCredentialRecord};
 use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
     LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
@@ -506,6 +506,7 @@ struct UserPresencePendingKey {
 struct PendingUserPresenceContext {
     request: PendingUserPresenceRequest,
     authentication: NativeWebAuthnAuthentication,
+    expected_credential: UserPresenceCredentialRecord,
     credential: NativeWebAuthnCredential,
 }
 
@@ -940,6 +941,7 @@ fn begin_user_presence(
         PendingUserPresenceContext {
             request: PendingUserPresenceRequest::new(binding),
             authentication,
+            expected_credential: credential_record,
             credential,
         },
         now,
@@ -1054,7 +1056,7 @@ async fn complete_user_presence(
             policy_version: claims.policy_version,
             evidence: claims.evidence,
             capabilities: claims.capabilities,
-            credential_digest: claims.credential_digest,
+            expected_credential: pending.expected_credential,
             updated_credential: pending.credential,
             issued_at_unix_milliseconds: claims.issued_at_unix_milliseconds,
             expires_at_unix_milliseconds: claims.grant_expires_at_unix_milliseconds,
@@ -5723,6 +5725,69 @@ mod tests {
             .unwrap();
     }
 
+    async fn request_user_presence_begin(
+        fixture: &Fixture,
+        issuer: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
+        request_seed: u8,
+        profile: &str,
+    ) -> serde_json::Value {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "profile": profile,
+            "sessionPublicKey": crate::mcp::encode_hex(
+                fixture.client_identity.public_key().as_bytes()
+            ),
+            "harness": "copilot",
+            "capabilities": SessionCapabilities::ALL.bits(),
+        }))
+        .unwrap();
+        let LocalServiceResponse::Success { payload, .. } = request(
+            issuer,
+            request_seed,
+            "authorization.user_presence.begin",
+            &payload,
+        )
+        .await
+        else {
+            panic!("user-presence challenge failed");
+        };
+        serde_json::from_slice(&payload).unwrap()
+    }
+
+    fn user_presence_completion_request(
+        fixture: &Fixture,
+        begin: &serde_json::Value,
+        assertion: serde_json::Value,
+    ) -> serde_json::Value {
+        let binding = decode_test_hex(begin["binding"].as_str().unwrap());
+        let session_signature = fixture.client_identity.sign(&binding).unwrap();
+        serde_json::json!({
+            "beginRequestId": begin["beginRequestId"],
+            "bindingDigest": begin["bindingDigest"],
+            "challenge": begin["challenge"],
+            "sessionSignature": crate::mcp::encode_hex(session_signature.as_bytes()),
+            "assertion": assertion,
+        })
+    }
+
+    async fn persisted_user_presence_counter(fixture: &Fixture) -> u64 {
+        let installation_path = fixture.installation_path.clone();
+        let installation_fingerprint = fixture.installation_fingerprint;
+        tokio::task::spawn_blocking(move || {
+            let store =
+                LocalAuthorizationStore::open(installation_path, installation_fingerprint, None)
+                    .unwrap();
+            let snapshot = store
+                .load_snapshot(SystemUnixClock.now_unix_milliseconds(), None)
+                .unwrap();
+            let document: serde_json::Value =
+                serde_json::from_slice(snapshot.user_presence_credential().unwrap().document())
+                    .unwrap();
+            document["passkey"]["counter"].as_u64().unwrap()
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn user_presence_issues_one_exact_grant_and_recovers_after_restart() {
         let (fixture, mut authenticator) = Fixture::new_with_user_presence().await;
@@ -5739,39 +5804,10 @@ mod tests {
             }
             stream = fixture.connect_issuer(70) => stream,
         };
-        let begin_payload = serde_json::to_vec(&serde_json::json!({
-            "profile": "session-presence",
-            "sessionPublicKey": crate::mcp::encode_hex(
-                fixture.client_identity.public_key().as_bytes()
-            ),
-            "harness": "copilot",
-            "capabilities": SessionCapabilities::ALL.bits(),
-        }))
-        .unwrap();
-        let LocalServiceResponse::Success {
-            payload: begin_payload,
-            ..
-        } = request(
-            &mut issuer,
-            71,
-            "authorization.user_presence.begin",
-            &begin_payload,
-        )
-        .await
-        else {
-            panic!("user-presence challenge failed");
-        };
-        let begin: serde_json::Value = serde_json::from_slice(&begin_payload).unwrap();
-        let binding = decode_test_hex(begin["binding"].as_str().unwrap());
-        let session_signature = fixture.client_identity.sign(&binding).unwrap();
+        let begin =
+            request_user_presence_begin(&fixture, &mut issuer, 71, "session-presence").await;
         let assertion = authenticator.authentication_response(&begin["webAuthnRequest"], true);
-        let complete = serde_json::json!({
-            "beginRequestId": begin["beginRequestId"],
-            "bindingDigest": begin["bindingDigest"],
-            "challenge": begin["challenge"],
-            "sessionSignature": crate::mcp::encode_hex(session_signature.as_bytes()),
-            "assertion": assertion,
-        });
+        let complete = user_presence_completion_request(&fixture, &begin, assertion);
         let complete_payload = serde_json::to_vec(&complete).unwrap();
         let LocalServiceResponse::Success { payload, .. } = request(
             &mut issuer,
@@ -5862,6 +5898,91 @@ mod tests {
         tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, restarted)
             .await
             .expect("restarted shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_user_presence_ceremonies_preserve_newer_credential_state() {
+        let (fixture, mut authenticator) = Fixture::new_with_user_presence().await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        let mut issuer = tokio::select! {
+            result = &mut service => {
+                panic!("shared service exited before the presence issuer connected: {result:?}")
+            }
+            stream = fixture.connect_issuer(80) => stream,
+        };
+
+        let first_begin =
+            request_user_presence_begin(&fixture, &mut issuer, 81, "session-presence-race").await;
+        let second_begin =
+            request_user_presence_begin(&fixture, &mut issuer, 82, "session-presence-race").await;
+        let lower_assertion =
+            authenticator.authentication_response(&first_begin["webAuthnRequest"], true);
+        let higher_assertion =
+            authenticator.authentication_response(&second_begin["webAuthnRequest"], true);
+        let lower_completion =
+            user_presence_completion_request(&fixture, &first_begin, lower_assertion);
+        let higher_completion =
+            user_presence_completion_request(&fixture, &second_begin, higher_assertion);
+        let higher_payload = serde_json::to_vec(&higher_completion).unwrap();
+        let lower_payload = serde_json::to_vec(&lower_completion).unwrap();
+
+        assert!(matches!(
+            request(
+                &mut issuer,
+                83,
+                "authorization.user_presence.complete",
+                &higher_payload,
+            )
+            .await,
+            LocalServiceResponse::Success { .. }
+        ));
+        assert!(matches!(
+            request(
+                &mut issuer,
+                84,
+                "authorization.user_presence.complete",
+                &lower_payload,
+            )
+            .await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::Conflict,
+                ..
+            }
+        ));
+        assert_eq!(persisted_user_presence_counter(&fixture).await, 2);
+
+        let third_begin =
+            request_user_presence_begin(&fixture, &mut issuer, 85, "session-presence-race").await;
+        let third_assertion =
+            authenticator.authentication_response(&third_begin["webAuthnRequest"], true);
+        let third_completion =
+            user_presence_completion_request(&fixture, &third_begin, third_assertion);
+        let third_payload = serde_json::to_vec(&third_completion).unwrap();
+        assert!(matches!(
+            request(
+                &mut issuer,
+                86,
+                "authorization.user_presence.complete",
+                &third_payload,
+            )
+            .await,
+            LocalServiceResponse::Success { .. }
+        ));
+        assert_eq!(persisted_user_presence_counter(&fixture).await, 3);
+
+        drop(issuer);
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
             .unwrap()
             .unwrap();
     }

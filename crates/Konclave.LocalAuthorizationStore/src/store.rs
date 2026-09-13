@@ -1106,6 +1106,7 @@ impl LocalAuthorizationStore {
 
     /// Advances mutable verifier state for the active credential.
     ///
+    /// Durable state must exactly match the record used to verify the assertion.
     /// Provider and credential identity must remain exact; only the validated
     /// credential document, such as its WebAuthn counter, may change.
     ///
@@ -1114,7 +1115,7 @@ impl LocalAuthorizationStore {
     /// Returns a finite not-found, conflict, validation, or storage failure.
     pub fn update_user_presence_credential(
         &self,
-        expected: UserPresenceCredentialDigest,
+        expected: &UserPresenceCredentialRecord,
         updated: &UserPresenceCredentialRecord,
         now_unix_milliseconds: u64,
     ) -> Result<AuthorizationMutation, LocalAuthorizationStoreError> {
@@ -1124,10 +1125,10 @@ impl LocalAuthorizationStore {
             |transaction, _generation| {
                 let existing = load_user_presence_credential(transaction)?
                     .ok_or(LocalAuthorizationStoreError::NotFound)?;
-                if existing.credential_digest() != expected
-                    || updated.credential_digest() != expected
-                    || existing.provider_id() != updated.provider_id()
-                    || existing.credential_id() != updated.credential_id()
+                if existing != *expected
+                    || expected.credential_digest() != updated.credential_digest()
+                    || expected.provider_id() != updated.provider_id()
+                    || expected.credential_id() != updated.credential_id()
                 {
                     return Err(LocalAuthorizationStoreError::Conflict);
                 }
