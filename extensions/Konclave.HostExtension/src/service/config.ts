@@ -327,7 +327,11 @@ export function resolveLocalServiceConfig(
   const canonical =
     canonicalRaw === undefined ? undefined : parseLocalServiceConfig(canonicalRaw, platform);
   const legacy = legacyRaw === undefined ? undefined : parseLocalServiceConfig(legacyRaw, platform);
-  if (canonical !== undefined && legacy !== undefined && !legacyMatchesCanonical(legacy, canonical)) {
+  if (
+    canonical !== undefined &&
+    legacy !== undefined &&
+    !legacyMatchesCanonical(legacy, canonical)
+  ) {
     throw new ServiceConfigurationError(
       'Konclave service configuration conflicts with the legacy extension sidecar.',
     );
@@ -437,9 +441,7 @@ function policiesEqual(
 function canonicalPolicyClauses(
   policy: LocalServiceRuntimeConfig['authorizationPolicy'],
 ): string[] {
-  return policy.acceptedEvidence
-    .map((clause) => [...clause].sort().join('|'))
-    .sort();
+  return policy.acceptedEvidence.map((clause) => [...clause].sort().join('|')).sort();
 }
 
 /**

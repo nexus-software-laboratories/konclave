@@ -299,9 +299,7 @@ describe('installed service custody', () => {
       if (platform === 'win32') {
         record.userPresenceHelper = 'C:\\owner\\konclave.exe';
       }
-      const files = mappedFiles(
-        new Map([[expected, { contents: JSON.stringify(record) }]]),
-      );
+      const files = mappedFiles(new Map([[expected, { contents: JSON.stringify(record) }]]));
 
       resolveLocalServiceConfig(environment, moduleDir, platform, files);
 
@@ -348,12 +346,7 @@ describe('installed service custody', () => {
       ]),
     );
 
-    const config = resolveLocalServiceConfig(
-      { HOME: '/home/example' },
-      moduleDir,
-      'linux',
-      files,
-    );
+    const config = resolveLocalServiceConfig({ HOME: '/home/example' }, moduleDir, 'linux', files);
 
     expect(config.userPresenceHelper).toBe(record.userPresenceHelper);
   });
@@ -372,12 +365,7 @@ describe('installed service custody', () => {
       ]),
     );
     expect(() =>
-      resolveLocalServiceConfig(
-        { HOME: '/home/example' },
-        moduleDir,
-        'linux',
-        conflicting,
-      ),
+      resolveLocalServiceConfig({ HOME: '/home/example' }, moduleDir, 'linux', conflicting),
     ).toThrow('conflicts with the legacy extension sidecar');
 
     const unsafe = mappedFiles(
