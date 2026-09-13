@@ -85,11 +85,22 @@ Later Copilot sessions create independent profiles and enroll automatically with
 receiving the credential through their environment or extension configuration. Repeating
 `init` is idempotent for the same endpoint and source; conflicting setup fails.
 
-The initial `AccountTrusted` authorization policy trusts every process under the
-configured operating-system account; it does not isolate hostile same-user sessions.
-Each client still uses a memory-only session key and a finite exact-profile grant.
-Unsupported harnesses can use the same minimum-trust contract through the generic
-installed client API without claiming stronger evidence.
+`AccountTrusted` trusts every process under the configured operating-system account;
+it does not isolate hostile same-user sessions. On Windows, a fresh installation can
+instead require native Windows Hello or compatible FIDO2 user verification:
+
+```powershell
+konclave init --relay-endpoint https://relay.example.com --authorization-policy user-presence --allow-no-recovery
+```
+
+Setup performs registration plus a confirmation ceremony, and each new Copilot
+session process completes its own native ceremony for one finite exact-profile,
+memory-key grant. Linux and macOS fail closed with no AccountTrusted fallback.
+The first delivery does not migrate an existing AccountTrusted installation in place;
+select UserPresence only during intentional fresh setup. Losing the credential can
+strand a no-recovery installation, which is why the acknowledgement flag is required.
+Unsupported harnesses continue to use the Generic AccountTrusted client and cannot
+self-assert stronger evidence.
 
 Operators can inspect and change the live durable authorization state without
 exposing administration as an agent tool:

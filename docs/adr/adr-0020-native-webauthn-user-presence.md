@@ -131,12 +131,13 @@ An authenticated issuer connection requests a presence challenge naming:
 - the ephemeral session public key;
 - the harness;
 - the requested capability bitset; and
-- the requested grant expiry, bounded to at most one hour.
+- the exact evidence set the service will record.
 
-The client also proves possession of the ephemeral session private key over a
-service-supplied request digest before a platform ceremony is created. This prevents
-another same-account process from directing approval to an arbitrary public key it
-does not control.
+The client proves possession of the ephemeral session private key over the canonical
+binding when it submits the platform assertion. The service verifies both proofs
+before issuance. Another same-account process can trigger a ceremony for an arbitrary
+public key, but cannot obtain or operate the resulting grant without that key's
+private half.
 
 The service creates a fresh WebAuthn authentication challenge and retains one pending
 record containing:
@@ -147,9 +148,8 @@ record containing:
 - issuer key identifier and version;
 - issuer client instance and request identifier;
 - policy version;
-- profile, session public key, harness, capabilities, and expiry;
+- profile, session public key, harness, evidence, capabilities, and expiry;
 - provider and credential identifier;
-- the session proof-of-possession digest; and
 - issued-at and challenge-expiry timestamps.
 
 The random challenge is therefore a cryptographic handle for the complete
@@ -162,22 +162,27 @@ issuer connection that received it and is removed on disconnect, service restart
 policy change, issuer disablement, cancellation, or timeout.
 
 The grant's profile, key, harness, evidence, policy version, capability bitset, and
-expiry must exactly match the pending request. Grant expiry never exceeds one hour or
-the owner-approved expiry.
+expiry must exactly match the pending request. Grant expiry never exceeds one hour.
 
-### Keep the approval UI outside the agent surface
+The version-1 canonical binding starts with
+`konclave.user-presence.binding.v1\0`, then encodes the version, issuer-connection
+identifier, WebAuthn challenge, installation fingerprint, service public key, issuer
+identifier and version, issuer client instance, request identifier, policy version,
+length-prefixed profile, session public key, harness wire value, evidence byte,
+capability bits, length-prefixed provider identifier, credential digest, issuance
+time, challenge expiry, and grant expiry. The frozen conformance vector is 349 bytes
+with SHA-256
+`836f5d2fe88dbb3c1bea0e085db7aa0a20be8e479b0c8ec3a5f54ddda15b44f2`.
 
-The Konclave platform helper displays a bounded request summary before invoking
-Windows WebAuthn:
-
-- exact profile and harness;
-- requested capabilities;
-- requested grant duration; and
-- an explicit statement that approval authorizes the named local session.
+### Keep approval outside the agent surface
 
 The Windows WebAuthn broker owns the modal user-verification UI. Neither a model tool
-response nor terminal input can substitute for the returned signed assertion.
-Production APIs accept no caller-supplied "approved" boolean.
+response nor terminal input can substitute for the returned signed assertion, and
+production APIs accept no caller-supplied "approved" boolean. The broker identifies
+the Konclave relying party, but the first adapter cannot place the exact profile,
+harness, capabilities, or duration inside authenticated broker display text. Those
+fields remain cryptographically bound to the opaque challenge and independently
+verified by the service.
 
 A hostile same-account process can initiate its own legitimate ceremony and may try
 to mislead the user. If the user approves that system ceremony, the attacker can
@@ -210,14 +215,20 @@ session handshake still requires the approved ephemeral private key.
 
 ### Enroll credentials through an explicit owner ceremony
 
-Fresh `UserPresence` setup is an explicit interactive owner action. The service starts
+Fresh `UserPresence` setup is an explicit interactive owner action. The installer starts
 a WebAuthn registration with user verification required; the returned credential is
-not retained until the service verifies that registration and the new credential
+not retained until the verifier accepts that registration and the new credential
 successfully authenticates an enrollment-lifecycle challenge.
 
-The initial credential record and selected policy are committed together. An existing
-installation may add a credential only through an explicit administrative flow that
-also completes the new credential's verification ceremony.
+The selected policy and credential use separate authorization-store transactions, but
+the immutable installation record and client sidecar are not published until both
+transactions succeed. A cancelled or failed ceremony therefore leaves no activatable
+installation. Exact retry reuses valid persisted state without replacing it.
+
+The first shipped CLI supports this lifecycle only during fresh initialization.
+Existing AccountTrusted installations must remain on their current policy or be
+re-created intentionally; an in-place enrollment or policy-downgrade command is not
+yet exposed.
 
 Once a credential exists, replacing or deleting it requires either:
 
@@ -253,10 +264,10 @@ registration or assertion object after independent safe-library verification. Th
 helper cannot select a different relying party, origin, policy, challenge, or
 credential than the service-provided options.
 
-Cancellation uses the Windows WebAuthn cancellation API and produces no proof.
-Provider absence, no enrolled credential, user cancellation, timeout, invalid
-assertion, stale challenge, and credential counter failure map to distinct finite
-provider outcomes.
+The native library maps Windows cancellation to a finite cancelled outcome and
+produces no proof. Provider absence, no enrolled credential, user cancellation,
+timeout, invalid assertion, stale challenge, and credential counter failure fail
+closed through bounded provider or local-service outcomes.
 
 Linux and macOS initially report `required_evidence_unavailable`. They do not use a
 software signing key, terminal confirmation, browser callback, or AccountTrusted
@@ -356,6 +367,9 @@ authenticator, not the sole provider.
 
 - The first production provider works only on supported Windows systems.
 - Linux and macOS users cannot select a UserPresence-only policy yet.
+- Existing AccountTrusted installations have no in-place UserPresence enrollment
+  command in the first delivery.
+- The Windows broker does not display every cryptographically bound grant field.
 - WebAuthn credential state and pending verifier state add a new durable and in-memory
   lifecycle.
 - Lost credentials can strand a no-recovery installation.

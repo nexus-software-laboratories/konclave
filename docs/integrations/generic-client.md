@@ -2,7 +2,8 @@
 
 Harness-specific integrations improve lifecycle mapping and automatic delivery, but
 they are not an eligibility gate. The packaged `generic.mjs` client lets any local
-harness invoke the shared service through the explicit `AccountTrusted` policy.
+harness invoke the shared service through the installed AccountTrusted or Windows
+UserPresence grant path.
 
 The fallback is forbidden when a paved integration is available. In particular,
 Copilot CLI must use its native tools and `/konclave` commands. A paved-operation
@@ -13,7 +14,8 @@ failure remains visible; it never authorizes profile discovery or Generic fallba
 The generic client:
 
 - generates a memory-only session key;
-- uses the installed account issuer only to request one finite exact-profile grant;
+- uses the installed account issuer only to request one finite exact-profile grant or
+  one service-owned UserPresence challenge;
 - sends `Generic` as its authorization metadata regardless of its self-declared
   integration label;
 - pins and authenticates the installed service;
@@ -22,8 +24,13 @@ The generic client:
 - retires its exact grant on clean exit.
 
 It proves no harness provenance. The `Generic` harness kind is bounded metadata, not
-`HarnessAttested` evidence. An installation whose policy excludes `AccountTrusted`
-rejects the client with no fallback.
+`HarnessAttested` evidence. On Windows, a policy whose satisfiable clause requires
+`UserPresence` runs the owner-protected sidecar's exact native helper and submits the
+returned assertion to the service for independent verification. The native ceremony
+does not make the caller harness-attested. Linux and macOS reject the same policy
+with `required_evidence_unavailable`, and no path silently relabels AccountTrusted as
+UserPresence. When the policy has an independent AccountTrusted clause, the client
+prefers the automatic lower-friction path explicitly permitted by that policy.
 
 The generic client also proves no automatic delivery, pre-tool policy gate, native
 permission intersection, subagent containment, or durable turn/token accounting.
@@ -42,10 +49,11 @@ metadata but never sends it to the service, stores it as evidence, or uses it to
 a profile. Unknown labels are accepted because they are self-declared, not an
 allowlist.
 
-The packaged reference executable proves only `AccountTrusted`. Future
-provider-specific Generic adapters may present independently verified
-`UserPresence` or `WorkloadIdentity` evidence through the same grant architecture,
-but no Generic caller may self-assert those claims or `HarnessAttested`.
+The packaged reference executable proves AccountTrusted through the installed issuer
+and can obtain UserPresence only through the Konclave-owned native Windows WebAuthn
+helper. Future provider-specific Generic adapters may present independently verified
+`WorkloadIdentity` or `HarnessAttested` evidence through the same grant architecture,
+but no Generic caller may self-assert any of those claims.
 
 ## Profile selection
 
@@ -73,6 +81,11 @@ On Windows this is `%USERPROFILE%\.copilot\extensions\konclave\generic.mjs` unle
 `COPILOT_HOME` selects another absolute Copilot configuration root. The packaged
 source under `share/konclave/plugin/` has no sidecar and is not the runtime invocation
 path.
+
+For a UserPresence policy, invocation pauses for one Windows-owned verification
+ceremony before the operation begins. One successful ceremony authorizes only the
+resulting ephemeral session key and finite grant; each one-shot Generic process uses
+a new key and therefore requires a new ceremony.
 
 It accepts one closed operation name and one JSON value over stdin:
 
