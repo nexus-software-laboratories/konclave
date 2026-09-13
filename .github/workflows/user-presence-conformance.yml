@@ -47,12 +47,15 @@ jobs:
               $files | Where-Object {
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/workflows/user-presence-conformance\.yml$' -or
+                $_ -match '^apps/Konclave\.CommandLine/' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:authorization_runtime|local_service)\.rs)$' -or
                 $_ -match '^crates/Konclave\.DomainCore/' -or
                 $_ -match '^crates/Konclave\.LocalAuthorizationStore/' -or
                 $_ -match '^crates/Konclave\.LocalServiceTransport/' -or
                 $_ -match '^crates/Konclave\.SecretStorage/' -or
-                $_ -match '^crates/Konclave\.UserPresence/'
+                $_ -match '^crates/Konclave\.UserPresence/' -or
+                $_ -match '^extensions/Konclave\.HostExtension/' -or
+                $_ -match '^scripts/packaging/Test-ReleasePackaging\.ps1$'
               }
             ).Count -ne 0
           }
@@ -74,20 +77,39 @@ jobs:
         with:
           key: user-presence-conformance
           cache-on-failure: false
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - name: Install Node
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: user-presence-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
       - name: Verify user-presence decision core
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt \
+            --package KonclaveCommandLine \
             --package KonclaveLocalDaemon \
             --package KonclaveLocalAuthorizationStore \
+            --package KonclaveLocalServiceTransport \
             --package KonclaveUserPresence \
             -- \
             --check
           cargo test \
             --locked \
+            --package KonclaveCommandLine \
             --package KonclaveLocalAuthorizationStore \
+            --package KonclaveLocalServiceTransport \
             --package KonclaveUserPresence
           cargo test \
             --locked \
@@ -96,7 +118,9 @@ jobs:
             user_presence_issues_one_exact_grant_and_recovers_after_restart
           cargo clippy \
             --locked \
+            --package KonclaveCommandLine \
             --package KonclaveLocalAuthorizationStore \
+            --package KonclaveLocalServiceTransport \
             --package KonclaveUserPresence \
             --all-targets \
             -- \
@@ -107,3 +131,9 @@ jobs:
             --lib \
             -- \
             -D warnings
+      - name: Verify user-presence client and helper contract
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm test
