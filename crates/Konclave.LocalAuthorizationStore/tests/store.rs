@@ -178,6 +178,10 @@ fn grant_with_evidence(
 }
 
 fn presence_credential(seed: u8) -> UserPresenceCredentialRecord {
+    presence_credential_with_counter(seed, 0)
+}
+
+fn presence_credential_with_counter(seed: u8, counter: u32) -> UserPresenceCredentialRecord {
     let mut public_key_cose = vec![0xa4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21, 0x58, 0x20];
     public_key_cose.extend_from_slice(&[seed; 32]);
     let user_handle = vec![seed; 16];
@@ -190,7 +194,7 @@ fn presence_credential(seed: u8) -> UserPresenceCredentialRecord {
         "passkey": {
             "id": credential_id,
             "public_key_cose": public_key_cose,
-            "counter": 0,
+            "counter": counter,
             "transports": ["internal"],
             "aaguid": aaguid,
         }
@@ -232,6 +236,7 @@ fn user_presence_credentials_are_exact_reserved_and_audited() {
     let fixture = Fixture::new();
     let store = fixture.open();
     let first = presence_credential(1);
+    let first_updated = presence_credential_with_counter(1, 1);
     let second = presence_credential(2);
 
     assert!(
@@ -265,38 +270,49 @@ fn user_presence_credentials_are_exact_reserved_and_audited() {
             .err(),
         Some(LocalAuthorizationStoreError::Conflict)
     );
-
-    let replaced = store
-        .replace_user_presence_credential(first.credential_digest(), &second, NOW + 2)
+    let updated = store
+        .update_user_presence_credential(first.credential_digest(), &first_updated, NOW + 2)
         .unwrap();
-    assert_eq!(replaced.generation().get(), 3);
+    assert_eq!(updated.generation().get(), 3);
     assert_eq!(
         store
-            .load_snapshot(NOW + 2, None)
+            .update_user_presence_credential(first.credential_digest(), &first_updated, NOW + 3,)
+            .unwrap()
+            .effect(),
+        MutationEffect::Unchanged
+    );
+
+    let replaced = store
+        .replace_user_presence_credential(first.credential_digest(), &second, NOW + 3)
+        .unwrap();
+    assert_eq!(replaced.generation().get(), 4);
+    assert_eq!(
+        store
+            .load_snapshot(NOW + 3, None)
             .unwrap()
             .user_presence_credential(),
         Some(&second)
     );
     assert_eq!(
         store
-            .remove_user_presence_credential(first.credential_digest(), NOW + 3)
+            .remove_user_presence_credential(first.credential_digest(), NOW + 4)
             .err(),
         Some(LocalAuthorizationStoreError::Conflict)
     );
     let removed = store
-        .remove_user_presence_credential(second.credential_digest(), NOW + 3)
+        .remove_user_presence_credential(second.credential_digest(), NOW + 4)
         .unwrap();
-    assert_eq!(removed.generation().get(), 4);
+    assert_eq!(removed.generation().get(), 5);
     assert_eq!(
         store
-            .remove_user_presence_credential(second.credential_digest(), NOW + 4)
+            .remove_user_presence_credential(second.credential_digest(), NOW + 5)
             .unwrap()
             .effect(),
         MutationEffect::Unchanged
     );
     assert_eq!(
         store
-            .register_user_presence_credential(&first, NOW + 4)
+            .register_user_presence_credential(&first, NOW + 5)
             .err(),
         Some(LocalAuthorizationStoreError::Conflict)
     );
@@ -307,13 +323,14 @@ fn user_presence_credentials_are_exact_reserved_and_audited() {
         vec![
             AuthorizationAuditKind::UserPresenceCredentialRemoved,
             AuthorizationAuditKind::UserPresenceCredentialReplaced,
+            AuthorizationAuditKind::UserPresenceCredentialUpdated,
             AuthorizationAuditKind::UserPresenceCredentialRegistered,
             AuthorizationAuditKind::Bootstrap,
         ]
     );
     let status = store
         .load_status(
-            NOW + 4,
+            NOW + 5,
             None,
             IssuerKeyId::from_bytes([1; 16]),
             &profile("alice"),

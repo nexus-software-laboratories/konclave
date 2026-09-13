@@ -425,6 +425,8 @@ pub enum AuthorizationAuditKind {
     UserPresenceCredentialReplaced,
     /// The active user-presence credential was removed.
     UserPresenceCredentialRemoved,
+    /// Mutable WebAuthn counter state advanced for the active credential.
+    UserPresenceCredentialUpdated,
 }
 
 /// One non-sensitive retained authorization mutation event.

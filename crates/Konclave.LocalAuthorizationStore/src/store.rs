@@ -255,7 +255,7 @@ const CREATE_SCHEMA_SQL: &str = "
             typeof(generation) = 'integer' AND generation >= 1
         ),
         event_kind INTEGER NOT NULL CHECK (
-            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 14
+            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 15
         ),
         occurred_at_unix_milliseconds INTEGER NOT NULL CHECK (
             typeof(occurred_at_unix_milliseconds) = 'integer'
@@ -1027,11 +1027,50 @@ impl LocalAuthorizationStore {
                 if existing == *replacement {
                     return Ok(false);
                 }
+                if replacement.credential_digest() == expected {
+                    return Err(LocalAuthorizationStoreError::Conflict);
+                }
                 reserve_user_presence_credential_identifier(
                     transaction,
                     replacement.credential_digest(),
                 )?;
                 update_user_presence_credential(transaction, replacement)?;
+                Ok(true)
+            },
+        )
+    }
+
+    /// Advances mutable verifier state for the active credential.
+    ///
+    /// Provider and credential identity must remain exact; only the validated
+    /// credential document, such as its WebAuthn counter, may change.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite not-found, conflict, validation, or storage failure.
+    pub fn update_user_presence_credential(
+        &self,
+        expected: UserPresenceCredentialDigest,
+        updated: &UserPresenceCredentialRecord,
+        now_unix_milliseconds: u64,
+    ) -> Result<AuthorizationMutation, LocalAuthorizationStoreError> {
+        self.mutate(
+            now_unix_milliseconds,
+            AuthorizationAuditKind::UserPresenceCredentialUpdated,
+            |transaction, _generation| {
+                let existing = load_user_presence_credential(transaction)?
+                    .ok_or(LocalAuthorizationStoreError::NotFound)?;
+                if existing.credential_digest() != expected
+                    || updated.credential_digest() != expected
+                    || existing.provider_id() != updated.provider_id()
+                    || existing.credential_id() != updated.credential_id()
+                {
+                    return Err(LocalAuthorizationStoreError::Conflict);
+                }
+                if existing == *updated {
+                    return Ok(false);
+                }
+                update_user_presence_credential(transaction, updated)?;
                 Ok(true)
             },
         )
@@ -3258,6 +3297,7 @@ const fn audit_kind_code(kind: AuthorizationAuditKind) -> i64 {
         AuthorizationAuditKind::UserPresenceCredentialRegistered => 12,
         AuthorizationAuditKind::UserPresenceCredentialReplaced => 13,
         AuthorizationAuditKind::UserPresenceCredentialRemoved => 14,
+        AuthorizationAuditKind::UserPresenceCredentialUpdated => 15,
     }
 }
 
@@ -3279,6 +3319,7 @@ fn audit_kind_from_code(
         12 => Ok(AuthorizationAuditKind::UserPresenceCredentialRegistered),
         13 => Ok(AuthorizationAuditKind::UserPresenceCredentialReplaced),
         14 => Ok(AuthorizationAuditKind::UserPresenceCredentialRemoved),
+        15 => Ok(AuthorizationAuditKind::UserPresenceCredentialUpdated),
         _ => Err(LocalAuthorizationStoreError::InvalidStorage),
     }
 }
