@@ -113,8 +113,8 @@ single-use `konclave.harness-attestation.challenge.v1` value containing:
 - the exact 32-byte installation fingerprint and local-service public key;
 - the 16-byte issuer request identifier;
 - the client's ephemeral session public key;
-- the requested closed capability bitset;
 - the expected harness kind;
+- the requested closed capability bitset;
 - the expected extension policy identifier; and
 - issued-at and expiry timestamps inside a short challenge window.
 
@@ -167,11 +167,13 @@ A verifier must check:
 1. the provider, algorithm, signing key, and key validity;
 2. the exact audience and local-service installation binding;
 3. the complete challenge digest and unused nonce;
-4. challenge and assertion expiry;
-5. the expected harness and approved extension identity/digest;
-6. the requested session key and capabilities;
-7. lifecycle and parent-subject consistency; and
-8. provider-specific revocation or generation state.
+4. the matching live provisional connection identifier and proof of the challenged
+   ephemeral private key;
+5. challenge and assertion expiry;
+6. the expected harness and approved extension identity/digest;
+7. the requested session key and capabilities;
+8. lifecycle and parent-subject consistency; and
+9. provider-specific revocation or generation state.
 
 After verification, Konclave derives the installation-local profile from the opaque
 session subject:

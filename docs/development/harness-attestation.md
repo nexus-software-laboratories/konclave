@@ -217,12 +217,14 @@ versions remain diagnostics.
 2. Require an allowlisted algorithm and registered signing key.
 3. Verify the signature before trusting claims.
 4. Verify provider, key validity, audience, and installation binding.
-5. Match the exact challenge digest and consume the nonce once.
-6. Check challenge and assertion time windows.
-7. Check harness, extension identity/digest, session key, profile, and capabilities.
-8. Validate lifecycle and parent relationships.
-9. Apply provider revocation/generation state.
-10. Atomically consume the nonce and issue the ordinary exact-profile grant.
+5. Match the exact challenge digest and require the nonce to remain pending.
+6. Verify the matching live provisional connection identifier and proof of the
+   challenged ephemeral private key.
+7. Check challenge and assertion time windows.
+8. Check harness, extension identity/digest, session key, and capabilities.
+9. Validate lifecycle and parent relationships.
+10. Apply provider revocation/generation state.
+11. Atomically consume the nonce and issue the ordinary exact-profile grant.
 
 Any failure returns a finite unavailable, invalid, expired, replay, or unauthorized
 result. Missing provider support returns `required_evidence_unavailable`. No path
