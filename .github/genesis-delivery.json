@@ -10,6 +10,7 @@
     "Adapter conformance",
     "Authorization store conformance",
     "Generic client conformance",
+    "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
@@ -45,6 +46,7 @@
         "adapter-conformance",
         "authorization-store-conformance",
         "generic-client-conformance",
+        "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
         "delete-run-artifacts"
@@ -94,6 +96,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Generic client conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/user-presence-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "User presence conformance"
       ]
     },
     {
