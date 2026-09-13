@@ -107,7 +107,9 @@ Before requesting an assertion, Konclave creates one bounded,
 single-use `konclave.harness-attestation.challenge.v1` value containing:
 
 - a random 256-bit nonce;
-- the exact local-service public key and installation scope;
+- the fixed `konclave.local-service` audience;
+- the exact 32-byte installation fingerprint and local-service public key;
+- the 16-byte issuer request identifier;
 - the requested canonical profile;
 - the client's ephemeral session public key;
 - the requested closed capability bitset;
@@ -119,6 +121,12 @@ Challenge issuance may occur before session authorization because the proof does
 yet exist. It remains on the owner-restricted local endpoint, allocates no profile
 runtime, performs no profile side effect, and is bounded globally and per connection.
 Restart invalidates every pending challenge.
+
+The canonical challenge bytes begin with
+`utf8("konclave.harness-attestation.challenge.v1") || 0x00`, followed by the fields
+above in order. Integers use unsigned big-endian encoding. Variable ASCII or UTF-8
+fields use an unsigned two-byte big-endian length followed by their exact bytes.
+Version and harness use two bytes; capabilities and timestamps use eight bytes.
 
 The harness receives the complete challenge. A successful assertion must bind its
 digest and add host-authoritative claims that the caller cannot choose:

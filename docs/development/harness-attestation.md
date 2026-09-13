@@ -66,7 +66,10 @@ any provider.
 | --- | --- | --- |
 | `version` | Exact value `1` | Prevent cross-version interpretation |
 | `nonce` | 32 random bytes, one use | Prevent replay |
-| `audience` | Exact local-service installation/service identity | Prevent cross-service reuse |
+| `audience` | Exact ASCII `konclave.local-service` | Prevent cross-protocol reuse |
+| `installation_fingerprint` | 32 bytes | Prevent cross-installation reuse |
+| `local_service_public_key` | 32 bytes | Bind the authenticated service identity |
+| `request_id` | 16 bytes | Bind durable idempotent issuance |
 | `profile` | Canonical profile, at most 32 ASCII bytes | Bind exact authority |
 | `session_public_key` | 32-byte Ed25519 public key | Bind proof of possession |
 | `harness` | Closed `HarnessKind` | Prevent relabeling |
@@ -75,8 +78,15 @@ any provider.
 | `issued_at` | Unsigned milliseconds | Bound freshness |
 | `expires_at` | Greater than `issued_at`, within provider maximum | Bound challenge lifetime |
 
-The caller may supply only the challenge fields. It never supplies session subject,
-lifecycle, extension identity, evidence kind, issuer identity, or verified outcome.
+The extension passes the service-issued challenge unchanged. It never supplies
+session subject, lifecycle, extension identity, evidence kind, issuer identity, or
+verified outcome.
+
+Canonical challenge bytes begin with
+`utf8("konclave.harness-attestation.challenge.v1") || 0x00`, then encode the table
+fields in order. Integers are unsigned big-endian. Variable ASCII or UTF-8 fields use
+an unsigned two-byte big-endian length followed by their exact bytes. Version and
+harness use two bytes; capabilities and timestamps use eight bytes.
 
 The owner-restricted local service may issue this challenge before authorization, but
 it allocates no profile runtime and performs no profile side effect. Pending
@@ -163,6 +173,15 @@ The initial deterministic derivation vector is:
 | SHA-256 digest | `dffe52852461b2e6a99f832aa1143a387ec8e69f30284f1aa4511890af92ae06` |
 | Derived profile | `session-dffe52852461b2e6a99f832a` |
 
+The initial challenge-digest vector uses that derived profile, version `1`, 32 bytes
+of `0x22` for the nonce, audience `konclave.local-service`, 32 bytes of `0x11` for the
+installation fingerprint, 32 bytes of `0x33` for the service public key, 16 bytes of
+`0x44` for the request identifier, 32 bytes of `0x55` for the session public key,
+Copilot harness wire value `1`, capabilities `15`, extension policy
+`github-copilot:konclave`, issued-at `1700000000000`, and expiry
+`1700000060000`. The encoded challenge is 297 bytes and its SHA-256 digest is
+`9406de81301a5b9d573797777e0bea3a6f09b801b3758863ef200628174150f7`.
+
 Provider key disablement uses the existing durable issuer lifecycle. New assertion
 verification fails after disablement, while existing grants follow the configured
 retain-or-revoke disposition and the daemon's existing one-second observation bound.
@@ -239,7 +258,9 @@ const assertion = await session.attest({
   contractVersion: 1,
   nonce,
   audience,
+  installationFingerprint,
   localServicePublicKey,
+  requestId,
   profile,
   sessionPublicKey,
   requestedCapabilities,
