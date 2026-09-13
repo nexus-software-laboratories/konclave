@@ -11,12 +11,12 @@ use KonclaveLocalAuthorizationStore::{
     installation_fingerprint, LocalAuthorizationStore, UserPresenceCredentialRecord,
 };
 use KonclaveLocalServiceTransport::{
-    default_client_runtime_config_path, reconcile_client_runtime_config,
-    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
-    ClientRuntimeConfigAction, CopilotServiceConfig, HarnessKind, InstalledIssuerRegistration,
-    IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LocalServiceEndpoint,
-    LocalServiceIdentitySource, LocalServiceInstallation, LocalServiceProfileCustody,
-    ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE, LOCAL_SERVICE_INSTALLATION_FILE,
+    default_client_runtime_config_path, reconcile_client_runtime_config, AuthorizationEvidenceKind,
+    AuthorizationEvidenceSet, AuthorizationPolicy, ClientRuntimeConfigAction, CopilotServiceConfig,
+    HarnessKind, InstalledIssuerRegistration, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
+    LocalServiceEndpoint, LocalServiceIdentitySource, LocalServiceInstallation,
+    LocalServiceProfileCustody, ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE,
+    LOCAL_SERVICE_INSTALLATION_FILE,
 };
 use KonclaveSecretStorage::{
     create_or_verify_owner_protected_file, ensure_owner_protected_directory,
@@ -248,9 +248,8 @@ fn install_with(
         .map(load_optional_legacy_client_config)
         .transpose()?
         .flatten();
-    let action =
-        reconcile_client_runtime_config(&client, canonical.as_ref(), legacy.as_ref())
-            .context("reconciling installed client configuration")?;
+    let action = reconcile_client_runtime_config(&client, canonical.as_ref(), legacy.as_ref())
+        .context("reconciling installed client configuration")?;
     if matches!(
         action,
         ClientRuntimeConfigAction::CreateCanonical | ClientRuntimeConfigAction::MigrateLegacy
@@ -385,15 +384,13 @@ fn default_legacy_extension_root() -> Option<PathBuf> {
         .filter(|value| !value.is_empty())?;
     Some(
         PathBuf::from(home)
-        .join(".copilot")
-        .join("extensions")
+            .join(".copilot")
+            .join("extensions")
             .join("konclave"),
     )
 }
 
-fn load_optional_legacy_client_config(
-    path: &Path,
-) -> anyhow::Result<Option<CopilotServiceConfig>> {
+fn load_optional_legacy_client_config(path: &Path) -> anyhow::Result<Option<CopilotServiceConfig>> {
     let parent = path
         .parent()
         .context("legacy client configuration path has no parent")?;
@@ -558,10 +555,8 @@ mod tests {
             .registration()
             .profiles()
             .permits(&ServiceProfileId::parse("session-example").unwrap()));
-        let client: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&client_config_path).unwrap(),
-        )
-        .unwrap();
+        let client: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&client_config_path).unwrap()).unwrap();
         assert_eq!(
             client["serviceKey"],
             encode_hex(installation.service_public_key().as_bytes())
@@ -609,10 +604,7 @@ mod tests {
             .join(COPILOT_SERVICE_CONFIG_FILE);
         std::fs::create_dir(&profile_root).unwrap();
         let endpoint = if cfg!(windows) {
-            format!(
-                r"\\.\pipe\konclave-migration-test-{}",
-                std::process::id()
-            )
+            format!(r"\\.\pipe\konclave-migration-test-{}", std::process::id())
         } else {
             root.path()
                 .join("service.sock")
@@ -665,11 +657,7 @@ mod tests {
                 std::process::id()
             )
         } else {
-            root.path()
-                .join("other.sock")
-                .to_str()
-                .unwrap()
-                .to_string()
+            root.path().join("other.sock").to_str().unwrap().to_string()
         });
         ensure_owner_protected_directory(&conflicting_extension_root).unwrap();
         create_or_verify_owner_protected_file(
