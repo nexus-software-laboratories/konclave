@@ -86,7 +86,9 @@ Canonical challenge bytes begin with
 `utf8("konclave.harness-attestation.challenge.v1") || 0x00`, then encode the table
 fields in order. Integers are unsigned big-endian. Variable ASCII or UTF-8 fields use
 an unsigned two-byte big-endian length followed by their exact bytes. Version and
-harness use two bytes; capabilities and timestamps use eight bytes.
+harness use two bytes; capabilities and timestamps use eight bytes. The assertion
+binds the SHA-256 digest of these complete bytes. The provider-specific assertion
+carrier is not part of the 279-byte challenge vector.
 
 The owner-restricted local service may issue this challenge before authorization, but
 the client first verifies the pinned service signature. The assertion is accepted

@@ -132,7 +132,9 @@ The canonical challenge bytes begin with
 `utf8("konclave.harness-attestation.challenge.v1") || 0x00`, followed by the fields
 above in order. Integers use unsigned big-endian encoding. Variable ASCII or UTF-8
 fields use an unsigned two-byte big-endian length followed by their exact bytes.
-Version and harness use two bytes; capabilities and timestamps use eight bytes.
+Version and harness use two bytes; capabilities and timestamps use eight bytes. The
+assertion binds the SHA-256 digest of these complete canonical bytes, not a
+provider-specific re-encoding.
 
 The harness receives the complete challenge. A successful assertion must bind its
 digest and add host-authoritative claims that the caller cannot choose:
