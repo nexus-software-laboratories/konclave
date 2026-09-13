@@ -237,7 +237,7 @@ impl LocalServiceInstallation {
 }
 
 /// Validated Copilot and Generic client configuration emitted from an installation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CopilotServiceConfig {
     endpoint: LocalServiceEndpoint,
     issuer_key_id: IssuerKeyId,
@@ -877,10 +877,7 @@ mod tests {
         .unwrap();
         let mut client_json = Vec::new();
         client.write_to(&mut client_json).unwrap();
-        assert_eq!(
-            CopilotServiceConfig::from_reader(client_json.as_slice()).unwrap(),
-            client
-        );
+        assert!(CopilotServiceConfig::from_reader(client_json.as_slice()).unwrap() == client);
         let value: serde_json::Value = serde_json::from_slice(&client_json).unwrap();
         assert_eq!(value["schemaVersion"], 2);
         assert_eq!(value["harness"], "copilot");
@@ -913,9 +910,8 @@ mod tests {
         .unwrap();
         let mut legacy_json = Vec::new();
         legacy_compatible.write_to(&mut legacy_json).unwrap();
-        assert_eq!(
-            CopilotServiceConfig::from_reader(legacy_json.as_slice()).unwrap(),
-            legacy_compatible
+        assert!(
+            CopilotServiceConfig::from_reader(legacy_json.as_slice()).unwrap() == legacy_compatible
         );
         let legacy: serde_json::Value = serde_json::from_slice(&legacy_json).unwrap();
         assert!(legacy.get("userPresenceHelper").is_none());
@@ -1058,16 +1054,16 @@ mod tests {
         ];
         for value in invalid {
             assert_eq!(
-                CopilotServiceConfig::from_reader(value.to_string().as_bytes()).unwrap_err(),
-                LocalServiceInstallationError::Invalid
+                CopilotServiceConfig::from_reader(value.to_string().as_bytes()).err(),
+                Some(LocalServiceInstallationError::Invalid)
             );
         }
         assert_eq!(
             CopilotServiceConfig::from_reader(
                 vec![0_u8; MAX_CLIENT_CONFIG_BYTES + 1].as_slice()
             )
-            .unwrap_err(),
-            LocalServiceInstallationError::TooLarge
+            .err(),
+            Some(LocalServiceInstallationError::TooLarge)
         );
     }
 
