@@ -208,6 +208,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/security-sensitive-delivery.md",
+        "title": "Security-sensitive component delivery",
+        "section": "Development",
+        "order": 26,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/secret-storage.md",
         "title": "Sealed secret storage",
         "section": "Development",

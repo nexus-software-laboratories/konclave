@@ -34,6 +34,7 @@
         "local-daemon-daemon-packaging",
         "source-policy",
         "validation-plan",
+        "guidance-policy",
         "ci",
         "pr-base/base",
         "pr-title/title",
