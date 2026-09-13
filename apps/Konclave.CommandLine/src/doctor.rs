@@ -42,39 +42,6 @@ pub(crate) async fn run(args: DoctorArgs) -> anyhow::Result<()> {
             report.pass("installation_config", "configuration is valid");
             Some(config)
         }
-
-        fn check_client_runtime_config(path: Option<PathBuf>, report: &mut DoctorReport) {
-            let path = match path {
-                Some(path) if path.is_absolute() => path,
-                Some(_) => {
-                    report.fail(
-                        "client_runtime_config",
-                        "configuration override must be absolute",
-                    );
-                    return;
-                }
-                None => match default_client_runtime_config_path() {
-                    Ok(path) => path,
-                    Err(_) => {
-                        report.fail(
-                            "client_runtime_config",
-                            "canonical configuration location is unavailable",
-                        );
-                        return;
-                    }
-                },
-            };
-            let config = open_owner_protected_file(&path)
-                .map_err(anyhow::Error::from)
-                .and_then(|file| CopilotServiceConfig::from_reader(file).map_err(anyhow::Error::from));
-            match config {
-                Ok(_) => report.pass("client_runtime_config", "configuration is valid"),
-                Err(_) => report.fail(
-                    "client_runtime_config",
-                    "configuration is unavailable or invalid",
-                ),
-            }
-        }
         Ok(None) => {
             report.fail("installation_config", "run `konclave init`");
             None
@@ -101,6 +68,39 @@ pub(crate) async fn run(args: DoctorArgs) -> anyhow::Result<()> {
         Ok(())
     } else {
         bail!("doctor found {} failing check(s)", report.failures)
+    }
+}
+
+fn check_client_runtime_config(path: Option<PathBuf>, report: &mut DoctorReport) {
+    let path = match path {
+        Some(path) if path.is_absolute() => path,
+        Some(_) => {
+            report.fail(
+                "client_runtime_config",
+                "configuration override must be absolute",
+            );
+            return;
+        }
+        None => match default_client_runtime_config_path() {
+            Ok(path) => path,
+            Err(_) => {
+                report.fail(
+                    "client_runtime_config",
+                    "canonical configuration location is unavailable",
+                );
+                return;
+            }
+        },
+    };
+    let config = open_owner_protected_file(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|file| CopilotServiceConfig::from_reader(file).map_err(anyhow::Error::from));
+    match config {
+        Ok(_) => report.pass("client_runtime_config", "configuration is valid"),
+        Err(_) => report.fail(
+            "client_runtime_config",
+            "configuration is unavailable or invalid",
+        ),
     }
 }
 
