@@ -475,6 +475,88 @@ fn unknown_schema_and_corrupt_bytes_are_rejected() {
 }
 
 #[test]
+fn schema_v1_is_migrated_transactionally_without_losing_authorization_state() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.suspend_profile(&profile("alice"), NOW + 1).unwrap();
+    drop(store);
+
+    let connection = Connection::open(fixture.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE authorization_audit RENAME TO authorization_audit_v2;
+             CREATE TABLE authorization_audit (
+        generation INTEGER PRIMARY KEY CHECK (
+            typeof(generation) = 'integer' AND generation >= 1
+        ),
+        event_kind INTEGER NOT NULL CHECK (
+            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 11
+        ),
+        occurred_at_unix_milliseconds INTEGER NOT NULL CHECK (
+            typeof(occurred_at_unix_milliseconds) = 'integer'
+            AND occurred_at_unix_milliseconds >= 0
+        )
+    );
+             INSERT INTO authorization_audit (
+                generation,
+                event_kind,
+                occurred_at_unix_milliseconds
+             )
+             SELECT generation, event_kind, occurred_at_unix_milliseconds
+             FROM authorization_audit_v2;
+             DROP TABLE authorization_audit_v2;
+             DROP TABLE authorization_user_presence_credential;
+             DROP TABLE authorization_user_presence_credential_identifier;
+             UPDATE authorization_store_meta
+             SET schema_version = 1
+             WHERE singleton_id = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let migrated =
+        LocalAuthorizationStore::open(&fixture.installation_path, fixture.fingerprint, None)
+            .unwrap();
+    let snapshot = migrated.load_snapshot(NOW + 1, None).unwrap();
+    assert_eq!(snapshot.generation().get(), 2);
+    assert!(snapshot.suspended_profiles().contains(&profile("alice")));
+    assert!(snapshot.user_presence_credential().is_none());
+    migrated
+        .register_user_presence_credential(&presence_credential(7), NOW + 2)
+        .unwrap();
+    drop(migrated);
+
+    let connection = Connection::open(fixture.database_path()).unwrap();
+    let schema_version: i64 = connection
+        .query_row(
+            "SELECT schema_version
+             FROM authorization_store_meta
+             WHERE singleton_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, 2);
+}
+
+#[test]
+fn schema_v1_label_on_an_unrecognized_shape_fails_closed() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    Connection::open(fixture.database_path())
+        .unwrap()
+        .execute(
+            "UPDATE authorization_store_meta SET schema_version = 1 WHERE singleton_id = 1",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        LocalAuthorizationStore::open(&fixture.installation_path, fixture.fingerprint, None,),
+        Err(LocalAuthorizationStoreError::InvalidStorage)
+    ));
+}
+
+#[test]
 fn unknown_schema_version_is_rejected_without_migration() {
     let fixture = Fixture::new();
     drop(fixture.open());

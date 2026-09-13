@@ -33,7 +33,9 @@ import {
   type SessionGrantRecord,
 } from '../src/service/transcript.js';
 import {
+  connectInstalledService,
   connectInstalledGenericService,
+  selectGrantEvidence,
   validateGenericClientIdentity,
 } from '../src/service/installed.js';
 
@@ -74,8 +76,25 @@ interface TestServiceOptions {
   readonly grantLifetimeMs?: number;
   readonly maximumGrantIssues?: number;
   readonly grantResponsesToDrop?: number;
+  readonly userPresenceResponsesToDrop?: number;
+  readonly userPresenceBeginResult?: (value: Record<string, unknown>) => unknown;
   readonly observeIssuerClientInstance?: (clientInstance: Buffer) => void;
   readonly observeGrantRequest?: (request: ReceivedRequest) => void;
+  readonly observeUserPresenceRequest?: (request: ReceivedRequest) => void;
+}
+
+interface PendingUserPresence {
+  readonly binding: Buffer;
+  readonly bindingDigest: Buffer;
+  readonly challenge: Buffer;
+  readonly profile: string;
+  readonly sessionPublicKey: Buffer;
+  readonly harness: HarnessKind;
+}
+
+interface CompletedUserPresence {
+  readonly payload: string;
+  readonly grant: SessionGrantRecord;
 }
 
 function endpoint(): string {
@@ -212,8 +231,13 @@ async function serveConnection(
   grantLifetimeMs: number,
   grantIssueAllowed: () => boolean,
   dropGrantResponse: () => boolean,
+  dropUserPresenceResponse: () => boolean,
   observeIssuerClientInstance: ((clientInstance: Buffer) => void) | undefined,
   observeGrantRequest: ((request: ReceivedRequest) => void) | undefined,
+  observeUserPresenceRequest: ((request: ReceivedRequest) => void) | undefined,
+  userPresenceBeginResult: ((value: Record<string, unknown>) => unknown) | undefined,
+  pendingUserPresence: Map<string, PendingUserPresence>,
+  completedUserPresence: Map<string, CompletedUserPresence>,
 ): Promise<void> {
   const reader = new FrameReader(socket, handshakeFrameLimit + 4);
   const helloFrame = await reader.read(handshakeFrameLimit);
@@ -270,8 +294,137 @@ async function serveConnection(
   }
   reader.setBufferLimit(rpcFrameLimit + 4);
 
-  const request = decodeRequest(await reader.read(rpcFrameLimit));
+  let request = decodeRequest(await reader.read(rpcFrameLimit));
   if (issuer) {
+    if (request.operation === 'authorization.user_presence.begin') {
+      observeUserPresenceRequest?.(request);
+      if (
+        typeof request.payload !== 'object' ||
+        request.payload === null ||
+        Array.isArray(request.payload)
+      ) {
+        throw new Error('user-presence begin request was malformed');
+      }
+      const values = request.payload as Record<string, unknown>;
+      const sessionPublicKey = Buffer.from(String(values.sessionPublicKey), 'hex');
+      if (sessionPublicKey.length !== 32) {
+        throw new Error('user-presence session key was malformed');
+      }
+      const binding = Buffer.concat([request.requestId, sessionPublicKey, randomBytes(32)]);
+      const bindingDigest = randomBytes(32);
+      const challenge = randomBytes(32);
+      pendingUserPresence.set(request.requestId.toString('hex'), {
+        binding,
+        bindingDigest,
+        challenge,
+        profile: String(values.profile),
+        sessionPublicKey,
+        harness: String(values.harness) as HarnessKind,
+      });
+      const issuedAt = Date.now();
+      const beginResult = {
+        beginRequestId: request.requestId.toString('hex'),
+        binding: binding.toString('hex'),
+        bindingDigest: bindingDigest.toString('hex'),
+        challenge: challenge.toString('hex'),
+        provider: 'windows-native-webauthn-v1',
+        credentialDigest: Buffer.alloc(32, 0x5a).toString('hex'),
+        policyVersion: 1,
+        issuedAtUnixMilliseconds: issuedAt,
+        challengeExpiresAtUnixMilliseconds: issuedAt + 120_000,
+        grantExpiresAtUnixMilliseconds: issuedAt + grantLifetimeMs,
+        webAuthnRequest: {
+          challenge: challenge.toString('base64url'),
+          rpId: 'konclave.local',
+        },
+      };
+      const response =
+        userPresenceBeginResult === undefined ? beginResult : userPresenceBeginResult(beginResult);
+      await writeFrame(
+        socket,
+        success(request.requestId, Buffer.from(JSON.stringify(response), 'utf8')),
+        rpcFrameLimit,
+      );
+      request = decodeRequest(await reader.read(rpcFrameLimit));
+    }
+    if (request.operation === 'authorization.user_presence.complete') {
+      observeUserPresenceRequest?.(request);
+      if (
+        typeof request.payload !== 'object' ||
+        request.payload === null ||
+        Array.isArray(request.payload)
+      ) {
+        throw new Error('user-presence completion request was malformed');
+      }
+      const serializedPayload = JSON.stringify(request.payload);
+      const completionKey = request.requestId.toString('hex');
+      const completed = completedUserPresence.get(completionKey);
+      if (completed !== undefined) {
+        if (completed.payload !== serializedPayload) {
+          await writeFrame(socket, failure(request.requestId, 8), rpcFrameLimit);
+          return;
+        }
+        await writeFrame(
+          socket,
+          success(
+            request.requestId,
+            Buffer.from(JSON.stringify(grantJson(completed.grant)), 'utf8'),
+          ),
+          rpcFrameLimit,
+        );
+        return;
+      }
+      const values = request.payload as Record<string, unknown>;
+      const pending = pendingUserPresence.get(String(values.beginRequestId));
+      const signature = Buffer.from(String(values.sessionSignature), 'hex');
+      if (
+        pending === undefined ||
+        String(values.bindingDigest) !== pending.bindingDigest.toString('hex') ||
+        String(values.challenge) !== pending.challenge.toString('hex') ||
+        signature.length !== 64 ||
+        !verifyMessage(publicKeyFromRaw(pending.sessionPublicKey), pending.binding, signature) ||
+        typeof values.assertion !== 'object' ||
+        values.assertion === null ||
+        Array.isArray(values.assertion)
+      ) {
+        await writeFrame(socket, failure(request.requestId, 8), rpcFrameLimit);
+        return;
+      }
+      if (!grantIssueAllowed()) {
+        await writeFrame(socket, failure(request.requestId, 13), rpcFrameLimit);
+        return;
+      }
+      const grant: SessionGrantRecord = {
+        grantId: randomBytes(16),
+        issuerKeyId: Buffer.alloc(16, 7),
+        issuerKeyVersion: 1,
+        profile: pending.profile,
+        sessionPublicKey: pending.sessionPublicKey,
+        harness: pending.harness,
+        evidence: 2,
+        policyVersion: 1n,
+        issuedAtUnixMilliseconds: BigInt(Date.now()),
+        expiresAtUnixMilliseconds: BigInt(Date.now() + grantLifetimeMs),
+        capabilities: 15n,
+      };
+      observeGrantIssued();
+      pendingUserPresence.delete(String(values.beginRequestId));
+      grants.set(grant.grantId.toString('hex'), grant);
+      completedUserPresence.set(completionKey, {
+        payload: serializedPayload,
+        grant,
+      });
+      if (dropUserPresenceResponse()) {
+        socket.destroy();
+        return;
+      }
+      await writeFrame(
+        socket,
+        success(request.requestId, Buffer.from(JSON.stringify(grantJson(grant)), 'utf8')),
+        rpcFrameLimit,
+      );
+      return;
+    }
     if (request.operation !== 'authorization.grant.issue') {
       throw new Error('issuer requested an operational method');
     }
@@ -402,8 +555,11 @@ async function startService(
   const sockets = new Set<Socket>();
   const tasks: Promise<void>[] = [];
   const grants = new Map<string, SessionGrantRecord>();
+  const pendingUserPresence = new Map<string, PendingUserPresence>();
+  const completedUserPresence = new Map<string, CompletedUserPresence>();
   let issuedGrantCount = 0;
   let droppedGrantResponses = 0;
+  let droppedUserPresenceResponses = 0;
   let sessionConnections = 0;
   const server: Server = createServer((socket) => {
     sockets.add(socket);
@@ -431,8 +587,19 @@ async function startService(
           droppedGrantResponses += 1;
           return true;
         },
+        () => {
+          if (droppedUserPresenceResponses >= (options.userPresenceResponsesToDrop ?? 0)) {
+            return false;
+          }
+          droppedUserPresenceResponses += 1;
+          return true;
+        },
         options.observeIssuerClientInstance,
         options.observeGrantRequest,
+        options.observeUserPresenceRequest,
+        options.userPresenceBeginResult,
+        pendingUserPresence,
+        completedUserPresence,
       ).catch((error: unknown) => {
         if (error instanceof FrameError && error.failure === 'closed') {
           return;
@@ -459,6 +626,8 @@ async function startService(
     disconnectClients,
     async resetAuthorization() {
       grants.clear();
+      pendingUserPresence.clear();
+      completedUserPresence.clear();
       await disconnectClients();
     },
     async close() {
@@ -517,6 +686,37 @@ function clientOptions(service: TestService): LocalServiceClientOptions {
   };
 }
 
+function writeInstalledConfig(
+  service: TestService,
+  acceptedEvidence: readonly (readonly string[])[],
+  includeUserPresenceHelper = true,
+): { readonly directory: string; readonly serviceConfigFile: string } {
+  const directory = mkdtempSync(join(tmpdir(), 'konclave-installed-client-test-'));
+  temporaryDirectories.push(directory);
+  const issuerKeyFile = join(directory, 'account-issuer.key');
+  const serviceConfigFile = join(directory, 'konclave.service.json');
+  writeFileSync(issuerKeyFile, clientSeed, { mode: 0o600 });
+  writeFileSync(
+    serviceConfigFile,
+    JSON.stringify({
+      schemaVersion: 2,
+      endpoint: service.endpoint,
+      issuerKeyId: '07'.repeat(16),
+      issuerKeyVersion: 1,
+      harness: 'copilot',
+      serviceKey: servicePublicKey.toString('hex'),
+      issuerKeyFile,
+      ...(includeUserPresenceHelper ? { userPresenceHelper: process.execPath } : {}),
+      authorizationPolicy: {
+        version: 1,
+        acceptedEvidence,
+      },
+    }),
+    { mode: 0o600 },
+  );
+  return { directory, serviceConfigFile };
+}
+
 afterEach(() => {
   while (temporaryDirectories.length > 0) {
     const directory = temporaryDirectories.pop();
@@ -529,6 +729,64 @@ afterEach(() => {
 describe('shared local service client', () => {
   it('keeps the additive A2A gateway harness wire value distinct', () => {
     expect(harnessWireValues['a2a-gateway']).toBe(5);
+  });
+
+  it('selects a satisfiable installed grant flow without policy downgrade', () => {
+    expect(
+      selectGrantEvidence({ version: 1, acceptedEvidence: [['account_trusted']] }, 'linux'),
+    ).toBe('account_trusted');
+    expect(
+      selectGrantEvidence(
+        { version: 1, acceptedEvidence: [['user_presence', 'account_trusted']] },
+        'win32',
+      ),
+    ).toBe('user_presence');
+    expect(
+      selectGrantEvidence({ version: 1, acceptedEvidence: [['user_presence']] }, 'win32'),
+    ).toBe('user_presence');
+    for (const [policy, platform] of [
+      [{ version: 1, acceptedEvidence: [['user_presence']] }, 'linux'],
+      [{ version: 1, acceptedEvidence: [['harness_attested']] }, 'win32'],
+    ] as const) {
+      expect(() => selectGrantEvidence(policy, platform)).toThrowError(
+        expect.objectContaining({ code: 'required_evidence_unavailable' }),
+      );
+    }
+  });
+
+  it('connects the paved installed client through AccountTrusted policy', async () => {
+    const service = await startService(() => ({
+      kind: 'respond',
+      value: { device_id: 'ac' },
+    }));
+    const installed = writeInstalledConfig(service, [['account_trusted']], false);
+
+    const client = await connectInstalledService(
+      { KONCLAVE_SERVICE_CONFIG_FILE: installed.serviceConfigFile },
+      installed.directory,
+      'session-test',
+      process.platform,
+    );
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ac' });
+    await client.retire();
+    await service.close();
+  });
+
+  it('requires an installed native helper only when policy selects UserPresence', async () => {
+    const service = await startService(() => ({ kind: 'respond', value: {} }));
+    const installed = writeInstalledConfig(service, [['user_presence']], false);
+
+    await expect(
+      connectInstalledService(
+        { KONCLAVE_SERVICE_CONFIG_FILE: installed.serviceConfigFile },
+        installed.directory,
+        'session-test',
+        'win32',
+      ),
+    ).rejects.toMatchObject({ code: 'required_evidence_unavailable' });
+
+    await service.close();
   });
 
   it('connects an unsupported harness through the installed generic issuer', async () => {
@@ -558,6 +816,7 @@ describe('shared local service client', () => {
         harness: 'copilot',
         serviceKey: servicePublicKey.toString('hex'),
         issuerKeyFile,
+        userPresenceHelper: process.execPath,
         authorizationPolicy: {
           version: 1,
           acceptedEvidence: [['account_trusted']],
@@ -637,6 +896,162 @@ describe('shared local service client', () => {
       expect(() => Reflect.apply(validateGenericClientIdentity, undefined, [invalid])).toThrow(
         'invalid_arguments',
       );
+    }
+  });
+
+  it('completes UserPresence on the challenge connection and uses evidence bit two', async () => {
+    const authorizationRequests: ReceivedRequest[] = [];
+    const issuerInstances: Buffer[] = [];
+    const nativeRequests: unknown[] = [];
+    const service = await startService(
+      () => ({ kind: 'respond', value: { device_id: 'up' } }),
+      undefined,
+      {
+        observeIssuerClientInstance: (clientInstance) =>
+          issuerInstances.push(Buffer.from(clientInstance)),
+        observeUserPresenceRequest: (request) => authorizationRequests.push(request),
+      },
+    );
+    const client = await connectLocalService({
+      ...clientOptions(service),
+      grantEvidence: 'user_presence',
+      grantDeadlineMs: 1_000,
+      requestUserPresence: async (request) => {
+        nativeRequests.push(request);
+        return { credential: 'approved' };
+      },
+    });
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'up' });
+
+    expect(issuerInstances).toHaveLength(1);
+    expect(authorizationRequests.map((request) => request.operation)).toEqual([
+      'authorization.user_presence.begin',
+      'authorization.user_presence.complete',
+    ]);
+    expect(authorizationRequests[0]?.payload).toMatchObject({
+      profile: 'session-test',
+      harness: 'copilot',
+      capabilities: 15,
+    });
+    expect(nativeRequests).toEqual([
+      expect.objectContaining({
+        rpId: 'konclave.local',
+      }),
+    ]);
+    expect(authorizationRequests[1]?.payload).toMatchObject({
+      assertion: { credential: 'approved' },
+    });
+    expect(service.issuedGrantCount()).toBe(1);
+
+    await client.retire();
+    await service.close();
+  });
+
+  it('retries the exact UserPresence completion without repeating the ceremony', async () => {
+    const authorizationRequests: ReceivedRequest[] = [];
+    const issuerInstances: Buffer[] = [];
+    let ceremonyCount = 0;
+    const service = await startService(
+      () => ({ kind: 'respond', value: { device_id: 'retry' } }),
+      undefined,
+      {
+        userPresenceResponsesToDrop: 1,
+        observeIssuerClientInstance: (clientInstance) =>
+          issuerInstances.push(Buffer.from(clientInstance)),
+        observeUserPresenceRequest: (request) => authorizationRequests.push(request),
+      },
+    );
+    const client = await connectLocalService({
+      ...clientOptions(service),
+      grantEvidence: 'user_presence',
+      grantDeadlineMs: 1_000,
+      requestUserPresence: async () => {
+        ceremonyCount += 1;
+        return { credential: 'approved-once' };
+      },
+    });
+
+    await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'retry' });
+
+    expect(ceremonyCount).toBe(1);
+    expect(issuerInstances).toHaveLength(2);
+    expect(issuerInstances[0]).toEqual(issuerInstances[1]);
+    expect(authorizationRequests.map((request) => request.operation)).toEqual([
+      'authorization.user_presence.begin',
+      'authorization.user_presence.complete',
+      'authorization.user_presence.complete',
+    ]);
+    expect(authorizationRequests[1]?.requestId).toEqual(authorizationRequests[2]?.requestId);
+    expect(authorizationRequests[1]?.payload).toEqual(authorizationRequests[2]?.payload);
+    expect(service.issuedGrantCount()).toBe(1);
+
+    client.close();
+    await service.close();
+  });
+
+  it('fails closed when UserPresence cannot produce a valid ceremony', async () => {
+    const unavailable: TestService = {
+      endpoint: endpoint(),
+      issuedGrantCount: () => 0,
+      disconnectClients: async () => {},
+      resetAuthorization: async () => {},
+      close: async () => {},
+    };
+    await expect(
+      connectLocalService({
+        ...clientOptions(unavailable),
+        grantEvidence: 'user_presence',
+        grantDeadlineMs: 1_000,
+      }),
+    ).rejects.toEqual(
+      new LocalServiceError('authorization.user_presence.begin', 'required_evidence_unavailable'),
+    );
+    await expect(
+      connectLocalService({
+        ...clientOptions(unavailable),
+        grantEvidence: 'user_presence',
+        grantDeadlineMs: 0,
+        requestUserPresence: async () => ({}),
+      }),
+    ).rejects.toThrow('grant deadline is invalid');
+
+    const service = await startService(() => ({ kind: 'respond', value: {} }));
+    await expect(
+      connectLocalService({
+        ...clientOptions(service),
+        grantEvidence: 'user_presence',
+        grantDeadlineMs: 1_000,
+        requestUserPresence: async () => [],
+      }),
+    ).rejects.toBeInstanceOf(LocalServiceProtocolError);
+    await service.close();
+  });
+
+  it('rejects malformed UserPresence challenge documents', async () => {
+    const mutations: Array<(value: Record<string, unknown>) => unknown> = [
+      () => null,
+      (value) => ({ ...value, beginRequestId: '00'.repeat(16) }),
+      (value) => ({ ...value, binding: '' }),
+      (value) => ({ ...value, provider: '' }),
+      (value) => ({ ...value, challengeExpiresAtUnixMilliseconds: value.issuedAtUnixMilliseconds }),
+      (value) => ({ ...value, webAuthnRequest: [] }),
+    ];
+    for (const mutate of mutations) {
+      const service = await startService(() => ({ kind: 'respond', value: {} }), undefined, {
+        userPresenceBeginResult: mutate,
+      });
+
+      await expect(
+        connectLocalService({
+          ...clientOptions(service),
+          grantEvidence: 'user_presence',
+          grantDeadlineMs: 1_000,
+          requestUserPresence: async () => ({ credential: 'unused' }),
+        }),
+      ).rejects.toBeInstanceOf(LocalServiceProtocolError);
+
+      await service.close();
     }
   });
 

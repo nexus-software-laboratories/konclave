@@ -1,9 +1,14 @@
 use assert_cmd::Command;
+#[cfg(unix)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+#[cfg(unix)]
 use base64::Engine as _;
+#[cfg(unix)]
 use predicates::prelude::PredicateBooleanExt as _;
 use predicates::str::contains;
+#[cfg(unix)]
 use KonclaveClientLibrary::{RelayEndpoint, RelayEnrollmentCredential};
+#[cfg(unix)]
 use KonclaveLocalAuthorizationStore::authorization_store_path;
 
 #[test]
@@ -40,6 +45,85 @@ fn noninteractive_init_requires_policy_before_side_effects() {
             "--authorization-policy is required for noninteractive initialization",
         ));
     assert!(!root.exists());
+}
+
+#[test]
+#[cfg(not(windows))]
+fn user_presence_init_requires_explicit_no_recovery_acknowledgement_before_side_effects() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profiles");
+    let mut command = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    command
+        .args([
+            "init",
+            "--relay-endpoint",
+            "https://relay.example.com",
+            "--authorization-policy",
+            "user-presence",
+            "--profile-root",
+        ])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(contains("--allow-no-recovery is required"));
+    assert!(!root.exists());
+}
+
+#[test]
+#[cfg(not(windows))]
+fn user_presence_init_rejects_an_unsupported_platform_before_side_effects() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profiles");
+    let mut command = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    command
+        .args([
+            "init",
+            "--relay-endpoint",
+            "https://relay.example.com",
+            "--authorization-policy",
+            "user-presence",
+            "--allow-no-recovery",
+            "--profile-root",
+        ])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(contains("UserPresence is unavailable on this platform"));
+    assert!(!root.exists());
+}
+
+#[test]
+fn user_presence_helper_rejects_empty_and_oversized_documents() {
+    let mut empty = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    empty
+        .args(["user-presence-helper", "authenticate"])
+        .assert()
+        .failure()
+        .stderr(contains("native user-presence request is invalid"));
+
+    let mut oversized = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    oversized
+        .args(["user-presence-helper", "authenticate"])
+        .write_stdin(vec![
+            b'x';
+            KonclaveUserPresence::MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES
+                + 1
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("native user-presence request is invalid"));
+}
+
+#[test]
+#[cfg(not(windows))]
+fn user_presence_helper_fails_closed_when_the_native_provider_is_unavailable() {
+    let mut command = Command::cargo_bin("KonclaveCommandLine").unwrap();
+    command
+        .args(["user-presence-helper", "authenticate"])
+        .write_stdin("{}")
+        .assert()
+        .failure()
+        .stderr(contains("user-presence WebAuthn provider is unavailable"));
 }
 
 #[test]

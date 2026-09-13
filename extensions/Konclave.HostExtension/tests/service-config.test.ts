@@ -33,6 +33,7 @@ function serviceConfigRecord(issuerKeyFile: string): Record<string, unknown> {
     harness: 'copilot',
     serviceKey: '11'.repeat(32),
     issuerKeyFile,
+    userPresenceHelper: join(tmpdir(), 'konclave'),
     authorizationPolicy: {
       version: 1,
       acceptedEvidence: [['account_trusted']],
@@ -144,6 +145,7 @@ describe('installed service custody', () => {
       endpoint: join(tmpdir(), 'konclave.sock'),
       harness: 'copilot',
       issuerKeyFile,
+      userPresenceHelper: join(tmpdir(), 'konclave'),
     });
     expect(config.issuerKeyId).toEqual(Buffer.alloc(16));
     expect(config.serviceKey).toEqual(Buffer.alloc(32, 0x11));
@@ -154,6 +156,20 @@ describe('installed service custody', () => {
     const files = fakeFiles(serviceConfig(join(tmpdir(), 'account-issuer.key')));
     resolveLocalServiceConfig({}, tmpdir(), 'linux', files);
     expect(files.opened).toEqual([join(tmpdir(), 'konclave.service.json')]);
+  });
+
+  it('accepts an older AccountTrusted sidecar without a native helper', () => {
+    const record = serviceConfigRecord(join(tmpdir(), 'account-issuer.key'));
+    delete record.userPresenceHelper;
+    const config = resolveLocalServiceConfig(
+      { KONCLAVE_SERVICE_CONFIG_FILE: join(tmpdir(), 'service.json') },
+      tmpdir(),
+      'linux',
+      fakeFiles(JSON.stringify(record)),
+    );
+
+    expect(config.userPresenceHelper).toBeUndefined();
+    expect(config.authorizationPolicy.acceptedEvidence).toEqual([['account_trusted']]);
   });
 
   it('rejects unverifiable, missing, unsafe, empty, and oversized files', () => {
@@ -195,14 +211,13 @@ describe('installed service custody', () => {
       { ...valid, issuerKeyVersion: 0 },
       { ...valid, issuerKeyVersion: 1.5 },
       { ...valid, issuerKeyFile: 'relative.key' },
+      { ...valid, userPresenceHelper: null },
+      { ...valid, userPresenceHelper: '' },
+      { ...valid, userPresenceHelper: 'relative-helper' },
       { ...valid, issuerKeyId: 'zz' },
       { ...valid, serviceKey: '00' },
       { ...valid, authorizationPolicy: null },
       { ...valid, authorizationPolicy: { version: 1, acceptedEvidence: [] } },
-      {
-        ...valid,
-        authorizationPolicy: { version: 1, acceptedEvidence: [['harness_attested']] },
-      },
     ];
 
     for (const value of invalid) {
@@ -217,28 +232,18 @@ describe('installed service custody', () => {
       ).toThrow(ServiceConfigurationError);
     }
 
-    const strongerOnly = {
-      ...valid,
-      authorizationPolicy: { version: 1, acceptedEvidence: [['harness_attested']] },
-    };
-    const error = (() => {
-      try {
-        resolveLocalServiceConfig(
-          { KONCLAVE_SERVICE_CONFIG_FILE: join(tmpdir(), 'service.json') },
-          tmpdir(),
-          'linux',
-          fakeFiles(JSON.stringify(strongerOnly)),
-        );
-      } catch (failure) {
-        return failure;
-      }
-      return undefined;
-    })();
-    expect(error).toBeInstanceOf(ServiceConfigurationError);
-    if (!(error instanceof ServiceConfigurationError)) {
-      throw new Error('expected a service configuration error');
-    }
-    expect(error.code).toBe('required_evidence_unavailable');
+    const strongerOnly = resolveLocalServiceConfig(
+      { KONCLAVE_SERVICE_CONFIG_FILE: join(tmpdir(), 'service.json') },
+      tmpdir(),
+      'linux',
+      fakeFiles(
+        JSON.stringify({
+          ...valid,
+          authorizationPolicy: { version: 1, acceptedEvidence: [['harness_attested']] },
+        }),
+      ),
+    );
+    expect(strongerOnly.authorizationPolicy.acceptedEvidence).toEqual([['harness_attested']]);
   });
 
   it('reads only the exact raw seed format installed by Konclave', () => {

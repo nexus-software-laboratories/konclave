@@ -5794,6 +5794,16 @@ mod tests {
             request(&mut session, 73, "get_identity", b"{}").await,
             LocalServiceResponse::Success { .. }
         ));
+        let LocalServiceResponse::Success {
+            payload: status, ..
+        } = request(&mut session, 74, "service.status", b"{}").await
+        else {
+            panic!("user-presence status failed");
+        };
+        let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
+        assert_eq!(status["authorizationPolicy"], "UserPresence");
+        assert_eq!(status["authorizationProvider"], "WindowsNativeWebAuthn");
+        assert_eq!(status["authorizationEvidence"][0], "user_presence");
 
         drop((issuer, session));
         stop_tx.send(()).unwrap();

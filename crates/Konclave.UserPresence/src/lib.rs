@@ -24,7 +24,9 @@ mod webauthn;
 pub use webauthn::{
     MAX_NATIVE_WEBAUTHN_DOCUMENT_BYTES, NativeWebAuthnAuthentication, NativeWebAuthnCredential,
     NativeWebAuthnEnrollment, NativeWebAuthnRequest, UserPresenceWebAuthnError,
-    UserPresenceWebAuthnVerifier, perform_native_authentication, perform_native_registration,
+    UserPresenceWebAuthnVerifier, native_user_presence_supported, perform_native_authentication,
+    perform_native_authentication_json, perform_native_registration,
+    perform_native_registration_json,
 };
 
 const BINDING_DOMAIN: &[u8] = b"konclave.user-presence.binding.v1\0";

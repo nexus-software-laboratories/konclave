@@ -241,6 +241,7 @@ pub struct CopilotServiceConfig {
     issuer_key_version: IssuerKeyVersion,
     service_public_key: Ed25519PublicKey,
     signing_key_file: PathBuf,
+    user_presence_helper: Option<PathBuf>,
     authorization_policy: AuthorizationPolicy,
 }
 
@@ -257,15 +258,20 @@ impl CopilotServiceConfig {
         issuer_key_version: IssuerKeyVersion,
         service_public_key: Ed25519PublicKey,
         signing_key_file: PathBuf,
+        user_presence_helper: Option<PathBuf>,
         authorization_policy: AuthorizationPolicy,
     ) -> Result<Self, LocalServiceInstallationError> {
         validate_absolute_path(&signing_key_file)?;
+        if let Some(user_presence_helper) = user_presence_helper.as_ref() {
+            validate_absolute_path(user_presence_helper)?;
+        }
         Ok(Self {
             endpoint,
             issuer_key_id,
             issuer_key_version,
             service_public_key,
             signing_key_file,
+            user_presence_helper,
             authorization_policy,
         })
     }
@@ -276,6 +282,11 @@ impl CopilotServiceConfig {
     ///
     /// Returns a finite encoding or output error.
     pub fn write_to(&self, mut writer: impl Write) -> Result<(), LocalServiceInstallationError> {
+        let user_presence_helper = self
+            .user_presence_helper
+            .as_ref()
+            .map(|path| path.to_str().ok_or(LocalServiceInstallationError::Invalid))
+            .transpose()?;
         serde_json::to_writer(
             &mut writer,
             &CopilotDocument {
@@ -289,6 +300,7 @@ impl CopilotServiceConfig {
                     .signing_key_file
                     .to_str()
                     .ok_or(LocalServiceInstallationError::Invalid)?,
+                user_presence_helper,
                 authorization_policy: AuthorizationPolicyDocument::from(&self.authorization_policy),
             },
         )
@@ -351,6 +363,8 @@ struct CopilotDocument<'a> {
     harness: &'static str,
     service_key: String,
     issuer_key_file: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_presence_helper: Option<&'a str>,
     authorization_policy: AuthorizationPolicyDocument,
 }
 
@@ -627,7 +641,12 @@ mod tests {
             issuer.issuer_key_id(),
             issuer.issuer_key_version(),
             expected.service_public_key(),
-            signing_key,
+            signing_key.clone(),
+            Some(if cfg!(windows) {
+                PathBuf::from(r"C:\Program Files\Konclave\bin\konclave.exe")
+            } else {
+                PathBuf::from("/opt/konclave/bin/konclave")
+            }),
             AuthorizationPolicy::account_trusted(),
         )
         .unwrap();
@@ -638,10 +657,35 @@ mod tests {
         assert_eq!(value["harness"], "copilot");
         assert_eq!(value["issuerKeyId"], "01".repeat(16));
         assert_eq!(value["serviceKey"], "03".repeat(32));
+        assert!(
+            value["userPresenceHelper"]
+                .as_str()
+                .unwrap()
+                .ends_with(if cfg!(windows) {
+                    "konclave.exe"
+                } else {
+                    "konclave"
+                })
+        );
         assert_eq!(
             value["authorizationPolicy"]["acceptedEvidence"][0][0],
             "account_trusted"
         );
+
+        let legacy_compatible = CopilotServiceConfig::new(
+            expected.endpoint().clone(),
+            issuer.issuer_key_id(),
+            issuer.issuer_key_version(),
+            expected.service_public_key(),
+            signing_key,
+            None,
+            AuthorizationPolicy::account_trusted(),
+        )
+        .unwrap();
+        let mut legacy_json = Vec::new();
+        legacy_compatible.write_to(&mut legacy_json).unwrap();
+        let legacy: serde_json::Value = serde_json::from_slice(&legacy_json).unwrap();
+        assert!(legacy.get("userPresenceHelper").is_none());
     }
 
     #[test]

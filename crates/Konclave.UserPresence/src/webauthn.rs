@@ -460,6 +460,17 @@ fn decode_bounded<T: for<'de> Deserialize<'de>>(
 pub fn perform_native_registration(
     request: &NativeWebAuthnRequest,
 ) -> Result<Vec<u8>, UserPresenceWebAuthnError> {
+    perform_native_registration_json(request.as_json())
+}
+
+/// Performs native registration from one bounded standard request document.
+///
+/// # Errors
+///
+/// Returns a finite unsupported, cancellation, provider, or encoding failure.
+pub fn perform_native_registration_json(
+    request: &[u8],
+) -> Result<Vec<u8>, UserPresenceWebAuthnError> {
     #[cfg(windows)]
     {
         use webauthn_authenticator_rs::prelude::{
@@ -468,7 +479,7 @@ pub fn perform_native_registration(
         use webauthn_authenticator_rs::win10::Win10;
 
         let options: CreationChallengeResponse =
-            decode_bounded(request.as_json(), UserPresenceWebAuthnError::Encoding)?;
+            decode_bounded(request, UserPresenceWebAuthnError::Encoding)?;
         let origin =
             url::Url::parse(NATIVE_ORIGIN).map_err(|_| UserPresenceWebAuthnError::Encoding)?;
         let mut authenticator = WebauthnAuthenticator::new(Win10::default());
@@ -492,13 +503,24 @@ pub fn perform_native_registration(
 pub fn perform_native_authentication(
     request: &NativeWebAuthnRequest,
 ) -> Result<Vec<u8>, UserPresenceWebAuthnError> {
+    perform_native_authentication_json(request.as_json())
+}
+
+/// Performs native authentication from one bounded standard request document.
+///
+/// # Errors
+///
+/// Returns a finite unsupported, cancellation, provider, or encoding failure.
+pub fn perform_native_authentication_json(
+    request: &[u8],
+) -> Result<Vec<u8>, UserPresenceWebAuthnError> {
     #[cfg(windows)]
     {
         use webauthn_authenticator_rs::prelude::{RequestChallengeResponse, WebauthnAuthenticator};
         use webauthn_authenticator_rs::win10::Win10;
 
         let options: RequestChallengeResponse =
-            decode_bounded(request.as_json(), UserPresenceWebAuthnError::Encoding)?;
+            decode_bounded(request, UserPresenceWebAuthnError::Encoding)?;
         let origin =
             url::Url::parse(NATIVE_ORIGIN).map_err(|_| UserPresenceWebAuthnError::Encoding)?;
         let mut authenticator = WebauthnAuthenticator::new(Win10::default());
@@ -512,6 +534,12 @@ pub fn perform_native_authentication(
         let _ = request;
         Err(UserPresenceWebAuthnError::ProviderUnavailable)
     }
+}
+
+/// Reports whether this build contains the native Windows WebAuthn adapter.
+#[must_use]
+pub const fn native_user_presence_supported() -> bool {
+    cfg!(windows)
 }
 
 #[cfg(windows)]

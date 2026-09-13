@@ -279,6 +279,7 @@ dependencies = [
  "KonclaveLocalAuthorizationStore",
  "KonclaveLocalServiceTransport",
  "KonclaveSecretStorage",
+ "KonclaveUserPresence",
  "anyhow",
  "assert_cmd",
  "base64 0.22.1",

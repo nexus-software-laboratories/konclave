@@ -1,8 +1,14 @@
 import type { LocalServiceClient } from './client.js';
 import { connectLocalService } from './client.js';
-import { readIssuerSigningSeed, resolveLocalServiceConfig } from './config.js';
+import {
+  readIssuerSigningSeed,
+  resolveLocalServiceConfig,
+  ServiceConfigurationError,
+  type LocalServiceRuntimeConfig,
+} from './config.js';
 import { privateKeyFromSeedAndZeroize } from './keys.js';
 import { assertCanonicalProfile, type HarnessKind } from './transcript.js';
+import { requestNativeUserPresence } from './user-presence.js';
 
 const genericIntegrationLabelPattern = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 const ephemeralProfilePattern = /^generic-[0-9a-f]{24}$/u;
@@ -112,6 +118,19 @@ async function connectInstalledHarnessService(
   const signingKey = privateKeyFromSeedAndZeroize(
     readIssuerSigningSeed(config.issuerKeyFile, platform),
   );
+  const grantEvidence = selectGrantEvidence(config.authorizationPolicy, platform);
+  let requestUserPresence: ((request: unknown) => Promise<Record<string, unknown>>) | undefined;
+  if (grantEvidence === 'user_presence') {
+    const userPresenceHelper = config.userPresenceHelper;
+    if (userPresenceHelper === undefined) {
+      throw new ServiceConfigurationError(
+        'Konclave user-presence helper is not installed.',
+        'required_evidence_unavailable',
+      );
+    }
+    requestUserPresence = (request) =>
+      requestNativeUserPresence(userPresenceHelper, request, platform);
+  }
   return connectLocalService({
     endpoint: config.endpoint,
     issuerKeyId: config.issuerKeyId,
@@ -120,5 +139,32 @@ async function connectInstalledHarnessService(
     serviceKey: config.serviceKey,
     harness,
     profile,
+    grantEvidence,
+    grantDeadlineMs: grantEvidence === 'user_presence' ? 180_000 : undefined,
+    requestUserPresence,
   });
+}
+
+/** Selects the strongest grant flow this client can satisfy without downgrading policy. */
+export function selectGrantEvidence(
+  policy: LocalServiceRuntimeConfig['authorizationPolicy'],
+  platform: NodeJS.Platform,
+): 'account_trusted' | 'user_presence' {
+  if (
+    policy.acceptedEvidence.some((clause) => clause.length === 1 && clause[0] === 'account_trusted')
+  ) {
+    return 'account_trusted';
+  }
+  const userPresence = policy.acceptedEvidence.some(
+    (clause) =>
+      clause.includes('user_presence') &&
+      clause.every((kind) => kind === 'account_trusted' || kind === 'user_presence'),
+  );
+  if (userPresence && platform === 'win32') {
+    return 'user_presence';
+  }
+  throw new ServiceConfigurationError(
+    'Konclave authorization policy requires unavailable evidence.',
+    'required_evidence_unavailable',
+  );
 }

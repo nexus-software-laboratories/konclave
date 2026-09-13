@@ -24,6 +24,23 @@ pub enum Command {
     Authorization(AuthorizationArgs),
     /// Create, validate, inspect, compile, diff, and list collaboration policies
     Policy(PolicyArgs),
+    /// Internal native user-presence bridge
+    #[command(hide = true)]
+    UserPresenceHelper(UserPresenceHelperArgs),
+}
+
+#[derive(Args)]
+pub struct UserPresenceHelperArgs {
+    #[command(subcommand)]
+    pub command: UserPresenceHelperCommand,
+}
+
+#[derive(Subcommand)]
+pub enum UserPresenceHelperCommand {
+    /// Create one native WebAuthn credential
+    Register,
+    /// Complete one native WebAuthn assertion
+    Authenticate,
 }
 
 #[derive(Args)]
@@ -52,6 +69,9 @@ pub struct InitArgs {
     /// Local authorization policy; required for noninteractive initialization
     #[arg(long, value_enum)]
     pub authorization_policy: Option<AuthorizationPolicyChoice>,
+    /// Acknowledge that losing every UserPresence credential can strand administration
+    #[arg(long)]
+    pub allow_no_recovery: bool,
 }
 
 /// Authorization policies available during initial installation.
@@ -59,6 +79,8 @@ pub struct InitArgs {
 pub enum AuthorizationPolicyChoice {
     /// Trust every process running under the configured operating-system account.
     AccountTrusted,
+    /// Require native user verification for each new session process.
+    UserPresence,
 }
 
 #[derive(Args)]

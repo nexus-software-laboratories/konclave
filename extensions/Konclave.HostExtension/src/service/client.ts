@@ -138,6 +138,12 @@ export interface LocalServiceClientOptions {
   readonly harness: HarnessKind;
   /** The durable profile this connection binds to. */
   readonly profile: string;
+  /** Evidence flow used to obtain the session grant. */
+  readonly grantEvidence?: 'account_trusted' | 'user_presence';
+  /** Native user-presence bridge, required only for UserPresence grants. */
+  readonly requestUserPresence?: (request: unknown) => Promise<unknown>;
+  /** Deadline covering challenge, native ceremony, and exact completion retry. */
+  readonly grantDeadlineMs?: number;
   /** Default handshake and request-cancellation deadline. */
   readonly deadlineMs?: number;
   /** Number of reconnects attempted after an early transport failure. */
@@ -685,6 +691,35 @@ async function issueSessionGrant(
   reconnectDelayMs: number,
   sleep: (milliseconds: number) => Promise<void>,
 ): Promise<SessionGrantRecord> {
+  const grantEvidence = options.grantEvidence ?? 'account_trusted';
+  if (grantEvidence === 'user_presence') {
+    return issueUserPresenceGrant(
+      options,
+      sessionKey,
+      options.grantDeadlineMs ?? 180_000,
+      reconnectAttempts,
+      reconnectDelayMs,
+      sleep,
+    );
+  }
+  return issueAccountTrustedGrant(
+    options,
+    sessionKey,
+    deadlineMs,
+    reconnectAttempts,
+    reconnectDelayMs,
+    sleep,
+  );
+}
+
+async function issueAccountTrustedGrant(
+  options: LocalServiceClientOptions,
+  sessionKey: KeyObject,
+  deadlineMs: number,
+  reconnectAttempts: number,
+  reconnectDelayMs: number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<SessionGrantRecord> {
   const requestId = randomBytes(requestIdLength);
   const clientInstance = randomBytes(clientInstanceLength);
   const payload = encodeRequestPayload('authorization.grant.issue', {
@@ -711,7 +746,7 @@ async function issueSessionGrant(
         'authorization.grant.issue',
         issuer.close,
       );
-      return parseIssuedGrant(result, options, rawPublicKey(sessionKey));
+      return parseIssuedGrant(result, options, rawPublicKey(sessionKey), 'account_trusted');
     } catch (error) {
       if (attempt >= reconnectAttempts || !isRetryableTransportFailure(error)) {
         throw error;
@@ -726,10 +761,173 @@ async function issueSessionGrant(
   }
 }
 
+interface UserPresenceBeginResult {
+  readonly beginRequestId: unknown;
+  readonly binding: unknown;
+  readonly bindingDigest: unknown;
+  readonly challenge: unknown;
+  readonly provider: unknown;
+  readonly credentialDigest: unknown;
+  readonly policyVersion: unknown;
+  readonly issuedAtUnixMilliseconds: unknown;
+  readonly challengeExpiresAtUnixMilliseconds: unknown;
+  readonly grantExpiresAtUnixMilliseconds: unknown;
+  readonly webAuthnRequest: unknown;
+}
+
+interface ParsedUserPresenceBegin {
+  readonly beginRequestId: Buffer;
+  readonly binding: Buffer;
+  readonly bindingDigest: Buffer;
+  readonly challenge: Buffer;
+  readonly webAuthnRequest: Record<string, unknown>;
+}
+
+async function issueUserPresenceGrant(
+  options: LocalServiceClientOptions,
+  sessionKey: KeyObject,
+  deadlineMs: number,
+  reconnectAttempts: number,
+  reconnectDelayMs: number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<SessionGrantRecord> {
+  const requestUserPresence = options.requestUserPresence;
+  if (requestUserPresence === undefined) {
+    throw new LocalServiceError(
+      'authorization.user_presence.begin',
+      'required_evidence_unavailable',
+    );
+  }
+  if (!Number.isInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 300_000) {
+    throw new Error('local service grant deadline is invalid');
+  }
+  const expiresAt = Date.now() + deadlineMs;
+  const clientInstance = randomBytes(clientInstanceLength);
+  const beginRequestId = randomBytes(requestIdLength);
+  let issuer = await openConnection(options, deadlineMs, {
+    kind: 'issuer',
+    key: options.signingKey,
+    clientInstance,
+  });
+  try {
+    const beginPayload = encodeRequestPayload('authorization.user_presence.begin', {
+      profile: options.profile,
+      sessionPublicKey: rawPublicKey(sessionKey).toString('hex'),
+      harness: options.harness,
+      capabilities: 15,
+    });
+    const beginResult = await withDeadline(
+      issuer.invoke(beginRequestId, 'authorization.user_presence.begin', beginPayload),
+      remainingGrantTime(expiresAt, 'authorization.user_presence.begin'),
+      'authorization.user_presence.begin',
+      issuer.close,
+    );
+    const begin = parseUserPresenceBegin(beginResult, beginRequestId);
+    const assertion = await withDeadline(
+      requestUserPresence(begin.webAuthnRequest),
+      remainingGrantTime(expiresAt, 'authorization.user_presence.complete'),
+      'authorization.user_presence.complete',
+      issuer.close,
+    );
+    if (typeof assertion !== 'object' || assertion === null || Array.isArray(assertion)) {
+      throw new LocalServiceProtocolError('the native user-presence assertion is malformed');
+    }
+    const completeRequestId = randomBytes(requestIdLength);
+    const completePayload = encodeRequestPayload('authorization.user_presence.complete', {
+      beginRequestId: begin.beginRequestId.toString('hex'),
+      bindingDigest: begin.bindingDigest.toString('hex'),
+      challenge: begin.challenge.toString('hex'),
+      sessionSignature: signMessage(sessionKey, begin.binding).toString('hex'),
+      assertion,
+    });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const result = await withDeadline(
+          issuer.invoke(completeRequestId, 'authorization.user_presence.complete', completePayload),
+          remainingGrantTime(expiresAt, 'authorization.user_presence.complete'),
+          'authorization.user_presence.complete',
+          issuer.close,
+        );
+        return parseIssuedGrant(result, options, rawPublicKey(sessionKey), 'user_presence');
+      } catch (error) {
+        if (attempt >= reconnectAttempts || !isRetryableTransportFailure(error)) {
+          throw error;
+        }
+        issuer.close();
+        const delay = Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
+        if (delay > 0) {
+          await sleep(delay);
+        }
+        issuer = await openConnection(
+          options,
+          remainingGrantTime(expiresAt, 'authorization.user_presence.complete'),
+          {
+            kind: 'issuer',
+            key: options.signingKey,
+            clientInstance,
+          },
+        );
+      }
+    }
+  } finally {
+    issuer.close();
+  }
+}
+
+function parseUserPresenceBegin(
+  value: unknown,
+  expectedRequestId: Buffer,
+): ParsedUserPresenceBegin {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new LocalServiceProtocolError('the user-presence challenge is malformed');
+  }
+  const result = value as UserPresenceBeginResult;
+  const beginRequestId = parseHex(result.beginRequestId, requestIdLength);
+  const binding = parseBoundedHex(result.binding, 1024);
+  const bindingDigest = parseHex(result.bindingDigest, 32);
+  const challenge = parseHex(result.challenge, 32);
+  const credentialDigest = parseHex(result.credentialDigest, 32);
+  const policyVersion = parsePositiveInteger(result.policyVersion);
+  const issuedAt = parsePositiveInteger(result.issuedAtUnixMilliseconds);
+  const challengeExpiresAt = parsePositiveInteger(result.challengeExpiresAtUnixMilliseconds);
+  const grantExpiresAt = parsePositiveInteger(result.grantExpiresAtUnixMilliseconds);
+  if (
+    !beginRequestId.equals(expectedRequestId) ||
+    typeof result.provider !== 'string' ||
+    result.provider.length < 1 ||
+    result.provider.length > 64 ||
+    credentialDigest.length !== 32 ||
+    policyVersion < 1 ||
+    challengeExpiresAt <= issuedAt ||
+    grantExpiresAt <= challengeExpiresAt ||
+    typeof result.webAuthnRequest !== 'object' ||
+    result.webAuthnRequest === null ||
+    Array.isArray(result.webAuthnRequest)
+  ) {
+    throw new LocalServiceProtocolError('the user-presence challenge is malformed');
+  }
+  return {
+    beginRequestId,
+    binding,
+    bindingDigest,
+    challenge,
+    webAuthnRequest: result.webAuthnRequest as Record<string, unknown>,
+  };
+}
+
+function remainingGrantTime(expiresAt: number, operation: string): number {
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) {
+    throw new LocalServiceError(operation, 'deadline_exceeded');
+  }
+  return remaining;
+}
+
 function parseIssuedGrant(
   value: unknown,
   options: LocalServiceClientOptions,
   expectedSessionKey: Buffer,
+  expectedEvidence: 'account_trusted' | 'user_presence',
 ): SessionGrantRecord {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new LocalServiceProtocolError('the issued session grant is malformed');
@@ -757,6 +955,10 @@ function parseIssuedGrant(
   ) {
     throw new LocalServiceProtocolError('the issued session grant does not match the request');
   }
+  const expectedEvidenceBit = expectedEvidence === 'user_presence' ? 2 : 1;
+  if ((grant.evidence & expectedEvidenceBit) !== expectedEvidenceBit) {
+    throw new LocalServiceProtocolError('the issued session grant has unexpected evidence');
+  }
   encodeGrantClaims(grant);
   return grant;
 }
@@ -764,6 +966,19 @@ function parseIssuedGrant(
 function parseHex(value: unknown, length: number): Buffer {
   if (typeof value !== 'string' || value.length !== length * 2 || !/^[0-9a-f]+$/u.test(value)) {
     throw new LocalServiceProtocolError('the issued session grant is malformed');
+  }
+  return Buffer.from(value, 'hex');
+}
+
+function parseBoundedHex(value: unknown, maximumBytes: number): Buffer {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length % 2 !== 0 ||
+    value.length > maximumBytes * 2 ||
+    !/^[0-9a-f]+$/u.test(value)
+  ) {
+    throw new LocalServiceProtocolError('the user-presence challenge is malformed');
   }
   return Buffer.from(value, 'hex');
 }

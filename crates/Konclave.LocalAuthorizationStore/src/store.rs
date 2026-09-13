@@ -48,7 +48,7 @@ const _: () = assert!(MAX_PROFILE_ID_LENGTH == 32);
 const _: () = assert!(MAX_POLICY_CLAUSES == 8);
 const _: () = assert!(HarnessKind::A2AGateway.wire_value() == 5);
 const _: () = assert!(SessionCapabilities::ALL.bits() == 15);
-const CREATE_SCHEMA_SQL: &str = "
+const CREATE_CORE_SCHEMA_SQL: &str = "
     CREATE TABLE authorization_store_meta (
         singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
         schema_version INTEGER NOT NULL CHECK (
@@ -221,7 +221,9 @@ const CREATE_SCHEMA_SQL: &str = "
             issuer_client_instance,
             issuance_request_id
         )
-    );
+    );";
+
+const CREATE_USER_PRESENCE_SCHEMA_SQL: &str = "
     CREATE TABLE authorization_user_presence_credential_identifier (
         credential_digest BLOB PRIMARY KEY CHECK (
             typeof(credential_digest) = 'blob' AND length(credential_digest) = 32
@@ -249,13 +251,29 @@ const CREATE_SCHEMA_SQL: &str = "
         ),
         FOREIGN KEY (credential_digest)
             REFERENCES authorization_user_presence_credential_identifier(credential_digest)
-    );
+    );";
+
+const CREATE_AUTHORIZATION_AUDIT_V2_SQL: &str = "
     CREATE TABLE authorization_audit (
         generation INTEGER PRIMARY KEY CHECK (
             typeof(generation) = 'integer' AND generation >= 1
         ),
         event_kind INTEGER NOT NULL CHECK (
             typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 15
+        ),
+        occurred_at_unix_milliseconds INTEGER NOT NULL CHECK (
+            typeof(occurred_at_unix_milliseconds) = 'integer'
+            AND occurred_at_unix_milliseconds >= 0
+        )
+    );";
+
+const CREATE_AUTHORIZATION_AUDIT_V1_SQL: &str = "
+    CREATE TABLE authorization_audit (
+        generation INTEGER PRIMARY KEY CHECK (
+            typeof(generation) = 'integer' AND generation >= 1
+        ),
+        event_kind INTEGER NOT NULL CHECK (
+            typeof(event_kind) = 'integer' AND event_kind >= 1 AND event_kind <= 11
         ),
         occurred_at_unix_milliseconds INTEGER NOT NULL CHECK (
             typeof(occurred_at_unix_milliseconds) = 'integer'
@@ -1428,16 +1446,14 @@ fn initialize_or_validate(
     installation_fingerprint: InstallationFingerprint,
     bootstrap: Option<(&AuthorizationPolicy, &[InstalledIssuerRegistration], u64)>,
 ) -> Result<(), LocalAuthorizationStoreError> {
-    let expected_schema = expected_schema_objects()?;
+    let expected_schema = expected_schema_objects(SCHEMA_VERSION)?;
     let transaction = immediate_transaction(connection)?;
     let existing_schema = schema_objects(&transaction)?;
     if existing_schema.is_empty() {
         let Some((bootstrap_policy, bootstrap_issuers, now_unix_milliseconds)) = bootstrap else {
             return Err(LocalAuthorizationStoreError::InvalidStorage);
         };
-        transaction
-            .execute_batch(CREATE_SCHEMA_SQL)
-            .map_err(map_write_error)?;
+        create_schema_v2(&transaction)?;
         bootstrap_store(
             &transaction,
             installation_fingerprint,
@@ -1462,13 +1478,22 @@ fn initialize_or_validate(
             )
             .optional()
             .map_err(map_read_error)?;
-        if version != Some(i64::from(SCHEMA_VERSION)) {
-            return Err(LocalAuthorizationStoreError::UnsupportedSchema);
+        match version {
+            Some(1) => {
+                if existing_schema != expected_schema_objects(1)? {
+                    return Err(LocalAuthorizationStoreError::InvalidStorage);
+                }
+                verify_identity_and_high_water(&transaction, installation_fingerprint, None)?;
+                migrate_schema_v1_to_v2(&transaction)?;
+            }
+            Some(version) if version == i64::from(SCHEMA_VERSION) => {
+                if existing_schema != expected_schema {
+                    return Err(LocalAuthorizationStoreError::InvalidStorage);
+                }
+                verify_identity_and_high_water(&transaction, installation_fingerprint, None)?;
+            }
+            _ => return Err(LocalAuthorizationStoreError::UnsupportedSchema),
         }
-        if existing_schema != expected_schema {
-            return Err(LocalAuthorizationStoreError::InvalidStorage);
-        }
-        verify_identity_and_high_water(&transaction, installation_fingerprint, None)?;
     }
     if schema_objects(&transaction)? != expected_schema {
         return Err(LocalAuthorizationStoreError::InvalidStorage);
@@ -1574,11 +1599,80 @@ struct SchemaObject {
     sql: Option<String>,
 }
 
-fn expected_schema_objects() -> Result<Vec<SchemaObject>, LocalAuthorizationStoreError> {
+fn create_schema_v2(connection: &Connection) -> Result<(), LocalAuthorizationStoreError> {
+    connection
+        .execute_batch(CREATE_CORE_SCHEMA_SQL)
+        .map_err(map_write_error)?;
+    connection
+        .execute_batch(CREATE_USER_PRESENCE_SCHEMA_SQL)
+        .map_err(map_write_error)?;
+    connection
+        .execute_batch(CREATE_AUTHORIZATION_AUDIT_V2_SQL)
+        .map_err(map_write_error)
+}
+
+fn migrate_schema_v1_to_v2(
+    transaction: &Transaction<'_>,
+) -> Result<(), LocalAuthorizationStoreError> {
+    transaction
+        .execute_batch(CREATE_USER_PRESENCE_SCHEMA_SQL)
+        .map_err(map_write_error)?;
+    transaction
+        .execute_batch("ALTER TABLE authorization_audit RENAME TO authorization_audit_v1;")
+        .map_err(map_write_error)?;
+    transaction
+        .execute_batch(CREATE_AUTHORIZATION_AUDIT_V2_SQL)
+        .map_err(map_write_error)?;
+    transaction
+        .execute(
+            "INSERT INTO authorization_audit (
+                generation,
+                event_kind,
+                occurred_at_unix_milliseconds
+             )
+             SELECT generation, event_kind, occurred_at_unix_milliseconds
+             FROM authorization_audit_v1",
+            [],
+        )
+        .map_err(map_write_error)?;
+    transaction
+        .execute_batch("DROP TABLE authorization_audit_v1;")
+        .map_err(map_write_error)?;
+    let updated = transaction
+        .execute(
+            "UPDATE authorization_store_meta
+             SET schema_version = ?1
+             WHERE singleton_id = 1 AND schema_version = 1",
+            [i64::from(SCHEMA_VERSION)],
+        )
+        .map_err(map_write_error)?;
+    if updated != 1 {
+        return Err(LocalAuthorizationStoreError::InvalidStorage);
+    }
+    Ok(())
+}
+
+fn expected_schema_objects(
+    schema_version: u32,
+) -> Result<Vec<SchemaObject>, LocalAuthorizationStoreError> {
     let connection = Connection::open_in_memory().map_err(map_open_error)?;
     connection
-        .execute_batch(CREATE_SCHEMA_SQL)
+        .execute_batch(CREATE_CORE_SCHEMA_SQL)
         .map_err(map_write_error)?;
+    match schema_version {
+        1 => connection
+            .execute_batch(CREATE_AUTHORIZATION_AUDIT_V1_SQL)
+            .map_err(map_write_error)?,
+        SCHEMA_VERSION => {
+            connection
+                .execute_batch(CREATE_USER_PRESENCE_SCHEMA_SQL)
+                .map_err(map_write_error)?;
+            connection
+                .execute_batch(CREATE_AUTHORIZATION_AUDIT_V2_SQL)
+                .map_err(map_write_error)?;
+        }
+        _ => return Err(LocalAuthorizationStoreError::UnsupportedSchema),
+    }
     schema_objects(&connection)
 }
 

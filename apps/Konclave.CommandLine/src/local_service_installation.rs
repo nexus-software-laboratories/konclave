@@ -6,16 +6,22 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 use KonclaveCryptographicCore::{LocalServiceIdentity, LocalServiceSigningSeed};
 use KonclaveDomainCore::Ed25519PublicKey;
-use KonclaveLocalAuthorizationStore::{installation_fingerprint, LocalAuthorizationStore};
+use KonclaveLocalAuthorizationStore::{
+    installation_fingerprint, LocalAuthorizationStore, UserPresenceCredentialRecord,
+};
 use KonclaveLocalServiceTransport::{
-    AuthorizationPolicy, CopilotServiceConfig, HarnessKind, InstalledIssuerRegistration,
-    IssuerKeyId, IssuerKeyVersion, IssuerRegistration, LocalServiceEndpoint,
-    LocalServiceIdentitySource, LocalServiceInstallation, LocalServiceProfileCustody,
-    ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE, LOCAL_SERVICE_INSTALLATION_FILE,
+    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy, CopilotServiceConfig,
+    HarnessKind, InstalledIssuerRegistration, IssuerKeyId, IssuerKeyVersion, IssuerRegistration,
+    LocalServiceEndpoint, LocalServiceIdentitySource, LocalServiceInstallation,
+    LocalServiceProfileCustody, ProfileAuthorization, COPILOT_SERVICE_CONFIG_FILE,
+    LOCAL_SERVICE_INSTALLATION_FILE,
 };
 use KonclaveSecretStorage::{
     create_or_verify_owner_protected_file, ensure_owner_protected_directory,
     open_owner_protected_file, NativeLocalServiceIdentityStore, SecretStorageError,
+};
+use KonclaveUserPresence::{
+    perform_native_authentication, perform_native_registration, UserPresenceWebAuthnVerifier,
 };
 
 #[cfg(any(windows, test))]
@@ -146,6 +152,7 @@ fn install_with(
     let installation_path = service_root.join(LOCAL_SERVICE_INSTALLATION_FILE);
     let fingerprint = installation_fingerprint(&installation)
         .context("binding durable authorization state to the installation")?;
+    let user_presence_required = policy_requires_user_presence(&authorization_policy);
     let now_unix_milliseconds = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -153,16 +160,27 @@ fn install_with(
             .as_millis(),
     )
     .context("converting system time")?;
-    drop(
-        LocalAuthorizationStore::bootstrap(
-            &installation_path,
-            fingerprint,
-            &authorization_policy,
-            &issuers,
-            now_unix_milliseconds,
-        )
-        .context("bootstrapping durable local authorization state")?,
-    );
+    let authorization = LocalAuthorizationStore::bootstrap(
+        &installation_path,
+        fingerprint,
+        &authorization_policy,
+        &issuers,
+        now_unix_milliseconds,
+    )
+    .context("bootstrapping durable local authorization state")?;
+    if user_presence_required
+        && authorization
+            .load_snapshot(now_unix_milliseconds, None)
+            .context("loading user-presence enrollment state")?
+            .user_presence_credential()
+            .is_none()
+    {
+        let credential = enroll_user_presence(*fingerprint.as_bytes(), now_unix_milliseconds)?;
+        authorization
+            .register_user_presence_credential(&credential, now_unix_milliseconds)
+            .context("persisting user-presence credential")?;
+    }
+    drop(authorization);
     let mut service_config = Vec::new();
     installation
         .write_to(&mut service_config)
@@ -179,6 +197,11 @@ fn install_with(
         issuer_key_version,
         service_identity.public_key(),
         issuer_key_file,
+        if user_presence_required {
+            Some(std::env::current_exe().context("resolving native user-presence helper")?)
+        } else {
+            None
+        },
         authorization_policy,
     )
     .context("building Copilot local-service configuration")?;
@@ -193,6 +216,43 @@ fn install_with(
     .context("persisting Copilot local-service configuration")?;
 
     Ok(InstalledLocalService { extension_root })
+}
+
+fn policy_requires_user_presence(policy: &AuthorizationPolicy) -> bool {
+    let account = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted]).ok();
+    let presence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).ok();
+    !account.is_some_and(|account| policy.accepts(account))
+        && presence.is_some_and(|presence| policy.accepts(presence))
+}
+
+fn enroll_user_presence(
+    installation_fingerprint: [u8; 32],
+    now_unix_milliseconds: u64,
+) -> anyhow::Result<UserPresenceCredentialRecord> {
+    eprintln!("Windows will request native user verification to enroll Konclave.");
+    let verifier = UserPresenceWebAuthnVerifier::new();
+    let (registration, enrollment) = verifier
+        .begin_enrollment(installation_fingerprint, None)
+        .context("creating user-presence enrollment challenge")?;
+    let response =
+        perform_native_registration(&registration).context("enrolling native user presence")?;
+    let mut credential = verifier
+        .finish_enrollment(&response, &enrollment)
+        .context("verifying user-presence enrollment")?;
+    let (authentication, state) = verifier
+        .begin_authentication(&credential)
+        .context("creating user-presence confirmation challenge")?;
+    let response = perform_native_authentication(&authentication)
+        .context("confirming native user presence")?;
+    verifier
+        .finish_authentication(&response, &state, &mut credential, now_unix_milliseconds)
+        .context("verifying user-presence confirmation")?;
+    UserPresenceCredentialRecord::from_document(
+        credential
+            .to_bytes()
+            .context("encoding user-presence credential")?,
+    )
+    .context("validating user-presence credential")
 }
 
 fn load_or_create_service_seed(
@@ -335,8 +395,15 @@ mod tests {
         let profile_root = root.path().join("profiles");
         let extension_root = root.path().join("extension");
         std::fs::create_dir(&profile_root).unwrap();
-        let endpoint = root.path().join("service.sock");
-        let endpoint = endpoint.to_str().unwrap();
+        let endpoint = if cfg!(windows) {
+            format!(r"\\.\pipe\konclave-install-test-{}", std::process::id())
+        } else {
+            root.path()
+                .join("service.sock")
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
         let profile_keys = root.path().join("profile-keys");
         let store = MemoryIdentityStore::default();
 
@@ -344,7 +411,7 @@ mod tests {
             &store,
             &profile_root,
             Some(extension_root.clone()),
-            Some(endpoint),
+            Some(&endpoint),
             None,
             Some(profile_keys.clone()),
             AuthorizationPolicy::account_trusted(),
@@ -366,7 +433,7 @@ mod tests {
             &store,
             &profile_root,
             Some(extension_root.clone()),
-            Some(endpoint),
+            Some(&endpoint),
             None,
             Some(profile_keys.clone()),
             AuthorizationPolicy::account_trusted(),
@@ -410,13 +477,18 @@ mod tests {
                 .to_str()
                 .unwrap()
         );
+        assert!(client.get("userPresenceHelper").is_none());
 
-        let conflict = root.path().join("other.sock");
+        let conflict = if cfg!(windows) {
+            format!(r"\\.\pipe\konclave-install-conflict-{}", std::process::id())
+        } else {
+            root.path().join("other.sock").to_str().unwrap().to_string()
+        };
         assert!(install_with(
             &store,
             &profile_root,
             Some(extension_root),
-            conflict.to_str(),
+            Some(&conflict),
             None,
             Some(root.path().join("profile-keys")),
             AuthorizationPolicy::account_trusted(),

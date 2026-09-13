@@ -12,6 +12,7 @@ use KonclaveLocalServiceTransport::{
     MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_SESSION_GRANTS,
 };
 use KonclaveSecretStorage::{open_owner_protected_file, NativeWrappingKeyProvider};
+use KonclaveUserPresence::native_user_presence_supported;
 
 use crate::cli::DoctorArgs;
 use crate::installation;
@@ -163,24 +164,25 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
             authorization.active_grants().len()
         ),
     );
-    let account_trusted =
-        AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
-            .is_ok_and(|evidence| authorization.policy().accepts(evidence));
+    let (account_trusted, user_presence) = supported_policy_paths(authorization.policy());
+    let providers = authorization
+        .issuers()
+        .iter()
+        .filter(|issuer| {
+            issuer.availability() == KonclaveLocalAuthorizationStore::IssuerAvailability::Enabled
+                && issuer.registration().harness() == HarnessKind::Generic
+                && issuer.registration().profiles() == &ProfileAuthorization::All
+        })
+        .count();
     if account_trusted {
         report.pass(
             "authorization_policy",
-            "AccountTrusted; same-account processes are trusted; no same-user isolation",
+            if user_presence {
+                "AccountTrusted or UserPresence; paved clients prefer automatic same-account authorization"
+            } else {
+                "AccountTrusted; same-account processes are trusted; no same-user isolation"
+            },
         );
-        let providers = authorization
-            .issuers()
-            .iter()
-            .filter(|issuer| {
-                issuer.availability()
-                    == KonclaveLocalAuthorizationStore::IssuerAvailability::Enabled
-                    && issuer.registration().harness() == HarnessKind::Generic
-                    && issuer.registration().profiles() == &ProfileAuthorization::All
-            })
-            .count();
         if providers == 0 {
             report.fail(
                 "authorization_provider",
@@ -192,19 +194,44 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
                 "AccountTrusted issuer is available to paved and generic clients",
             );
         }
-
+    } else if user_presence {
         report.pass(
-            "grant_limits",
-            format!(
-                "active grants are bounded: global {MAX_SESSION_GRANTS}, issuer {MAX_GRANTS_PER_ISSUER}, profile {MAX_GRANTS_PER_PROFILE}"
-            ),
+            "authorization_policy",
+            "UserPresence-capable policy; every new session process requires native user verification",
         );
+        if providers == 0 {
+            report.fail(
+                "authorization_provider",
+                "UserPresence challenge issuer is unavailable",
+            );
+        } else if authorization.user_presence_credential().is_none() {
+            report.fail(
+                "authorization_provider",
+                "UserPresence credential is not enrolled",
+            );
+        } else if !native_user_presence_supported() {
+            report.fail(
+                "authorization_provider",
+                "UserPresence is unavailable on this platform",
+            );
+        } else {
+            report.pass(
+                "authorization_provider",
+                "native Windows WebAuthn and an enrolled credential are available",
+            );
+        }
     } else {
         report.fail(
             "authorization_policy",
             "this client has no available accepted evidence",
         );
     }
+    report.pass(
+        "grant_limits",
+        format!(
+            "active grants are bounded: global {MAX_SESSION_GRANTS}, issuer {MAX_GRANTS_PER_ISSUER}, profile {MAX_GRANTS_PER_PROFILE}"
+        ),
+    );
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
         connect_local_service(installation.endpoint()),
@@ -223,6 +250,25 @@ async fn check_local_service(profile_root: &Path, report: &mut DoctorReport) {
             "shared local service is unavailable",
         ),
     }
+}
+
+fn supported_policy_paths(
+    policy: &KonclaveLocalServiceTransport::AuthorizationPolicy,
+) -> (bool, bool) {
+    let account = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted])
+        .expect("fixed evidence is valid");
+    let presence = AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence])
+        .expect("fixed evidence is valid");
+    let supported_bits = account.bits() | presence.bits();
+    (
+        policy
+            .clauses()
+            .iter()
+            .any(|clause| clause.bits() == account.bits()),
+        policy.clauses().iter().any(|clause| {
+            clause.bits() & presence.bits() != 0 && clause.bits() & !supported_bits == 0
+        }),
+    )
 }
 
 fn current_unix_milliseconds(
@@ -434,6 +480,52 @@ mod tests {
         report.fail("three", "fail");
         assert_eq!(report.failures, 1);
         assert_eq!(report.checks.len(), 3);
+    }
+
+    #[test]
+    fn policy_path_classification_preserves_all_of_semantics() {
+        let version = KonclaveLocalServiceTransport::AuthorizationPolicyVersion::new(1).unwrap();
+        let account =
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::AccountTrusted]).unwrap();
+        let presence =
+            AuthorizationEvidenceSet::new([AuthorizationEvidenceKind::UserPresence]).unwrap();
+        let both = AuthorizationEvidenceSet::new([
+            AuthorizationEvidenceKind::AccountTrusted,
+            AuthorizationEvidenceKind::UserPresence,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            supported_policy_paths(
+                &KonclaveLocalServiceTransport::AuthorizationPolicy::new(version, vec![account],)
+                    .unwrap()
+            ),
+            (true, false)
+        );
+        assert_eq!(
+            supported_policy_paths(
+                &KonclaveLocalServiceTransport::AuthorizationPolicy::new(version, vec![presence],)
+                    .unwrap()
+            ),
+            (false, true)
+        );
+        assert_eq!(
+            supported_policy_paths(
+                &KonclaveLocalServiceTransport::AuthorizationPolicy::new(version, vec![both],)
+                    .unwrap()
+            ),
+            (false, true)
+        );
+        assert_eq!(
+            supported_policy_paths(
+                &KonclaveLocalServiceTransport::AuthorizationPolicy::new(
+                    version,
+                    vec![account, presence],
+                )
+                .unwrap()
+            ),
+            (true, true)
+        );
     }
 
     #[test]
