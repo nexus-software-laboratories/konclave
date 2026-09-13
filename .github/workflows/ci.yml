@@ -141,9 +141,11 @@ jobs:
         shell: pwsh
         run: ./scripts/Invoke-NodeWorkspaceChecks.ps1
 
+  # These named jobs are branch-protection contexts. Guidance-only pull requests
+  # publish a lightweight success instead of leaving the context skipped.
   container-ci:
     needs: validation-plan
-    if: needs.validation-plan.outputs.scope == 'full'
+    if: ${{ needs.validation-plan.outputs.scope == 'full' || needs.validation-plan.outputs.scope == 'guidance' }}
     name: Container CI (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -159,11 +161,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
+      - name: Publish guidance-only required check
+        if: needs.validation-plan.outputs.scope == 'guidance'
+        run: echo 'Container validation is not required for guidance-only changes.'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.validation-plan.outputs.scope == 'full'
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Initialize container validation paths
+        if: needs.validation-plan.outputs.scope == 'full'
         shell: bash
         run: >-
           bash ./scripts/ci/Initialize-JobPrivatePaths.sh
@@ -172,6 +179,7 @@ jobs:
       # built, so a filter that removes too much is caught while the only resources at
       # risk are the throwaway ones this test made.
       - name: Verify container validation cleanup contract
+        if: needs.validation-plan.outputs.scope == 'full'
         shell: bash
         run: |
           bash ./scripts/ci/Test-ContainerImageContract.sh
@@ -181,10 +189,12 @@ jobs:
           fi
           bash ./scripts/ci/Test-ContainerValidationCleanup.sh
       - name: Capture Docker baseline
+        if: needs.validation-plan.outputs.scope == 'full'
         shell: bash
         run: >-
           bash ./scripts/ci/Capture-ContainerValidationBaseline.sh
       - name: Build and validate AMD64 OCI archive
+        if: needs.validation-plan.outputs.scope == 'full'
         shell: bash
         run: >-
           bash ./scripts/ci/Validate-HostedContainerImage.sh
@@ -193,24 +203,31 @@ jobs:
       # Cleanup is unconditional so no builder, cache, or archive survives the job, and
       # it fails the job when anything run-owned remains or anything else vanished.
       - name: Remove container validation state
-        if: always()
+        if: ${{ always() && needs.validation-plan.outputs.scope == 'full' }}
         shell: bash
         run: bash ./scripts/ci/Cleanup-HostedContainerImage.sh
 
   local-daemon-daemon-packaging:
     needs: validation-plan
-    if: needs.validation-plan.outputs.scope == 'full'
+    if: ${{ needs.validation-plan.outputs.scope == 'full' || needs.validation-plan.outputs.scope == 'guidance' }}
     name: Daemon packaging (local-daemon)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Publish guidance-only required check
+        if: needs.validation-plan.outputs.scope == 'guidance'
+        run: echo 'Daemon packaging validation is not required for guidance-only changes.'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.validation-plan.outputs.scope == 'full'
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        if: needs.validation-plan.outputs.scope == 'full'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: needs.validation-plan.outputs.scope == 'full'
       - name: Check Windows Service host source
+        if: needs.validation-plan.outputs.scope == 'full'
         shell: pwsh
         working-directory: apps/Konclave.LocalDaemon
         run: |
@@ -223,6 +240,7 @@ jobs:
             throw 'Windows and shared-service host checks failed.'
           }
       - name: Validate daemon package definitions
+        if: needs.validation-plan.outputs.scope == 'full'
         shell: pwsh
         working-directory: apps/Konclave.LocalDaemon
         run: |

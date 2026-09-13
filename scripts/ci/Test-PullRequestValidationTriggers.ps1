@@ -53,6 +53,72 @@ if (
     throw 'Superseded pull-request CI must be cancelled automatically.'
 }
 
+function Get-CiJobLines {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Job
+    )
+
+    $start = [Array]::IndexOf($ciLines, "  ${Job}:")
+    if ($start -lt 0) {
+        throw "CI workflow is missing the '$Job' job."
+    }
+
+    $end = $ciLines.Count
+    for ($index = $start + 1; $index -lt $ciLines.Count; $index++) {
+        if ($ciLines[$index] -cmatch '^  [a-z0-9-]+:$') {
+            $end = $index
+            break
+        }
+    }
+
+    return @($ciLines[$start..($end - 1)])
+}
+
+$requiredContextCondition =
+    '    if: ${{ needs.validation-plan.outputs.scope == ''full'' || needs.validation-plan.outputs.scope == ''guidance'' }}'
+$fullStepCondition = "        if: needs.validation-plan.outputs.scope == 'full'"
+$cleanupStepCondition =
+    '        if: ${{ always() && needs.validation-plan.outputs.scope == ''full'' }}'
+
+foreach ($job in @('container-ci', 'local-daemon-daemon-packaging')) {
+    $jobLines = Get-CiJobLines -Job $job
+    if ($requiredContextCondition -cnotin $jobLines) {
+        throw "$job must publish its required context for ready guidance-only changes."
+    }
+
+    $stepStarts = @(
+        for ($index = 0; $index -lt $jobLines.Count; $index++) {
+            if ($jobLines[$index] -cmatch '^      - (name|uses): ') {
+                $index
+            }
+        }
+    )
+    if ($stepStarts.Count -lt 2) {
+        throw "$job must contain a guidance-only publisher and full validation steps."
+    }
+
+    for ($step = 0; $step -lt $stepStarts.Count; $step++) {
+        $start = $stepStarts[$step]
+        $end = if ($step + 1 -lt $stepStarts.Count) {
+            $stepStarts[$step + 1] - 1
+        }
+        else {
+            $jobLines.Count - 1
+        }
+        $stepLines = @($jobLines[$start..$end])
+        if ($stepLines[0] -ceq '      - name: Publish guidance-only required check') {
+            if ("        if: needs.validation-plan.outputs.scope == 'guidance'" -cnotin $stepLines) {
+                throw "$job guidance-only publisher has the wrong scope."
+            }
+            continue
+        }
+        if ($fullStepCondition -cnotin $stepLines -and $cleanupStepCondition -cnotin $stepLines) {
+            throw "$job has a runner-intensive step without a full-scope guard: $($stepLines[0])"
+        }
+    }
+}
+
 foreach ($workflow in Get-ChildItem -LiteralPath $workflowRoot -File |
     Where-Object { $_.Extension -in @('.yml', '.yaml') }) {
     $content = Get-Content -LiteralPath $workflow.FullName -Raw
