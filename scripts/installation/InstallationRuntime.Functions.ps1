@@ -28,7 +28,7 @@ function Assert-SafeInstallationItem {
         [string]$Kind
     )
 
-    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (
         $item.Attributes -band [IO.FileAttributes]::ReparsePoint -or
         $item.LinkType -in @('SymbolicLink', 'Junction') -or
