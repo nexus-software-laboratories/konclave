@@ -181,7 +181,8 @@ $root = Join-Path (
 $baselineRelease = Join-Path $root 'release-0.1.0'
 $candidateRelease = Join-Path $root 'release-0.1.1'
 $bootstrapRoot = Join-Path $root 'bootstrap'
-$dataRoot = Join-Path $root 'data'
+$localAppData = Join-Path $root 'local-app-data'
+$dataRoot = Join-Path $localAppData 'Konclave'
 $relayState = Join-Path $root 'relay'
 $copilotHome = Join-Path $root 'copilot-home'
 $relayProcess = $null
@@ -198,7 +199,9 @@ New-Item -ItemType Directory -Path (
     $copilotHome
 ) | Out-Null
 $previousCopilotHome = $env:COPILOT_HOME
+$previousLocalAppData = $env:LOCALAPPDATA
 $env:COPILOT_HOME = $copilotHome
+$env:LOCALAPPDATA = $localAppData
 try {
     [void](Invoke-NativeCommand gh @(
         'release',
@@ -448,6 +451,7 @@ try {
 }
 finally {
     $env:COPILOT_HOME = $previousCopilotHome
+    $env:LOCALAPPDATA = $previousLocalAppData
     $tasks = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
     if ($null -ne $manager -and $tasks.Count -ne 0) {
         if ($null -eq $managerInstallRoot) {
