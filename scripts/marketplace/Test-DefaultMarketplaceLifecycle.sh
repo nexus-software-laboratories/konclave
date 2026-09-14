@@ -259,20 +259,28 @@ exercise_update_and_rollback() {
     git -C "$work" remote add origin "$remote"
     git -C "$work" push --quiet --set-upstream origin main
     git -C "$remote" symbolic-ref HEAD refs/heads/main
-    git -C "$remote" update-server-info
 
     local port
     port="$(
         python3 -c \
             'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
     )"
+    local http_root="$test_root/http"
+    mkdir -p "$http_root/cgi-bin"
+    cat >"$http_root/cgi-bin/git-http-backend" <<'EOF'
+#!/usr/bin/env sh
+exec git http-backend
+EOF
+    chmod 0700 "$http_root/cgi-bin/git-http-backend"
+    GIT_PROJECT_ROOT="$test_root" GIT_HTTP_EXPORT_ALL=1 \
     python3 -m http.server "$port" \
+        --cgi \
         --bind 127.0.0.1 \
-        --directory "$test_root" \
+        --directory "$http_root" \
         >"$test_root/source-server.log" 2>"$test_root/source-server.error.log" &
     source_server_pid="$!"
     for _ in $(seq 1 50); do
-        if curl --fail --silent "http://127.0.0.1:$port/fixture.git/HEAD" >/dev/null; then
+        if curl --fail --silent "http://127.0.0.1:$port/" >/dev/null; then
             break
         fi
         sleep 0.1
@@ -284,7 +292,7 @@ exercise_update_and_rollback() {
         exit 1
     fi
 
-    local source="http://127.0.0.1:$port/fixture.git"
+    local source="http://127.0.0.1:$port/cgi-bin/git-http-backend/fixture.git"
     "$copilot_command" plugin marketplace add "$source"
     assert_registered "$marketplace"
     install_plugin "$marketplace"
@@ -306,7 +314,6 @@ exercise_update_and_rollback() {
     git -C "$work" add .
     git -C "$work" commit --quiet -m 'update marketplace'
     git -C "$work" push --quiet
-    git -C "$remote" update-server-info
 
     "$copilot_command" plugin marketplace update "$marketplace"
     "$copilot_command" plugin update "konclave@$marketplace"
@@ -317,7 +324,6 @@ exercise_update_and_rollback() {
     git -C "$work" add .
     git -C "$work" commit --quiet -m 'rollback marketplace'
     git -C "$work" push --quiet
-    git -C "$remote" update-server-info
 
     "$copilot_command" plugin marketplace update "$marketplace"
     "$copilot_command" plugin uninstall "konclave@$marketplace"
