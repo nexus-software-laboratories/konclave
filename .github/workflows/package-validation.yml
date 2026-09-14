@@ -103,6 +103,7 @@ jobs:
         with:
           key: package-${{ matrix.target }}
           cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: ./.github/actions/setup-node
         with:
           node-version: ${{ steps.release-toolchains.outputs.node }}
@@ -501,6 +502,7 @@ jobs:
         with:
           key: release-integrity
           cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: ./.github/actions/setup-node
         with:
           node-version: ${{ steps.release-toolchains.outputs.node }}
@@ -665,6 +667,7 @@ jobs:
         with:
           key: packaged-acceptance
           cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: ./.github/actions/setup-node
         with:
           node-version: ${{ steps.release-toolchains.outputs.node }}

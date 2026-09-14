@@ -71,7 +71,8 @@
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
-        "delete-run-artifacts"
+        "delete-run-artifacts",
+        "prune-actions-caches"
       ]
     }
   ],

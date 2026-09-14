@@ -74,6 +74,7 @@ jobs:
         with:
           key: generic-client-conformance
           cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Resolve pinned Node version
         if: steps.scope.outputs.run == 'true'
         id: toolchains

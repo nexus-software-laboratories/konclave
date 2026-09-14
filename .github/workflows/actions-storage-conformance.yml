@@ -37,6 +37,7 @@ jobs:
         run: |
           foreach ($path in @(
             'scripts/ci/ActionsStoragePolicy.Functions.ps1',
+            'scripts/ci/Test-ActionsStoragePolicy.ps1',
             'scripts/ci/Test-ActionsStoragePolicyFunctions.ps1'
           )) {
             $errors = $null
@@ -50,3 +51,4 @@ jobs:
             }
           }
           ./scripts/ci/Test-ActionsStoragePolicyFunctions.ps1
+          ./scripts/ci/Test-ActionsStoragePolicy.ps1
