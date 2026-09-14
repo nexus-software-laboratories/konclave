@@ -116,7 +116,7 @@ jobs:
                 ConvertFrom-Json -Depth 20
             if (
               $LASTEXITCODE -ne 0 -or
-              [string]$sourceRun.name -cne 'Publish prerelease' -or
+              [string]$sourceRun.path -cne '.github/workflows/publish-prerelease.yml' -or
               [string]$sourceRun.event -cne 'workflow_dispatch' -or
               [string]$sourceRun.conclusion -cne 'failure' -or
               [string]$sourceRun.head_sha -cne $sourceCommit
