@@ -28,13 +28,13 @@ if (-not ($manifestJson | Test-Json -SchemaFile $schemaPath)) {
 }
 $manifest = $manifestJson | ConvertFrom-Json -Depth 100
 
-$contractCount = Test-ReleaseContractCoverage -Directory $root
+[void](Test-ReleaseContractCoverage -Directory $root)
 $provenanceCount = Assert-ReleaseProvenanceSet `
     -Directory $root `
     -Manifest $manifest `
     -SourceCommit $SourceCommit
-if ($contractCount -ne $provenanceCount) {
-    throw 'Release contract and provenance artifact counts differ.'
+if ($provenanceCount -ne @($manifest.artifacts).Count) {
+    throw 'Release manifest and provenance artifact counts differ.'
 }
 
 & (Join-Path $PSScriptRoot 'Test-PublicReleaseMetadata.ps1') `
