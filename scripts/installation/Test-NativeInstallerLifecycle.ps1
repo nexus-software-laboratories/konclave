@@ -12,6 +12,16 @@ $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) {
     throw 'Native installer lifecycle acceptance requires Windows.'
 }
+$baselineMatch = [regex]::Match($BaselineTag, '^v([0-9]+\.[0-9]+\.[0-9]+)$')
+$candidateMatch = [regex]::Match($CandidateTag, '^v([0-9]+\.[0-9]+\.[0-9]+)$')
+if (-not $baselineMatch.Success -or -not $candidateMatch.Success) {
+    throw 'Lifecycle release tags must be canonical v-prefixed SemVer.'
+}
+$baselineVersion = $baselineMatch.Groups[1].Value
+$candidateVersion = $candidateMatch.Groups[1].Value
+if ($baselineVersion -ceq $candidateVersion) {
+    throw 'Lifecycle baseline and candidate versions must differ.'
+}
 
 function Invoke-NativeCommand {
     param(
@@ -178,8 +188,8 @@ function Get-KonclavePluginRecords {
 $root = Join-Path (
     [IO.Path]::GetTempPath()
 ) "konclave-native-lifecycle-$([Guid]::NewGuid().ToString('N'))"
-$baselineRelease = Join-Path $root 'release-0.1.0'
-$candidateRelease = Join-Path $root 'release-0.1.1'
+$baselineRelease = Join-Path $root "release-$baselineVersion"
+$candidateRelease = Join-Path $root "release-$candidateVersion"
 $currentInstallerRoot = Join-Path $root 'current-installer'
 $bootstrapRoot = Join-Path $root 'bootstrap'
 $localAppData = Join-Path $root 'local-app-data'
@@ -323,7 +333,7 @@ try {
         AuthorizationPolicy = 'account-trusted'
     }
     $installed = Invoke-Installer -Installer $installer -Arguments $installArguments
-    Assert-InstallerAction -Result $installed -Action Install -Version '0.1.0'
+    Assert-InstallerAction -Result $installed -Action Install -Version $baselineVersion
     Write-Output 'lifecycle: baseline installed'
     $managerInstallRoot = [string]$installed.installRoot
 
@@ -382,11 +392,11 @@ try {
     Assert-InstallerAction `
         -Result $healthyAfterRestart `
         -Action Healthy `
-        -Version '0.1.0'
+        -Version $baselineVersion
     Write-Output 'lifecycle: supervisor stop and start passed'
 
     $verified = Invoke-Installer -Installer $installer -Arguments $installArguments
-    Assert-InstallerAction -Result $verified -Action Verified -Version '0.1.0'
+    Assert-InstallerAction -Result $verified -Action Verified -Version $baselineVersion
     Write-Output 'lifecycle: repeat install passed'
 
     $legacyRoot = Join-Path $copilotHome 'extensions' 'konclave'
@@ -410,7 +420,7 @@ try {
         Join-Path $dataRoot 'service' 'konclave.service.json'
     ) -Force
     $migrated = Invoke-Installer -Installer $installer -Arguments $installArguments
-    Assert-InstallerAction -Result $migrated -Action Verified -Version '0.1.0'
+    Assert-InstallerAction -Result $migrated -Action Verified -Version $baselineVersion
     Write-Output 'lifecycle: legacy sidecar migrated'
     if (-not (Test-Path -LiteralPath (
         Join-Path $dataRoot 'service' 'konclave.service.json'
@@ -422,7 +432,7 @@ try {
         Action = 'ActivatePlugin'
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $activated -Action PluginActivated -Version '0.1.0'
+    Assert-InstallerAction -Result $activated -Action PluginActivated -Version $baselineVersion
     Write-Output 'lifecycle: baseline plugin activated'
     if (
         (Test-Path -LiteralPath $legacyRoot) -or
@@ -441,7 +451,7 @@ try {
         ReleaseDirectory = $candidateRelease
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $updated -Action Update -Version '0.1.1'
+    Assert-InstallerAction -Result $updated -Action Update -Version $candidateVersion
     Write-Output 'lifecycle: candidate updated'
     $candidateInstallRoot = [string]$updated.installRoot
 
@@ -449,7 +459,7 @@ try {
         Action = 'Rollback'
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $rolledBack -Action RolledBack -Version '0.1.0'
+    Assert-InstallerAction -Result $rolledBack -Action RolledBack -Version $baselineVersion
     Write-Output 'lifecycle: candidate rolled back'
     $managerInstallRoot = [string]$rolledBack.installRoot
 
@@ -481,14 +491,14 @@ try {
     $state = Get-Content -LiteralPath (
         Join-Path $dataRoot 'runtime' 'installation.json'
     ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 20
-    if ([string]$state.activeVersion -cne '0.1.0') {
+    if ([string]$state.activeVersion -cne $baselineVersion) {
         throw 'Failed update did not retain the previous active version.'
     }
     $status = Invoke-Installer -Installer $installer -Arguments @{
         Action = 'Status'
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $status -Action Healthy -Version '0.1.0'
+    Assert-InstallerAction -Result $status -Action Healthy -Version $baselineVersion
     if (
         @(Get-KonclavePluginRecords).Count -ne 1 -or
         -not (Test-Path -LiteralPath (
@@ -504,14 +514,14 @@ try {
         ReleaseDirectory = $candidateRelease
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $updatedAgain -Action Switch -Version '0.1.1'
+    Assert-InstallerAction -Result $updatedAgain -Action Switch -Version $candidateVersion
     Write-Output 'lifecycle: retained candidate reactivated'
     $managerInstallRoot = [string]$updatedAgain.installRoot
     $activatedAgain = Invoke-Installer -Installer $installer -Arguments @{
         Action = 'ActivatePlugin'
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $activatedAgain -Action PluginActivated -Version '0.1.1'
+    Assert-InstallerAction -Result $activatedAgain -Action PluginActivated -Version $candidateVersion
     Write-Output 'lifecycle: candidate plugin activated'
     if (@(Get-KonclavePluginRecords).Count -ne 1) {
         throw 'Plugin update created a duplicate Konclave installation.'
@@ -521,7 +531,7 @@ try {
         Action = 'Uninstall'
         DataRoot = $dataRoot
     }
-    Assert-InstallerAction -Result $uninstalled -Action Uninstalled -Version '0.1.1'
+    Assert-InstallerAction -Result $uninstalled -Action Uninstalled -Version $candidateVersion
     Write-Output 'lifecycle: installer uninstalled'
     $task = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
     if (

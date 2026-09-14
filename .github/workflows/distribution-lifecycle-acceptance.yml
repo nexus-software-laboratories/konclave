@@ -5,6 +5,17 @@ on:
     branches: [main]
     types: [opened, edited, synchronize, reopened]
   workflow_dispatch:
+    inputs:
+      baseline_tag:
+        description: Immutable baseline release tag
+        required: false
+        default: v0.1.0
+        type: string
+      candidate_tag:
+        description: Immutable candidate release tag
+        required: false
+        default: v0.1.1
+        type: string
 
 permissions:
   contents: read
@@ -190,8 +201,13 @@ jobs:
       - name: Exercise native install, update, rollback, and uninstall
         shell: pwsh
         env:
+          BASELINE_TAG: ${{ inputs.baseline_tag || 'v0.1.0' }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag || 'v0.1.1' }}
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/installation/Test-NativeInstallerLifecycle.ps1
+        run: |
+          ./scripts/installation/Test-NativeInstallerLifecycle.ps1 `
+            -BaselineTag $env:BASELINE_TAG `
+            -CandidateTag $env:CANDIDATE_TAG
 
   distribution-lifecycle-acceptance:
     name: Distribution lifecycle acceptance
