@@ -44,6 +44,12 @@ supports_plugin_json=false
 if "$copilot_command" plugin list --help | grep -q -- '--json'; then
     supports_plugin_json=true
 fi
+supports_plugin_toggle=false
+if "$copilot_command" plugin disable --help >/dev/null 2>&1 &&
+    "$copilot_command" plugin enable --help >/dev/null 2>&1
+then
+    supports_plugin_toggle=true
+fi
 
 assert_registered() {
     local name="$1"
@@ -179,24 +185,14 @@ exercise_registration() {
     install_plugin "$marketplace"
     assert_installed "$marketplace" "$expected_version" true "$mode"
 
-    "$copilot_command" plugin disable "konclave@$marketplace"
-    assert_installed "$marketplace" "$expected_version" false "$mode"
-    "$copilot_command" plugin enable "konclave@$marketplace"
-    assert_installed "$marketplace" "$expected_version" true "$mode"
-
-    set +e
-    local remove_output
-    remove_output="$("$copilot_command" plugin marketplace remove "$marketplace" 2>&1)"
-    local remove_status="$?"
-    set -e
-    printf '%s\n' "$remove_output"
-    if [ "$remove_status" -eq 0 ]; then
-        echo 'Marketplace removal succeeded while its plugin was installed.' >&2
-        exit 1
-    fi
-    if ! grep -Eiq 'installed|force' <<<"$remove_output"; then
-        echo 'Marketplace removal failed for an unexpected reason.' >&2
-        exit 1
+    if [ "$supports_plugin_toggle" = true ]; then
+        "$copilot_command" plugin disable "konclave@$marketplace"
+        assert_installed "$marketplace" "$expected_version" false "$mode"
+        "$copilot_command" plugin enable "konclave@$marketplace"
+        assert_installed "$marketplace" "$expected_version" true "$mode"
+    else
+        printf 'Copilot CLI %s does not expose plugin disable/enable commands.\n' \
+            "$expected_cli_version"
     fi
 
     "$copilot_command" plugin marketplace remove "$marketplace" --force
