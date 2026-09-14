@@ -53,9 +53,15 @@ publication.
 - Copilot installs marketplace plugins under its replaceable installed-plugin root.
   Remote marketplace repositories use a separate platform source cache, overridable
   with `COPILOT_CACHE_HOME`.
+- User-added marketplaces use explicit catalog refresh and plugin update by default.
+  Session-start auto-update is opt-in for user marketplaces and is skipped in CI, so
+  the supported release flow does not depend on implicit refresh timing.
 - `marketplace remove --force` unregisters the marketplace and removes its installed
   plugins. The reusable remote-source cache may remain until ordinary cache cleanup;
   it is not installed plugin state or Konclave authority state.
+- An organization- or MDM-managed marketplace entry cannot be repointed locally.
+  Managed configuration replaces the same-named user entry and therefore remains an
+  administrative trust boundary rather than a local fallback.
 - The short CLI `marketplace add --help` text does not enumerate refs, and the older
   open [github/copilot-cli#1296](https://github.com/github/copilot-cli/issues/1296)
   records that branch and tag syntax was previously unavailable or untested. The
@@ -302,7 +308,8 @@ The supported install order is:
 
 An update publishes and verifies the new immutable Release first, then advances the
 marketplace branch. Clients refresh the marketplace and update the plugin only after
-the matching native runtime is healthy.
+the matching native runtime is healthy. Managed deployments may configure the same
+stable marketplace source centrally; local configuration cannot override that source.
 
 A rollback rematerializes the prior immutable plugin archive as a new reviewed branch
 snapshot and rolls the native installer back to the same Release version. Because
@@ -434,6 +441,8 @@ this accepted decision. The implementation issue must then:
   archive bytes;
 - retain hosted current/minimum CLI install, update, rollback, remove, cache-isolation,
   and branch-cleanup acceptance;
+- verify that user configuration cannot override a same-named managed marketplace
+  source and that explicit refresh remains deterministic when auto-update is disabled;
 - update installation documentation only after the production branch exists and
   passes lifecycle acceptance; and
 - keep direct local plugin activation as an explicitly transitional compatibility
