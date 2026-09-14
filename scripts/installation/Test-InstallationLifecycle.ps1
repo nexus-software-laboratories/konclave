@@ -71,6 +71,9 @@ foreach ($case in $cases) {
     $expectedTarget = if ($case.ContainsKey('Target')) {
         [string]$case.Target
     }
+    elseif ($case.ContainsKey('Candidate')) {
+        [string]$case.Candidate.version
+    }
     else {
         ''
     }
