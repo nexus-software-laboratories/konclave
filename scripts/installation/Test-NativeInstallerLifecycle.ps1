@@ -223,6 +223,32 @@ try {
     ))
     & (Join-Path $baselineRelease 'Verify-Release.ps1') -Directory $baselineRelease
     & (Join-Path $candidateRelease 'Verify-Release.ps1') -Directory $candidateRelease
+    foreach ($name in @(
+        'Install-Konclave.ps1',
+        'InstallationLifecycle.Functions.ps1',
+        'InstallationRuntime.Functions.ps1'
+    )) {
+        Copy-Item `
+            -LiteralPath (Join-Path $PSScriptRoot $name) `
+            -Destination (Join-Path $candidateRelease $name) `
+            -Force
+    }
+    foreach ($name in @(
+        'ReleaseIntegrity.Functions.ps1',
+        'ReleasePublication.Functions.ps1'
+    )) {
+        Copy-Item `
+            -LiteralPath (Join-Path $PSScriptRoot '..' 'packaging' $name) `
+            -Destination (Join-Path $candidateRelease $name) `
+            -Force
+    }
+    Copy-Item `
+        -LiteralPath (
+            Join-Path $PSScriptRoot '..' '..' 'apps' 'Konclave.LocalDaemon' `
+                'packaging' 'windows' 'manage-user-service.ps1'
+        ) `
+        -Destination (Join-Path $candidateRelease 'WindowsUserService.ps1') `
+        -Force
 
     $candidateManifest = Get-Content -LiteralPath (
         Join-Path $candidateRelease 'RELEASE.json'

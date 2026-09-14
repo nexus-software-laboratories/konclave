@@ -63,8 +63,7 @@ function Remove-CandidateVersion {
 
     $versionRoot = Join-Path $Paths.versionsRoot $Version
     if (Test-Path -LiteralPath $versionRoot) {
-        [void](Assert-SafeInstallationItem -Path $versionRoot -Kind Directory)
-        Remove-Item -LiteralPath $versionRoot -Recurse -Force
+        Remove-InstallerDirectory -Path $versionRoot
     }
 }
 
@@ -173,7 +172,7 @@ if ($Action -ceq 'Uninstall') {
         -InstallRoot $root `
         -ConfigPath $paths.serviceConfigPath)
     if (Test-Path -LiteralPath $paths.versionsRoot) {
-        Remove-Item -LiteralPath $paths.versionsRoot -Recurse -Force
+        Remove-InstallerDirectory -Path $paths.versionsRoot
     }
     if (Test-Path -LiteralPath $paths.statePath) {
         Remove-Item -LiteralPath $paths.statePath -Force

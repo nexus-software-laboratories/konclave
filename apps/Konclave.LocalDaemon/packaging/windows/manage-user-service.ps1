@@ -90,6 +90,39 @@ function Assert-ManagedTask {
     }
 }
 
+function Wait-ManagedProcessExit {
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        $processes = @(
+            Get-CimInstance Win32_Process -Filter "Name='KonclaveLocalService.exe'" |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
+                    ([string]$_.ExecutablePath).Equals(
+                        $binaryPath,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }
+        )
+        if ($processes.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "Scheduled task '$taskName' process did not stop."
+}
+
+function Stop-ManagedTask {
+    param(
+        [Parameter(Mandatory)]
+        $Task
+    )
+
+    Assert-ManagedTask -Task $Task
+    if ($Task.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $taskName
+    }
+    Wait-ManagedProcessExit
+}
+
 $task = Get-ManagedTask
 switch ($Action) {
     'Install' {
@@ -136,8 +169,7 @@ switch ($Action) {
     }
     'Stop' {
         if ($null -ne $task) {
-            Assert-ManagedTask -Task $task
-            Stop-ScheduledTask -TaskName $taskName
+            Stop-ManagedTask -Task $task
         }
     }
     'Status' {
@@ -156,20 +188,7 @@ switch ($Action) {
     }
     'Uninstall' {
         if ($null -ne $task) {
-            Assert-ManagedTask -Task $task
-            if ($task.State -eq 'Running') {
-                Stop-ScheduledTask -TaskName $taskName
-                for ($attempt = 0; $attempt -lt 50; $attempt++) {
-                    $task = Get-ManagedTask
-                    if ($null -eq $task -or $task.State -ne 'Running') {
-                        break
-                    }
-                    Start-Sleep -Milliseconds 100
-                }
-                if ($null -ne $task -and $task.State -eq 'Running') {
-                    throw "Scheduled task '$taskName' did not stop."
-                }
-            }
+            Stop-ManagedTask -Task $task
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
         }
     }
