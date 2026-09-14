@@ -180,6 +180,7 @@ $root = Join-Path (
 ) "konclave-native-lifecycle-$([Guid]::NewGuid().ToString('N'))"
 $baselineRelease = Join-Path $root 'release-0.1.0'
 $candidateRelease = Join-Path $root 'release-0.1.1'
+$currentInstallerRoot = Join-Path $root 'current-installer'
 $bootstrapRoot = Join-Path $root 'bootstrap'
 $localAppData = Join-Path $root 'local-app-data'
 $dataRoot = Join-Path $localAppData 'Konclave'
@@ -194,6 +195,7 @@ New-Item -ItemType Directory -Path (
     $root,
     $baselineRelease,
     $candidateRelease,
+    $currentInstallerRoot,
     $bootstrapRoot,
     $relayState,
     $copilotHome
@@ -230,7 +232,7 @@ try {
     )) {
         Copy-Item `
             -LiteralPath (Join-Path $PSScriptRoot $name) `
-            -Destination (Join-Path $candidateRelease $name) `
+            -Destination (Join-Path $currentInstallerRoot $name) `
             -Force
     }
     foreach ($name in @(
@@ -239,7 +241,7 @@ try {
     )) {
         Copy-Item `
             -LiteralPath (Join-Path $PSScriptRoot '..' 'packaging' $name) `
-            -Destination (Join-Path $candidateRelease $name) `
+            -Destination (Join-Path $currentInstallerRoot $name) `
             -Force
     }
     Copy-Item `
@@ -247,7 +249,7 @@ try {
             Join-Path $PSScriptRoot '..' '..' 'apps' 'Konclave.LocalDaemon' `
                 'packaging' 'windows' 'manage-user-service.ps1'
         ) `
-        -Destination (Join-Path $candidateRelease 'WindowsUserService.ps1') `
+        -Destination (Join-Path $currentInstallerRoot 'WindowsUserService.ps1') `
         -Force
 
     $candidateManifest = Get-Content -LiteralPath (
@@ -311,8 +313,8 @@ try {
     }
     Wait-RelayHealth -Endpoint $endpoint
 
-    $installer = Join-Path $candidateRelease 'Install-Konclave.ps1'
-    $manager = Join-Path $candidateRelease 'WindowsUserService.ps1'
+    $installer = Join-Path $currentInstallerRoot 'Install-Konclave.ps1'
+    $manager = Join-Path $currentInstallerRoot 'WindowsUserService.ps1'
     $installArguments = @{
         Action = 'Install'
         ReleaseDirectory = $baselineRelease
