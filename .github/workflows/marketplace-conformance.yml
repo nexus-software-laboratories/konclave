@@ -175,6 +175,7 @@ jobs:
         shell: bash
         env:
           MARKETPLACE_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.repository || github.workspace }}
+          SOURCE_MODE: ${{ github.event_name == 'pull_request' && 'live' || 'remote' }}
         run: |
           timeout --foreground --kill-after=30s 12m \
             bash scripts/marketplace/Test-DefaultMarketplaceLifecycle.sh \
@@ -182,7 +183,8 @@ jobs:
               '${{ matrix.version }}' \
               "$GITHUB_WORKSPACE" \
               "$MARKETPLACE_SOURCE" \
-              '${{ needs.marketplace-materialization.outputs.version }}'
+              '${{ needs.marketplace-materialization.outputs.version }}' \
+              "$SOURCE_MODE"
 
   marketplace-conformance:
     name: Marketplace conformance

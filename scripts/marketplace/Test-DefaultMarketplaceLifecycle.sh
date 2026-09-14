@@ -6,6 +6,11 @@ expected_cli_version="${2:?Copilot CLI version is required.}"
 marketplace_root="${3:?Marketplace root is required.}"
 marketplace_source="${4:?Marketplace source is required.}"
 expected_version="${5:?Marketplace version is required.}"
+source_mode="${6:?Marketplace source mode is required.}"
+if [ "$source_mode" != 'live' ] && [ "$source_mode" != 'remote' ]; then
+    echo "Unsupported marketplace source mode: $source_mode" >&2
+    exit 1
+fi
 
 test_root="$(mktemp -d)"
 cleanup() {
@@ -88,10 +93,15 @@ assert_installed() {
     local marketplace="$1"
     local version="$2"
     local enabled="${3:-}"
-    local manifest
-    manifest="$(find_installed_manifest "$version")"
+    local mode="${4:-remote}"
     local plugin_root
-    plugin_root="$(dirname "$manifest")"
+    if [ "$mode" = 'live' ]; then
+        plugin_root="$marketplace_root/plugins/konclave"
+    else
+        local manifest
+        manifest="$(find_installed_manifest "$version")"
+        plugin_root="$(dirname "$manifest")"
+    fi
     find "$plugin_root" -type f -printf '%P\n' | sort >"$test_root/actual-plugin-files"
     cat >"$test_root/expected-plugin-files" <<'EOF'
 com.github.copilot/extensions/konclave/extension.mjs
@@ -163,15 +173,16 @@ install_plugin() {
 exercise_registration() {
     local source="$1"
     local marketplace="$2"
+    local mode="$3"
     "$copilot_command" plugin marketplace add "$source"
     assert_registered "$marketplace"
     install_plugin "$marketplace"
-    assert_installed "$marketplace" "$expected_version" true
+    assert_installed "$marketplace" "$expected_version" true "$mode"
 
     "$copilot_command" plugin disable "konclave@$marketplace"
-    assert_installed "$marketplace" "$expected_version" false
+    assert_installed "$marketplace" "$expected_version" false "$mode"
     "$copilot_command" plugin enable "konclave@$marketplace"
-    assert_installed "$marketplace" "$expected_version" true
+    assert_installed "$marketplace" "$expected_version" true "$mode"
 
     set +e
     local remove_output
@@ -194,7 +205,7 @@ exercise_registration() {
 
     "$copilot_command" plugin marketplace add "$source"
     install_plugin "$marketplace"
-    assert_installed "$marketplace" "$expected_version" true
+    assert_installed "$marketplace" "$expected_version" true "$mode"
     "$copilot_command" plugin uninstall "konclave@$marketplace"
     assert_not_installed
     "$copilot_command" plugin marketplace remove "$marketplace"
@@ -272,7 +283,7 @@ exercise_update_and_rollback() {
 }
 
 "$copilot_command" --version | grep -F "$expected_cli_version"
-exercise_registration "$marketplace_source" konclave
+exercise_registration "$marketplace_source" konclave "$source_mode"
 exercise_update_and_rollback
 
 if [ "$(sha256sum "$authority_sentinel" | awk '{print $1}')" != "$authority_digest" ]; then
