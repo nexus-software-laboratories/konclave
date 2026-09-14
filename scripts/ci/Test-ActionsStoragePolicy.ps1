@@ -20,7 +20,7 @@ function Get-StepBlock {
     )
 
     $start = $Line
-    while ($start -ge 0 -and $Lines[$start] -cnotmatch '^\s*- (?:name|uses):') {
+    while ($start -ge 0 -and $Lines[$start] -cnotmatch '^\s*- (?:name|uses|run):') {
         $start--
     }
     if ($start -lt 0) {
@@ -29,7 +29,7 @@ function Get-StepBlock {
     $indent = $Lines[$start].Length - $Lines[$start].TrimStart().Length
     $end = $Lines.Count
     for ($index = $start + 1; $index -lt $Lines.Count; $index++) {
-        if ($Lines[$index] -cmatch "^\s{$indent}- (?:name|uses):") {
+        if ($Lines[$index] -cmatch "^\s{$indent}- (?:name|uses|run):") {
             $end = $index
             break
         }
@@ -77,7 +77,14 @@ foreach ($required in @(
         throw "Node setup does not enforce shared main-only caching: $required"
     }
 }
-if ($nodeSetup.Contains('${{ inputs.npm-cache-scope }}-${{ inputs.npm-cache-dependency-hash }}')) {
+$nodeCacheKey = @(
+    $nodeSetup -split "`r?`n" |
+        Where-Object { $_ -cmatch '^\s+key: npm-download-' }
+)
+if (
+    $nodeCacheKey.Count -ne 1 -or
+    $nodeCacheKey[0].Contains('inputs.npm-cache-scope')
+) {
     throw 'Node setup partitions identical npm download stores by workflow scope.'
 }
 
@@ -87,6 +94,7 @@ $cleanup = Get-Content -LiteralPath (
 foreach ($required in @(
     'name: Actions storage cleanup',
     '- Agent plugin conformance',
+    "github.event.workflow_run.path == '.github/workflows/agent-plugin-conformance.yml'",
     "github.event.workflow_run.path == '.github/workflows/package-validation.yml'",
     "github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml'",
     'CACHE_BUDGET_BYTES: ''5368709120''',
