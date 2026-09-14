@@ -222,7 +222,6 @@ try {
     $port = Get-FreePort
     $endpoint = "http://127.0.0.1:$port"
     $accessDocument = Join-Path $relayState 'access.json'
-    $enrollmentSource = Join-Path $relayState 'enrollment.credential'
     [void](Invoke-NativeCommand (
         Join-Path $bootstrapClient 'bin' 'konclave.exe'
     ) @(
@@ -230,9 +229,7 @@ try {
         '--relay-endpoint',
         $endpoint,
         '--access-document',
-        $accessDocument,
-        '--external-source',
-        $enrollmentSource
+        $accessDocument
     ))
 
     $relayLog = Join-Path $relayState 'relay.log'
@@ -273,7 +270,6 @@ try {
         DataRoot = $dataRoot
         RelayEndpoint = $endpoint
         AuthorizationPolicy = 'account-trusted'
-        ExternalSource = $enrollmentSource
         ServiceIdentityFile = $serviceIdentity
         ProfileKeyDirectory = $profileKeys
     }
