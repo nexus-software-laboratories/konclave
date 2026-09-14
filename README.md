@@ -58,8 +58,13 @@ The Copilot CLI host extension is packaged from
 
 ### Initialize an installation
 
-After installing the CLI, shared service, and Copilot extension, configure the
-installation once:
+Installer-enabled release sets provide `Install-Konclave.ps1`, which verifies release
+integrity and provenance, installs one versioned per-user runtime, starts the native
+supervisor, and requires health before reporting the Agent Plugin ready. See
+[Install an unsigned prerelease](docs/distribution/installation.md) for install,
+update, rollback, and uninstall commands.
+
+For a manually extracted development package, configure the installation once:
 
 ```shell
 konclave init --relay-endpoint https://relay.example.com

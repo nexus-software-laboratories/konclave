@@ -180,8 +180,16 @@ foreach ($path in @(
     $inputPaths.Add($path)
 }
 if ($BuildKind -ceq 'native') {
-    $inputPaths.Add('Cargo.lock')
-    $inputPaths.Add('extensions/Konclave.HostExtension/package-lock.json')
+    foreach ($path in @(
+        'Cargo.lock',
+        'extensions/Konclave.HostExtension/package-lock.json',
+        'scripts/installation/Install-Konclave.ps1',
+        'scripts/installation/InstallationLifecycle.Functions.ps1',
+        'scripts/installation/InstallationRuntime.Functions.ps1',
+        'scripts/packaging/ReleasePackaging.Functions.ps1'
+    )) {
+        $inputPaths.Add($path)
+    }
 }
 elseif ($BuildKind -ceq 'plugin') {
     foreach ($path in @(

@@ -122,6 +122,12 @@ function Assert-ReleaseLayout {
                 'share/konclave/client/client.mjs',
                 'share/konclave/client/generic.mjs',
                 'share/konclave/client/skills/konclave-generic/SKILL.md',
+                'share/konclave/installer/Install-Konclave.ps1',
+                'share/konclave/installer/InstallationLifecycle.Functions.ps1',
+                'share/konclave/installer/InstallationRuntime.Functions.ps1',
+                'share/konclave/installer/ReleaseIntegrity.Functions.ps1',
+                'share/konclave/installer/ReleasePublication.Functions.ps1',
+                'share/konclave/installer/WindowsUserService.ps1',
                 'share/konclave/policy/collaboration-policy-source-v1.schema.json',
                 'share/konclave/policy/collaboration-policy-source-v2.schema.json',
                 'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
@@ -155,7 +161,7 @@ function Assert-ReleaseLayout {
             $serviceRelative = switch ([string]$Artifact.operatingSystem) {
                 'linux' { 'share/konclave/service/systemd/KonclaveLocalService.service' }
                 'macos' { 'share/konclave/service/launchd/com.genesis.KonclaveLocalService.plist' }
-                'windows' { 'share/konclave/service/windows/install-service.ps1' }
+                'windows' { 'share/konclave/service/windows/manage-user-service.ps1' }
                 default {
                     throw "Unsupported release operating system: $($Artifact.operatingSystem)"
                 }
@@ -187,6 +193,24 @@ function Assert-ReleaseLayout {
                 )
             ) {
                 throw 'Windows client package is missing its shared-service host.'
+            }
+            $installerStateRoot = Join-Path (
+                [IO.Path]::GetTempPath()
+            ) "konclave-packaged-installer-$([Guid]::NewGuid().ToString('N'))"
+            try {
+                $installerOutput = & (
+                    Join-Path $ExtractedRoot 'share' 'konclave' 'installer' `
+                        'Install-Konclave.ps1'
+                ) -Action Status -DataRoot $installerStateRoot
+                $installerStatus = $installerOutput | ConvertFrom-Json -Depth 20
+                if ([string]$installerStatus.action -cne 'NotInstalled') {
+                    throw 'Packaged installer did not report an empty installation.'
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $installerStateRoot) {
+                    Remove-Item -LiteralPath $installerStateRoot -Recurse -Force
+                }
             }
         }
         'relay' {

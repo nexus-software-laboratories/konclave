@@ -36,14 +36,14 @@ directory is the installation root used by the commands below.
 Before extraction, verify the complete downloaded release set as described in
 [Verify release integrity and contents](integrity.md).
 
-For the `v0.1.0` prerelease, a clean machine with GitHub CLI and PowerShell can
+For the `v0.1.1` prerelease, a clean machine with GitHub CLI and PowerShell can
 download and verify the complete set without a source checkout:
 
 ```shell
-gh release download v0.1.0 \
+gh release download v0.1.1 \
   --repo nexus-software-laboratories/konclave \
-  --dir konclave-0.1.0
-pwsh ./konclave-0.1.0/Verify-Release.ps1
+  --dir konclave-0.1.1
+pwsh ./konclave-0.1.1/Verify-Release.ps1
 ```
 
 ## Install the Copilot Agent Plugin
@@ -62,8 +62,6 @@ is deprecated. The package must otherwise install without manifest warnings. The
 marketplace source is deliberately not selected or created by this package.
 
 Copilot's cache is replaceable runtime material, not an authority store.
-Installer-owned `konclave.service.json` lives under the canonical Konclave platform
-data root:
 Installer-owned `konclave.service.json` lives under the canonical Konclave platform
 data root rather than the replaceable extension directory:
 
@@ -100,21 +98,100 @@ unsupported harness's own skill location when the best-effort fallback is wanted
 Do not install it into Copilot CLI; the paved extension owns that harness.
 Do not copy a native executable or create a `bin/` child under the extension.
 
-## Replace or roll back an extracted release
+## Install the per-user runtime
 
-Release assets and their tag are immutable. Never overlay a corrected archive under
-an existing version: publish and verify a new version instead. Keep each extracted
-version in a separate owner-controlled directory and keep profiles, credentials,
-service identity, and canonical client configuration outside those directories.
+Installer-enabled complete release sets contain `Install-Konclave.ps1` beside the
+integrity verifier. The installer verifies checksums and every artifact's source
+provenance before extracting or executing a native binary, selects the current host
+target, and installs it under the canonical data root:
 
-Before switching versions, stop the per-user service with the platform manager from
-the active installation. Verify the complete target release set, start its service
-manager, and run that version's `konclave doctor --install-root <install-root>`.
-Rolling back uses the same process with a previously published release. `v0.1.0` is
-the first native prerelease, so it has no earlier native package to select; uninstall
-preserves separately stored profile and authority state by default.
+- Windows: `%LOCALAPPDATA%\Konclave\runtime\versions\<version>\`;
+- Linux: `$XDG_DATA_HOME/konclave/runtime/versions/<version>/`, or
+  `~/.local/share/konclave/runtime/versions/<version>/`; and
+- macOS:
+  `~/Library/Application Support/Konclave/runtime/versions/<version>/`.
 
-## Initialize the installation
+Run it from the directory containing every downloaded release asset:
+
+```shell
+pwsh ./Install-Konclave.ps1 \
+  -Action Install \
+  -ReleaseDirectory . \
+  -RelayEndpoint https://relay.example.com \
+  -AuthorizationPolicy account-trusted
+```
+
+The relay endpoint and policy are not credentials. Native setup reads the enrollment
+credential without echo. Headless operators pass only absolute paths such as
+`-ExternalSource`, `-ServiceIdentityFile`, and `-ProfileKeyDirectory`; secret bytes
+never enter process arguments.
+
+The installer records only version, target, archive digest, source commit, and
+package-root metadata in owner-only `runtime/installation.json`. Profiles, service
+identity, enrollment custody, authorization state, and canonical client
+configuration remain outside version directories.
+
+The candidate service must pass `konclave doctor` before installation state changes.
+The installer then reports the packaged Agent Plugin path as ready for #108's later
+marketplace integration. Native install, update, and rollback never modify Copilot's
+plugin cache.
+
+`-Action ActivatePlugin` is a separate explicit pre-marketplace compatibility step.
+It first rechecks the active service, then installs the local Agent Plugin, preserves
+any legacy raw extension under `runtime/legacy/`, removes the original, and reports
+that existing Copilot sessions must restart. It never kills those sessions:
+
+```shell
+pwsh ./Install-Konclave.ps1 -Action ActivatePlugin
+```
+
+## Update, rollback, status, and uninstall
+
+Update from another complete release directory:
+
+```shell
+pwsh ./Install-Konclave.ps1 -Action Update -ReleaseDirectory <new-release-directory>
+```
+
+Installing the active version again verifies and repairs supervision idempotently.
+`Install` with another version fails explicitly and directs the operator to
+`Update`. A recorded version whose SHA-256 differs from the candidate is rejected.
+If start, health, or state publication fails, the candidate manager is removed, the
+previous version is restarted and rechecked, candidate files are removed, and the
+prior configuration remains active.
+
+Rollback selects the recorded previous version by default, or one exact retained
+version:
+
+```shell
+pwsh ./Install-Konclave.ps1 -Action Rollback
+pwsh ./Install-Konclave.ps1 -Action Rollback -RollbackVersion <version>
+pwsh ./Install-Konclave.ps1 -Action Status
+```
+
+Immutable `v0.1.0` remains the first native rollback baseline and predates the
+installer files. The `v0.1.1` installer can still verify, extract, supervise, and
+retain that older client archive because its release manifest and provenance remain
+self-contained.
+
+Uninstall removes the exact supervisor definition, installer-owned version
+directories, installation metadata, and the replaceable client runtime record while
+retaining profiles, service identity, and durable authority state. If the explicit
+direct-plugin compatibility path was used, uninstall removes only that
+installer-owned cache entry and reports a Copilot restart:
+
+```shell
+pwsh ./Install-Konclave.ps1 -Action Uninstall
+```
+
+Permanent local state deletion is separate and requires both
+`-RemoveState -ConfirmStateRemoval`.
+
+Removing the client runtime record prevents a retained UserPresence helper path from
+pointing at deleted binaries. Reinstallation recreates that record from the preserved
+service authority and therefore requires the original relay endpoint again.
+
+## Initialize a manually extracted installation
 
 Run the packaged CLI once:
 
@@ -203,26 +280,20 @@ bash <install-root>/share/konclave/service/systemd/manage-user-service.sh instal
 bash <install-root>/share/konclave/service/launchd/manage-agent.sh install <install-root>
 ```
 
-On Windows, run `install-service.ps1 -Action Install -Credential <current-user>` for
-an SCM-managed per-user service, or use the local demo's hidden owner-session process.
-All managers also support start, stop, status, and uninstall actions and reject an
-existing conflicting definition.
+On Windows, `manage-user-service.ps1` registers one limited scheduled task for the
+current interactive user and requires no password in command history. The existing
+`install-service.ps1` remains an optional elevated SCM integration. All managers
+support install, start, stop, status, and uninstall actions and reject a definition
+that points to another binary, user, or configuration.
 
-## Upgrade and rollback
+## Profile schema compatibility
 
-The current unsigned prerelease has no supported external installation base.
-Protocol-v2 remains a clean development transition rather than a customer migration
-contract. Authorization-store schema 1 is upgraded transactionally to schema 2 on
-open after its complete schema and installation fingerprint are verified. The
-migration preserves policy, issuer, suspension, grant, reservation, and audit state,
-then adds the empty UserPresence credential tables and widens the closed audit-kind
-range. Unknown or modified schema-1 shapes fail closed.
+Authorization-store schema 1 is upgraded transactionally to schema 2 on open after
+its complete schema and installation fingerprint are verified. The migration
+preserves policy, issuer, suspension, grant, reservation, and audit state, then adds
+the empty UserPresence credential tables and widens the closed audit-kind range.
+Unknown or modified schema-1 shapes fail closed.
 
-Close old harness sessions, stop the exact recorded service, install the complete new
-archive, rerun the exact `init` command with the same explicit policy, and then start
-the shared service. The demo's `-Refresh` path replaces only obsolete development
-authorization state and package files after stopping that service; durable profiles
-remain separate.
 Existing conversation credential bindings remain valid for ordinary text but do not
 gain directed-request capability retroactively. Create new membership with the
 upgraded clients before using `send_directed_request` or `/konclave request`.
@@ -254,7 +325,7 @@ The Linux AMD64 container candidate is a Docker-loadable tar archive produced fr
 same build result as the statically validated OCI image:
 
 ```shell
-docker image load --input konclave-community-relay-container-0.1.0-linux-amd64.docker.tar
+docker image load --input konclave-community-relay-container-0.1.1-linux-amd64.docker.tar
 KONCLAVE_RELAY_ACCESS_SOURCE=/absolute/path/to/relay-access.json docker compose --file <relay-root>/share/konclave/relay/compose.example.yaml up --detach
 ```
 
@@ -291,7 +362,7 @@ shutdown behavior are in `<gateway-root>/share/konclave/a2a/README.md`.
 The Linux AMD64 container candidate is a separate Docker-loadable archive:
 
 ```shell
-docker image load --input konclave-a2a-gateway-container-0.1.0-linux-amd64.docker.tar
+docker image load --input konclave-a2a-gateway-container-0.1.1-linux-amd64.docker.tar
 ```
 
 Use `<gateway-root>/share/konclave/a2a/compose.example.yaml`,
@@ -318,7 +389,7 @@ system warnings by weakening machine-wide security policy.
 See [Packaged clean-install acceptance](acceptance.md) for the automated evidence
 covering native and containerized self-hosting.
 
-## Uninstall an archive installation
+## Uninstall a manually extracted archive
 
 Disable or remove the exact issuer key versions owned by the package, stop the shared
 service through its platform manager, stop any A2A gateway process, remove the user

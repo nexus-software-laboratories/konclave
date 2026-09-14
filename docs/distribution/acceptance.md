@@ -57,6 +57,12 @@ The prerelease publisher consumes the same complete candidate set after this
 acceptance job succeeds. It does not rebuild an archive after creating the release
 tag.
 
+The required `Installer lifecycle conformance` gate runs on hosted Linux, Windows,
+and macOS. It proves owner-only state publication, bounded ZIP and tar extraction,
+traversal rejection, host-target selection, legacy raw-extension backup, Windows
+owner-session task install/status/uninstall, and deterministic recovery from an
+unhealthy update without publishing new state.
+
 Gateway-container execution uses host-loopback networking only inside the acceptance
 harness so the owner-verified Unix local-service socket retains the host account's
 kernel peer identity. The released Compose contract is validated separately and uses
