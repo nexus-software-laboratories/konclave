@@ -18,6 +18,7 @@
     "test:coverage": "vitest run --coverage",
     "test:package-contract": "node scripts/test-package-contract.mjs",
     "test:marketplace-contract": "node scripts/test-marketplace-contract.mjs",
+    "test:marketplace-materializer": "node scripts/test-marketplace-materializer.mjs",
     "package": "node scripts/package-plugin.mjs",
     "spike:adapter-transport": "node spikes/adapter-transport-probe.mjs",
     "spike:sdk-proxy": "node spikes/sdk-tool-proxy-probe.mjs",
