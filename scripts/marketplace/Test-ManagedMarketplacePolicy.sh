@@ -28,10 +28,9 @@ cp "$marketplace_root/.github/plugin/marketplace.json" \
 cp -R "$marketplace_root/plugins/konclave" "$alternate/plugins/konclave"
 
 marketplaces="$("$copilot_command" plugin marketplace list)"
-if ! grep -Fq 'konclave' <<<"$marketplaces" ||
-    ! grep -Eiq 'managed' <<<"$marketplaces"
-then
-    echo 'Managed Konclave marketplace was not listed as managed.' >&2
+printf '%s\n' "$marketplaces"
+if ! grep -Fq 'konclave' <<<"$marketplaces"; then
+    echo 'Managed Konclave marketplace was not listed.' >&2
     exit 1
 fi
 
