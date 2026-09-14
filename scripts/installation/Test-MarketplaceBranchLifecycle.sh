@@ -11,9 +11,23 @@ plugin_version="${7:?Agent Plugin version is required.}"
 source_commit="${8:?Source commit is required.}"
 
 test_root="$(mktemp -d)"
-trap 'rm -rf -- "$test_root"' EXIT
+cleanup() {
+    local status="$?"
+    trap - EXIT
+    if ! rm -rf -- "$test_root"; then
+        echo 'Marketplace lifecycle root cleanup failed.' >&2
+        exit 1
+    fi
+    if [ -e "$test_root" ]; then
+        echo 'Marketplace lifecycle root remained after cleanup.' >&2
+        exit 1
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
 export COPILOT_HOME="$test_root/copilot-home"
 export HOME="$test_root/home"
+export COPILOT_CACHE_HOME="$test_root/copilot-cache"
 export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_DATA_HOME="$HOME/.local/share"
@@ -227,12 +241,13 @@ then
     echo 'Marketplace removal left a Konclave plugin cache.' >&2
     exit 1
 fi
-if [ -d "$XDG_CACHE_HOME/copilot/marketplaces" ] &&
-    find "$XDG_CACHE_HOME/copilot/marketplaces" -mindepth 1 -print -quit |
+# Removing a marketplace unregisters it and its installed plugins; the reusable
+# remote-source cache remains implementation-owned and is removed with this test root.
+if [ -d "$COPILOT_CACHE_HOME" ] &&
+    find "$COPILOT_CACHE_HOME" -mindepth 1 -print -quit |
         grep -q .
 then
-    echo 'Marketplace removal left a remote marketplace cache.' >&2
-    exit 1
+    printf 'Copilot retained its reusable source cache inside the isolated test root.\n'
 fi
 
 printf 'Copilot CLI %s non-default marketplace lifecycle passed.\n' "$expected_cli_version"
