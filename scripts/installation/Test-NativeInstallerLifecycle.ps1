@@ -296,6 +296,7 @@ try {
     }
     $installed = Invoke-Installer -Installer $installer -Arguments $installArguments
     Assert-InstallerAction -Result $installed -Action Install -Version '0.1.0'
+    Write-Output 'lifecycle: baseline installed'
     $managerInstallRoot = [string]$installed.installRoot
 
     $profileSentinel = Join-Path $dataRoot 'profiles' 'retained-profile.sqlite3'
@@ -354,9 +355,11 @@ try {
         -Result $healthyAfterRestart `
         -Action Healthy `
         -Version '0.1.0'
+    Write-Output 'lifecycle: supervisor stop and start passed'
 
     $verified = Invoke-Installer -Installer $installer -Arguments $installArguments
     Assert-InstallerAction -Result $verified -Action Verified -Version '0.1.0'
+    Write-Output 'lifecycle: repeat install passed'
 
     $legacyRoot = Join-Path $copilotHome 'extensions' 'konclave'
     . (Join-Path $PSScriptRoot 'InstallationRuntime.Functions.ps1')
@@ -380,6 +383,7 @@ try {
     ) -Force
     $migrated = Invoke-Installer -Installer $installer -Arguments $installArguments
     Assert-InstallerAction -Result $migrated -Action Verified -Version '0.1.0'
+    Write-Output 'lifecycle: legacy sidecar migrated'
     if (-not (Test-Path -LiteralPath (
         Join-Path $dataRoot 'service' 'konclave.service.json'
     ) -PathType Leaf)) {
@@ -391,6 +395,7 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $activated -Action PluginActivated -Version '0.1.0'
+    Write-Output 'lifecycle: baseline plugin activated'
     if (
         (Test-Path -LiteralPath $legacyRoot) -or
         -not (Test-Path -LiteralPath (
@@ -409,6 +414,7 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $updated -Action Update -Version '0.1.1'
+    Write-Output 'lifecycle: candidate updated'
     $candidateInstallRoot = [string]$updated.installRoot
 
     $rolledBack = Invoke-Installer -Installer $installer -Arguments @{
@@ -416,6 +422,7 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $rolledBack -Action RolledBack -Version '0.1.0'
+    Write-Output 'lifecycle: candidate rolled back'
     $managerInstallRoot = [string]$rolledBack.installRoot
 
     $candidateService = Join-Path $candidateInstallRoot 'bin' 'KonclaveLocalService.exe'
@@ -442,6 +449,7 @@ try {
     if (-not $updateFailed) {
         throw 'Unhealthy update unexpectedly succeeded.'
     }
+    Write-Output 'lifecycle: unhealthy update rejected'
     $state = Get-Content -LiteralPath (
         Join-Path $dataRoot 'runtime' 'installation.json'
     ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 20
@@ -453,6 +461,7 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $status -Action Healthy -Version '0.1.0'
+    Write-Output 'lifecycle: previous runtime restored'
 
     $updatedAgain = Invoke-Installer -Installer $installer -Arguments @{
         Action = 'Update'
@@ -460,12 +469,14 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $updatedAgain -Action Switch -Version '0.1.1'
+    Write-Output 'lifecycle: retained candidate reactivated'
     $managerInstallRoot = [string]$updatedAgain.installRoot
     $activatedAgain = Invoke-Installer -Installer $installer -Arguments @{
         Action = 'ActivatePlugin'
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $activatedAgain -Action PluginActivated -Version '0.1.1'
+    Write-Output 'lifecycle: candidate plugin activated'
     if ((Get-KonclavePluginRecords).Count -ne 1) {
         throw 'Plugin update created a duplicate Konclave installation.'
     }
@@ -475,6 +486,7 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $uninstalled -Action Uninstalled -Version '0.1.1'
+    Write-Output 'lifecycle: installer uninstalled'
     $task = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
     if (
         $task.Count -ne 0 -or
