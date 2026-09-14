@@ -432,7 +432,7 @@ try {
     ) {
         throw 'Legacy raw extension was not preserved and removed after activation.'
     }
-    if ((Get-KonclavePluginRecords).Count -ne 1) {
+    if (@(Get-KonclavePluginRecords).Count -ne 1) {
         throw 'Direct activation did not leave exactly one Konclave plugin.'
     }
 
@@ -490,7 +490,7 @@ try {
     }
     Assert-InstallerAction -Result $status -Action Healthy -Version '0.1.0'
     if (
-        (Get-KonclavePluginRecords).Count -ne 1 -or
+        @(Get-KonclavePluginRecords).Count -ne 1 -or
         -not (Test-Path -LiteralPath (
             Join-Path $dataRoot 'runtime' 'direct-plugin.json'
         ) -PathType Leaf)
@@ -513,7 +513,7 @@ try {
     }
     Assert-InstallerAction -Result $activatedAgain -Action PluginActivated -Version '0.1.1'
     Write-Output 'lifecycle: candidate plugin activated'
-    if ((Get-KonclavePluginRecords).Count -ne 1) {
+    if (@(Get-KonclavePluginRecords).Count -ne 1) {
         throw 'Plugin update created a duplicate Konclave installation.'
     }
 
@@ -530,7 +530,7 @@ try {
         (Test-Path -LiteralPath (Join-Path $dataRoot 'service' 'konclave.service.json')) -or
         -not (Test-Path -LiteralPath $profileSentinel -PathType Leaf) -or
         (Get-FileHashAfterRelease -Path $authorityPath) -cne $authorityHash -or
-        (Get-KonclavePluginRecords).Count -ne 0
+        @(Get-KonclavePluginRecords).Count -ne 0
     ) {
         throw 'Uninstall did not remove exact runtime state while retaining durable data.'
     }
