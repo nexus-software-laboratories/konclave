@@ -323,7 +323,8 @@ try {
     Assert-InstallerAction -Result $verified -Action Verified -Version '0.1.0'
 
     $legacyRoot = Join-Path $copilotHome 'extensions' 'konclave'
-    New-Item -ItemType Directory -Path $legacyRoot -Force | Out-Null
+    . (Join-Path $candidateRelease 'InstallationRuntime.Functions.ps1')
+    [void](Set-OwnerOnlyDirectory -Path $legacyRoot)
     Copy-Item (
         Join-Path $managerInstallRoot 'share' 'konclave' 'client' 'client.mjs'
     ) $legacyRoot
