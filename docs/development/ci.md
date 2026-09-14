@@ -100,6 +100,13 @@ instead of creating one copy per job. Scheduled and post-package cleanup removes
 pull-request cache and deletes the oldest trusted caches until the repository is at or
 below 5 GiB. Pull-request code receives no `actions: write` permission.
 
+`Marketplace conformance` verifies pure materialization decisions, Release checksum
+and SLSA provenance binding, safe exact-path writes, and byte identity between the
+immutable Agent Plugin archive and the four committed marketplace files. Pull
+requests run minimum/current Copilot CLI lifecycle against the local default-branch
+tree. A trusted post-merge dispatch repeats registration through the public
+`owner/repo` source without a ref suffix.
+
 ## Immutable prerelease publication
 
 `.github/workflows/publish-prerelease.yml` is manual, main-only, and uses public

@@ -48,18 +48,20 @@ pwsh ./konclave-0.1.2/Verify-Release.ps1
 
 ## Install the Copilot Agent Plugin
 
-The standalone `konclave-<version>.zip` contains exactly the Agent Plugins 1.0
-manifest and the Copilot extension files beneath
-`com.github.copilot/extensions/konclave/`. For isolated pre-marketplace validation,
-extract it into an owner-controlled directory and run:
+The standalone `konclave-<version>.zip` is the immutable source for the Agent Plugins
+1.0 manifest and Copilot extension files published through the repository
+marketplace. Install and health-check the matching native runtime first, then
+register and install the default-branch marketplace:
 
 ```shell
-copilot plugin install <extracted-plugin-directory>
+copilot plugin marketplace add nexus-software-laboratories/konclave
+copilot plugin install konclave@konclave
 ```
 
-Current Copilot CLI builds emit the expected warning that direct plugin installation
-is deprecated. The package must otherwise install without manifest warnings. The
-marketplace source is deliberately not selected or created by this package.
+Marketplace installation emits no direct-install deprecation warning. The installed
+plugin contains exactly `plugin.json`, the Copilot extension package, and
+`extension.mjs`. Extracting the ZIP and installing its directory directly remains a
+development and recovery path, not the supported installation.
 
 Copilot's cache is replaceable runtime material, not an authority store.
 Installer-owned `konclave.service.json` lives under the canonical Konclave platform
@@ -132,11 +134,11 @@ identity, enrollment custody, authorization state, and canonical client
 configuration remain outside version directories.
 
 The candidate service must pass `konclave doctor` before installation state changes.
-The installer then reports the packaged Agent Plugin path as ready for #108's later
-marketplace integration. Native install, update, and rollback never modify Copilot's
-plugin cache.
+The installer reports the packaged Agent Plugin path for verification and explicit
+recovery. Native install, update, and rollback never modify Copilot's plugin or
+marketplace caches.
 
-`-Action ActivatePlugin` is a separate explicit pre-marketplace compatibility step.
+`-Action ActivatePlugin` is a separate explicit direct-install compatibility step.
 It first rechecks the active service, then installs the local Agent Plugin, preserves
 any legacy raw extension under `runtime/legacy/`, removes the original, and reports
 that existing Copilot sessions must restart. It never kills those sessions:
@@ -151,6 +153,14 @@ Update from another complete release directory:
 
 ```shell
 pwsh ./Install-Konclave.ps1 -Action Update -ReleaseDirectory <new-release-directory>
+```
+
+After the matching immutable Release and marketplace update are available, refresh
+and update the plugin:
+
+```shell
+copilot plugin marketplace update konclave
+copilot plugin update konclave@konclave
 ```
 
 Installing the active version again verifies and repairs supervision idempotently.
@@ -174,6 +184,15 @@ installer files. The `v0.1.2` installer can still verify, extract, supervise, an
 retain that older client archive because its release manifest and provenance remain
 self-contained.
 
+Plugin downgrade is explicit because `plugin update` does not downgrade. After the
+marketplace tree is restored from the matching prior immutable Release, run:
+
+```shell
+copilot plugin marketplace update konclave
+copilot plugin uninstall konclave@konclave
+copilot plugin install konclave@konclave
+```
+
 Uninstall removes the exact supervisor definition, installer-owned version
 directories, installation metadata, and the replaceable client runtime record while
 retaining profiles, service identity, and durable authority state. If the explicit
@@ -186,6 +205,15 @@ pwsh ./Install-Konclave.ps1 -Action Uninstall
 
 Permanent local state deletion is separate and requires both
 `-RemoveState -ConfirmStateRemoval`.
+
+Marketplace removal is also separate from native uninstall:
+
+```shell
+copilot plugin marketplace remove konclave --force
+```
+
+This removes the registration and installed plugin but may leave Copilot's reusable
+source cache. That cache contains no Konclave authority or profile state.
 
 Removing the client runtime record prevents a retained UserPresence helper path from
 pointing at deleted binaries. Reinstallation recreates that record from the preserved
