@@ -151,7 +151,6 @@ function Get-InstallationPaths {
         stagingRoot = Join-Path $runtime 'staging'
         legacyRoot = Join-Path $runtime 'legacy'
         statePath = Join-Path $runtime 'installation.json'
-        transactionPath = Join-Path $runtime 'transaction.json'
         profileRoot = Join-Path $data 'profiles'
         serviceRoot = Join-Path $data 'service'
         serviceConfigPath = Join-Path $data 'service' 'konclave-local-service.json'

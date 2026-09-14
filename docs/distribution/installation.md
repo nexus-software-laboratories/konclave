@@ -168,7 +168,8 @@ retain that older client archive because its release manifest and provenance rem
 self-contained.
 
 Uninstall removes the exact supervisor definition, installer-owned version
-directories, and installation metadata while retaining profiles and authority state:
+directories, installation metadata, and the replaceable client runtime record while
+retaining profiles, service identity, and durable authority state:
 
 ```shell
 pwsh ./Install-Konclave.ps1 -Action Uninstall
@@ -176,6 +177,10 @@ pwsh ./Install-Konclave.ps1 -Action Uninstall
 
 Permanent local state deletion is separate and requires both
 `-RemoveState -ConfirmStateRemoval`.
+
+Removing the client runtime record prevents a retained UserPresence helper path from
+pointing at deleted binaries. Reinstallation recreates that record from the preserved
+service authority and therefore requires the original relay endpoint again.
 
 ## Initialize a manually extracted installation
 

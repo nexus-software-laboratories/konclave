@@ -159,8 +159,12 @@ if ($Action -ceq 'Uninstall') {
     if (Test-Path -LiteralPath $paths.statePath) {
         Remove-Item -LiteralPath $paths.statePath -Force
     }
+    if (Test-Path -LiteralPath $paths.clientConfigPath) {
+        [void](Assert-SafeInstallationItem -Path $paths.clientConfigPath -Kind File)
+        Remove-Item -LiteralPath $paths.clientConfigPath -Force
+    }
     if ($RemoveState) {
-        foreach ($path in @($paths.profileRoot, $paths.serviceRoot)) {
+        foreach ($path in @($paths.profileRoot, $paths.serviceRoot, $paths.legacyRoot)) {
             if (Test-Path -LiteralPath $path) {
                 [void](Assert-SafeInstallationItem -Path $path -Kind Directory)
                 Remove-Item -LiteralPath $path -Recurse -Force
@@ -243,7 +247,11 @@ if ($null -eq $knownCandidate -and (Test-Path -LiteralPath $candidateVersionRoot
 $installedCandidate = Install-ReleaseCandidateFiles -Paths $paths -Candidate $candidate
 $candidateRoot = [string]$installedCandidate.root
 
-if (-not (Test-Path -LiteralPath $paths.serviceConfigPath -PathType Leaf)) {
+$initializationRequired = (
+    -not (Test-Path -LiteralPath $paths.serviceConfigPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $paths.clientConfigPath -PathType Leaf)
+)
+if ($initializationRequired) {
     if ([string]::IsNullOrWhiteSpace($RelayEndpoint)) {
         if ($installedCandidate.created) {
             Remove-CandidateVersion -Paths $paths -Version $candidate.record.version
