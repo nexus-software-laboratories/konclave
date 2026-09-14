@@ -13,7 +13,17 @@ source_commit="${8:?Source commit is required.}"
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 export COPILOT_HOME="$test_root/copilot-home"
-mkdir -p "$COPILOT_HOME" "$test_root/distribution/plugins/konclave"
+export HOME="$test_root/home"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+mkdir -p \
+    "$COPILOT_HOME" \
+    "$HOME" \
+    "$XDG_CACHE_HOME" \
+    "$XDG_CONFIG_HOME" \
+    "$XDG_DATA_HOME" \
+    "$test_root/distribution/plugins/konclave"
 unzip -q "$plugin_archive" -d "$test_root/distribution/plugins/konclave"
 
 next_version="$(
@@ -107,6 +117,22 @@ find_cached_manifest() {
     printf '%s\n' "${matches[0]}"
 }
 
+verify_cached_plugin() {
+    local version="$1"
+    local manifest
+    local cache_root
+    manifest="$(find_cached_manifest "$version")"
+    cache_root="$(dirname "$manifest")"
+    find "$cache_root" -type f -printf '%P\n' | sort >"$test_root/actual-plugin-files"
+    cat >"$test_root/expected-plugin-files" <<'EOF'
+com.github.copilot/extensions/konclave/extension.mjs
+com.github.copilot/extensions/konclave/package.json
+plugin.json
+EOF
+    diff -u "$test_root/expected-plugin-files" "$test_root/actual-plugin-files"
+    printf '%s\n' "$manifest"
+}
+
 add_marketplace() {
     local label="$1"
     local source="$2"
@@ -146,8 +172,13 @@ if ! grep -Fq "$marketplace_name" <<<"$marketplaces"; then
     echo 'Registered marketplace was not listed.' >&2
     exit 1
 fi
+available_plugins="$("$copilot_command" plugin marketplace browse "$marketplace_name")"
+if ! grep -Fq 'konclave' <<<"$available_plugins"; then
+    echo 'Registered marketplace did not expose the Konclave plugin.' >&2
+    exit 1
+fi
 "$copilot_command" plugin install "konclave@$marketplace_name"
-initial_manifest="$(find_cached_manifest "$plugin_version")"
+initial_manifest="$(verify_cached_plugin "$plugin_version")"
 
 jq \
     --arg version "$next_version" \
@@ -170,7 +201,7 @@ git push origin "$second_commit:refs/heads/$branch"
 
 "$copilot_command" plugin marketplace update "$marketplace_name"
 "$copilot_command" plugin update "konclave@$marketplace_name"
-updated_manifest="$(find_cached_manifest "$next_version")"
+updated_manifest="$(verify_cached_plugin "$next_version")"
 if [ "$updated_manifest" = "$initial_manifest" ]; then
     printf 'Marketplace update reused cache root with updated bytes.\n'
 fi
@@ -182,13 +213,25 @@ git push \
 "$copilot_command" plugin marketplace update "$marketplace_name"
 "$copilot_command" plugin uninstall "konclave@$marketplace_name"
 "$copilot_command" plugin install "konclave@$marketplace_name"
-find_cached_manifest "$plugin_version" >/dev/null
+verify_cached_plugin "$plugin_version" >/dev/null
 
 "$copilot_command" plugin marketplace remove "$marketplace_name" --force
+marketplaces="$("$copilot_command" plugin marketplace list)"
+if grep -Fq "$marketplace_name" <<<"$marketplaces"; then
+    echo 'Marketplace remained registered after removal.' >&2
+    exit 1
+fi
 if find "$COPILOT_HOME" -type f -name plugin.json -exec \
     jq -e 'select(.name == "konclave")' {} \; | grep -q .
 then
     echo 'Marketplace removal left a Konclave plugin cache.' >&2
+    exit 1
+fi
+if [ -d "$XDG_CACHE_HOME/copilot/marketplaces" ] &&
+    find "$XDG_CACHE_HOME/copilot/marketplaces" -mindepth 1 -print -quit |
+        grep -q .
+then
+    echo 'Marketplace removal left a remote marketplace cache.' >&2
     exit 1
 fi
 
