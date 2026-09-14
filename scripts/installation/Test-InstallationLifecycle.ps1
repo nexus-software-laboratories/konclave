@@ -64,13 +64,19 @@ foreach ($case in $cases) {
         Action = $case.Action
         State = $case.State
     }
-    if ($case.Candidate) {
+    if ($case.ContainsKey('Candidate')) {
         $arguments.Candidate = $case.Candidate
     }
     $decision = Resolve-InstallationLifecycle @arguments
+    $expectedTarget = if ($case.ContainsKey('Target')) {
+        [string]$case.Target
+    }
+    else {
+        ''
+    }
     if (
         [string]$decision.kind -cne [string]$case.Kind -or
-        [string]$decision.targetVersion -cne [string]$case.Target
+        [string]$decision.targetVersion -cne $expectedTarget
     ) {
         throw "Lifecycle case failed: $($case.Name)"
     }
