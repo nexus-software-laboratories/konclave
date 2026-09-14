@@ -23,6 +23,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0018: Negotiate protected A2A as a fail-closed native Konclave handoff](../adr/adr-0018-fail-closed-protected-a2a-handoff.md)
 - [ADR 0019: Require harness-owned challenge-bound assertions for HarnessAttested grants](../adr/adr-0019-harness-owned-session-attestation.md)
 - [ADR 0020: Prove UserPresence with native WebAuthn verification](../adr/adr-0020-native-webauthn-user-presence.md)
+- [ADR 0021: Keep immutable artifacts in Releases and publish the marketplace tree on a generated branch](../adr/adr-0021-generated-marketplace-branch.md)
 
 ## Superseded records
 
