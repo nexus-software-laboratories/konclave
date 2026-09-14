@@ -317,6 +317,7 @@ function Resolve-ArchiveEntryPath {
         [string]$EntryName,
 
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [Collections.Generic.HashSet[string]]$Seen
     )
 
