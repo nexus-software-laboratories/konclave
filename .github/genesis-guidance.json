@@ -159,6 +159,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0022-default-branch-copilot-marketplace.md",
+        "title": "ADR 0022: Default-branch Copilot marketplace",
+        "section": "Architecture",
+        "order": 220,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
