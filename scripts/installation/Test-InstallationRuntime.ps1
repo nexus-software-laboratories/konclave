@@ -167,6 +167,62 @@ try {
         throw 'Protected tar.gz installation failed.'
     }
 
+    $events = [Collections.Generic.List[string]]::new()
+    $managerInvoker = {
+        param($Action, $InstallRoot, $ConfigPath)
+        $events.Add("$Action|$InstallRoot")
+    }.GetNewClosure()
+    $healthInvoker = {
+        param($InstallRoot, $InstallationPaths)
+        $events.Add("Health|$InstallRoot")
+        if ($InstallRoot -ceq [string]$tarInstall.root) {
+            throw 'synthetic candidate health failure'
+        }
+    }.GetNewClosure()
+    $stateWriter = {
+        param($StatePath, $NextState)
+        throw 'failed update must not publish state'
+    }
+    $candidateRemover = {
+        param($InstallationPaths, $Version)
+        $events.Add("Remove|$Version")
+    }.GetNewClosure()
+    $updateDecision = Resolve-InstallationLifecycle `
+        -Action Update `
+        -State $state `
+        -Candidate $tarRecord
+    Assert-RuntimeCheckFails {
+        Invoke-TransactionalRuntimeSwitch `
+            -Paths $paths `
+            -State $state `
+            -Decision $updateDecision `
+            -CandidateRecord $tarRecord `
+            -CandidateRoot $tarInstall.root `
+            -CandidateCreated $true `
+            -ManagerInvoker $managerInvoker `
+            -HealthInvoker $healthInvoker `
+            -StateWriter $stateWriter `
+            -CandidateRemover $candidateRemover
+    } 'an unhealthy update'
+    $expectedEvents = [string[]]@(
+        "Uninstall|$($zipInstall.root)",
+        "Install|$($tarInstall.root)",
+        "Health|$($tarInstall.root)",
+        "Uninstall|$($tarInstall.root)",
+        "Install|$($zipInstall.root)",
+        "Health|$($zipInstall.root)",
+        'Remove|0.2.0'
+    )
+    if (
+        @(Compare-Object `
+            ([string[]]$events) `
+            $expectedEvents `
+            -CaseSensitive `
+            -SyncWindow 0).Count -gt 0
+    ) {
+        throw 'Failed update did not restore the previous runnable version.'
+    }
+
     $unsafeZip = Join-Path $root 'unsafe.zip'
     Write-TestZip -Path $unsafeZip -EntryName '../escape.txt' -Content 'escape'
     Assert-RuntimeCheckFails {

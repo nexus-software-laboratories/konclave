@@ -832,7 +832,120 @@ function Enable-InstallerAgentPlugin {
         }
     }
 
-function Install-NewReleaseCandidateFiles {
+    function Invoke-TransactionalRuntimeSwitch {
+        param(
+            [Parameter(Mandatory)]
+            $Paths,
+
+            [Parameter(Mandatory)]
+            $State,
+
+            [Parameter(Mandatory)]
+            $Decision,
+
+            [Parameter(Mandatory)]
+            $CandidateRecord,
+
+            [Parameter(Mandatory)]
+            [string]$CandidateRoot,
+
+            [Parameter(Mandatory)]
+            [bool]$CandidateCreated,
+
+            [scriptblock]$ManagerInvoker,
+
+            [scriptblock]$HealthInvoker,
+
+            [scriptblock]$StateWriter,
+
+            [scriptblock]$CandidateRemover
+        )
+
+        if ($null -eq $ManagerInvoker) {
+            $ManagerInvoker = {
+                param($ManagerAction, $Root, $Configuration)
+                [void](Invoke-ServiceManager `
+                    -Action $ManagerAction `
+                    -InstallRoot $Root `
+                    -ConfigPath $Configuration)
+            }
+        }
+        if ($null -eq $HealthInvoker) {
+            $HealthInvoker = {
+                param($Root, $InstallationPaths)
+                [void](Wait-InstalledRuntimeHealth `
+                    -InstallRoot $Root `
+                    -Paths $InstallationPaths)
+            }
+        }
+        if ($null -eq $StateWriter) {
+            $StateWriter = {
+                param($StatePath, $NextState)
+                Write-InstallationState -Path $StatePath -State $NextState
+            }
+        }
+        if ($null -eq $CandidateRemover) {
+            $CandidateRemover = {
+                param($InstallationPaths, $Version)
+                $versionRoot = Join-Path $InstallationPaths.versionsRoot $Version
+                if (Test-Path -LiteralPath $versionRoot) {
+                    [void](Assert-SafeInstallationItem -Path $versionRoot -Kind Directory)
+                    Remove-Item -LiteralPath $versionRoot -Recurse -Force
+                }
+            }
+        }
+
+        $previousRecord = if ([string]::IsNullOrEmpty([string]$State.activeVersion)) {
+            $null
+        }
+        else {
+            Find-InstalledVersion -State $State -Version ([string]$State.activeVersion)
+        }
+        $previousRoot = if ($null -eq $previousRecord) {
+            $null
+        }
+        else {
+            Get-InstalledVersionRoot -Paths $Paths -Record $previousRecord
+        }
+        $candidateManagerInstalled = $false
+        try {
+            if ($null -ne $previousRoot) {
+                & $ManagerInvoker 'Uninstall' $previousRoot $Paths.serviceConfigPath
+            }
+            & $ManagerInvoker 'Install' $CandidateRoot $Paths.serviceConfigPath
+            $candidateManagerInstalled = $true
+            & $HealthInvoker $CandidateRoot $Paths
+            $nextState = Complete-InstallationLifecycle `
+                -State $State `
+                -Decision $Decision `
+                -Candidate $CandidateRecord
+            & $StateWriter $Paths.statePath $nextState
+            return $nextState
+        }
+        catch {
+            $operationError = $_
+            try {
+                if ($candidateManagerInstalled) {
+                    & $ManagerInvoker 'Uninstall' $CandidateRoot $Paths.serviceConfigPath
+                }
+                if ($null -ne $previousRoot) {
+                    & $ManagerInvoker 'Install' $previousRoot $Paths.serviceConfigPath
+                    & $HealthInvoker $previousRoot $Paths
+                }
+                if ($CandidateCreated) {
+                    & $CandidateRemover $Paths ([string]$CandidateRecord.version)
+                }
+            }
+            catch {
+                throw "Runtime switch failed and recovery failed: $(
+                    $operationError.Exception.Message
+                )`nRecovery: $($_.Exception.Message)"
+            }
+            throw $operationError
+        }
+    }
+
+    function Install-NewReleaseCandidateFiles {
     param(
         [Parameter(Mandatory)]
         $Paths,

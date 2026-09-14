@@ -284,56 +284,13 @@ if ($decision.kind -ceq 'Verify') {
     return
 }
 
-$previousRecord = if ([string]::IsNullOrEmpty([string]$state.activeVersion)) {
-    $null
-}
-else {
-    Get-StateVersionRecord -State $state -Version ([string]$state.activeVersion)
-}
-$candidateManagerInstalled = $false
-try {
-    if ($null -ne $previousRecord) {
-        $previousRoot = Get-InstalledVersionRoot -Paths $paths -Record $previousRecord
-        [void](Invoke-ServiceManager `
-            -Action Uninstall `
-            -InstallRoot $previousRoot `
-            -ConfigPath $paths.serviceConfigPath)
-    }
-    [void](Invoke-ServiceManager `
-        -Action Install `
-        -InstallRoot $candidateRoot `
-        -ConfigPath $paths.serviceConfigPath)
-    $candidateManagerInstalled = $true
-    [void](Wait-InstalledRuntimeHealth -InstallRoot $candidateRoot -Paths $paths)
-    $nextState = Complete-InstallationLifecycle `
-        -State $state `
-        -Decision $decision `
-        -Candidate $candidate.record
-    Write-InstallationState -Path $paths.statePath -State $nextState
-}
-catch {
-    $operationError = $_
-    try {
-        if ($candidateManagerInstalled) {
-            [void](Invoke-ServiceManager `
-                -Action Uninstall `
-                -InstallRoot $candidateRoot `
-                -ConfigPath $paths.serviceConfigPath)
-        }
-        if ($null -ne $previousRecord) {
-            Restore-PreviousRuntime -Paths $paths -PreviousRecord $previousRecord
-        }
-        if ($installedCandidate.created) {
-            Remove-CandidateVersion -Paths $paths -Version $candidate.record.version
-        }
-    }
-    catch {
-        throw "$Action failed and the previous runtime could not be restored: $(
-            $operationError.Exception.Message
-        )`nRecovery: $($_.Exception.Message)"
-    }
-    throw $operationError
-}
+[void](Invoke-TransactionalRuntimeSwitch `
+    -Paths $paths `
+    -State $state `
+    -Decision $decision `
+    -CandidateRecord $candidate.record `
+    -CandidateRoot $candidateRoot `
+    -CandidateCreated ([bool]$installedCandidate.created))
 
 $plugin = Enable-InstallerAgentPlugin `
     -InstallRoot $candidateRoot `
