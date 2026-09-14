@@ -2,7 +2,7 @@ name: konclave-a2a-gateway
 
 services:
   gateway:
-    image: konclave-a2a-gateway:0.1.1
+    image: konclave-a2a-gateway:0.1.2
     pull_policy: never
     restart: unless-stopped
     init: true

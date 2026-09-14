@@ -8,7 +8,7 @@ script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$script_directory/container-validation.lib.sh"
 
 for image_name in konclave-community-relay konclave-a2a-gateway; do
-    expected="$image_name:0.1.1"
+    expected="$image_name:0.1.2"
     actual="$(container_image_release_reference "$image_name" "$expected")"
     if [ "$actual" != "$expected" ]; then
         echo '::error::Release image reference did not round-trip exactly.'
@@ -16,8 +16,8 @@ for image_name in konclave-community-relay konclave-a2a-gateway; do
     fi
 
     for invalid in \
-        'other-image:0.1.1' \
-        "registry.example.com/$image_name:0.1.1" \
+        'other-image:0.1.2' \
+        "registry.example.com/$image_name:0.1.2" \
         "$image_name:bad:tag" \
         "$image_name:"
     do
