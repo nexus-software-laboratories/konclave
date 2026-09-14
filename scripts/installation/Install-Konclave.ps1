@@ -126,6 +126,7 @@ if ($Action -ceq 'Status') {
     }
     $record = Get-StateVersionRecord -State $state -Version $decision.targetVersion
     $root = Get-InstalledVersionRoot -Paths $paths -Record $record
+    $pluginRemoved = Disable-InstallerAgentPlugin -Paths $paths
     [void](Invoke-ServiceManager `
         -Action Status `
         -InstallRoot $root `
@@ -171,7 +172,20 @@ if ($Action -ceq 'Uninstall') {
             }
         }
     }
-    Write-InstallationResult -ResultAction Uninstalled -Version $record.version
+    $plugin = if ($pluginRemoved) {
+        [pscustomobject]@{
+            status = 'RemovedDirect'
+            pluginRoot = $null
+            restartRequired = $true
+        }
+    }
+    else {
+        $null
+    }
+    Write-InstallationResult `
+        -ResultAction Uninstalled `
+        -Version $record.version `
+        -Plugin $plugin
     return
 }
 
@@ -220,6 +234,7 @@ if ($Action -ceq 'Rollback') {
     $plugin = Enable-InstallerAgentPlugin `
         -InstallRoot $targetRoot `
         -Paths $paths `
+        -Version ([string]$targetRecord.version) `
         -EnableDirectAgentPlugin:$EnableDirectAgentPlugin
     Write-InstallationResult `
         -ResultAction RolledBack `
@@ -283,6 +298,7 @@ if ($decision.kind -ceq 'Verify') {
     $plugin = Enable-InstallerAgentPlugin `
         -InstallRoot $candidateRoot `
         -Paths $paths `
+        -Version ([string]$candidate.record.version) `
         -EnableDirectAgentPlugin:$EnableDirectAgentPlugin
     Write-InstallationResult `
         -ResultAction Verified `
@@ -303,6 +319,7 @@ if ($decision.kind -ceq 'Verify') {
 $plugin = Enable-InstallerAgentPlugin `
     -InstallRoot $candidateRoot `
     -Paths $paths `
+    -Version ([string]$candidate.record.version) `
     -EnableDirectAgentPlugin:$EnableDirectAgentPlugin
 Write-InstallationResult `
     -ResultAction ([string]$decision.kind) `

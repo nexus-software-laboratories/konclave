@@ -151,6 +151,7 @@ function Get-InstallationPaths {
         stagingRoot = Join-Path $runtime 'staging'
         legacyRoot = Join-Path $runtime 'legacy'
         statePath = Join-Path $runtime 'installation.json'
+        directPluginPath = Join-Path $runtime 'direct-plugin.json'
         profileRoot = Join-Path $data 'profiles'
         serviceRoot = Join-Path $data 'service'
         serviceConfigPath = Join-Path $data 'service' 'konclave-local-service.json'
@@ -734,7 +735,36 @@ function Resolve-LegacyCopilotExtensionRoot {
         return Join-Path ([IO.Path]::GetFullPath($copilotHome)) 'extensions' 'konclave'
     }
 
-function Move-LegacyCopilotExtension {
+    function Read-DirectPluginMarker {
+        param(
+            [Parameter(Mandatory)]
+            [string]$Path
+        )
+
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return $null
+        }
+        $file = Assert-SafeInstallationItem -Path $Path -Kind File
+        if ($file.Length -le 0 -or $file.Length -gt 4KB) {
+            throw 'Direct Agent Plugin marker is empty or oversized.'
+        }
+        $marker = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        $fields = [string[]]@($marker.PSObject.Properties.Name)
+        $expected = [string[]]@('schemaVersion', 'mode', 'name', 'version')
+        if (
+            @(Compare-Object $fields $expected -CaseSensitive).Count -gt 0 -or
+            [int]$marker.schemaVersion -ne 1 -or
+            [string]$marker.mode -cne 'direct' -or
+            [string]$marker.name -cne 'konclave' -or
+            [string]$marker.version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$'
+        ) {
+            throw 'Direct Agent Plugin marker is invalid.'
+        }
+        return $marker
+    }
+
+    function Move-LegacyCopilotExtension {
         param(
             [Parameter(Mandatory)]
             [string]$Source,
@@ -809,6 +839,9 @@ function Enable-InstallerAgentPlugin {
             [Parameter(Mandatory)]
             $Paths,
 
+            [Parameter(Mandatory)]
+            [string]$Version,
+
             [switch]$EnableDirectAgentPlugin
         )
 
@@ -824,10 +857,34 @@ function Enable-InstallerAgentPlugin {
         if ($null -eq (Get-Command copilot -ErrorAction SilentlyContinue)) {
             throw 'Copilot CLI is required for direct Agent Plugin activation.'
         }
+        $existingMarker = Read-DirectPluginMarker -Path $Paths.directPluginPath
+        if (
+            $null -ne $existingMarker -and
+            [string]$existingMarker.version -ceq $Version
+        ) {
+            return [pscustomobject][ordered]@{
+                status = 'InstalledDirect'
+                pluginRoot = $pluginRoot
+                restartRequired = $false
+            }
+        }
         $output = & copilot plugin install $pluginRoot 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "Direct Agent Plugin activation failed: $($output -join "`n")"
         }
+        $marker = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            mode = 'direct'
+            name = 'konclave'
+            version = $Version
+        }
+        $markerJson = ($marker | ConvertTo-Json -Compress) + "`n"
+        [IO.File]::WriteAllText(
+            $Paths.directPluginPath,
+            $markerJson,
+            [Text.UTF8Encoding]::new($false)
+        )
+        Set-OwnerOnlyFile -Path $Paths.directPluginPath
 
         $legacy = Resolve-LegacyCopilotExtensionRoot
         $restartRequired = $false
@@ -842,6 +899,27 @@ function Enable-InstallerAgentPlugin {
             pluginRoot = $pluginRoot
             restartRequired = $restartRequired
         }
+    }
+
+    function Disable-InstallerAgentPlugin {
+        param(
+            [Parameter(Mandatory)]
+            $Paths
+        )
+
+        if (-not (Test-Path -LiteralPath $Paths.directPluginPath)) {
+            return $false
+        }
+        [void](Read-DirectPluginMarker -Path $Paths.directPluginPath)
+        if ($null -eq (Get-Command copilot -ErrorAction SilentlyContinue)) {
+            throw 'Copilot CLI is required to remove the installer-owned direct plugin.'
+        }
+        $output = & copilot plugin uninstall konclave 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Direct Agent Plugin removal failed: $($output -join "`n")"
+        }
+        Remove-Item -LiteralPath $Paths.directPluginPath -Force
+        return $true
     }
 
     function Invoke-TransactionalRuntimeSwitch {

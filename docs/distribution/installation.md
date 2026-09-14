@@ -169,7 +169,9 @@ self-contained.
 
 Uninstall removes the exact supervisor definition, installer-owned version
 directories, installation metadata, and the replaceable client runtime record while
-retaining profiles, service identity, and durable authority state:
+retaining profiles, service identity, and durable authority state. If the explicit
+direct-plugin compatibility path was used, uninstall removes only that
+installer-owned cache entry and reports a Copilot restart:
 
 ```shell
 pwsh ./Install-Konclave.ps1 -Action Uninstall

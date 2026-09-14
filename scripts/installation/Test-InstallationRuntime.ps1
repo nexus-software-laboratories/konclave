@@ -290,6 +290,24 @@ try {
         }
     }
 
+    [IO.File]::WriteAllText(
+        $paths.directPluginPath,
+        '{"schemaVersion":1,"mode":"direct","name":"konclave","version":"0.1.1"}'
+    )
+    Set-OwnerOnlyFile -Path $paths.directPluginPath
+    $directMarker = Read-DirectPluginMarker -Path $paths.directPluginPath
+    if ([string]$directMarker.version -cne '0.1.1') {
+        throw 'Direct Agent Plugin marker did not validate.'
+    }
+    [IO.File]::WriteAllText(
+        $paths.directPluginPath,
+        '{"schemaVersion":1,"mode":"direct","name":"konclave","version":"0.1.1","extra":true}'
+    )
+    Assert-RuntimeCheckFails {
+        Read-DirectPluginMarker -Path $paths.directPluginPath
+    } 'an extended direct-plugin marker'
+    Remove-Item -LiteralPath $paths.directPluginPath -Force
+
     $legacy = Join-Path $root 'legacy-extension'
     [void](Set-OwnerOnlyDirectory -Path $legacy)
     [IO.File]::WriteAllText((Join-Path $legacy 'extension.mjs'), 'legacy')
