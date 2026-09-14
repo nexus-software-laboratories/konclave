@@ -49,6 +49,8 @@
         "a2a-conformance",
         "adapter-conformance",
         "agent-plugin-conformance",
+        "package-plugin",
+        "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
         "generic-client-conformance",
@@ -158,6 +160,15 @@
       "requiredChecks": [
         "Release publication conformance"
       ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/publish-prerelease.yml",
+      "roles": [
+        "repository-automation"
+      ],
+      "draftBehavior": "not-applicable",
+      "requiredChecks": []
     },
     {
       "source": "project",

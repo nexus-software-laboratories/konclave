@@ -4,6 +4,7 @@ on:
   workflow_run:
     workflows:
       - Package validation
+      - Publish prerelease
     types:
       - completed
 
@@ -14,6 +15,9 @@ permissions:
 jobs:
   delete-run-artifacts:
     name: Delete package run artifacts
+    if: >-
+      github.event.workflow_run.name == 'Package validation' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
