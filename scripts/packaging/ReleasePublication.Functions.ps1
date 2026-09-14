@@ -80,12 +80,13 @@ function Assert-PrereleaseSourceVersions {
     return $manifest
 }
 
-function Assert-PublishedReleaseAssetInventory {
+function Get-MissingPublishedReleaseAssetNames {
     param(
         [Parameter(Mandatory)]
         [string]$Directory,
 
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [object[]]$Assets
     )
 
@@ -129,15 +130,10 @@ function Assert-PublishedReleaseAssetInventory {
         }
     }
 
-    $fileNames = [string[]]@($filesByName.Keys)
-    $assetNames = [string[]]@($assetsByName.Keys)
-    [Array]::Sort($fileNames, [StringComparer]::Ordinal)
-    [Array]::Sort($assetNames, [StringComparer]::Ordinal)
-    if (@(Compare-Object $fileNames $assetNames -CaseSensitive).Count -gt 0) {
-        throw 'Published release asset names do not exactly match the validated set.'
-    }
-
-    foreach ($name in $fileNames) {
+    foreach ($name in [string[]]@($assetsByName.Keys)) {
+        if (-not $filesByName.ContainsKey($name)) {
+            throw "Published release contains an unexpected asset: $name"
+        }
         $file = $filesByName[$name]
         $asset = $assetsByName[$name]
         $expectedDigest = 'sha256:' + (
@@ -151,7 +147,33 @@ function Assert-PublishedReleaseAssetInventory {
             throw "Published release asset bytes do not match: $name"
         }
     }
-    return $fileNames.Count
+    $missing = [string[]]@(
+        $filesByName.Keys |
+            Where-Object { -not $assetsByName.ContainsKey($_) }
+    )
+    [Array]::Sort($missing, [StringComparer]::Ordinal)
+    return $missing
+}
+
+function Assert-PublishedReleaseAssetInventory {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Assets
+    )
+
+    $missing = @(
+        Get-MissingPublishedReleaseAssetNames `
+            -Directory $Directory `
+            -Assets $Assets
+    )
+    if ($missing.Count -ne 0) {
+        throw "Published release is missing assets: $($missing -join ', ')"
+    }
+    return @(Get-ChildItem -LiteralPath $Directory -File).Count
 }
 
 function Resolve-ReleaseArtifactPath {
