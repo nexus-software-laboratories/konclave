@@ -518,8 +518,10 @@ function Install-ReleaseCandidateFiles {
             created = $false
         }
     }
+    return Install-NewReleaseCandidateFiles -Paths $Paths -Candidate $Candidate
+}
 
-    function Get-InstalledVersionRoot {
+function Get-InstalledVersionRoot {
         param(
             [Parameter(Mandatory)]
             $Paths,
@@ -535,7 +537,7 @@ function Install-ReleaseCandidateFiles {
         return $root
     }
 
-    function Get-ServiceManagerPath {
+function Get-ServiceManagerPath {
         param(
             [Parameter(Mandatory)]
             [string]$InstallRoot
@@ -553,7 +555,7 @@ function Install-ReleaseCandidateFiles {
             'manage-user-service.sh'
     }
 
-    function Invoke-ServiceManager {
+function Invoke-ServiceManager {
         param(
             [Parameter(Mandatory)]
             [ValidateSet('Install', 'Start', 'Stop', 'Status', 'Uninstall')]
@@ -586,7 +588,7 @@ function Install-ReleaseCandidateFiles {
         return @($output)
     }
 
-    function Invoke-InstalledCli {
+function Invoke-InstalledCli {
         param(
             [Parameter(Mandatory)]
             [string]$InstallRoot,
@@ -605,7 +607,7 @@ function Install-ReleaseCandidateFiles {
         return @($output)
     }
 
-    function Initialize-InstalledRuntime {
+function Initialize-InstalledRuntime {
         param(
             [Parameter(Mandatory)]
             [string]$InstallRoot,
@@ -664,7 +666,7 @@ function Install-ReleaseCandidateFiles {
         return Invoke-InstalledCli -InstallRoot $InstallRoot -Arguments $arguments
     }
 
-    function Wait-InstalledRuntimeHealth {
+function Wait-InstalledRuntimeHealth {
         param(
             [Parameter(Mandatory)]
             [string]$InstallRoot,
@@ -703,7 +705,7 @@ function Install-ReleaseCandidateFiles {
         throw "Installed runtime did not become healthy: $($lastOutput -join "`n")"
     }
 
-    function Resolve-LegacyCopilotExtensionRoot {
+function Resolve-LegacyCopilotExtensionRoot {
         $copilotHome = $env:COPILOT_HOME
         if ([string]::IsNullOrWhiteSpace($copilotHome)) {
             $home = [Environment]::GetFolderPath(
@@ -720,7 +722,7 @@ function Install-ReleaseCandidateFiles {
         return Join-Path ([IO.Path]::GetFullPath($copilotHome)) 'extensions' 'konclave'
     }
 
-    function Move-LegacyCopilotExtension {
+function Move-LegacyCopilotExtension {
         param(
             [Parameter(Mandatory)]
             [string]$Source,
@@ -787,7 +789,7 @@ function Install-ReleaseCandidateFiles {
         return $destination
     }
 
-    function Enable-InstallerAgentPlugin {
+function Enable-InstallerAgentPlugin {
         param(
             [Parameter(Mandatory)]
             [string]$InstallRoot,
@@ -830,6 +832,18 @@ function Install-ReleaseCandidateFiles {
         }
     }
 
+function Install-NewReleaseCandidateFiles {
+    param(
+        [Parameter(Mandatory)]
+        $Paths,
+
+        [Parameter(Mandatory)]
+        $Candidate
+    )
+
+    $record = $Candidate.record
+    $versionRoot = Join-Path $Paths.versionsRoot ([string]$record.version)
+    $installedRoot = Join-Path $versionRoot ([string]$record.rootDirectory)
     $staging = Join-Path $Paths.stagingRoot ([Guid]::NewGuid().ToString('N'))
     [void](Set-OwnerOnlyDirectory -Path $staging)
     try {
