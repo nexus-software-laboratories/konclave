@@ -12,6 +12,7 @@
     "Authorization store conformance",
     "Client runtime config conformance",
     "Generic client conformance",
+    "Installer lifecycle conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -54,6 +55,7 @@
         "authorization-store-conformance",
         "client-runtime-config-conformance",
         "generic-client-conformance",
+        "installer-lifecycle-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -126,6 +128,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Generic client conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/installer-lifecycle-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Installer lifecycle conformance"
       ]
     },
     {

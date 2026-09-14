@@ -1,0 +1,84 @@
+name: Installer lifecycle conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: installer-lifecycle-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer-lifecycle-conformance:
+    name: Installer lifecycle conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve installer validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(
+              gh api --paginate `
+                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
+                --jq '.[].filename'
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not resolve pull-request files for installer conformance.'
+            }
+            if ($files.Count -eq 0) {
+              throw 'Pull-request file discovery returned no files.'
+            }
+            $run = $files.Count -ge 3000 -or @(
+              $files | Where-Object {
+                $_ -match '^\.github/genesis-delivery\.json$' -or
+                $_ -match '^\.github/workflows/(?:installer-lifecycle-conformance|package-validation)\.yml$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/packaging/' -or
+                $_ -match '^distribution/' -or
+                $_ -match '^docs/distribution/' -or
+                $_ -match '^scripts/installation/' -or
+                $_ -match '^scripts/packaging/'
+              }
+            ).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify installer lifecycle
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'scripts/installation/InstallationLifecycle.Functions.ps1',
+            'scripts/installation/Test-InstallationLifecycle.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              throw "$path contains PowerShell parse errors."
+            }
+          }
+          ./scripts/installation/Test-InstallationLifecycle.ps1
