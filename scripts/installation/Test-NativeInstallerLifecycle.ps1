@@ -332,11 +332,13 @@ try {
         Join-Path $managerInstallRoot 'share' 'konclave' 'plugin' `
             'com.github.copilot' 'extensions' 'konclave' 'extension.mjs'
     ) $legacyRoot
-    Copy-Item (
+    $canonicalClientConfig = Get-Content -LiteralPath (
         Join-Path $dataRoot 'service' 'konclave.service.json'
-    ) (
-        Join-Path $legacyRoot 'konclave.service.json'
-    )
+    ) -Raw -Encoding UTF8
+    Write-OwnerOnlyTextFile `
+        -Path (Join-Path $legacyRoot 'konclave.service.json') `
+        -Content $canonicalClientConfig `
+        -MaximumBytes 64KB
     Remove-Item -LiteralPath (
         Join-Path $dataRoot 'service' 'konclave.service.json'
     ) -Force
