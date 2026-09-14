@@ -101,6 +101,39 @@ function Set-OwnerOnlyFile {
     }
 }
 
+function Write-OwnerOnlyTextFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Content,
+
+        [Parameter(Mandatory)]
+        [int]$MaximumBytes
+    )
+
+    $encoding = [Text.UTF8Encoding]::new($false)
+    if ($encoding.GetByteCount($Content) -gt $MaximumBytes) {
+        throw 'Installer-owned text file exceeds its size bound.'
+    }
+    $parent = Set-OwnerOnlyDirectory -Path (Split-Path -Parent $Path)
+    $temporary = Join-Path $parent ".$([IO.Path]::GetFileName($Path)).$(
+        [Guid]::NewGuid().ToString('N')
+    ).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, $Content, $encoding)
+        Set-OwnerOnlyFile -Path $temporary
+        [IO.File]::Move($temporary, $Path, $true)
+        Set-OwnerOnlyFile -Path $Path
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
 function Resolve-KonclaveDataRoot {
     param(
         [string]$DataRoot
@@ -205,26 +238,11 @@ function Write-InstallationState {
     )
 
     Assert-InstallationState -State $State
-    $parent = Set-OwnerOnlyDirectory -Path (Split-Path -Parent $Path)
-    $temporary = Join-Path $parent ".$([IO.Path]::GetFileName($Path)).$(
-        [Guid]::NewGuid().ToString('N')
-    ).tmp"
-    try {
-        $json = ($State | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
-        [IO.File]::WriteAllText(
-            $temporary,
-            $json,
-            [Text.UTF8Encoding]::new($false)
-        )
-        Set-OwnerOnlyFile -Path $temporary
-        [IO.File]::Move($temporary, $Path, $true)
-        Set-OwnerOnlyFile -Path $Path
-    }
-    finally {
-        if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Force
-        }
-    }
+    $json = ($State | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
+    Write-OwnerOnlyTextFile `
+        -Path $Path `
+        -Content $json `
+        -MaximumBytes $script:MaximumInstallationStateBytes
 }
 
 function Get-HostReleaseTarget {
@@ -879,17 +897,7 @@ function Enable-InstallerAgentPlugin {
         if ($null -eq (Get-Command copilot -ErrorAction SilentlyContinue)) {
             throw 'Copilot CLI is required for direct Agent Plugin activation.'
         }
-        $existingMarker = Read-DirectPluginMarker -Path $Paths.directPluginPath
-        if (
-            $null -ne $existingMarker -and
-            [string]$existingMarker.version -ceq $Version
-        ) {
-            return [pscustomobject][ordered]@{
-                status = 'InstalledDirect'
-                pluginRoot = $pluginRoot
-                restartRequired = $false
-            }
-        }
+        [void](Read-DirectPluginMarker -Path $Paths.directPluginPath)
         $output = & copilot plugin install $pluginRoot 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "Direct Agent Plugin activation failed: $($output -join "`n")"
@@ -901,12 +909,10 @@ function Enable-InstallerAgentPlugin {
             version = $Version
         }
         $markerJson = ($marker | ConvertTo-Json -Compress) + "`n"
-        [IO.File]::WriteAllText(
-            $Paths.directPluginPath,
-            $markerJson,
-            [Text.UTF8Encoding]::new($false)
-        )
-        Set-OwnerOnlyFile -Path $Paths.directPluginPath
+        Write-OwnerOnlyTextFile `
+            -Path $Paths.directPluginPath `
+            -Content $markerJson `
+            -MaximumBytes 4KB
 
         $legacy = Resolve-LegacyCopilotExtensionRoot
         $restartRequired = $false

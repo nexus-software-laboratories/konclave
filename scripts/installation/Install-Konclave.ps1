@@ -277,16 +277,24 @@ if ($initializationRequired) {
     if (-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
         $legacyRoot = $null
     }
-    [void](Initialize-InstalledRuntime `
-        -InstallRoot $candidateRoot `
-        -Paths $paths `
-        -RelayEndpoint $RelayEndpoint `
-        -AuthorizationPolicy $AuthorizationPolicy `
-        -ExternalSource $ExternalSource `
-        -ServiceIdentityFile $ServiceIdentityFile `
-        -ProfileKeyDirectory $ProfileKeyDirectory `
-        -LegacyExtensionRoot $legacyRoot `
-        -AllowNoRecovery:$AllowNoRecovery)
+    try {
+        [void](Initialize-InstalledRuntime `
+            -InstallRoot $candidateRoot `
+            -Paths $paths `
+            -RelayEndpoint $RelayEndpoint `
+            -AuthorizationPolicy $AuthorizationPolicy `
+            -ExternalSource $ExternalSource `
+            -ServiceIdentityFile $ServiceIdentityFile `
+            -ProfileKeyDirectory $ProfileKeyDirectory `
+            -LegacyExtensionRoot $legacyRoot `
+            -AllowNoRecovery:$AllowNoRecovery)
+    }
+    catch {
+        if ($installedCandidate.created) {
+            Remove-CandidateVersion -Paths $paths -Version $candidate.record.version
+        }
+        throw
+    }
 }
 
 if ($decision.kind -ceq 'Verify') {
