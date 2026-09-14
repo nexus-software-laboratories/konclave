@@ -189,6 +189,12 @@ try {
             -Manifest $provenanceManifest `
             -SourceCommit $sourceCommit
     } 'mismatched artifact provenance'
+    $provenanceManifest.artifacts[0].fileName = '../plugin.zip'
+    Assert-PublicationCheckFails {
+        Get-ReleaseProvenanceSourceCommit `
+            -Directory $root `
+            -Manifest $provenanceManifest
+    } 'an escaping provenance artifact path'
 }
 finally {
     if (Test-Path -LiteralPath $root) {

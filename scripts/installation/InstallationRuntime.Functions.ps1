@@ -278,6 +278,22 @@ function Get-ReleaseInstallationCandidate {
     $manifest = Get-Content -LiteralPath (
         Join-Path $root 'RELEASE.json'
     ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    if (
+        [int]$manifest.schemaVersion -ne 1 -or
+        [string]$manifest.release.channel -cne 'prerelease' -or
+        [string]$manifest.release.signatureStatus -cne 'unsigned'
+    ) {
+        throw 'Release manifest is not a supported unsigned prerelease.'
+    }
+    foreach ($property in @('id', 'fileName')) {
+        if (@(
+            $manifest.artifacts |
+                Group-Object -Property $property |
+                Where-Object Count -ne 1
+        ).Count -ne 0) {
+            throw "Release manifest contains a duplicate $property."
+        }
+    }
     $sourceCommit = Get-ReleaseProvenanceSourceCommit `
         -Directory $root `
         -Manifest $manifest
@@ -418,6 +434,9 @@ function Expand-ProtectedZipRelease {
                 $output.Dispose()
                 $input.Dispose()
             }
+            if ((Get-Item -LiteralPath $target -Force).Length -ne $entry.Length) {
+                throw "Release archive entry length mismatch: $name"
+            }
         }
     }
     finally {
@@ -488,6 +507,9 @@ function Expand-ProtectedTarGzipRelease {
             }
             finally {
                 $output.Dispose()
+            }
+            if ((Get-Item -LiteralPath $target -Force).Length -ne $entry.Length) {
+                throw "Release archive entry length mismatch: $name"
             }
             if (-not $IsWindows) {
                 [IO.File]::SetUnixFileMode($target, $entry.Mode)

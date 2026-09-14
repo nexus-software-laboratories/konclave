@@ -154,6 +154,26 @@ function Assert-PublishedReleaseAssetInventory {
     return $fileNames.Count
 }
 
+function Resolve-ReleaseArtifactPath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [string]$FileName
+    )
+
+    if ($FileName -cnotmatch $script:PortablePublishedReleaseFilePattern) {
+        throw "Release artifact file name is unsafe: $FileName"
+    }
+    $root = (Resolve-Path -LiteralPath $Directory).Path
+    $path = [IO.Path]::GetFullPath((Join-Path $root $FileName))
+    if ([IO.Path]::GetDirectoryName($path) -cne $root) {
+        throw "Release artifact resolves outside its directory: $FileName"
+    }
+    return $path
+}
+
 function Get-ReleaseProvenanceSourceCommit {
     param(
         [Parameter(Mandatory)]
@@ -166,9 +186,10 @@ function Get-ReleaseProvenanceSourceCommit {
     $root = (Resolve-Path -LiteralPath $Directory).Path
     $commits = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($artifact in $Manifest.artifacts) {
-        $provenancePath = Join-Path (
-            $root
-        ) "$($artifact.fileName).intoto.jsonl"
+        $artifactPath = Resolve-ReleaseArtifactPath `
+            -Directory $root `
+            -FileName ([string]$artifact.fileName)
+        $provenancePath = "$artifactPath.intoto.jsonl"
         $statement = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 |
             ConvertFrom-Json -Depth 100
         $dependencies = @(
@@ -219,7 +240,9 @@ function Assert-ReleaseProvenanceSet {
     }
     $root = (Resolve-Path -LiteralPath $Directory).Path
     foreach ($artifact in $Manifest.artifacts) {
-        $artifactPath = Join-Path $root ([string]$artifact.fileName)
+        $artifactPath = Resolve-ReleaseArtifactPath `
+            -Directory $root `
+            -FileName ([string]$artifact.fileName)
         $provenancePath = "$artifactPath.intoto.jsonl"
         $statement = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 |
             ConvertFrom-Json -Depth 100
