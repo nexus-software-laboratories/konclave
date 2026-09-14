@@ -37,6 +37,34 @@ function Invoke-NativeCommand {
     return @($output)
 }
 
+function Receive-ReleaseAssets {
+    param(
+        [string]$Tag,
+        [string]$Destination
+    )
+
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        $output = & gh release download `
+            $Tag `
+            --repo $Repository `
+            --dir $Destination `
+            --clobber 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        $diagnostics = ($output -join "`n")
+        if ($diagnostics -match 'HTTP (?:400|401|403|404|405|422)\b') {
+            throw "Release download is not retryable: $Tag"
+        }
+        if ($attempt -eq 5) {
+            $tail = @($output | Select-Object -Last 5) -join "`n"
+            throw "Release download failed after five attempts: $Tag`n$tail"
+        }
+        Write-Warning "Release download attempt $attempt failed for $Tag."
+        Start-Sleep -Seconds ([math]::Pow(2, $attempt - 1))
+    }
+}
+
 function Get-ReleaseArtifact {
     param(
         $Manifest,
@@ -217,24 +245,8 @@ $previousLocalAppData = $env:LOCALAPPDATA
 $env:COPILOT_HOME = $copilotHome
 $env:LOCALAPPDATA = $localAppData
 try {
-    [void](Invoke-NativeCommand gh @(
-        'release',
-        'download',
-        $BaselineTag,
-        '--repo',
-        $Repository,
-        '--dir',
-        $baselineRelease
-    ))
-    [void](Invoke-NativeCommand gh @(
-        'release',
-        'download',
-        $CandidateTag,
-        '--repo',
-        $Repository,
-        '--dir',
-        $candidateRelease
-    ))
+    Receive-ReleaseAssets -Tag $BaselineTag -Destination $baselineRelease
+    Receive-ReleaseAssets -Tag $CandidateTag -Destination $candidateRelease
     & (Join-Path $baselineRelease 'Verify-Release.ps1') -Directory $baselineRelease
     & (Join-Path $candidateRelease 'Verify-Release.ps1') -Directory $candidateRelease
     foreach ($name in @(
