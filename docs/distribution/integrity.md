@@ -11,6 +11,7 @@ Each complete unsigned prerelease set assembled during package validation contai
 - one CycloneDX SBOM for the Agent Plugin;
 - one Syft-generated CycloneDX SBOM for each container;
 - one SLSA v1 in-toto provenance statement per executable archive;
+- the per-user installer, lifecycle/runtime support, and provenance verifier;
 - `Verify-Release.ps1` and its shared verification functions; and
 - the unsigned-prerelease notice and release-contract schema.
 

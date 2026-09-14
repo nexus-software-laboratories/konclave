@@ -112,6 +112,19 @@ it before dispatch; the final release response is the workflow's authoritative
 immutability check. If GitHub reports a mutable release, the workflow returns it to
 draft and fails.
 
+## Installer lifecycle validation
+
+`Installer lifecycle conformance` runs while a pull request is draft on
+`ubuntu-latest`, `windows-latest`, and `macos-15`, then publishes one stable aggregate
+check. The platform jobs exercise pure install/update/rollback/uninstall decisions,
+owner-only state, bounded archive extraction, legacy-extension preservation, and
+failed-update recovery. Windows additionally installs, inspects, stops, and removes
+the exact limited scheduled task used by the per-user supervisor.
+
+Ready-only package validation invokes the installer from each extracted client
+archive with an isolated empty data root. Release integrity also checksums the
+installer and its support functions in the complete release set.
+
 `Packaged clean-install acceptance` then extracts the Linux client, relay, and gateway archives
 twice, creates temporary trusted TLS, and drives the packaged shared local service
 through the same authenticated thin-client contract used by Copilot. It repeats the
