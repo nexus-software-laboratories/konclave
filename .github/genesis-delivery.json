@@ -15,6 +15,7 @@
     "Distribution lifecycle acceptance",
     "Generic client conformance",
     "Installer lifecycle conformance",
+    "Marketplace conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -67,6 +68,7 @@
         "service-failure-contract",
         "generic-client-conformance",
         "installer-lifecycle-conformance",
+        "marketplace-conformance",
         "marketplace-branch-acceptance",
         "marketplace-branch-lifecycle",
         "user-presence-conformance",
@@ -196,6 +198,17 @@
       ],
       "draftBehavior": "not-applicable",
       "requiredChecks": []
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/marketplace-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Marketplace conformance"
+      ]
     },
     {
       "source": "project",

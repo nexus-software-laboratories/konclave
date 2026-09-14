@@ -1,0 +1,52 @@
+name: Marketplace conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+    paths:
+      - '.github/genesis-delivery.json'
+      - '.github/plugin/**'
+      - '.github/workflows/marketplace-conformance.yml'
+      - 'docs/distribution/**'
+      - 'extensions/Konclave.HostExtension/**'
+      - 'plugins/konclave/**'
+      - 'scripts/marketplace/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-conformance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  marketplace-conformance:
+    name: Marketplace conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: marketplace-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify marketplace decision contract
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run format:check
+          npm run lint
+          npm run test:marketplace-contract
