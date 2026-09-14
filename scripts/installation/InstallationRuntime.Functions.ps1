@@ -95,7 +95,24 @@ function Set-OwnerOnlyFile {
     )
 
     [void](Assert-SafeInstallationItem -Path $Path -Kind File)
-    if (-not $IsWindows) {
+    if ($IsWindows) {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($null -eq $identity) {
+            throw 'Current Windows user SID is unavailable.'
+        }
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetOwner($identity)
+        $security.SetGroup($identity)
+        $security.SetAccessRuleProtection($true, $false)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$security.AddAccessRule($rule)
+        Set-Acl -LiteralPath $Path -AclObject $security
+    }
+    else {
         $mode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite
         [IO.File]::SetUnixFileMode($Path, $mode)
     }
@@ -589,14 +606,14 @@ function Get-ServiceManagerPath {
         )
 
         if ($IsWindows) {
+            $fallback = Join-Path $PSScriptRoot 'WindowsUserService.ps1'
+            if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+                return $fallback
+            }
             $manager = Join-Path $InstallRoot 'share' 'konclave' 'service' 'windows' `
                 'manage-user-service.ps1'
             if (Test-Path -LiteralPath $manager -PathType Leaf) {
                 return $manager
-            }
-            $fallback = Join-Path $PSScriptRoot 'WindowsUserService.ps1'
-            if (Test-Path -LiteralPath $fallback -PathType Leaf) {
-                return $fallback
             }
             throw 'Windows user-service manager is unavailable.'
         }
@@ -1007,8 +1024,7 @@ function Enable-InstallerAgentPlugin {
                 param($InstallationPaths, $Version)
                 $versionRoot = Join-Path $InstallationPaths.versionsRoot $Version
                 if (Test-Path -LiteralPath $versionRoot) {
-                    [void](Assert-SafeInstallationItem -Path $versionRoot -Kind Directory)
-                    Remove-Item -LiteralPath $versionRoot -Recurse -Force
+                    Remove-InstallerDirectory -Path $versionRoot
                 }
             }
         }
@@ -1060,6 +1076,30 @@ function Enable-InstallerAgentPlugin {
                 )`nRecovery: $($_.Exception.Message)"
             }
             throw $operationError
+        }
+    }
+
+    function Remove-InstallerDirectory {
+        param(
+            [Parameter(Mandatory)]
+            [string]$Path
+        )
+
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+        [void](Assert-SafeInstallationItem -Path $Path -Kind Directory)
+        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+            try {
+                Remove-Item -LiteralPath $Path -Recurse -Force
+                return
+            }
+            catch {
+                if ($attempt -eq 49) {
+                    throw
+                }
+                Start-Sleep -Milliseconds 100
+            }
         }
     }
 

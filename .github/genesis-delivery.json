@@ -11,6 +11,7 @@
     "Agent plugin conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
+    "Distribution lifecycle acceptance",
     "Generic client conformance",
     "Installer lifecycle conformance",
     "User presence conformance",
@@ -47,6 +48,7 @@
         "pr-title/title",
         "pr-review-policy/evaluate",
         "release-publication-conformance",
+        "authorize-marketplace-branch-acceptance",
         "a2a-conformance",
         "adapter-conformance",
         "agent-plugin-conformance",
@@ -54,8 +56,16 @@
         "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
+        "cleanup-marketplace-branches",
+        "distribution-lifecycle-acceptance",
+        "resolve-scope",
+        "copilot-plugin-lifecycle",
+        "native-installer-lifecycle",
+        "service-failure-contract",
         "generic-client-conformance",
         "installer-lifecycle-conformance",
+        "marketplace-branch-acceptance",
+        "marketplace-branch-lifecycle",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -121,6 +131,17 @@
     },
     {
       "source": "project",
+      "path": ".github/workflows/distribution-lifecycle-acceptance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Distribution lifecycle acceptance"
+      ]
+    },
+    {
+      "source": "project",
       "path": ".github/workflows/generic-client-conformance.yml",
       "roles": [
         "merge-gate"
@@ -151,6 +172,15 @@
       "requiredChecks": [
         "User presence conformance"
       ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/marketplace-branch-acceptance.yml",
+      "roles": [
+        "repository-automation"
+      ],
+      "draftBehavior": "not-applicable",
+      "requiredChecks": []
     },
     {
       "source": "project",
