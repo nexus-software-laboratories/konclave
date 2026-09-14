@@ -94,16 +94,8 @@ export function createMarketplacePlan({ releaseVersion, artifactFileName, entrie
   }
 
   const pluginBytes = copyEntry(entries, 'plugin.json', maximumManifestBytes);
-  const packageBytes = copyEntry(
-    entries,
-    agentPluginExtensionPackagePath,
-    maximumManifestBytes,
-  );
-  const extensionBytes = copyEntry(
-    entries,
-    agentPluginExtensionEntryPath,
-    maximumExtensionBytes,
-  );
+  const packageBytes = copyEntry(entries, agentPluginExtensionPackagePath, maximumManifestBytes);
+  const extensionBytes = copyEntry(entries, agentPluginExtensionEntryPath, maximumExtensionBytes);
   const plugin = parseJson(pluginBytes, 'plugin.json');
   const extensionPackage = parseJson(packageBytes, agentPluginExtensionPackagePath);
 
@@ -120,10 +112,7 @@ export function createMarketplacePlan({ releaseVersion, artifactFileName, entrie
     extensionPackage?.type !== 'module' ||
     extensionPackage?.main !== 'extension.mjs'
   ) {
-    fail(
-      'extension_package_mismatch',
-      'Marketplace extension package does not match the release.',
-    );
+    fail('extension_package_mismatch', 'Marketplace extension package does not match the release.');
   }
 
   const catalogBytes = Buffer.from(`${JSON.stringify(createCatalog(releaseVersion), null, 2)}\n`);
