@@ -51,7 +51,18 @@ pwsh ./konclave-0.1.2/Verify-Release.ps1
 The standalone `konclave-<version>.zip` is the immutable source for the Agent Plugins
 1.0 manifest and Copilot extension files published through the repository
 marketplace. Install and health-check the matching native runtime first, then
-register and install the default-branch marketplace:
+prepare any installer-owned direct plugin or legacy raw extension for migration:
+
+```shell
+pwsh ./Install-Konclave.ps1 -Action PrepareMarketplace
+```
+
+The action is idempotent when no compatibility plugin exists. It removes only the
+installer-owned direct plugin, preserves an owner-protected legacy raw extension
+under `runtime/legacy/`, leaves native and authority state unchanged, and reports
+whether existing Copilot sessions must restart.
+
+Then register and install the default-branch marketplace:
 
 ```shell
 copilot plugin marketplace add nexus-software-laboratories/konclave

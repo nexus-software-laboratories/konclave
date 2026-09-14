@@ -200,6 +200,7 @@ $copilotHome = Join-Path $root 'copilot-home'
 $relayProcess = $null
 $manager = $null
 $managerInstallRoot = $null
+$marketplaceRegistered = $false
 $managerConfig = Join-Path $dataRoot 'service' 'konclave-local-service.json'
 
 New-Item -ItemType Directory -Path (
@@ -542,6 +543,42 @@ try {
         throw 'Plugin update created a duplicate Konclave installation.'
     }
 
+    $prepared = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'PrepareMarketplace'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction `
+        -Result $prepared `
+        -Action MarketplacePrepared `
+        -Version $candidateVersion
+    if (
+        [string]$prepared.pluginStatus -cne 'RemovedDirect' -or
+        -not [bool]$prepared.restartRequired -or
+        @(Get-KonclavePluginRecords).Count -ne 0 -or
+        (Test-Path -LiteralPath (
+            Join-Path $dataRoot 'runtime' 'direct-plugin.json'
+        ))
+    ) {
+        throw 'Marketplace preparation did not remove the installer-owned direct plugin.'
+    }
+    $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+    [void](Invoke-NativeCommand copilot @(
+        'plugin',
+        'marketplace',
+        'add',
+        $projectRoot
+    ))
+    $marketplaceRegistered = $true
+    [void](Invoke-NativeCommand copilot @(
+        'plugin',
+        'install',
+        'konclave@konclave'
+    ))
+    if (@(Get-KonclavePluginRecords).Count -ne 1) {
+        throw 'Marketplace migration did not leave exactly one Konclave plugin.'
+    }
+    Write-Output 'lifecycle: direct plugin migrated to marketplace'
+
     $uninstalled = Invoke-Installer -Installer $installer -Arguments @{
         Action = 'Uninstall'
         DataRoot = $dataRoot
@@ -555,13 +592,33 @@ try {
         (Test-Path -LiteralPath (Join-Path $dataRoot 'service' 'konclave.service.json')) -or
         -not (Test-Path -LiteralPath $profileSentinel -PathType Leaf) -or
         (Get-FileHashAfterRelease -Path $authorityPath) -cne $authorityHash -or
-        @(Get-KonclavePluginRecords).Count -ne 0
+        @(Get-KonclavePluginRecords).Count -ne 1
     ) {
-        throw 'Uninstall did not remove exact runtime state while retaining durable data.'
+        throw 'Uninstall did not separate marketplace state from retained durable data.'
+    }
+    [void](Invoke-NativeCommand copilot @(
+        'plugin',
+        'marketplace',
+        'remove',
+        'konclave',
+        '--force'
+    ))
+    $marketplaceRegistered = $false
+    if (@(Get-KonclavePluginRecords).Count -ne 0) {
+        throw 'Marketplace removal left a Konclave plugin after native uninstall.'
     }
     $managerInstallRoot = $null
 }
 finally {
+    if ($marketplaceRegistered) {
+        [void](Invoke-NativeCommand copilot @(
+            'plugin',
+            'marketplace',
+            'remove',
+            'konclave',
+            '--force'
+        ))
+    }
     $env:COPILOT_HOME = $previousCopilotHome
     $env:LOCALAPPDATA = $previousLocalAppData
     $tasks = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
