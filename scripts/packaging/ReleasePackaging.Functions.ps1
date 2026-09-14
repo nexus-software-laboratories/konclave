@@ -251,16 +251,13 @@ function Assert-PackagedPlugin {
     )
 
     $manifestPath = Join-Path $PluginRoot 'plugin.json'
-    $clientPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'client.mjs'
-    $extensionPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'extension.mjs'
-    $genericPath = Join-Path $PluginRoot 'extensions' 'Konclave.Extension' 'generic.mjs'
-    $genericSkillPath = Join-Path $PluginRoot 'skills' 'konclave-generic' 'SKILL.md'
+    $extensionRoot = Join-Path $PluginRoot 'com.github.copilot' 'extensions' 'konclave'
+    $extensionPath = Join-Path $extensionRoot 'extension.mjs'
+    $extensionPackagePath = Join-Path $extensionRoot 'package.json'
     foreach ($path in @(
         $manifestPath,
-        $clientPath,
         $extensionPath,
-        $genericPath,
-        $genericSkillPath
+        $extensionPackagePath
     )) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Packaged plugin file is missing: $path"
@@ -269,10 +266,37 @@ function Assert-PackagedPlugin {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
         ConvertFrom-Json -Depth 100
     if (
+        [string]$manifest.'$schema' -cne
+            'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json' -or
         [string]$manifest.name -cne 'konclave' -or
         [string]$manifest.version -cne $ExpectedVersion
     ) {
         throw 'Packaged plugin identity does not match the release.'
+    }
+    $extensionPackage = Get-Content -LiteralPath $extensionPackagePath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -Depth 100
+    if (
+        [string]$extensionPackage.name -cne 'konclave' -or
+        [string]$extensionPackage.version -cne $ExpectedVersion -or
+        [string]$extensionPackage.type -cne 'module' -or
+        [string]$extensionPackage.main -cne 'extension.mjs' -or
+        [string]$extensionPackage.dependencies.'@github/copilot-sdk' -notmatch '^\^?\d+\.\d+\.\d+$'
+    ) {
+        throw 'Packaged Copilot extension identity does not match the release.'
+    }
+    $relativeFiles = @(
+        Get-ChildItem -LiteralPath $PluginRoot -Recurse -File |
+            ForEach-Object {
+                [IO.Path]::GetRelativePath($PluginRoot, $_.FullName).Replace('\', '/')
+            }
+    )
+    $expected = @(
+        'com.github.copilot/extensions/konclave/extension.mjs',
+        'com.github.copilot/extensions/konclave/package.json',
+        'plugin.json'
+    )
+    if (@(Compare-Object $relativeFiles $expected -CaseSensitive).Count -gt 0) {
+        throw 'Packaged Agent Plugin contains an unexpected file.'
     }
 }
 
@@ -441,6 +465,25 @@ function Copy-ClientPayload {
     $pluginRoot = Join-Path $DestinationRoot 'share' 'konclave' 'plugin'
     Expand-ProtectedPluginArchive $PluginArchivePath $pluginRoot
     Assert-PackagedPlugin $pluginRoot $Version
+    $clientSupportRoot = Join-Path $DestinationRoot 'share' 'konclave' 'client'
+    $compiledRoot = Join-Path $ProjectRoot 'extensions' 'Konclave.HostExtension' `
+        'extensions' 'Konclave.Extension'
+    Copy-ReleaseFile (
+        Join-Path $compiledRoot 'client.mjs'
+    ) (
+        Join-Path $clientSupportRoot 'client.mjs'
+    )
+    Copy-ReleaseFile (
+        Join-Path $compiledRoot 'generic.mjs'
+    ) (
+        Join-Path $clientSupportRoot 'generic.mjs'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'extensions' 'Konclave.HostExtension' `
+            'skills' 'konclave-generic' 'SKILL.md'
+    ) (
+        Join-Path $clientSupportRoot 'skills' 'konclave-generic' 'SKILL.md'
+    )
     $policyRoot = Join-Path $DestinationRoot 'share' 'konclave' 'policy'
     foreach ($relative in @(
         'collaboration-policy-source-v1.schema.json',

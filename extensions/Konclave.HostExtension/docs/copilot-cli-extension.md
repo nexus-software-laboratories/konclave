@@ -241,21 +241,25 @@ supported.
 ## Build and package contract
 
 - `extensions/Konclave.Extension/extension.mjs` is the bundled entry loaded by
-  Copilot CLI.
+  Copilot CLI and copied into
+  `com.github.copilot/extensions/konclave/extension.mjs` in the Agent Plugin.
 - `extensions/Konclave.Extension/client.mjs` is the reusable headless shared-client,
   command, policy-gate, delivery-parser, and safety-framing bundle used by the local
-  smoke and future harness adapters.
-- `plugin.json` is the distribution manifest.
+  smoke and future harness adapters. It is native-package support content, not a
+  separate Agent Plugin entry.
+- `plugin.json` is the closed Agent Plugins 1.0 distribution manifest.
 - `skills/copilot-cli-extension-maintainer/SKILL.md` is the contributor skill.
-- `skills/konclave-generic/SKILL.md` is packaged for manual installation by
-  unsupported harnesses; the manifest's empty skill list prevents Copilot from
-  auto-loading it.
+- `skills/konclave-generic/SKILL.md` and the Generic bundle are native-package
+  support content for manual installation by unsupported harnesses. Neither is in
+  the Copilot Agent Plugin.
 - `build/outputs/<plugin-name>-<version>.zip` is the deterministic release bundle.
 
 `scripts/verify-package.mjs` rejects a compiled extension that omits the shared-client
 tool, command, or delivery surfaces; writes to stdout; names `KonclaveLocalDaemon`;
-or declares a stdio MCP server. The archive contains exactly the manifest, thin
-extension, reusable clients, and documented skills—never a daemon binary.
+or declares a stdio MCP server. The archive contains exactly `plugin.json`, the thin
+extension, and its generated runtime `package.json`—never source, tests, skills,
+build tooling, `node_modules`, a daemon binary, credentials, a client sidecar, or
+mutable authority state.
 
 ## Safe send seam
 

@@ -117,10 +117,11 @@ function Assert-ReleaseLayout {
                 "bin/konclave$suffix",
                 "bin/KonclaveLocalService$suffix",
                 'share/konclave/plugin/plugin.json',
-                'share/konclave/plugin/extensions/Konclave.Extension/client.mjs',
-                'share/konclave/plugin/extensions/Konclave.Extension/extension.mjs',
-                'share/konclave/plugin/extensions/Konclave.Extension/generic.mjs',
-                'share/konclave/plugin/skills/konclave-generic/SKILL.md',
+                'share/konclave/plugin/com.github.copilot/extensions/konclave/extension.mjs',
+                'share/konclave/plugin/com.github.copilot/extensions/konclave/package.json',
+                'share/konclave/client/client.mjs',
+                'share/konclave/client/generic.mjs',
+                'share/konclave/client/skills/konclave-generic/SKILL.md',
                 'share/konclave/policy/collaboration-policy-source-v1.schema.json',
                 'share/konclave/policy/collaboration-policy-source-v2.schema.json',
                 'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
@@ -132,6 +133,24 @@ function Assert-ReleaseLayout {
                 )) {
                     throw "Client package is missing $relative."
                 }
+            }
+            $pluginRoot = Join-Path $ExtractedRoot 'share' 'konclave' 'plugin'
+            $pluginFiles = @(
+                Get-ChildItem -LiteralPath $pluginRoot -Recurse -File |
+                    ForEach-Object {
+                        [IO.Path]::GetRelativePath(
+                            $pluginRoot,
+                            $_.FullName
+                        ).Replace('\', '/')
+                    }
+            )
+            $expectedPluginFiles = @(
+                'com.github.copilot/extensions/konclave/extension.mjs',
+                'com.github.copilot/extensions/konclave/package.json',
+                'plugin.json'
+            )
+            if (@(Compare-Object $pluginFiles $expectedPluginFiles -CaseSensitive).Count -gt 0) {
+                throw 'Client package contains unexpected Agent Plugin bytes.'
             }
             $serviceRelative = switch ([string]$Artifact.operatingSystem) {
                 'linux' { 'share/konclave/service/systemd/KonclaveLocalService.service' }
