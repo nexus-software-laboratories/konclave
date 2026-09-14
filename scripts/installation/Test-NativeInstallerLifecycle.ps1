@@ -301,6 +301,42 @@ try {
     $profileSentinel = Join-Path $dataRoot 'profiles' 'retained-profile.sqlite3'
     [IO.File]::WriteAllText($profileSentinel, 'retained-profile')
     $authorityPath = Join-Path $dataRoot 'service' 'konclave-local-authorization.sqlite3'
+    $task = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
+    $renderedTask = & $manager `
+        -Action Render `
+        -InstallRoot $managerInstallRoot `
+        -ConfigPath $managerConfig |
+            ConvertFrom-Json
+    if ($task.Count -ne 1) {
+        throw 'Installed runtime did not create one scheduled task.'
+    }
+    $taskActions = @($task[0].Actions)
+    if (
+        $taskActions.Count -ne 1 -or
+        -not ([string]$taskActions[0].Execute).Equals(
+            [string]$renderedTask.executable,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$taskActions[0].Arguments -cne [string]$renderedTask.arguments
+    ) {
+        throw "Scheduled task action mismatch. Expected $(
+            $renderedTask.executable
+        ) $($renderedTask.arguments); actual $(
+            $taskActions[0].Execute
+        ) $($taskActions[0].Arguments)."
+    }
+    $expectedSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $actualSid = if ([string]$task[0].Principal.UserId -match '^S-') {
+        [string]$task[0].Principal.UserId
+    }
+    else {
+        ([Security.Principal.NTAccount]::new(
+            [string]$task[0].Principal.UserId
+        )).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    if ($actualSid -cne $expectedSid) {
+        throw "Scheduled task principal mismatch: $actualSid rather than $expectedSid."
+    }
     & $manager `
         -Action Stop `
         -InstallRoot $managerInstallRoot `
