@@ -92,6 +92,24 @@ function Wait-RelayHealth {
     throw 'Relay did not become healthy.'
 }
 
+function Get-FileHashAfterRelease {
+    param(
+        [string]$Path
+    )
+
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        try {
+            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        }
+        catch {
+            if ($attempt -eq 49) {
+                throw
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Invoke-Installer {
     param(
         [string]$Installer,
@@ -280,7 +298,23 @@ try {
     $profileSentinel = Join-Path $dataRoot 'profiles' 'retained-profile.sqlite3'
     [IO.File]::WriteAllText($profileSentinel, 'retained-profile')
     $authorityPath = Join-Path $dataRoot 'service' 'konclave-local-authorization.sqlite3'
-    $authorityHash = (Get-FileHash -LiteralPath $authorityPath -Algorithm SHA256).Hash
+    & $manager `
+        -Action Stop `
+        -InstallRoot $managerInstallRoot `
+        -ConfigPath $managerConfig
+    $authorityHash = Get-FileHashAfterRelease -Path $authorityPath
+    & $manager `
+        -Action Start `
+        -InstallRoot $managerInstallRoot `
+        -ConfigPath $managerConfig
+    $healthyAfterRestart = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'Status'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction `
+        -Result $healthyAfterRestart `
+        -Action Healthy `
+        -Version '0.1.0'
 
     $verified = Invoke-Installer -Installer $installer -Arguments $installArguments
     Assert-InstallerAction -Result $verified -Action Verified -Version '0.1.0'
@@ -405,7 +439,7 @@ try {
         (Test-Path -LiteralPath (Join-Path $dataRoot 'runtime' 'versions')) -or
         (Test-Path -LiteralPath (Join-Path $dataRoot 'service' 'konclave.service.json')) -or
         -not (Test-Path -LiteralPath $profileSentinel -PathType Leaf) -or
-        (Get-FileHash -LiteralPath $authorityPath -Algorithm SHA256).Hash -cne $authorityHash -or
+        (Get-FileHashAfterRelease -Path $authorityPath) -cne $authorityHash -or
         (Get-KonclavePluginRecords).Count -ne 0
     ) {
         throw 'Uninstall did not remove exact runtime state while retaining durable data.'
