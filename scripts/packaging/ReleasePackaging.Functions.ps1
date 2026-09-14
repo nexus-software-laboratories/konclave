@@ -497,9 +497,20 @@ function Copy-ClientPayload {
         )
     }
     Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'scripts' 'packaging' 'ReleaseIntegrity.Functions.ps1'
+    ) (
+        Join-Path $installerRoot 'ReleaseIntegrity.Functions.ps1'
+    )
+    Copy-ReleaseFile (
         Join-Path $ProjectRoot 'scripts' 'packaging' 'ReleasePublication.Functions.ps1'
     ) (
         Join-Path $installerRoot 'ReleasePublication.Functions.ps1'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+            'manage-user-service.ps1'
+    ) (
+        Join-Path $installerRoot 'WindowsUserService.ps1'
     )
     $policyRoot = Join-Path $DestinationRoot 'share' 'konclave' 'policy'
     foreach ($relative in @(

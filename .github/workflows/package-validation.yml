@@ -614,6 +614,9 @@ jobs:
           Copy-Item scripts/installation/InstallationRuntime.Functions.ps1 $releaseRoot
           Copy-Item scripts/packaging/ReleaseIntegrity.Functions.ps1 $releaseRoot
           Copy-Item scripts/packaging/ReleasePublication.Functions.ps1 $releaseRoot
+          Copy-Item `
+            apps/Konclave.LocalDaemon/packaging/windows/manage-user-service.ps1 `
+            (Join-Path $releaseRoot 'WindowsUserService.ps1')
           Copy-Item scripts/packaging/Verify-Release.ps1 $releaseRoot
 
           ./scripts/packaging/Test-ReleaseIntegrity.ps1

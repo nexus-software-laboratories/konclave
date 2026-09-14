@@ -29,6 +29,12 @@ try {
     )) {
         Copy-Item (Join-Path $projectRoot $relative) $root
     }
+    Copy-Item (
+        Join-Path $projectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+            'manage-user-service.ps1'
+    ) (
+        Join-Path $root 'WindowsUserService.ps1'
+    )
     $manifest = Get-Content -LiteralPath (
         Join-Path $root 'RELEASE.json'
     ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100

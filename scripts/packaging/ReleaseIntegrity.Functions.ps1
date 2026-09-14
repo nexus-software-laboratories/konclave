@@ -93,6 +93,7 @@ function Test-ReleaseContractCoverage {
         'InstallationRuntime.Functions.ps1',
         'ReleaseIntegrity.Functions.ps1',
         'ReleasePublication.Functions.ps1',
+        'WindowsUserService.ps1',
         'Verify-Release.ps1'
     )) {
         [void]$expected.Add($name)

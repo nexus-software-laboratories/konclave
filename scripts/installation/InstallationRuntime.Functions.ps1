@@ -3,6 +3,12 @@
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'InstallationLifecycle.Functions.ps1')
+$integrityFunctions = Join-Path $PSScriptRoot 'ReleaseIntegrity.Functions.ps1'
+if (-not (Test-Path -LiteralPath $integrityFunctions -PathType Leaf)) {
+    $integrityFunctions = Join-Path $PSScriptRoot '..' 'packaging' `
+        'ReleaseIntegrity.Functions.ps1'
+}
+. $integrityFunctions
 $publicationFunctions = Join-Path $PSScriptRoot 'ReleasePublication.Functions.ps1'
 if (-not (Test-Path -LiteralPath $publicationFunctions -PathType Leaf)) {
     $publicationFunctions = Join-Path $PSScriptRoot '..' 'packaging' `
@@ -268,8 +274,7 @@ function Get-ReleaseInstallationCandidate {
 
     $root = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
     [void](Assert-SafeInstallationItem -Path $root -Kind Directory)
-    $verifier = Join-Path $root 'Verify-Release.ps1'
-    & $verifier -Directory $root
+    [void](Test-ReleaseChecksums -Directory $root)
     $manifest = Get-Content -LiteralPath (
         Join-Path $root 'RELEASE.json'
     ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
@@ -544,8 +549,16 @@ function Get-ServiceManagerPath {
         )
 
         if ($IsWindows) {
-            return Join-Path $InstallRoot 'share' 'konclave' 'service' 'windows' `
+            $manager = Join-Path $InstallRoot 'share' 'konclave' 'service' 'windows' `
                 'manage-user-service.ps1'
+            if (Test-Path -LiteralPath $manager -PathType Leaf) {
+                return $manager
+            }
+            $fallback = Join-Path $PSScriptRoot 'WindowsUserService.ps1'
+            if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+                return $fallback
+            }
+            throw 'Windows user-service manager is unavailable.'
         }
         if ($IsMacOS) {
             return Join-Path $InstallRoot 'share' 'konclave' 'service' 'launchd' `

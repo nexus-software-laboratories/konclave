@@ -78,6 +78,12 @@ try {
     )) {
         Copy-Item (Join-Path $projectRoot $relative) $contractRoot
     }
+    Copy-Item (
+        Join-Path $projectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+            'manage-user-service.ps1'
+    ) (
+        Join-Path $contractRoot 'WindowsUserService.ps1'
+    )
     $manifest = Get-Content (Join-Path $contractRoot 'RELEASE.json') -Raw |
         ConvertFrom-Json -Depth 100
     foreach ($entry in $manifest.artifacts) {
