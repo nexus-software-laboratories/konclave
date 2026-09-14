@@ -147,6 +147,10 @@ try {
                             "konclave@$sourceCommit"
                         )
                         digest = [ordered]@{ gitCommit = $sourceCommit }
+                    },
+                    [ordered]@{
+                        uri = 'git+https://example.invalid/dependency'
+                        digest = [ordered]@{ sha256 = '0' * 64 }
                     }
                 )
             }

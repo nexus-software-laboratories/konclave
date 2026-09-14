@@ -178,11 +178,20 @@ function Assert-ReleaseProvenanceSet {
         $sourceDependencies = @(
             $statement.predicate.buildDefinition.resolvedDependencies |
                 Where-Object {
-                    [string]$_.digest.gitCommit -ceq $SourceCommit -and
-                    [string]$_.uri -ceq (
-                        'git+https://github.com/nexus-software-laboratories/' +
-                        "konclave@$SourceCommit"
-                    )
+                    $digestProperty = $_.PSObject.Properties['digest']
+                    $uriProperty = $_.PSObject.Properties['uri']
+                    if ($null -eq $digestProperty -or $null -eq $uriProperty) {
+                        $false
+                    }
+                    else {
+                        $gitCommitProperty = $digestProperty.Value.PSObject.Properties['gitCommit']
+                        $null -ne $gitCommitProperty -and
+                            [string]$gitCommitProperty.Value -ceq $SourceCommit -and
+                            [string]$uriProperty.Value -ceq (
+                                'git+https://github.com/nexus-software-laboratories/' +
+                                "konclave@$SourceCommit"
+                            )
+                    }
                 }
         )
         $expectedBuildKind = switch ([string]$artifact.kind) {
