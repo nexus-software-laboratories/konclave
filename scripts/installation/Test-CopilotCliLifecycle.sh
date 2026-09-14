@@ -35,10 +35,20 @@ if [ "$(printf '%s\n' "$install_output" | grep -Eio 'deprecat(ed|ion)' | wc -l)"
     exit 1
 fi
 
-plugin_list="$("$copilot_command" plugin list --json)"
-if [ "$(jq '[.. | objects | select(.name? == "konclave")] | length' <<<"$plugin_list")" -ne 1 ]; then
-    echo 'Expected exactly one installed Konclave plugin.' >&2
-    exit 1
+supports_json=false
+if "$copilot_command" plugin list --help | grep -q -- '--json'; then
+    supports_json=true
+    plugin_list="$("$copilot_command" plugin list --json)"
+    if [ "$(jq '[.. | objects | select(.name? == "konclave")] | length' <<<"$plugin_list")" -ne 1 ]; then
+        echo 'Expected exactly one installed Konclave plugin.' >&2
+        exit 1
+    fi
+else
+    plugin_list="$("$copilot_command" plugin list)"
+    if [ "$(grep -Eic '(^|[^a-z0-9-])konclave([^a-z0-9-]|$)' <<<"$plugin_list")" -ne 1 ]; then
+        echo 'Expected one textual Konclave plugin listing.' >&2
+        exit 1
+    fi
 fi
 mapfile -d '' manifests < <(find "$COPILOT_HOME" -type f -name plugin.json -print0)
 konclave_roots=()
@@ -171,8 +181,15 @@ write_config "$absent_socket" user_presence
 run_prompt_probe unavailable-policy
 
 "$copilot_command" plugin uninstall konclave
-if "$copilot_command" plugin list --json |
-    jq -e '.. | objects | select(.name? == "konclave")' >/dev/null
+if [ "$supports_json" = true ]; then
+    if "$copilot_command" plugin list --json |
+        jq -e '.. | objects | select(.name? == "konclave")' >/dev/null
+    then
+        echo 'Konclave plugin remained after uninstall.' >&2
+        exit 1
+    fi
+elif "$copilot_command" plugin list |
+    grep -Eiq '(^|[^a-z0-9-])konclave([^a-z0-9-]|$)'
 then
     echo 'Konclave plugin remained after uninstall.' >&2
     exit 1
