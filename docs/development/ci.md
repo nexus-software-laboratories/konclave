@@ -66,28 +66,51 @@ before running its focused Vitest case.
 
 `.github/workflows/package-validation.yml` builds Linux x64, Windows x64, macOS
 Apple-silicon, and macOS Intel binaries. Each lane packages the CLI, shared local
-service, standalone relay, platform service files, and built Copilot plugin according to
-`distribution/release-artifacts.json`.
+service, standalone relay, platform service files, and built Copilot plugin according
+to `distribution/release-artifacts.json`. A separate hosted lane builds the portable
+Agent Plugin once and emits its provenance.
 
 The package gate creates each native archive twice and requires byte-identical output,
 extracts it outside the source tree, runs the packaged CLI, and requires `konclave
-doctor` to recognize the packaged daemon and plugin. Candidates are uploaded as
-transient unsigned workflow artifacts used only to transfer files between jobs; the
-workflow does not publish a release.
+doctor` to recognize the packaged daemon and plugin. Candidates are uploaded as transient unsigned workflow artifacts used only to
+transfer files between jobs; package validation itself does not publish a release.
 
 After every native and container lane succeeds, `Release integrity` downloads the
 candidates into one flat release set. It emits target-filtered Rust, npm-lock, and
 container CycloneDX SBOMs; one deterministic SLSA provenance statement per executable
 archive; and an exact SHA-256 manifest. The shipped `RELEASE.json` independently
 defines every required archive and sidecar, so a partial download cannot redefine
-itself as complete merely by omitting a checksum line. Negative tests mutate, remove,
-and add files before the final verifier is allowed to pass. The complete set exists
-only on that job's ephemeral filesystem and is never uploaded or published.
+itself as complete merely by omitting a checksum line. Negative tests mutate, remove, and add files before the final verifier is allowed to
+pass. A trusted reusable-workflow caller may retain the complete set as a one-day
+Actions artifact; pull-request validation does not.
 
 The default-branch `Package artifact cleanup` workflow runs after every completed
-package-validation run, including failures and cancellations, and deletes artifacts
-belonging to that exact run. Pull-request code receives no `actions: write`
-permission. One-day retention is only a fallback if trusted cleanup cannot run.
+package-validation run, including failures and cancellations, and after successful
+prerelease publication. It deletes artifacts belonging to that exact run.
+Publication failures keep the candidate for at most one day so a maintainer can
+diagnose a draft or tag failure without presenting it as a release. Pull-request code
+receives no `actions: write` permission.
+
+## Immutable prerelease publication
+
+`.github/workflows/publish-prerelease.yml` is manual, main-only, and uses public
+GitHub-hosted runners plus the repository-scoped `GITHUB_TOKEN`. It calls package
+validation as a reusable workflow and waits for every native, container, integrity,
+and packaged-acceptance job before receiving the complete set.
+
+The publisher requires repository release immutability, an unused `v<version>` tag,
+and exact agreement among the release manifest, Agent Plugin, and npm package. It
+creates the tag only after local verification, creates a draft release, uploads every
+file without replacement, compares GitHub's asset sizes and digests, downloads the
+draft to a clean directory, and runs the shipped verifier. The final publish must
+report an immutable prerelease whose lightweight tag identifies the validated source
+commit. Any earlier failure leaves no published release.
+
+Release immutability is an administrator-owned repository setting. GitHub does not
+allow the credential-free workflow token to read that setting, so maintainers verify
+it before dispatch; the final release response is the workflow's authoritative
+immutability check. If GitHub reports a mutable release, the workflow returns it to
+draft and fails.
 
 `Packaged clean-install acceptance` then extracts the Linux client, relay, and gateway archives
 twice, creates temporary trusted TLS, and drives the packaged shared local service

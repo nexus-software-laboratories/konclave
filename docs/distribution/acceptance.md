@@ -53,6 +53,10 @@ The test compiles only its CI harness. Every process under test—the CLI, share
 service and its replacement extraction, standalone relay, standalone gateway, and
 both container images—comes from the packaged release candidates.
 
+The prerelease publisher consumes the same complete candidate set after this
+acceptance job succeeds. It does not rebuild an archive after creating the release
+tag.
+
 Gateway-container execution uses host-loopback networking only inside the acceptance
 harness so the owner-verified Unix local-service socket retains the host account's
 kernel peer identity. The released Compose contract is validated separately and uses

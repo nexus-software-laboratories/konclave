@@ -16,6 +16,15 @@
   },
   "artifacts": [
     {
+      "id": "konclave-agent-plugin",
+      "kind": "plugin",
+      "target": "portable",
+      "operatingSystem": "any",
+      "architecture": "any",
+      "archiveFormat": "zip",
+      "fileName": "konclave-0.1.0.zip"
+    },
+    {
       "id": "konclave-client-linux-x64",
       "kind": "client",
       "target": "x86_64-unknown-linux-gnu",

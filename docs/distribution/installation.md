@@ -10,10 +10,10 @@ examples. Gateway archives contain the standalone standard A2A HTTP+JSON process
 strict configuration and publication examples, and its runtime contract. No source
 checkout or compiler is required after extraction.
 
-Package-validation artifacts are transient CI transport and are deleted immediately
-after each run. No public release download is currently published. A maintainer must
-build the package set locally or explicitly authorize a separate public release
-channel before end users can download these archives.
+Verified package-validation artifacts are transient CI transport and are deleted
+after each run. Durable downloads are published together as an immutable GitHub
+prerelease only after the same candidate set passes packaged clean-install
+acceptance.
 
 Repository contributors on Windows can use the one-command
 [Local Copilot demo](local-demo.md), which downloads the transient Windows candidate
@@ -35,6 +35,16 @@ directory is the installation root used by the commands below.
 
 Before extraction, verify the complete downloaded release set as described in
 [Verify release integrity and contents](integrity.md).
+
+For the `v0.1.0` prerelease, a clean machine with GitHub CLI and PowerShell can
+download and verify the complete set without a source checkout:
+
+```shell
+gh release download v0.1.0 \
+  --repo nexus-software-laboratories/konclave \
+  --dir konclave-0.1.0
+pwsh ./konclave-0.1.0/Verify-Release.ps1
+```
 
 ## Install the Copilot Agent Plugin
 
@@ -89,6 +99,20 @@ directory separately, then copy the Agent Plugin's
 unsupported harness's own skill location when the best-effort fallback is wanted.
 Do not install it into Copilot CLI; the paved extension owns that harness.
 Do not copy a native executable or create a `bin/` child under the extension.
+
+## Replace or roll back an extracted release
+
+Release assets and their tag are immutable. Never overlay a corrected archive under
+an existing version: publish and verify a new version instead. Keep each extracted
+version in a separate owner-controlled directory and keep profiles, credentials,
+service identity, and canonical client configuration outside those directories.
+
+Before switching versions, stop the per-user service with the platform manager from
+the active installation. Verify the complete target release set, start its service
+manager, and run that version's `konclave doctor --install-root <install-root>`.
+Rolling back uses the same process with a previously published release. `v0.1.0` is
+the first native prerelease, so it has no earlier native package to select; uninstall
+preserves separately stored profile and authority state by default.
 
 ## Initialize the installation
 

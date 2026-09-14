@@ -18,6 +18,7 @@
     "Daemon packaging (local-daemon)",
     "Package validation",
     "PR title",
+    "Release publication conformance",
     "Review policy"
   ],
   "draftValidation": {
@@ -44,9 +45,12 @@
         "pr-base/base",
         "pr-title/title",
         "pr-review-policy/evaluate",
+        "release-publication-conformance",
         "a2a-conformance",
         "adapter-conformance",
         "agent-plugin-conformance",
+        "package-plugin",
+        "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
         "generic-client-conformance",
@@ -145,6 +149,26 @@
       "requiredChecks": [
         "Package validation"
       ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/release-publication-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Release publication conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/publish-prerelease.yml",
+      "roles": [
+        "repository-automation"
+      ],
+      "draftBehavior": "not-applicable",
+      "requiredChecks": []
     },
     {
       "source": "project",

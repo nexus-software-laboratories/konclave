@@ -1,6 +1,22 @@
 name: Package validation
 
 on:
+  workflow_call:
+    inputs:
+      request_id:
+        description: Optional caller correlation identifier
+        required: false
+        type: string
+      demo_windows_only:
+        description: Build only the transient Windows package for the local demo
+        required: false
+        default: false
+        type: boolean
+      retain_release_set:
+        description: Upload the complete validated release set for a trusted caller
+        required: false
+        default: false
+        type: boolean
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
@@ -27,6 +43,11 @@ on:
         type: string
       demo_windows_only:
         description: Build only the transient Windows package for the local demo
+        required: false
+        default: false
+        type: boolean
+      retain_release_set:
+        description: Upload the complete validated release set
         required: false
         default: false
         type: boolean
@@ -193,6 +214,82 @@ jobs:
         if: ${{ inputs.demo_windows_only }}
         shell: pwsh
         run: Start-Sleep -Seconds 600
+
+  package-plugin:
+    name: Package Agent Plugin
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Resolve Agent Plugin release contract
+        id: plugin-contract
+        shell: pwsh
+        run: |
+          $releaseJson = Get-Content distribution/release-artifacts.json -Raw
+          if (
+            -not (
+              $releaseJson |
+                Test-Json -SchemaFile distribution/release-artifacts.schema.json
+            )
+          ) {
+            throw 'Release artifact manifest does not satisfy its schema.'
+          }
+          $release = $releaseJson | ConvertFrom-Json -Depth 100
+          $artifacts = @(
+            $release.artifacts |
+              Where-Object { [string]$_.id -ceq 'konclave-agent-plugin' }
+          )
+          if (
+            $artifacts.Count -ne 1 -or
+            [string]$artifacts[0].kind -cne 'plugin' -or
+            [string]$artifacts[0].target -cne 'portable'
+          ) {
+            throw 'Agent Plugin entry does not match the release manifest.'
+          }
+          "file-name=$($artifacts[0].fileName)" >>$env:GITHUB_OUTPUT
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.plugin-contract.outputs.node }}
+          npm-cache-scope: release-agent-plugin
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Build and verify Agent Plugin candidate
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run build
+          npm run test:package-contract
+      - name: Stage Agent Plugin and provenance
+        shell: pwsh
+        run: |
+          $releaseRoot = 'target/release-plugin'
+          New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+          $archive = Join-Path $releaseRoot '${{ steps.plugin-contract.outputs.file-name }}'
+          Copy-Item (
+            Join-Path `
+              'extensions' `
+              'Konclave.HostExtension' `
+              'build' `
+              'outputs' `
+              '${{ steps.plugin-contract.outputs.file-name }}'
+          ) $archive
+          ./scripts/packaging/New-ReleaseProvenance.ps1 `
+            -ArtifactPath $archive `
+            -ArtifactId konclave-agent-plugin `
+            -Target portable `
+            -BuildKind plugin `
+            -OutputPath "$archive.intoto.jsonl"
+      - name: Upload unsigned Agent Plugin candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: konclave-agent-plugin-unsigned
+          path: target/release-plugin/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
   package-container:
     name: Package ${{ matrix.name }} linux/amd64 container
@@ -372,6 +469,7 @@ jobs:
     if: ${{ !inputs.demo_windows_only }}
     needs:
       - package-native
+      - package-plugin
       - package-container
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -407,7 +505,7 @@ jobs:
           node-version: ${{ steps.release-toolchains.outputs.node }}
           npm-cache-scope: release-integrity
           npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
-      - name: Download native and container candidates
+      - name: Download native, Agent Plugin, and container candidates
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: konclave-*-unsigned
@@ -487,11 +585,19 @@ jobs:
           finally {
             Pop-Location
           }
+          $pluginArtifact = @(
+            $release.artifacts |
+              Where-Object { [string]$_.kind -ceq 'plugin' }
+          )
+          if ($pluginArtifact.Count -ne 1) {
+            throw 'Release manifest must contain one Agent Plugin.'
+          }
+          $pluginSbomPath = Join-Path `
+            'target/release-set' `
+            "$($pluginArtifact[0].fileName).cdx.json"
           ./scripts/packaging/Normalize-CycloneDx.ps1 `
             -InputPath $rawPluginSbom `
-            -OutputPath (
-              Join-Path 'target/release-set' "konclave-copilot-plugin-$version.cdx.json"
-            ) `
+            -OutputPath $pluginSbomPath `
             -ComponentName 'konclave-copilot-plugin' `
             -ComponentVersion $version
           Remove-Item -LiteralPath $rawPluginSbom -Force
@@ -509,16 +615,25 @@ jobs:
           ./scripts/packaging/Test-ReleaseIntegrity.ps1
           ./scripts/packaging/Test-ReleaseMetadata.ps1
           ./scripts/packaging/Test-ReleaseRustSbom.ps1
-          . ./scripts/packaging/ReleaseIntegrity.Functions.ps1
-          [void](Test-ReleaseContractCoverage -Directory $releaseRoot)
-          ./scripts/packaging/Test-PublicReleaseMetadata.ps1 -Directory $releaseRoot
-          ./scripts/packaging/New-ReleaseChecksums.ps1 -Directory $releaseRoot
-          & (Join-Path $releaseRoot 'Verify-Release.ps1') -Directory $releaseRoot
+          $sourceCommit = (git rev-parse HEAD).Trim()
+          ./scripts/packaging/Complete-ReleaseSet.ps1 `
+            -Directory $releaseRoot `
+            -SourceCommit $sourceCommit
+      - name: Upload complete validated release set
+        if: ${{ inputs.retain_release_set }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: konclave-complete-release-set
+          path: target/release-set/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
   packaged-acceptance:
     name: Packaged clean-install acceptance
     if: ${{ !inputs.demo_windows_only }}
     needs:
       - package-native
+      - package-plugin
       - package-container
       - release-integrity
     runs-on: ubuntu-latest
@@ -610,6 +725,7 @@ jobs:
     if: always()
     needs:
       - package-native
+      - package-plugin
       - package-container
       - release-integrity
       - packaged-acceptance
@@ -622,6 +738,7 @@ jobs:
           IS_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
           DEMO_WINDOWS_ONLY: ${{ inputs.demo_windows_only }}
           NATIVE_RESULT: ${{ needs.package-native.result }}
+          PLUGIN_RESULT: ${{ needs.package-plugin.result }}
           CONTAINER_RESULT: ${{ needs.package-container.result }}
           INTEGRITY_RESULT: ${{ needs.release-integrity.result }}
           ACCEPTANCE_RESULT: ${{ needs.packaged-acceptance.result }}
@@ -638,6 +755,10 @@ jobs:
           if [ "$DEMO_WINDOWS_ONLY" = 'true' ]; then
             echo 'Transient Windows demo package passed.'
             exit 0
+          fi
+          if [ "$PLUGIN_RESULT" != 'success' ]; then
+            echo "::error::Agent Plugin packaging concluded with $PLUGIN_RESULT."
+            exit 1
           fi
           if [ "$CONTAINER_RESULT" != 'success' ]; then
             echo "::error::Container packaging concluded with $CONTAINER_RESULT."
