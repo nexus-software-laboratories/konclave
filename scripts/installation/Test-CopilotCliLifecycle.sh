@@ -100,7 +100,6 @@ write_config() {
 run_prompt_probe() {
     local scenario="$1"
     local transcript="$test_root/$scenario.transcript"
-    local started elapsed status command
     local args=(
         "$copilot_command"
         --no-auto-update
@@ -114,27 +113,20 @@ run_prompt_probe() {
         --log-level error
         -C "$test_root/workspace"
     )
-    printf -v command '%q ' "${args[@]}"
-    started="$(date +%s%3N)"
-    set +e
-    printf '/exit\n' |
-        KONCLAVE_SERVICE_CONFIG_FILE="$test_root/config/konclave.service.json" \
-        timeout 8s script --quiet --return --command "$command" "$transcript" \
-            >"$test_root/$scenario.stdout" 2>"$test_root/$scenario.stderr"
-    status=$?
-    set -e
-    elapsed="$(( $(date +%s%3N) - started ))"
-    if [ "$status" -ne 0 ]; then
+    if ! KONCLAVE_SERVICE_CONFIG_FILE="$test_root/config/konclave.service.json" \
+        python3 "$(
+            dirname "$0"
+        )/copilot_prompt_probe.py" \
+            --timeout-seconds 7 \
+            --transcript "$transcript" \
+            -- "${args[@]}" \
+            >"$test_root/$scenario.stdout" 2>"$test_root/$scenario.stderr"; then
         cat "$test_root/$scenario.stdout" >&2
         cat "$test_root/$scenario.stderr" >&2
         echo "$scenario did not reach and exit a usable prompt." >&2
         exit 1
     fi
-    if [ "$elapsed" -ge 7000 ]; then
-        echo "$scenario exceeded the 7-second prompt budget: ${elapsed}ms." >&2
-        exit 1
-    fi
-    printf '%s=%sms\n' "$scenario" "$elapsed"
+    printf '%s %s\n' "$scenario" "$(<"$test_root/$scenario.stdout")"
 }
 
 absent_socket="$test_root/config/absent.sock"
