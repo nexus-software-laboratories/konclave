@@ -13,15 +13,31 @@ if [ "$source_mode" != 'live' ] && [ "$source_mode" != 'remote' ]; then
 fi
 
 test_root="$(mktemp -d)"
+git_daemon_pid=''
 cleanup() {
     local status="$?"
+    local cleanup_status=0
     trap - EXIT
+    if [ -n "$git_daemon_pid" ] && kill -0 "$git_daemon_pid" 2>/dev/null; then
+        if ! kill "$git_daemon_pid"; then
+            cleanup_status=1
+        fi
+        set +e
+        wait "$git_daemon_pid"
+        local wait_status="$?"
+        set -e
+        if [ "$wait_status" -ne 0 ] && [ "$wait_status" -ne 143 ]; then
+            cleanup_status=1
+        fi
+    fi
     if ! rm -rf -- "$test_root"; then
-        echo 'Marketplace lifecycle cleanup failed.' >&2
-        exit 1
+        cleanup_status=1
     fi
     if [ -e "$test_root" ]; then
-        echo 'Marketplace lifecycle root remained after cleanup.' >&2
+        cleanup_status=1
+    fi
+    if [ "$cleanup_status" -ne 0 ]; then
+        echo 'Marketplace lifecycle cleanup failed.' >&2
         exit 1
     fi
     exit "$status"
@@ -45,8 +61,16 @@ if "$copilot_command" plugin list --help | grep -q -- '--json'; then
     supports_plugin_json=true
 fi
 supports_plugin_toggle=false
-if "$copilot_command" plugin disable --help >/dev/null 2>&1 &&
-    "$copilot_command" plugin enable --help >/dev/null 2>&1
+set +e
+disable_help="$("$copilot_command" plugin disable --help 2>&1)"
+disable_status="$?"
+enable_help="$("$copilot_command" plugin enable --help 2>&1)"
+enable_status="$?"
+set -e
+if [ "$disable_status" -eq 0 ] &&
+    [ "$enable_status" -eq 0 ] &&
+    grep -Fq 'Usage: copilot plugin disable' <<<"$disable_help" &&
+    grep -Fq 'Usage: copilot plugin enable' <<<"$enable_help"
 then
     supports_plugin_toggle=true
 fi
@@ -236,7 +260,34 @@ exercise_update_and_rollback() {
     git -C "$work" push --quiet --set-upstream origin main
     git -C "$remote" symbolic-ref HEAD refs/heads/main
 
-    local source="file://$(realpath "$remote")"
+    local port
+    port="$(
+        python3 -c \
+            'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+    )"
+    git daemon \
+        --reuseaddr \
+        --export-all \
+        --base-path="$test_root" \
+        --listen=127.0.0.1 \
+        --port="$port" \
+        "$remote" \
+        >"$test_root/git-daemon.log" 2>"$test_root/git-daemon.error.log" &
+    git_daemon_pid="$!"
+    for _ in $(seq 1 50); do
+        if (echo >"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if ! kill -0 "$git_daemon_pid" 2>/dev/null; then
+        cat "$test_root/git-daemon.log" >&2
+        cat "$test_root/git-daemon.error.log" >&2
+        echo 'Marketplace Git fixture did not start.' >&2
+        exit 1
+    fi
+
+    local source="git://127.0.0.1:$port/fixture.git"
     "$copilot_command" plugin marketplace add "$source"
     assert_registered "$marketplace"
     install_plugin "$marketplace"
