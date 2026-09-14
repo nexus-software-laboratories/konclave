@@ -1,6 +1,6 @@
 import { chmodSync, constants, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -101,6 +101,83 @@ function fakeFiles(
   };
 }
 
+function mappedFiles(
+  entries: ReadonlyMap<
+    string,
+    {
+      readonly contents: string | Buffer;
+      readonly mode?: number;
+      readonly uid?: number;
+      readonly file?: boolean;
+    }
+  >,
+): SecureFileOperations & { readonly opened: string[]; readonly closed: number[] } {
+  const opened: string[] = [];
+  const closed: number[] = [];
+  const descriptors = new Map<
+    number,
+    {
+      readonly bytes: Buffer;
+      readonly mode: number;
+      readonly uid: number;
+      readonly file: boolean;
+      position: number;
+    }
+  >();
+  let nextDescriptor = 10;
+  return {
+    noFollowFlag: 0x20_000,
+    currentUid: () => 1_000,
+    open(path) {
+      opened.push(path);
+      const entry = entries.get(path);
+      if (entry === undefined) {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      const descriptor = nextDescriptor;
+      nextDescriptor += 1;
+      descriptors.set(descriptor, {
+        bytes: typeof entry.contents === 'string' ? Buffer.from(entry.contents) : entry.contents,
+        mode: entry.mode ?? 0o100600,
+        uid: entry.uid ?? 1_000,
+        file: entry.file ?? true,
+        position: 0,
+      });
+      return descriptor;
+    },
+    stat(descriptor) {
+      const entry = descriptors.get(descriptor);
+      if (entry === undefined) {
+        throw new Error('unknown descriptor');
+      }
+      return {
+        uid: entry.uid,
+        mode: entry.mode,
+        size: entry.bytes.length,
+        isFile: () => entry.file,
+      };
+    },
+    read(descriptor, buffer, offset, length) {
+      const entry = descriptors.get(descriptor);
+      if (entry === undefined) {
+        throw new Error('unknown descriptor');
+      }
+      const count = Math.min(length, entry.bytes.length - entry.position);
+      if (count <= 0) {
+        return 0;
+      }
+      entry.bytes.copy(buffer, offset, entry.position, entry.position + count);
+      entry.position += count;
+      return count;
+    },
+    close(descriptor) {
+      closed.push(descriptor);
+    },
+    opened,
+    closed,
+  };
+}
+
 afterEach(() => {
   while (temporaryDirectories.length > 0) {
     const directory = temporaryDirectories.pop();
@@ -152,10 +229,172 @@ describe('installed service custody', () => {
     expect(files.closed).toEqual([7]);
   });
 
-  it('uses the installed sidecar when no override is present', () => {
-    const files = fakeFiles(serviceConfig(join(tmpdir(), 'account-issuer.key')));
-    resolveLocalServiceConfig({}, tmpdir(), 'linux', files);
-    expect(files.opened).toEqual([join(tmpdir(), 'konclave.service.json')]);
+  it('prefers canonical platform data and accepts an equivalent legacy encoding', () => {
+    const moduleDir = '/plugin/cache';
+    const canonical = '/var/lib/user/konclave/service/konclave.service.json';
+    const legacy = posix.join(moduleDir, 'konclave.service.json');
+    const record = {
+      ...serviceConfigRecord('/var/lib/user/konclave/service/account-issuer.key'),
+      authorizationPolicy: {
+        version: 1,
+        acceptedEvidence: [['account_trusted'], ['user_presence', 'account_trusted']],
+      },
+    };
+    const legacyRecord = {
+      ...record,
+      authorizationPolicy: {
+        version: 1,
+        acceptedEvidence: [['account_trusted', 'user_presence'], ['account_trusted']],
+      },
+    };
+    const files = mappedFiles(
+      new Map([
+        [canonical, { contents: JSON.stringify(record) }],
+        [legacy, { contents: JSON.stringify(legacyRecord, null, 2) }],
+      ]),
+    );
+
+    resolveLocalServiceConfig(
+      { XDG_DATA_HOME: '/var/lib/user', HOME: '/home/example' },
+      moduleDir,
+      'linux',
+      files,
+    );
+
+    expect(files.opened).toEqual([canonical, legacy]);
+    expect(files.closed).toEqual([10, 11]);
+  });
+
+  it.each([
+    {
+      platform: 'win32' as const,
+      environment: { LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local' },
+      moduleDir: 'C:\\plugin\\cache',
+      expected: 'C:\\Users\\example\\AppData\\Local\\Konclave\\service\\konclave.service.json',
+    },
+    {
+      platform: 'darwin' as const,
+      environment: { HOME: '/Users/example' },
+      moduleDir: '/plugin/cache',
+      expected: '/Users/example/Library/Application Support/Konclave/service/konclave.service.json',
+    },
+    {
+      platform: 'linux' as const,
+      environment: { XDG_DATA_HOME: '/srv/example', HOME: '/home/example' },
+      moduleDir: '/plugin/cache',
+      expected: '/srv/example/konclave/service/konclave.service.json',
+    },
+    {
+      platform: 'linux' as const,
+      environment: { HOME: '/home/example' },
+      moduleDir: '/plugin/cache',
+      expected: '/home/example/.local/share/konclave/service/konclave.service.json',
+    },
+  ])(
+    'resolves the canonical $platform client configuration path',
+    ({ platform, environment, moduleDir, expected }) => {
+      const record = serviceConfigRecord(
+        platform === 'win32' ? 'C:\\owner\\account-issuer.key' : '/owner/account-issuer.key',
+      );
+      if (platform === 'win32') {
+        record.userPresenceHelper = 'C:\\owner\\konclave.exe';
+      }
+      const files = mappedFiles(new Map([[expected, { contents: JSON.stringify(record) }]]));
+
+      resolveLocalServiceConfig(environment, moduleDir, platform, files);
+
+      expect(files.opened[0]).toBe(expected);
+    },
+  );
+
+  it('falls back to one valid legacy sidecar only when canonical state is absent', () => {
+    const moduleDir = '/plugin/cache';
+    const canonical = '/home/example/.local/share/konclave/service/konclave.service.json';
+    const legacy = posix.join(moduleDir, 'konclave.service.json');
+    const files = mappedFiles(
+      new Map([
+        [
+          legacy,
+          {
+            contents: serviceConfig(
+              '/home/example/.local/share/konclave/service/account-issuer.key',
+            ),
+          },
+        ],
+      ]),
+    );
+
+    resolveLocalServiceConfig({ HOME: '/home/example' }, moduleDir, 'linux', files);
+
+    expect(files.opened).toEqual([canonical, legacy]);
+    expect(files.closed).toEqual([10]);
+  });
+
+  it('accepts a legacy sidecar that only omits the newer UserPresence helper', () => {
+    const moduleDir = '/plugin/cache';
+    const canonical = '/home/example/.local/share/konclave/service/konclave.service.json';
+    const legacy = posix.join(moduleDir, 'konclave.service.json');
+    const record = serviceConfigRecord(
+      '/home/example/.local/share/konclave/service/account-issuer.key',
+    );
+    const oldRecord = { ...record };
+    delete oldRecord.userPresenceHelper;
+    const files = mappedFiles(
+      new Map([
+        [canonical, { contents: JSON.stringify(record) }],
+        [legacy, { contents: JSON.stringify(oldRecord) }],
+      ]),
+    );
+
+    const config = resolveLocalServiceConfig({ HOME: '/home/example' }, moduleDir, 'linux', files);
+
+    expect(config.userPresenceHelper).toBe(record.userPresenceHelper);
+  });
+
+  it('rejects conflicting or unsafe canonical state without trusting legacy fallback', () => {
+    const moduleDir = '/plugin/cache';
+    const canonical = '/home/example/.local/share/konclave/service/konclave.service.json';
+    const legacy = posix.join(moduleDir, 'konclave.service.json');
+    const record = serviceConfigRecord(
+      '/home/example/.local/share/konclave/service/account-issuer.key',
+    );
+    const conflicting = mappedFiles(
+      new Map([
+        [canonical, { contents: JSON.stringify(record) }],
+        [legacy, { contents: JSON.stringify({ ...record, endpoint: '/tmp/other.sock' }) }],
+      ]),
+    );
+    expect(() =>
+      resolveLocalServiceConfig({ HOME: '/home/example' }, moduleDir, 'linux', conflicting),
+    ).toThrow('conflicts with the legacy extension sidecar');
+
+    const unsafe = mappedFiles(
+      new Map([
+        [canonical, { contents: JSON.stringify(record), mode: 0o100640 }],
+        [legacy, { contents: JSON.stringify(record) }],
+      ]),
+    );
+    expect(() =>
+      resolveLocalServiceConfig({ HOME: '/home/example' }, moduleDir, 'linux', unsafe),
+    ).toThrow('service configuration is invalid');
+    expect(unsafe.opened).toEqual([canonical]);
+  });
+
+  it('rejects missing, relative, oversized, or unsupported platform locations', () => {
+    const contents = serviceConfig('/owner/account-issuer.key');
+    for (const [environment, platform, moduleDir] of [
+      [{}, 'linux', '/plugin/cache'],
+      [{ HOME: 'relative' }, 'linux', '/plugin/cache'],
+      [{ XDG_DATA_HOME: 'relative', HOME: '/home/example' }, 'linux', '/plugin/cache'],
+      [{ LOCALAPPDATA: 'relative' }, 'win32', 'C:\\plugin\\cache'],
+      [{ HOME: '/home/example' }, 'freebsd', '/plugin/cache'],
+      [{ HOME: '/home/example' }, 'linux', 'relative'],
+      [{ HOME: `/${'a'.repeat(4097)}` }, 'linux', '/plugin/cache'],
+    ] as const) {
+      expect(() =>
+        resolveLocalServiceConfig(environment, moduleDir, platform, fakeFiles(contents)),
+      ).toThrow(ServiceConfigurationError);
+    }
   });
 
   it('accepts an older AccountTrusted sidecar without a native helper', () => {

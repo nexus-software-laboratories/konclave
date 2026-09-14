@@ -79,14 +79,15 @@ pub(crate) fn run(args: InitArgs) -> anyhow::Result<()> {
     let local = local_service_installation::install(
         &root,
         args.copilot_extension_root,
+        args.local_service_client_config,
         args.local_service_endpoint.as_deref(),
         args.local_service_identity_file,
         args.local_service_profile_key_directory,
         authorization_policy,
     )?;
     println!(
-        "Initialized shared local service for the Copilot extension at {}.",
-        local.extension_root.display()
+        "Initialized shared local service client configuration at {}.",
+        local.client_config_path.display()
     );
     Ok(())
 }

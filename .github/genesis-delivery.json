@@ -9,6 +9,7 @@
     "A2A conformance",
     "Adapter conformance",
     "Authorization store conformance",
+    "Client runtime config conformance",
     "Generic client conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
@@ -45,6 +46,7 @@
         "a2a-conformance",
         "adapter-conformance",
         "authorization-store-conformance",
+        "client-runtime-config-conformance",
         "generic-client-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
@@ -85,6 +87,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Authorization store conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/client-runtime-config-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Client runtime config conformance"
       ]
     },
     {

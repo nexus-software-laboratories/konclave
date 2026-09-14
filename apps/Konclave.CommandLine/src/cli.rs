@@ -54,9 +54,12 @@ pub struct InitArgs {
     /// Absolute path for an endpoint-bound Unix headless credential record
     #[arg(long)]
     pub external_source: Option<PathBuf>,
-    /// User-scoped Copilot extension directory
+    /// Legacy raw-extension directory inspected only for sidecar migration
     #[arg(long)]
     pub copilot_extension_root: Option<PathBuf>,
+    /// Absolute client configuration path override for tests and development
+    #[arg(long)]
+    pub local_service_client_config: Option<PathBuf>,
     /// Explicit local named-pipe or Unix-socket endpoint
     #[arg(long)]
     pub local_service_endpoint: Option<String>,
@@ -107,6 +110,9 @@ pub struct DoctorArgs {
     /// Installation root containing bin/ and share/konclave/
     #[arg(long)]
     pub install_root: Option<PathBuf>,
+    /// Absolute client configuration path override for tests and development
+    #[arg(long)]
+    pub local_service_client_config: Option<PathBuf>,
 }
 
 #[derive(Args)]

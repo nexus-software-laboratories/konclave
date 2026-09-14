@@ -133,6 +133,10 @@ fn external_init_is_idempotent_and_conflicts_fail() {
     let root = directory.path().join("profiles");
     let source = directory.path().join("enrollment.credential");
     let extension = directory.path().join("extension");
+    let client_config = directory
+        .path()
+        .join("service")
+        .join("konclave.service.json");
     let service_identity = directory.path().join("service").join("identity.key");
     let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
     let encoded_credential = URL_SAFE_NO_PAD.encode([7; 32]);
@@ -153,6 +157,8 @@ fn external_init_is_idempotent_and_conflicts_fail() {
             .arg(&source)
             .arg("--copilot-extension-root")
             .arg(&extension)
+            .arg("--local-service-client-config")
+            .arg(&client_config)
             .arg("--local-service-identity-file")
             .arg(&service_identity);
         if attempt == 0 {
@@ -172,6 +178,10 @@ fn external_init_is_idempotent_and_conflicts_fail() {
     assert!(authorization_store_path(&installation_path)
         .unwrap()
         .is_file());
+    assert!(client_config.is_file());
+    assert!(!extension
+        .join(KonclaveLocalServiceTransport::COPILOT_SERVICE_CONFIG_FILE)
+        .exists());
     assert!(!std::fs::read(root.join("relay-installation.conf"))
         .unwrap()
         .windows(encoded_credential.len())
@@ -192,6 +202,8 @@ fn external_init_is_idempotent_and_conflicts_fail() {
         .arg(&source)
         .arg("--copilot-extension-root")
         .arg(&extension)
+        .arg("--local-service-client-config")
+        .arg(&client_config)
         .arg("--local-service-identity-file")
         .arg(&service_identity)
         .assert()
@@ -208,6 +220,10 @@ fn doctor_checks_installation_source_layout_and_relay() {
     let install = directory.path().join("install");
     let source = directory.path().join("enrollment.credential");
     let extension = directory.path().join("extension");
+    let client_config = directory
+        .path()
+        .join("service")
+        .join("konclave.service.json");
     let service_identity = directory.path().join("service").join("identity.key");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint =
@@ -237,6 +253,8 @@ fn doctor_checks_installation_source_layout_and_relay() {
     .arg(&source)
     .arg("--copilot-extension-root")
     .arg(&extension)
+    .arg("--local-service-client-config")
+    .arg(&client_config)
     .arg("--local-service-identity-file")
     .arg(&service_identity)
     .write_stdin(format!("{}\n", URL_SAFE_NO_PAD.encode([8; 32])))
@@ -276,6 +294,8 @@ fn doctor_checks_installation_source_layout_and_relay() {
         .arg(&root)
         .arg("--install-root")
         .arg(&install)
+        .arg("--local-service-client-config")
+        .arg(&client_config)
         .assert()
         .success()
         .stdout(contains("PASS installation_config"))
@@ -299,6 +319,10 @@ fn relay_bootstrap_creates_idempotent_access_and_protected_source() {
     let source = directory.path().join("enrollment.credential");
     let access = directory.path().join("relay-access.json");
     let extension = directory.path().join("extension");
+    let client_config = directory
+        .path()
+        .join("service")
+        .join("konclave.service.json");
     let service_identity = directory.path().join("service").join("identity.key");
     let endpoint = RelayEndpoint::parse("http://127.0.0.1:43123").unwrap();
 
@@ -342,6 +366,8 @@ fn relay_bootstrap_creates_idempotent_access_and_protected_source() {
         .arg(&source)
         .arg("--copilot-extension-root")
         .arg(&extension)
+        .arg("--local-service-client-config")
+        .arg(&client_config)
         .arg("--local-service-identity-file")
         .arg(&service_identity)
         .assert()

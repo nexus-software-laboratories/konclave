@@ -24,6 +24,7 @@ impl Installation {
         let profile_root = root.path().join("profiles");
         let enrollment_source = root.path().join("enrollment.credential");
         let extension_root = root.path().join("extension");
+        let client_config = root.path().join("service").join("konclave.service.json");
         let service_identity = root.path().join("service").join("identity.key");
         let mut init = Command::cargo_bin("KonclaveCommandLine").unwrap();
         init.args([
@@ -39,6 +40,8 @@ impl Installation {
         .arg(&enrollment_source)
         .arg("--copilot-extension-root")
         .arg(&extension_root)
+        .arg("--local-service-client-config")
+        .arg(&client_config)
         .arg("--local-service-identity-file")
         .arg(&service_identity)
         .write_stdin(format!("{}\n", URL_SAFE_NO_PAD.encode([8; 32])))

@@ -309,6 +309,12 @@ The installer owns service start, stop, health, upgrade, and rollback. Thin exte
 contain no daemon binary after migration. `konclave init` configures installation and
 enrollment; `doctor` checks the shared service and local client path.
 
+Installer-owned client configuration lives under the canonical per-user Konclave
+platform data root, not a replaceable harness plugin cache. During migration, an
+owner-protected legacy sidecar may seed the canonical record only when its validated
+authority values match the requested installation. New installations do not create a
+legacy sidecar, and plugin update or removal cannot delete service authority state.
+
 The service may start eagerly through the platform supervisor or lazily through an
 idempotent installer-owned launcher. Concurrent client starts must converge on one
 service instance.

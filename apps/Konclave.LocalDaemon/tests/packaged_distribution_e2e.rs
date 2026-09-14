@@ -33,7 +33,10 @@ use KonclaveLocalServiceTransport::{
     AdapterKeyId, AdapterKeyVersion, LocalServiceInstallation, LocalServiceProfileCustody,
     encode_lowercase_hex,
 };
-use KonclaveSecretStorage::{create_or_verify_owner_protected_file, open_owner_protected_file};
+use KonclaveSecretStorage::{
+    create_or_verify_owner_protected_file, ensure_owner_protected_directory,
+    open_owner_protected_file,
+};
 use sha2::{Digest as _, Sha256};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::time::timeout;
@@ -63,6 +66,7 @@ struct AcceptancePaths {
     profile_keys: PathBuf,
     service_identity: PathBuf,
     extension_root: PathBuf,
+    client_config: PathBuf,
     relay_state: PathBuf,
     relay_database: PathBuf,
     gateway: PathBuf,
@@ -89,6 +93,7 @@ impl AcceptancePaths {
             profile_keys: required_path("KONCLAVE_ACCEPTANCE_PROFILE_KEYS"),
             service_identity: required_path("KONCLAVE_ACCEPTANCE_SERVICE_IDENTITY"),
             extension_root: required_path("KONCLAVE_ACCEPTANCE_EXTENSION_ROOT"),
+            client_config: required_path("KONCLAVE_ACCEPTANCE_CLIENT_CONFIG"),
             relay_state: required_path("KONCLAVE_ACCEPTANCE_RELAY_STATE"),
             relay_database: required_path("KONCLAVE_ACCEPTANCE_RELAY_DATABASE"),
             gateway: required_path("KONCLAVE_ACCEPTANCE_GATEWAY"),
@@ -408,12 +413,14 @@ struct GenericInvocation<'a> {
 
 fn run_generic(
     module: &Path,
+    client_config: &Path,
     invocation: GenericInvocation<'_>,
     expect_success: bool,
 ) -> serde_json::Value {
     let mut command = Command::new("node");
     command
         .arg(module)
+        .env("KONCLAVE_SERVICE_CONFIG_FILE", client_config)
         .args([
             "--profile",
             invocation.profile,
@@ -957,6 +964,8 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             paths.enrollment_source.clone().into_os_string(),
             OsString::from("--copilot-extension-root"),
             paths.extension_root.clone().into_os_string(),
+            OsString::from("--local-service-client-config"),
+            paths.client_config.clone().into_os_string(),
             OsString::from("--local-service-identity-file"),
             paths.service_identity.clone().into_os_string(),
             OsString::from("--local-service-profile-key-directory"),
@@ -965,7 +974,15 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
         true,
     );
     assert!(init_output.contains("shared local service"));
+    assert!(paths.client_config.is_file());
+    assert!(
+        !paths
+            .extension_root
+            .join(KonclaveLocalServiceTransport::COPILOT_SERVICE_CONFIG_FILE)
+            .exists()
+    );
     let installed_generic = paths.extension_root.join("generic.mjs");
+    ensure_owner_protected_directory(&paths.extension_root).unwrap();
     std::fs::copy(&paths.generic_module, &installed_generic).unwrap();
     for (profile, value) in [
         ("session-packaged-a", 31_u8),
@@ -1007,6 +1024,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     let service = SharedServiceProcess::start_with_inherited_stderr(&paths.service, &config_path);
     let generic_identity = run_generic(
         &installed_generic,
+        &paths.client_config,
         GenericInvocation {
             profile: "generic-packaged",
             profile_mode: "durable",
@@ -1045,6 +1063,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
 
     let generic_pairing = run_generic(
         &installed_generic,
+        &paths.client_config,
         GenericInvocation {
             profile: "generic-packaged",
             profile_mode: "durable",
@@ -1090,6 +1109,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
         let sync_request_id = format!("{:02x}", 80 + attempt).repeat(16);
         let mut generic_status = run_generic(
             &installed_generic,
+            &paths.client_config,
             GenericInvocation {
                 profile: "generic-packaged",
                 profile_mode: "durable",
@@ -1107,6 +1127,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             let pairing = &generic_status["pairing"];
             generic_status = run_generic(
                 &installed_generic,
+                &paths.client_config,
                 GenericInvocation {
                     profile: "generic-packaged",
                     profile_mode: "durable",
@@ -1146,6 +1167,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     let generic_text = "packaged generic client message";
     run_generic(
         &installed_generic,
+        &paths.client_config,
         GenericInvocation {
             profile: "generic-packaged",
             profile_mode: "durable",
@@ -1204,6 +1226,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             let sync_request_id = format!("{:02x}", 128 + attempt).repeat(16);
             run_generic(
                 &installed_generic,
+                &paths.client_config,
                 GenericInvocation {
                     profile: "generic-packaged",
                     profile_mode: "durable",
@@ -1216,6 +1239,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             );
             let history = run_generic(
                 &installed_generic,
+                &paths.client_config,
                 GenericInvocation {
                     profile: "generic-packaged",
                     profile_mode: "durable",
@@ -1676,6 +1700,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     .expect("shared service did not publish issuer disablement");
     let disabled = run_generic(
         &installed_generic,
+        &paths.client_config,
         GenericInvocation {
             profile: "generic-packaged",
             profile_mode: "durable",

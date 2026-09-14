@@ -70,8 +70,7 @@ installation configuration or opening a service connection.
 
 ## Invocation
 
-The client must run from the installed extension directory beside
-`konclave.service.json`:
+The client may run from the installed extension or plugin cache:
 
 ```text
 $HOME/.copilot/extensions/konclave/generic.mjs
@@ -79,8 +78,20 @@ $HOME/.copilot/extensions/konclave/generic.mjs
 
 On Windows this is `%USERPROFILE%\.copilot\extensions\konclave\generic.mjs` unless
 `COPILOT_HOME` selects another absolute Copilot configuration root. The packaged
-source under `share/konclave/plugin/` has no sidecar and is not the runtime invocation
-path.
+source under `share/konclave/plugin/` remains a distribution input rather than mutable
+authority state.
+
+The client resolves installer-owned service configuration independently:
+
+- Windows: `%LOCALAPPDATA%\Konclave\service\konclave.service.json`;
+- Linux: `$XDG_DATA_HOME/konclave/service/konclave.service.json`, or
+  `~/.local/share/konclave/service/konclave.service.json`; and
+- macOS: `~/Library/Application Support/Konclave/service/konclave.service.json`.
+
+An existing module-adjacent sidecar is a migration fallback only. If canonical and
+legacy records both exist, their validated authority values must agree. The
+`KONCLAVE_SERVICE_CONFIG_FILE` absolute-path override is reserved for isolated tests
+and declared development scenarios.
 
 For a UserPresence policy, invocation pauses for one Windows-owned verification
 ceremony before the operation begins. One successful ceremony authorizes only the
