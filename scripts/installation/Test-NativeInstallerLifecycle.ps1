@@ -222,6 +222,7 @@ try {
     $port = Get-FreePort
     $endpoint = "http://127.0.0.1:$port"
     $accessDocument = Join-Path $relayState 'access.json'
+    $profileRoot = Join-Path $dataRoot 'profiles'
     [void](Invoke-NativeCommand (
         Join-Path $bootstrapClient 'bin' 'konclave.exe'
     ) @(
@@ -229,7 +230,9 @@ try {
         '--relay-endpoint',
         $endpoint,
         '--access-document',
-        $accessDocument
+        $accessDocument,
+        '--profile-root',
+        $profileRoot
     ))
 
     $relayLog = Join-Path $relayState 'relay.log'
