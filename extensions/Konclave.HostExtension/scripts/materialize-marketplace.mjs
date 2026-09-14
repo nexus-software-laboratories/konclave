@@ -214,12 +214,21 @@ function readReleasePlan(releaseDirectory) {
     fail('release_provenance_invalid', 'Release Agent Plugin provenance is missing or invalid.');
   }
   const externalParameters = provenance?.predicate?.buildDefinition?.externalParameters;
-  const sourceCommits = (
+  const sourceDependencies = (
     provenance?.predicate?.buildDefinition?.resolvedDependencies ?? []
   ).flatMap((dependency) => {
     const commit = dependency?.digest?.gitCommit;
-    return typeof commit === 'string' && /^[0-9a-f]{40}$/.test(commit) ? [commit] : [];
+    const expectedUri = `git+https://github.com/nexus-software-laboratories/konclave@${commit}`;
+    return typeof commit === 'string' &&
+      /^[0-9a-f]{40}$/.test(commit) &&
+      dependency?.uri === expectedUri
+      ? [{ commit, uri: expectedUri }]
+      : [];
   });
+  const sourceCommit = sourceDependencies[0]?.commit;
+  const buildType =
+    `https://github.com/nexus-software-laboratories/konclave/blob/${sourceCommit}` +
+    '/.github/workflows/package-validation.yml';
   if (
     provenance?._type !== 'https://in-toto.io/Statement/v1' ||
     provenance?.predicateType !== 'https://slsa.dev/provenance/v1' ||
@@ -230,7 +239,10 @@ function readReleasePlan(releaseDirectory) {
     externalParameters?.buildKind !== 'plugin' ||
     externalParameters?.target !== 'portable' ||
     externalParameters?.version !== version ||
-    sourceCommits.length !== 1
+    sourceDependencies.length !== 1 ||
+    provenance?.predicate?.buildDefinition?.buildType !== buildType ||
+    provenance?.predicate?.runDetails?.builder?.id !==
+      'https://github.com/nexus-software-laboratories/konclave/actions/workflows/package-validation.yml'
   ) {
     fail('release_provenance_invalid', 'Release Agent Plugin provenance does not match.');
   }
@@ -286,7 +298,7 @@ function readReleasePlan(releaseDirectory) {
   });
   return {
     ...plan,
-    sourceCommit: sourceCommits[0],
+    sourceCommit,
   };
 }
 

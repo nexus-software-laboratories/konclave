@@ -58,6 +58,9 @@ function writeRelease(releaseRoot, mutateArchive = null, mutateManifest = null) 
       predicateType: 'https://slsa.dev/provenance/v1',
       predicate: {
         buildDefinition: {
+          buildType:
+            `https://github.com/nexus-software-laboratories/konclave/blob/${sourceCommit}` +
+            '/.github/workflows/package-validation.yml',
           externalParameters: {
             artifactId: 'konclave-agent-plugin',
             buildKind: 'plugin',
@@ -66,12 +69,17 @@ function writeRelease(releaseRoot, mutateArchive = null, mutateManifest = null) 
           },
           resolvedDependencies: [
             {
-              uri: 'git+https://github.com/nexus-software-laboratories/konclave',
+              uri: 'git+https://github.com/nexus-software-laboratories/konclave@' + sourceCommit,
               digest: {
                 gitCommit: sourceCommit,
               },
             },
           ],
+        },
+        runDetails: {
+          builder: {
+            id: 'https://github.com/nexus-software-laboratories/konclave/actions/workflows/package-validation.yml',
+          },
         },
       },
     })}\n`,
