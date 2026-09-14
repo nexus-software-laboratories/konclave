@@ -15,9 +15,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  installer-lifecycle-conformance:
-    name: Installer lifecycle conformance
-    runs-on: ubuntu-latest
+  installer-platform-conformance:
+    name: Installer lifecycle (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-15
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - name: Resolve installer validation scope
@@ -100,3 +107,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw 'launchd user-service manager has invalid shell syntax.'
           }
+
+  installer-lifecycle-conformance:
+    name: Installer lifecycle conformance
+    if: always()
+    needs: installer-platform-conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check installer platform matrix
+        shell: bash
+        env:
+          RESULT: ${{ needs.installer-platform-conformance.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" != 'success' ]; then
+            echo "::error::Installer platform matrix concluded with $RESULT."
+            exit 1
+          fi
+          echo 'Installer lifecycle passed on Linux, Windows, and macOS.'

@@ -258,6 +258,35 @@ try {
     ) {
         throw 'Windows user-service descriptor is invalid.'
     }
+    if ($IsWindows) {
+        $windowsInstall = Join-Path $root 'windows-install'
+        $windowsBin = Join-Path $windowsInstall 'bin'
+        New-Item -ItemType Directory -Path $windowsBin | Out-Null
+        Copy-Item -LiteralPath $env:ComSpec -Destination (
+            Join-Path $windowsBin 'KonclaveLocalService.exe'
+        )
+        $windowsConfig = Join-Path $root 'windows-service.json'
+        [IO.File]::WriteAllText($windowsConfig, '{}')
+        try {
+            & $manager `
+                -Action Install `
+                -InstallRoot $windowsInstall `
+                -ConfigPath $windowsConfig
+            $taskStatus = & $manager `
+                -Action Status `
+                -InstallRoot $windowsInstall `
+                -ConfigPath $windowsConfig
+            if ([string]::IsNullOrWhiteSpace(($taskStatus | Out-String))) {
+                throw 'Windows user-service manager returned no status.'
+            }
+        }
+        finally {
+            & $manager `
+                -Action Uninstall `
+                -InstallRoot $windowsInstall `
+                -ConfigPath $windowsConfig
+        }
+    }
 
     $legacy = Join-Path $root 'legacy-extension'
     [void](Set-OwnerOnlyDirectory -Path $legacy)
