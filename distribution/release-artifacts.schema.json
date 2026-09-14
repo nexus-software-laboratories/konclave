@@ -73,7 +73,7 @@
     },
     "artifacts": {
       "type": "array",
-      "minItems": 14,
+      "minItems": 15,
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -94,7 +94,7 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["client", "relay", "gateway", "container"]
+            "enum": ["plugin", "client", "relay", "gateway", "container"]
           },
           "target": {
             "type": "string",
@@ -103,16 +103,17 @@
               "x86_64-pc-windows-msvc",
               "aarch64-apple-darwin",
               "x86_64-apple-darwin",
-              "linux/amd64"
+              "linux/amd64",
+              "portable"
             ]
           },
           "operatingSystem": {
             "type": "string",
-            "enum": ["linux", "windows", "macos"]
+            "enum": ["linux", "windows", "macos", "any"]
           },
           "architecture": {
             "type": "string",
-            "enum": ["x64", "arm64"]
+            "enum": ["x64", "arm64", "any"]
           },
           "archiveFormat": {
             "type": "string",
@@ -165,7 +166,91 @@
               "required": ["image", "componentName", "applicationRoot", "provenanceInputs"]
             },
             "else": {
-              "required": ["rootDirectory"]
+              "if": {
+                "properties": {
+                  "kind": {
+                    "enum": ["client", "relay", "gateway"]
+                  }
+                },
+                "required": ["kind"]
+              },
+              "then": {
+                "required": ["rootDirectory"]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "plugin"
+                }
+              },
+              "required": ["kind"]
+            },
+            "then": {
+              "properties": {
+                "target": {
+                  "const": "portable"
+                },
+                "operatingSystem": {
+                  "const": "any"
+                },
+                "architecture": {
+                  "const": "any"
+                },
+                "archiveFormat": {
+                  "const": "zip"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": ["rootDirectory"]
+                  },
+                  {
+                    "required": ["image"]
+                  },
+                  {
+                    "required": ["applicationRoot"]
+                  },
+                  {
+                    "required": ["componentName"]
+                  },
+                  {
+                    "required": ["provenanceInputs"]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": ["client", "relay", "gateway", "container"]
+                }
+              },
+              "required": ["kind"]
+            },
+            "then": {
+              "properties": {
+                "target": {
+                  "enum": [
+                    "x86_64-unknown-linux-gnu",
+                    "x86_64-pc-windows-msvc",
+                    "aarch64-apple-darwin",
+                    "x86_64-apple-darwin",
+                    "linux/amd64"
+                  ]
+                },
+                "operatingSystem": {
+                  "enum": ["linux", "windows", "macos"]
+                },
+                "architecture": {
+                  "enum": ["x64", "arm64"]
+                }
+              }
             }
           }
         ]

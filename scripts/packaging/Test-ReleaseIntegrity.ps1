@@ -76,19 +76,20 @@ try {
     }
     $manifest = Get-Content (Join-Path $contractRoot 'RELEASE.json') -Raw |
         ConvertFrom-Json -Depth 100
-    [IO.File]::WriteAllText(
-        (Join-Path $contractRoot "konclave-copilot-plugin-$($manifest.release.version).cdx.json"),
-        '{}'
-    )
     foreach ($entry in $manifest.artifacts) {
         $archive = Join-Path $contractRoot ([string]$entry.fileName)
         [IO.File]::WriteAllText($archive, [string]$entry.id)
         [IO.File]::WriteAllText("$archive.intoto.jsonl", '{}')
-        if ([string]$entry.kind -in @('client', 'relay', 'gateway')) {
-            [IO.File]::WriteAllText("$archive.rust.cdx.json", '{}')
-        }
-        else {
-            [IO.File]::WriteAllText("$archive.cdx.json", '{}')
+        switch ([string]$entry.kind) {
+            { $_ -in @('client', 'relay', 'gateway') } {
+                [IO.File]::WriteAllText("$archive.rust.cdx.json", '{}')
+            }
+            { $_ -in @('plugin', 'container') } {
+                [IO.File]::WriteAllText("$archive.cdx.json", '{}')
+            }
+            default {
+                throw "Unsupported fixture artifact kind: $($entry.kind)"
+            }
         }
     }
     [void](New-ReleaseChecksums -Directory $contractRoot)
