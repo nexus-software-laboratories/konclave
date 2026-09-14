@@ -42,6 +42,39 @@ function writeRelease(releaseRoot, mutateArchive = null, mutateManifest = null) 
   writeFileSync(join(releaseRoot, fileName), archive);
   const digest = createHash('sha256').update(archive).digest('hex');
   writeFileSync(join(releaseRoot, 'SHA256SUMS'), `${digest}  ${fileName}\n`);
+  writeFileSync(
+    join(releaseRoot, `${fileName}.intoto.jsonl`),
+    `${JSON.stringify({
+      _type: 'https://in-toto.io/Statement/v1',
+      subject: [
+        {
+          name: fileName,
+          digest: {
+            sha256: digest,
+          },
+        },
+      ],
+      predicateType: 'https://slsa.dev/provenance/v1',
+      predicate: {
+        buildDefinition: {
+          externalParameters: {
+            artifactId: 'konclave-agent-plugin',
+            buildKind: 'plugin',
+            target: 'portable',
+            version,
+          },
+          resolvedDependencies: [
+            {
+              uri: 'git+https://github.com/nexus-software-laboratories/konclave',
+              digest: {
+                gitCommit: 'a'.repeat(40),
+              },
+            },
+          ],
+        },
+      },
+    })}\n`,
+  );
   const manifest = {
     release: {
       version,
@@ -77,6 +110,7 @@ try {
     releaseDirectory: releaseRoot,
     outputRoot,
   });
+  assert.equal(plan.sourceCommit, 'a'.repeat(40));
   assert.deepEqual(
     plan.files.map((file) => file.path),
     marketplaceOutputPaths,
@@ -183,11 +217,19 @@ try {
   writeRelease(invalidArchiveRoot);
   const invalidArchive = Buffer.from('not a zip');
   const invalidArchiveName = `konclave-${version}.zip`;
+  const invalidArchiveDigest = createHash('sha256').update(invalidArchive).digest('hex');
   writeFileSync(join(invalidArchiveRoot, invalidArchiveName), invalidArchive);
   writeFileSync(
     join(invalidArchiveRoot, 'SHA256SUMS'),
-    `${createHash('sha256').update(invalidArchive).digest('hex')}  ${invalidArchiveName}\n`,
+    `${invalidArchiveDigest}  ${invalidArchiveName}\n`,
   );
+  const invalidArchiveProvenancePath = join(
+    invalidArchiveRoot,
+    `${invalidArchiveName}.intoto.jsonl`,
+  );
+  const invalidArchiveProvenance = JSON.parse(readFileSync(invalidArchiveProvenancePath, 'utf8'));
+  invalidArchiveProvenance.subject[0].digest.sha256 = invalidArchiveDigest;
+  writeFileSync(invalidArchiveProvenancePath, `${JSON.stringify(invalidArchiveProvenance)}\n`);
   expectFailure(
     'invalid release archive',
     () =>
@@ -196,6 +238,19 @@ try {
         outputRoot: join(root, 'invalid-archive-output'),
       }),
     'release_archive_invalid',
+  );
+
+  const invalidProvenanceRoot = join(root, 'invalid-provenance');
+  writeRelease(invalidProvenanceRoot);
+  writeFileSync(join(invalidProvenanceRoot, `konclave-${version}.zip.intoto.jsonl`), '{}\n');
+  expectFailure(
+    'invalid release provenance',
+    () =>
+      materializeMarketplace({
+        releaseDirectory: invalidProvenanceRoot,
+        outputRoot: join(root, 'invalid-provenance-output'),
+      }),
+    'release_provenance_invalid',
   );
 
   const unsafeArchiveRoot = join(root, 'unsafe-archive');

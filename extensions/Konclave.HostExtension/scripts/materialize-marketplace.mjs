@@ -158,17 +158,62 @@ function readReleasePlan(releaseDirectory) {
     fail('release_checksum_mismatch', 'Release Agent Plugin checksum does not match.');
   }
 
+  let provenance;
+  try {
+    const statements = readFileSync(
+      resolve(releaseRoot, `${artifactFileName}.intoto.jsonl`),
+      'utf8',
+    )
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+    if (statements.length !== 1) {
+      fail('release_provenance_invalid', 'Release Agent Plugin provenance is not singular.');
+    }
+    [provenance] = statements;
+  } catch (error) {
+    if (error instanceof MarketplaceContractError) {
+      throw error;
+    }
+    fail('release_provenance_invalid', 'Release Agent Plugin provenance is missing or invalid.');
+  }
+  const externalParameters = provenance?.predicate?.buildDefinition?.externalParameters;
+  const sourceCommits = (
+    provenance?.predicate?.buildDefinition?.resolvedDependencies ?? []
+  ).flatMap((dependency) => {
+    const commit = dependency?.digest?.gitCommit;
+    return typeof commit === 'string' && /^[0-9a-f]{40}$/.test(commit) ? [commit] : [];
+  });
+  if (
+    provenance?._type !== 'https://in-toto.io/Statement/v1' ||
+    provenance?.predicateType !== 'https://slsa.dev/provenance/v1' ||
+    provenance?.subject?.length !== 1 ||
+    provenance.subject[0]?.name !== artifactFileName ||
+    provenance.subject[0]?.digest?.sha256 !== actualDigest ||
+    externalParameters?.artifactId !== 'konclave-agent-plugin' ||
+    externalParameters?.buildKind !== 'plugin' ||
+    externalParameters?.target !== 'portable' ||
+    externalParameters?.version !== version ||
+    sourceCommits.length !== 1
+  ) {
+    fail('release_provenance_invalid', 'Release Agent Plugin provenance does not match.');
+  }
+
   let entries;
   try {
     entries = unzipSync(new Uint8Array(archive));
   } catch {
     fail('release_archive_invalid', 'Release Agent Plugin archive cannot be decoded.');
   }
-  return createMarketplacePlan({
+  const plan = createMarketplacePlan({
     releaseVersion: version,
     artifactFileName,
     entries,
   });
+  return {
+    ...plan,
+    sourceCommit: sourceCommits[0],
+  };
 }
 
 export function materializeMarketplace({ releaseDirectory, outputRoot, checkOnly = false }) {
