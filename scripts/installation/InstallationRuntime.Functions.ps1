@@ -248,13 +248,14 @@ function Get-HostReleaseTarget {
             default { throw 'Installer does not support this processor architecture.' }
         }
     }
-    return switch ("$Platform/$Architecture") {
+    $target = switch ("$Platform/$Architecture") {
         'windows/x64' { 'x86_64-pc-windows-msvc' }
         'linux/x64' { 'x86_64-unknown-linux-gnu' }
         'macos/x64' { 'x86_64-apple-darwin' }
         'macos/arm64' { 'aarch64-apple-darwin' }
         default { throw "Installer does not support $Platform/$Architecture." }
     }
+    return $target
 }
 
 function Get-ReleaseInstallationCandidate {
