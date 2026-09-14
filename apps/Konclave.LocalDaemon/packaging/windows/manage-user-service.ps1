@@ -159,6 +159,16 @@ switch ($Action) {
             Assert-ManagedTask -Task $task
             if ($task.State -eq 'Running') {
                 Stop-ScheduledTask -TaskName $taskName
+                for ($attempt = 0; $attempt -lt 50; $attempt++) {
+                    $task = Get-ManagedTask
+                    if ($null -eq $task -or $task.State -ne 'Running') {
+                        break
+                    }
+                    Start-Sleep -Milliseconds 100
+                }
+                if ($null -ne $task -and $task.State -eq 'Running') {
+                    throw "Scheduled task '$taskName' did not stop."
+                }
             }
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
         }

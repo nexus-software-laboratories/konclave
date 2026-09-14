@@ -262,7 +262,9 @@ try {
         $windowsInstall = Join-Path $root 'windows-install'
         $windowsBin = Join-Path $windowsInstall 'bin'
         New-Item -ItemType Directory -Path $windowsBin | Out-Null
-        Copy-Item -LiteralPath $env:ComSpec -Destination (
+        Copy-Item -LiteralPath (
+            Join-Path $env:SystemRoot 'System32' 'where.exe'
+        ) -Destination (
             Join-Path $windowsBin 'KonclaveLocalService.exe'
         )
         $windowsConfig = Join-Path $root 'windows-service.json'
