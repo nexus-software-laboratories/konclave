@@ -107,6 +107,22 @@ find_cached_manifest() {
     printf '%s\n' "${matches[0]}"
 }
 
+add_marketplace() {
+    local label="$1"
+    local source="$2"
+    set +e
+    add_output="$("$copilot_command" plugin marketplace add "$source" 2>&1)"
+    add_status=$?
+    set -e
+    printf '%s\n' "$add_output"
+    if [ "$add_status" -eq 0 ]; then
+        printf 'Non-default marketplace source form: %s\n' "$label"
+        return 0
+    fi
+    printf 'Non-default marketplace source form failed: %s\n' "$label" >&2
+    return "$add_status"
+}
+
 write_catalog "$plugin_version"
 write_source_record "$plugin_version" false
 git config user.name 'github-actions[bot]'
@@ -115,7 +131,16 @@ first_commit="$(create_commit 'test: materialize initial marketplace')"
 git push origin "$first_commit:refs/heads/$branch"
 
 "$copilot_command" --version | grep -F "$expected_cli_version"
-"$copilot_command" plugin marketplace add "$repository#$branch"
+if ! add_marketplace shorthand "$repository#$branch"; then
+    marketplaces="$("$copilot_command" plugin marketplace list)"
+    if grep -Fq "$marketplace_name" <<<"$marketplaces"; then
+        echo 'Failed shorthand registration left a marketplace behind.' >&2
+        exit 1
+    fi
+    add_marketplace \
+        full-url \
+        "https://github.com/$repository.git#$branch"
+fi
 marketplaces="$("$copilot_command" plugin marketplace list)"
 if ! grep -Fq "$marketplace_name" <<<"$marketplaces"; then
     echo 'Registered marketplace was not listed.' >&2
