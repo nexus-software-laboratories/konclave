@@ -489,6 +489,14 @@ try {
         DataRoot = $dataRoot
     }
     Assert-InstallerAction -Result $status -Action Healthy -Version '0.1.0'
+    if (
+        (Get-KonclavePluginRecords).Count -ne 1 -or
+        -not (Test-Path -LiteralPath (
+            Join-Path $dataRoot 'runtime' 'direct-plugin.json'
+        ) -PathType Leaf)
+    ) {
+        throw 'Status changed installer-owned Agent Plugin state.'
+    }
     Write-Output 'lifecycle: previous runtime restored'
 
     $updatedAgain = Invoke-Installer -Installer $installer -Arguments @{

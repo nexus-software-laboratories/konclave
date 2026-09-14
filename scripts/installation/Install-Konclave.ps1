@@ -143,7 +143,6 @@ if ($Action -ceq 'Status') {
     }
     $record = Get-StateVersionRecord -State $state -Version $decision.targetVersion
     $root = Get-InstalledVersionRoot -Paths $paths -Record $record
-    $pluginRemoved = Disable-InstallerAgentPlugin -Paths $paths
     [void](Invoke-ServiceManager `
         -Action Status `
         -InstallRoot $root `
@@ -167,6 +166,7 @@ if ($Action -ceq 'Uninstall') {
     }
     $record = Get-StateVersionRecord -State $state -Version $decision.targetVersion
     $root = Get-InstalledVersionRoot -Paths $paths -Record $record
+    $pluginRemoved = Disable-InstallerAgentPlugin -Paths $paths
     [void](Invoke-ServiceManager `
         -Action Uninstall `
         -InstallRoot $root `
