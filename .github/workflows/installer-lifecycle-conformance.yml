@@ -82,7 +82,12 @@ jobs:
               [ref]$errors
             )
             if ($errors.Count -ne 0) {
-              throw "$path contains PowerShell parse errors."
+              $details = @(
+                $errors | ForEach-Object {
+                  "line $($_.Extent.StartLineNumber): $($_.Message)"
+                }
+              ) -join "`n"
+              throw "$path contains PowerShell parse errors:`n$details"
             }
           }
           ./scripts/installation/Test-InstallationLifecycle.ps1
