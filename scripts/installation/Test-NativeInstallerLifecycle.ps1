@@ -265,16 +265,12 @@ try {
     Wait-RelayHealth -Endpoint $endpoint
 
     $installer = Join-Path $candidateRelease 'Install-Konclave.ps1'
-    $serviceIdentity = Join-Path $relayState 'service-identity.key'
-    $profileKeys = Join-Path $relayState 'profile-keys'
     $installArguments = @{
         Action = 'Install'
         ReleaseDirectory = $baselineRelease
         DataRoot = $dataRoot
         RelayEndpoint = $endpoint
         AuthorizationPolicy = 'account-trusted'
-        ServiceIdentityFile = $serviceIdentity
-        ProfileKeyDirectory = $profileKeys
     }
     $installed = Invoke-Installer -Installer $installer -Arguments $installArguments
     Assert-InstallerAction -Result $installed -Action Install -Version '0.1.0'
