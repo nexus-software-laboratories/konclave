@@ -265,6 +265,7 @@ try {
     Wait-RelayHealth -Endpoint $endpoint
 
     $installer = Join-Path $candidateRelease 'Install-Konclave.ps1'
+    $manager = Join-Path $candidateRelease 'WindowsUserService.ps1'
     $installArguments = @{
         Action = 'Install'
         ReleaseDirectory = $baselineRelease
@@ -275,7 +276,6 @@ try {
     $installed = Invoke-Installer -Installer $installer -Arguments $installArguments
     Assert-InstallerAction -Result $installed -Action Install -Version '0.1.0'
     $managerInstallRoot = [string]$installed.installRoot
-    $manager = Join-Path $candidateRelease 'WindowsUserService.ps1'
 
     $profileSentinel = Join-Path $dataRoot 'profiles' 'retained-profile.sqlite3'
     [IO.File]::WriteAllText($profileSentinel, 'retained-profile')
@@ -414,9 +414,14 @@ try {
 }
 finally {
     $env:COPILOT_HOME = $previousCopilotHome
-    if ($null -ne $manager -and $null -ne $managerInstallRoot) {
-        $tasks = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
-        if ($tasks.Count -ne 0) {
+    $tasks = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
+    if ($null -ne $manager -and $tasks.Count -ne 0) {
+        if ($null -eq $managerInstallRoot) {
+            $taskAction = @($tasks[0].Actions)[0]
+            $binary = [string]$taskAction.Execute
+            $managerInstallRoot = Split-Path -Parent (Split-Path -Parent $binary)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($managerInstallRoot)) {
             & $manager `
                 -Action Uninstall `
                 -InstallRoot $managerInstallRoot `
@@ -427,8 +432,20 @@ finally {
         Stop-Process -Id $relayProcess.Id
         $relayProcess.WaitForExit()
     }
-    if (Test-Path -LiteralPath $root) {
-        Remove-Item -LiteralPath $root -Recurse -Force
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (-not (Test-Path -LiteralPath $root)) {
+            break
+        }
+        try {
+            Remove-Item -LiteralPath $root -Recurse -Force
+            break
+        }
+        catch {
+            if ($attempt -eq 19) {
+                throw
+            }
+            Start-Sleep -Milliseconds 250
+        }
     }
 }
 
