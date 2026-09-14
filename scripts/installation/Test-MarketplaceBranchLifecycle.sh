@@ -14,9 +14,9 @@ test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 export COPILOT_HOME="$test_root/copilot-home"
 export HOME="$test_root/home"
-export XDG_CACHE_HOME="$test_root/cache"
-export XDG_CONFIG_HOME="$test_root/config"
-export XDG_DATA_HOME="$test_root/data"
+export XDG_CACHE_HOME="$HOME/.cache"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
 mkdir -p \
     "$COPILOT_HOME" \
     "$HOME" \
