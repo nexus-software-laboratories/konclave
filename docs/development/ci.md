@@ -112,6 +112,21 @@ it before dispatch; the final release response is the workflow's authoritative
 immutability check. If GitHub reports a mutable release, the workflow returns it to
 draft and fails.
 
+If publication fails after tag or draft creation, dispatch `Publish prerelease` in
+`resume` mode with the failed source run identifier. Resume downloads that run's
+retained complete-set artifact, requires the existing tag and mutable draft to match
+its provenance, rejects changed or extra assets, uploads only missing exact assets,
+and retries each draft download with a bounded digest check. It never rebuilds after
+tag creation. A successful resume deletes the original run's transient artifacts.
+
+```shell
+gh workflow run publish-prerelease.yml \
+  --ref main \
+  -f mode=resume \
+  -f version=<version> \
+  -f source_run_id=<failed-run-id>
+```
+
 ## Installer lifecycle validation
 
 `Installer lifecycle conformance` runs while a pull request is draft on
