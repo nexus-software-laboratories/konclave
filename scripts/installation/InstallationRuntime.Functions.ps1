@@ -243,8 +243,8 @@ function Get-HostReleaseTarget {
     }
     if ([string]::IsNullOrEmpty($Architecture)) {
         $Architecture = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-            ([Runtime.InteropServices.Architecture]::X64) { 'x64' }
-            ([Runtime.InteropServices.Architecture]::Arm64) { 'arm64' }
+            { $_ -eq [Runtime.InteropServices.Architecture]::X64 } { 'x64' }
+            { $_ -eq [Runtime.InteropServices.Architecture]::Arm64 } { 'arm64' }
             default { throw 'Installer does not support this processor architecture.' }
         }
     }
