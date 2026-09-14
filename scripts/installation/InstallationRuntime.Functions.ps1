@@ -967,6 +967,61 @@ function Enable-InstallerAgentPlugin {
         return $true
     }
 
+    function Prepare-InstallerMarketplace {
+        param(
+            [Parameter(Mandatory)]
+            $Paths,
+
+            [scriptblock]$DirectPluginDisabler,
+
+            [scriptblock]$LegacyRootResolver,
+
+            [scriptblock]$LegacyMover
+        )
+
+        if ($null -eq $DirectPluginDisabler) {
+            $DirectPluginDisabler = {
+                param($InstallationPaths)
+                Disable-InstallerAgentPlugin -Paths $InstallationPaths
+            }
+        }
+        if ($null -eq $LegacyRootResolver) {
+            $LegacyRootResolver = {
+                Resolve-LegacyCopilotExtensionRoot
+            }
+        }
+        if ($null -eq $LegacyMover) {
+            $LegacyMover = {
+                param($Source, $LegacyRoot)
+                Move-LegacyCopilotExtension -Source $Source -LegacyRoot $LegacyRoot
+            }
+        }
+
+        $directRemoved = [bool](& $DirectPluginDisabler $Paths)
+        $legacyRoot = [string](& $LegacyRootResolver)
+        $legacyPreserved = $false
+        if (Test-Path -LiteralPath $legacyRoot) {
+            [void](& $LegacyMover $legacyRoot $Paths.legacyRoot)
+            $legacyPreserved = $true
+        }
+        return [pscustomobject][ordered]@{
+            status = if ($directRemoved -and $legacyPreserved) {
+                'RemovedDirectAndPreservedLegacy'
+            }
+            elseif ($directRemoved) {
+                'RemovedDirect'
+            }
+            elseif ($legacyPreserved) {
+                'PreservedLegacy'
+            }
+            else {
+                'ReadyMarketplace'
+            }
+            pluginRoot = $null
+            restartRequired = $directRemoved -or $legacyPreserved
+        }
+    }
+
     function Invoke-TransactionalRuntimeSwitch {
         param(
             [Parameter(Mandatory)]

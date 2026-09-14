@@ -60,7 +60,9 @@ The Copilot CLI host extension is packaged from
 
 Installer-enabled release sets provide `Install-Konclave.ps1`, which verifies release
 integrity and provenance, installs one versioned per-user runtime, starts the native
-supervisor, and requires health before reporting the Agent Plugin ready. See
+supervisor, and requires health before reporting the Agent Plugin ready. Users then
+register `nexus-software-laboratories/konclave` as a Copilot marketplace and install
+`konclave@konclave`. See
 [Install an unsigned prerelease](docs/distribution/installation.md) for install,
 update, rollback, and uninstall commands.
 

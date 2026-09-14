@@ -46,9 +46,12 @@ jobs:
             $run = $files.Count -ge 3000 -or @(
               $files | Where-Object {
                 $_ -match '^\.github/genesis-delivery\.json$' -or
+                $_ -match '^\.github/plugin/' -or
                 $_ -match '^\.github/workflows/agent-plugin-conformance\.yml$' -or
                 $_ -match '^distribution/release-artifacts\.json$' -or
                 $_ -match '^extensions/Konclave\.HostExtension/' -or
+                $_ -match '^plugins/konclave/' -or
+                $_ -match '^scripts/marketplace/' -or
                 $_ -match '^scripts/(?:demo|packaging)/'
               }
             ).Count -ne 0

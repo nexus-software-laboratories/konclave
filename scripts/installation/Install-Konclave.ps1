@@ -1,11 +1,19 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-    Installs, updates, rolls back, inspects, or removes the per-user Konclave runtime.
+    Installs, updates, prepares marketplace migration, or removes the per-user runtime.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Update', 'Rollback', 'Uninstall', 'Status', 'ActivatePlugin')]
+    [ValidateSet(
+        'Install',
+        'Update',
+        'Rollback',
+        'Uninstall',
+        'Status',
+        'ActivatePlugin',
+        'PrepareMarketplace'
+    )]
     [string]$Action = 'Install',
 
     [string]$ReleaseDirectory,
@@ -129,6 +137,26 @@ if ($Action -ceq 'ActivatePlugin') {
         -EnableDirectAgentPlugin
     Write-InstallationResult `
         -ResultAction PluginActivated `
+        -Version $record.version `
+        -InstallRoot $root `
+        -Plugin $plugin
+    return
+}
+
+if ($Action -ceq 'PrepareMarketplace') {
+    if ([string]::IsNullOrEmpty([string]$state.activeVersion)) {
+        throw 'installer.not_installed'
+    }
+    $record = Get-StateVersionRecord -State $state -Version ([string]$state.activeVersion)
+    $root = Get-InstalledVersionRoot -Paths $paths -Record $record
+    [void](Wait-InstalledRuntimeHealth `
+        -InstallRoot $root `
+        -Paths $paths `
+        -Attempts 1 `
+        -DelaySeconds 0)
+    $plugin = Prepare-InstallerMarketplace -Paths $paths
+    Write-InstallationResult `
+        -ResultAction MarketplacePrepared `
         -Version $record.version `
         -InstallRoot $root `
         -Plugin $plugin

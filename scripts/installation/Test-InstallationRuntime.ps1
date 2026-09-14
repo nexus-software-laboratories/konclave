@@ -320,6 +320,70 @@ try {
     ) {
         throw 'Legacy Copilot extension was not preserved before removal.'
     }
+
+    $marketplaceCases = @(
+        @{
+            name = 'ready'
+            direct = $false
+            legacy = $false
+            status = 'ReadyMarketplace'
+        },
+        @{
+            name = 'direct'
+            direct = $true
+            legacy = $false
+            status = 'RemovedDirect'
+        },
+        @{
+            name = 'legacy'
+            direct = $false
+            legacy = $true
+            status = 'PreservedLegacy'
+        },
+        @{
+            name = 'direct and legacy'
+            direct = $true
+            legacy = $true
+            status = 'RemovedDirectAndPreservedLegacy'
+        }
+    )
+    foreach ($case in $marketplaceCases) {
+        $caseRoot = Join-Path $root "marketplace-$($case.name.Replace(' ', '-'))"
+        if ($case.legacy) {
+            [void](Set-OwnerOnlyDirectory -Path $caseRoot)
+        }
+        $tracker = [pscustomobject]@{
+            disabled = $false
+            moved = $false
+        }
+        $directResult = [bool]$case.direct
+        $directDisabler = {
+            param($InstallationPaths)
+            $tracker.disabled = $directResult
+            return $directResult
+        }.GetNewClosure()
+        $legacyResolver = {
+            return $caseRoot
+        }.GetNewClosure()
+        $legacyMover = {
+            param($Source, $LegacyRoot)
+            $tracker.moved = $true
+            Remove-Item -LiteralPath $Source -Recurse -Force
+        }.GetNewClosure()
+        $result = Prepare-InstallerMarketplace `
+            -Paths $paths `
+            -DirectPluginDisabler $directDisabler `
+            -LegacyRootResolver $legacyResolver `
+            -LegacyMover $legacyMover
+        if (
+            [string]$result.status -cne [string]$case.status -or
+            [bool]$result.restartRequired -ne ([bool]$case.direct -or [bool]$case.legacy) -or
+            $tracker.disabled -ne [bool]$case.direct -or
+            $tracker.moved -ne [bool]$case.legacy
+        ) {
+            throw "Marketplace preparation decision failed: $($case.name)"
+        }
+    }
 }
 finally {
     if (Test-Path -LiteralPath $root) {

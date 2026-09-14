@@ -15,6 +15,7 @@
     "Distribution lifecycle acceptance",
     "Generic client conformance",
     "Installer lifecycle conformance",
+    "Marketplace conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -49,7 +50,6 @@
         "pr-title/title",
         "pr-review-policy/evaluate",
         "release-publication-conformance",
-        "authorize-marketplace-branch-acceptance",
         "authorize-storage-cleanup",
         "a2a-conformance",
         "adapter-conformance",
@@ -59,7 +59,6 @@
         "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
-        "cleanup-marketplace-branches",
         "distribution-lifecycle-acceptance",
         "resolve-scope",
         "copilot-plugin-lifecycle",
@@ -67,8 +66,10 @@
         "service-failure-contract",
         "generic-client-conformance",
         "installer-lifecycle-conformance",
-        "marketplace-branch-acceptance",
-        "marketplace-branch-lifecycle",
+        "marketplace-conformance",
+        "marketplace-materialization",
+        "marketplace-client-lifecycle",
+        "managed-marketplace-policy",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -190,12 +191,14 @@
     },
     {
       "source": "project",
-      "path": ".github/workflows/marketplace-branch-acceptance.yml",
+      "path": ".github/workflows/marketplace-conformance.yml",
       "roles": [
-        "repository-automation"
+        "merge-gate"
       ],
-      "draftBehavior": "not-applicable",
-      "requiredChecks": []
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Marketplace conformance"
+      ]
     },
     {
       "source": "project",
