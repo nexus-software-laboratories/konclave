@@ -48,6 +48,7 @@
         "pr-title/title",
         "pr-review-policy/evaluate",
         "release-publication-conformance",
+        "authorize-marketplace-branch-acceptance",
         "a2a-conformance",
         "adapter-conformance",
         "agent-plugin-conformance",
@@ -62,6 +63,8 @@
         "service-failure-contract",
         "generic-client-conformance",
         "installer-lifecycle-conformance",
+        "marketplace-branch-acceptance",
+        "marketplace-branch-lifecycle",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -168,6 +171,15 @@
       "requiredChecks": [
         "User presence conformance"
       ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/marketplace-branch-acceptance.yml",
+      "roles": [
+        "repository-automation"
+      ],
+      "draftBehavior": "not-applicable",
+      "requiredChecks": []
     },
     {
       "source": "project",

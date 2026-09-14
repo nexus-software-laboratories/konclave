@@ -1,0 +1,183 @@
+name: Marketplace branch acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-branch-acceptance
+  cancel-in-progress: false
+
+jobs:
+  authorize-marketplace-branch-acceptance:
+    name: Authorize marketplace branch acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the exact default-branch head
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo 'Marketplace branch acceptance must run from the default branch.' >&2
+            exit 1
+          fi
+          default_head="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" \
+              --jq '.object.sha'
+          )"
+          if [ "$GITHUB_SHA" != "$default_head" ]; then
+            echo 'Marketplace branch acceptance requires the current default-branch head.' >&2
+            exit 1
+          fi
+
+  marketplace-branch-lifecycle:
+    name: Marketplace branch ${{ matrix.label }}
+    needs: authorize-marketplace-branch-acceptance
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: minimum
+            version: 1.0.82
+          - label: current
+            version: 1.0.84-5
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ACCEPTANCE_BRANCH: acceptance/marketplace-${{ github.run_id }}-${{ matrix.label }}
+      MARKETPLACE_NAME: konclave-lifecycle-${{ github.run_id }}-${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Resolve pinned Node version
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+          "plugin-version=$($release.release.version)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: marketplace-branch-${{ matrix.label }}
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Build Agent Plugin
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run compile
+          npm run package
+          npm run verify:package
+      - name: Install pinned Copilot CLI
+        shell: bash
+        env:
+          COPILOT_CLI_VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          npm install \
+            --global \
+            --prefix "$RUNNER_TEMP/copilot-cli" \
+            --no-audit \
+            --no-fund \
+            "@github/copilot@$COPILOT_CLI_VERSION"
+      - name: Exercise non-default marketplace branch
+        shell: bash
+        run: |
+          timeout --foreground --kill-after=30s 12m \
+            bash ./scripts/installation/Test-MarketplaceBranchLifecycle.sh \
+              "$RUNNER_TEMP/copilot-cli/bin/copilot" \
+              '${{ matrix.version }}' \
+              '${{ github.repository }}' \
+              "$ACCEPTANCE_BRANCH" \
+              "$MARKETPLACE_NAME" \
+              "extensions/Konclave.HostExtension/build/outputs/konclave-${{ steps.toolchains.outputs.plugin-version }}.zip" \
+              '${{ steps.toolchains.outputs.plugin-version }}' \
+              '${{ github.sha }}'
+      - name: Delete ephemeral marketplace branch
+        if: always()
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          branch_query="$(
+            timeout --foreground --kill-after=10s 1m \
+              git ls-remote \
+                --exit-code \
+                --heads \
+                origin \
+                "refs/heads/$ACCEPTANCE_BRANCH" 2>&1
+          )"
+          branch_status=$?
+          set -e
+          case "$branch_status" in
+            0)
+              printf '%s\n' "$branch_query"
+              timeout --foreground --kill-after=10s 1m \
+                git push origin --delete "$ACCEPTANCE_BRANCH"
+              ;;
+            2)
+              printf 'Ephemeral marketplace branch was not created.\n'
+              ;;
+            *)
+              printf '%s\n' "$branch_query" >&2
+              exit "$branch_status"
+              ;;
+          esac
+
+          set +e
+          branch_query="$(
+            timeout --foreground --kill-after=10s 1m \
+              git ls-remote \
+                --exit-code \
+                --heads \
+                origin \
+                "refs/heads/$ACCEPTANCE_BRANCH" 2>&1
+          )"
+          branch_status=$?
+          set -e
+          if [ "$branch_status" -eq 0 ]; then
+            echo 'Ephemeral marketplace branch still exists.' >&2
+            exit 1
+          fi
+          if [ "$branch_status" -ne 2 ]; then
+            printf '%s\n' "$branch_query" >&2
+            exit "$branch_status"
+          fi
+
+  marketplace-branch-acceptance:
+    name: Marketplace branch acceptance
+    if: always()
+    needs:
+      - authorize-marketplace-branch-acceptance
+      - marketplace-branch-lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check marketplace branch matrix
+        shell: bash
+        env:
+          AUTHORIZATION_RESULT: ${{ needs.authorize-marketplace-branch-acceptance.result }}
+          RESULT: ${{ needs.marketplace-branch-lifecycle.result }}
+        run: |
+          set -euo pipefail
+          if [ "$AUTHORIZATION_RESULT" != 'success' ]; then
+            echo "::error::Marketplace branch authorization concluded with $AUTHORIZATION_RESULT."
+            exit 1
+          fi
+          if [ "$RESULT" != 'success' ]; then
+            echo "::error::Marketplace branch matrix concluded with $RESULT."
+            exit 1
+          fi
+          echo 'Non-default marketplace branch acceptance passed.'
