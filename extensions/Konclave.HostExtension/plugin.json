@@ -10,13 +10,7 @@
   "homepage": "https://github.com/nexus-software-laboratories/konclave",
   "repository": "https://github.com/nexus-software-laboratories/konclave",
   "license": "Apache-2.0",
-  "keywords": [
-    "agent",
-    "communication",
-    "copilot",
-    "encrypted",
-    "plugin"
-  ],
+  "keywords": ["agent", "communication", "copilot", "encrypted", "plugin"],
   "extensions": {
     "com.github.copilot": {}
   }
