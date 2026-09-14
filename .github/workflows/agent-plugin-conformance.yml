@@ -1,0 +1,238 @@
+name: Agent plugin conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: agent-plugin-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-plugin-conformance:
+    name: Agent plugin conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve Agent Plugin validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(
+              gh api --paginate `
+                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
+                --jq '.[].filename'
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not resolve pull-request files for Agent Plugin conformance.'
+            }
+            if ($files.Count -eq 0) {
+              throw 'Pull-request file discovery returned no files.'
+            }
+            $run = $files.Count -ge 3000 -or @(
+              $files | Where-Object {
+                $_ -match '^\.github/genesis-delivery\.json$' -or
+                $_ -match '^\.github/workflows/agent-plugin-conformance\.yml$' -or
+                $_ -match '^distribution/release-artifacts\.json$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/' -or
+                $_ -match '^scripts/(?:demo|packaging)/'
+              }
+            ).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          $manifest = Get-Content extensions/Konclave.HostExtension/plugin.json -Raw |
+            ConvertFrom-Json -Depth 100
+          $package = Get-Content extensions/Konclave.HostExtension/package.json -Raw |
+            ConvertFrom-Json -Depth 100
+          if (
+            [string]$release.release.version -cne [string]$manifest.version -or
+            [string]$manifest.version -cne [string]$package.version
+          ) {
+            throw 'Native release, Agent Plugin, and package versions differ.'
+          }
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+          "plugin-version=$($manifest.version)" >>$env:GITHUB_OUTPUT
+      - name: Install Node
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: agent-plugin-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify deterministic Agent Plugin
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run format:check
+          npm run lint
+          npm run typecheck
+          npm run test:coverage
+          npm run compile
+          npm run package
+          npm run verify:package
+          npm run test:package-contract
+      - name: Verify distribution integration
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'scripts/demo/Start-KonclaveLocalDemo.ps1',
+            'scripts/packaging/ReleasePackaging.Functions.ps1',
+            'scripts/packaging/Test-ReleasePackaging.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              throw "$path contains PowerShell parse errors."
+            }
+          }
+          bash -n scripts/packaging/Test-PackagedAcceptance.sh
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged acceptance script syntax validation failed.'
+          }
+
+          . ./scripts/packaging/ReleasePackaging.Functions.ps1
+          $archive = (
+            Resolve-Path (
+              "extensions/Konclave.HostExtension/build/outputs/" +
+              "konclave-${{ steps.toolchains.outputs.plugin-version }}.zip"
+            )
+          ).Path
+          $pluginRoot = Join-Path $env:RUNNER_TEMP 'native-agent-plugin'
+          try {
+            Expand-ProtectedPluginArchive $archive $pluginRoot
+            Assert-PackagedPlugin `
+              $pluginRoot `
+              '${{ steps.toolchains.outputs.plugin-version }}'
+          }
+          finally {
+            if (Test-Path -LiteralPath $pluginRoot) {
+              Remove-Item -LiteralPath $pluginRoot -Recurse -Force
+            }
+          }
+      - name: Install pinned Copilot CLI
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        env:
+          COPILOT_CLI_VERSION: 1.0.84-5
+        run: |
+          set -euo pipefail
+          npm install \
+            --global \
+            --prefix "$RUNNER_TEMP/copilot-cli" \
+            --no-audit \
+            --no-fund \
+            "@github/copilot@$COPILOT_CLI_VERSION"
+          "$RUNNER_TEMP/copilot-cli/bin/copilot" --version |
+            grep -F "$COPILOT_CLI_VERSION"
+      - name: Verify isolated direct installation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        env:
+          COPILOT_HOME: ${{ runner.temp }}/copilot-home
+        run: |
+          set -euo pipefail
+          plugin_source="$RUNNER_TEMP/konclave-agent-plugin"
+          mkdir -p "$plugin_source" "$COPILOT_HOME"
+          unzip -q \
+            extensions/Konclave.HostExtension/build/outputs/konclave-${{ steps.toolchains.outputs.plugin-version }}.zip \
+            -d "$plugin_source"
+
+          set +e
+          install_output="$(
+            "$RUNNER_TEMP/copilot-cli/bin/copilot" \
+              plugin install "$plugin_source" 2>&1
+          )"
+          install_status=$?
+          set -e
+          printf '%s\n' "$install_output"
+          if [ "$install_status" -ne 0 ]; then
+            echo 'Direct Agent Plugin installation failed.' >&2
+            exit "$install_status"
+          fi
+          deprecation_count="$(
+            printf '%s\n' "$install_output" |
+              grep -Eio 'deprecat(ed|ion)' |
+              wc -l
+          )"
+          if [ "$deprecation_count" -ne 1 ]; then
+            echo 'Expected one direct-install deprecation notice.' >&2
+            exit 1
+          fi
+          if printf '%s\n' "$install_output" |
+            grep -Eiq \
+              'invalid|malformed|unrecognized|unknown (field|key)|manifest.*(error|warning)|schema.*(error|warning)'
+          then
+            echo 'Copilot CLI reported a manifest warning or error.' >&2
+            exit 1
+          fi
+
+          "$RUNNER_TEMP/copilot-cli/bin/copilot" plugin list --json |
+            jq -e '.. | objects | select(.name? == "konclave")' >/dev/null
+          mapfile -d '' manifests < <(
+            find "$COPILOT_HOME" -type f -name plugin.json -print0
+          )
+          konclave_roots=()
+          for manifest in "${manifests[@]}"; do
+            if jq -e '.name == "konclave"' "$manifest" >/dev/null; then
+              konclave_roots+=("$(dirname "$manifest")")
+            fi
+          done
+          if [ "${#konclave_roots[@]}" -ne 1 ]; then
+            echo 'Expected exactly one cached Konclave Agent Plugin.' >&2
+            exit 1
+          fi
+          cache_root="${konclave_roots[0]}"
+          if find "$cache_root" -type l -print -quit | grep -q .; then
+            echo 'Cached Agent Plugin contains a symbolic link.' >&2
+            exit 1
+          fi
+          find "$cache_root" -type f -printf '%P\n' | sort >"$RUNNER_TEMP/actual-files"
+          cat >"$RUNNER_TEMP/expected-files" <<'EOF'
+          com.github.copilot/extensions/konclave/extension.mjs
+          com.github.copilot/extensions/konclave/package.json
+          plugin.json
+          EOF
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/actual-files"
+      - name: Upload validated Agent Plugin
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: konclave-agent-plugin-unsigned
+          path: extensions/Konclave.HostExtension/build/outputs/konclave-${{ steps.toolchains.outputs.plugin-version }}.zip
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0

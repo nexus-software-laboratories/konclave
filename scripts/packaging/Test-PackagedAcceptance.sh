@@ -172,9 +172,9 @@ run_harness() {
     KONCLAVE_ACCEPTANCE_CLI="$client_root_a/bin/konclave" \
     KONCLAVE_ACCEPTANCE_SERVICE="$client_root_a/bin/KonclaveLocalService" \
     KONCLAVE_ACCEPTANCE_SECOND_SERVICE="$client_root_b/bin/KonclaveLocalService" \
-    KONCLAVE_ACCEPTANCE_CLIENT_MODULE="$client_root_a/share/konclave/plugin/extensions/Konclave.Extension/client.mjs" \
-    KONCLAVE_ACCEPTANCE_GENERIC_MODULE="$client_root_a/share/konclave/plugin/extensions/Konclave.Extension/generic.mjs" \
-    KONCLAVE_ACCEPTANCE_GENERIC_SKILL="$client_root_a/share/konclave/plugin/skills/konclave-generic/SKILL.md" \
+    KONCLAVE_ACCEPTANCE_CLIENT_MODULE="$client_root_a/share/konclave/client/client.mjs" \
+    KONCLAVE_ACCEPTANCE_GENERIC_MODULE="$client_root_a/share/konclave/client/generic.mjs" \
+    KONCLAVE_ACCEPTANCE_GENERIC_SKILL="$client_root_a/share/konclave/client/skills/konclave-generic/SKILL.md" \
     KONCLAVE_ACCEPTANCE_INSTALL_ROOT="$client_root_a" \
     KONCLAVE_ACCEPTANCE_RELAY_ENDPOINT="$endpoint" \
     KONCLAVE_ACCEPTANCE_ACCESS_DOCUMENT="$state_root/access.json" \

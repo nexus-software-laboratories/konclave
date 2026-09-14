@@ -2,8 +2,8 @@
 
 Konclave packaging produces native archives for supported Linux, Windows, and macOS
 targets. Each client archive contains the CLI, one shared local-service binary,
-platform lifecycle managers, a thin Copilot CLI extension payload, and editable
-collaboration-policy schemas and examples under
+platform lifecycle managers, a minimal Agent Plugins 1.0 payload, separate portable
+client support, and editable collaboration-policy schemas and examples under
 `<install-root>/share/konclave/policy/`. The extension contains no daemon binary.
 Relay archives contain the standalone Community Relay binary and its self-hosting
 examples. Gateway archives contain the standalone standard A2A HTTP+JSON process,
@@ -36,11 +36,24 @@ directory is the installation root used by the commands below.
 Before extraction, verify the complete downloaded release set as described in
 [Verify release integrity and contents](integrity.md).
 
-## Install the Copilot extension
+## Install the Copilot Agent Plugin
 
-Copilot discovers user-scoped extensions under
-`~/.copilot/extensions/konclave/`. A complete legacy installation contains
-`extension.mjs`, the reusable `client.mjs`, and the one-shot `generic.mjs` fallback.
+The standalone `konclave-<version>.zip` contains exactly the Agent Plugins 1.0
+manifest and the Copilot extension files beneath
+`com.github.copilot/extensions/konclave/`. For isolated pre-marketplace validation,
+extract it into an owner-controlled directory and run:
+
+```shell
+copilot plugin install <extracted-plugin-directory>
+```
+
+Current Copilot CLI builds emit the expected warning that direct plugin installation
+is deprecated. The package must otherwise install without manifest warnings. The
+marketplace source is deliberately not selected or created by this package.
+
+Copilot's cache is replaceable runtime material, not an authority store.
+Installer-owned `konclave.service.json` lives under the canonical Konclave platform
+data root:
 Installer-owned `konclave.service.json` lives under the canonical Konclave platform
 data root rather than the replaceable extension directory:
 
@@ -63,16 +76,16 @@ UserPresence client configuration records the absolute packaged CLI path as
 AccountTrusted-only records omit that field and cannot satisfy UserPresence.
 No native executable or authority state belongs under the extension directory.
 
-The [Local Copilot demo](local-demo.md) performs this installation atomically on
-Windows and enables experimental extension support when necessary. Direct
-`copilot plugin install` is not the extension installation path: current Copilot CLI
-versions can cache the plugin payload without mounting its extension.
+The [Local Copilot demo](local-demo.md) continues to exercise the transitional raw
+extension path atomically on Windows and enables experimental extension support when
+necessary.
 
-On Linux or macOS, run `init` first so the owner-protected canonical client
-configuration exists. Create the legacy extension directory separately, then copy
-`extension.mjs`, `client.mjs`, and `generic.mjs` from
-`<install-root>/share/konclave/plugin/extensions/Konclave.Extension/` into it. Copy
-`<install-root>/share/konclave/plugin/skills/konclave-generic/SKILL.md` only into an
+For a transitional raw extension on Linux or macOS, run `init` first so the
+owner-protected canonical client configuration exists. Create the legacy extension
+directory separately, then copy the Agent Plugin's
+`com.github.copilot/extensions/konclave/extension.mjs` plus `client.mjs` and
+`generic.mjs` from `<install-root>/share/konclave/client/` into it. Copy
+`<install-root>/share/konclave/client/skills/konclave-generic/SKILL.md` only into an
 unsupported harness's own skill location when the best-effort fallback is wanted.
 Do not install it into Copilot CLI; the paved extension owns that harness.
 Do not copy a native executable or create a `bin/` child under the extension.

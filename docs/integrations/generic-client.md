@@ -78,8 +78,10 @@ $HOME/.copilot/extensions/konclave/generic.mjs
 
 On Windows this is `%USERPROFILE%\.copilot\extensions\konclave\generic.mjs` unless
 `COPILOT_HOME` selects another absolute Copilot configuration root. The packaged
-source under `share/konclave/plugin/` remains a distribution input rather than mutable
-authority state.
+source under `share/konclave/client/` remains native support content rather than
+mutable authority state. The minimal Agent Plugin under `share/konclave/plugin/`
+contains only the Copilot extension bundle and cannot be used as a Generic-client
+installation source.
 
 The client resolves installer-owned service configuration independently:
 

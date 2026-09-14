@@ -5,19 +5,22 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { unzipSync } from 'fflate';
 import {
-  extensionEntryPath,
+  agentPluginArchivePaths,
+  agentPluginExtensionEntryPath,
+  agentPluginExtensionPackagePath,
   clientEntryPath,
+  createAgentExtensionPackage,
+  extensionEntryPath,
   genericEntryPath,
   genericSkillPath,
   getArchivePath,
   maintainerSkillPath,
-  manifestExtensionPath,
-  packageFiles,
 } from './package-contract.mjs';
 
 const errors = [];
 const semverPattern = /^\d+\.\d+\.\d+$/;
-const pluginNamePattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const agentPluginSchema = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
+const pluginNamePattern = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 
 function check(condition, message) {
   if (!condition) {
@@ -46,6 +49,19 @@ function readJson(path) {
 
 const packageManifest = readJson('package.json');
 const pluginManifest = readJson('plugin.json');
+const agentExtensionPackage = createAgentExtensionPackage(pluginManifest, packageManifest);
+const allowedManifestFields = new Set([
+  '$schema',
+  'name',
+  'version',
+  'description',
+  'author',
+  'homepage',
+  'repository',
+  'license',
+  'keywords',
+  'extensions',
+]);
 
 check(packageManifest.private === true, 'package.json must stay private.');
 check(packageManifest.type === 'module', 'package.json must set type to "module".');
@@ -74,16 +90,38 @@ check(
   `package.json version (${packageManifest.version}) does not match plugin.json version (${pluginManifest.version}).`,
 );
 check(
-  pluginManifest.extensions === manifestExtensionPath,
-  `plugin.json extensions must be "${manifestExtensionPath}".`,
+  pluginManifest.$schema === agentPluginSchema,
+  `plugin.json must target Agent Plugins 1.0: "${agentPluginSchema}".`,
 );
 check(
-  Array.isArray(pluginManifest.skills) && pluginManifest.skills.length === 0,
-  'plugin.json skills must be empty so the unsupported-harness fallback is not auto-loaded.',
+  Object.keys(pluginManifest).every((field) => allowedManifestFields.has(field)),
+  'plugin.json contains a non-Agent-Plugins field.',
+);
+check(
+  pluginManifest.extensions &&
+    typeof pluginManifest.extensions === 'object' &&
+    !Array.isArray(pluginManifest.extensions) &&
+    Object.keys(pluginManifest.extensions).length === 1 &&
+    pluginManifest.extensions['com.github.copilot'] &&
+    typeof pluginManifest.extensions['com.github.copilot'] === 'object' &&
+    Object.keys(pluginManifest.extensions['com.github.copilot']).length === 0,
+  'plugin.json must declare only the empty com.github.copilot namespace.',
+);
+check(pluginManifest.license === 'Apache-2.0', 'plugin.json must declare the Apache-2.0 license.');
+check(
+  typeof agentExtensionPackage.dependencies['@github/copilot-sdk'] === 'string' &&
+    agentExtensionPackage.dependencies['@github/copilot-sdk'].length > 0,
+  'The Copilot extension package must declare its SDK dependency.',
 );
 
-for (const filePath of packageFiles) {
-  check(existsSync(filePath), `Missing installable plugin asset: ${filePath}`);
+for (const filePath of [
+  extensionEntryPath,
+  clientEntryPath,
+  genericEntryPath,
+  genericSkillPath,
+  maintainerSkillPath,
+]) {
+  check(existsSync(filePath), `Missing compiled or source support asset: ${filePath}`);
 }
 
 const compiledExtension = existsSync(extensionEntryPath)
@@ -198,25 +236,40 @@ if (errors.length === 0) {
   const firstArchiveHash = createHash('sha256').update(readFileSync(archivePath)).digest('hex');
   const archiveEntries = unzipSync(new Uint8Array(readFileSync(archivePath)));
   const entryNames = Object.keys(archiveEntries).sort();
-  const expectedEntries = [...packageFiles].sort();
+  const expectedEntries = [...agentPluginArchivePaths].sort();
 
   check(
     JSON.stringify(entryNames) === JSON.stringify(expectedEntries),
     `Packaged archive must contain exactly: ${expectedEntries.join(', ')}`,
   );
 
+  const expectedBytes = new Map([
+    ['plugin.json', readFileSync('plugin.json')],
+    [agentPluginExtensionEntryPath, readFileSync(extensionEntryPath)],
+    [
+      agentPluginExtensionPackagePath,
+      Buffer.from(`${JSON.stringify(agentExtensionPackage, null, 2)}\n`),
+    ],
+  ]);
   for (const filePath of expectedEntries) {
     const archivedFile = archiveEntries[filePath];
     if (!archivedFile) {
       continue;
     }
 
-    const sourceBytes = readFileSync(filePath);
     check(
-      Buffer.from(archivedFile).equals(sourceBytes),
-      `Packaged archive entry does not match source asset: ${filePath}`,
+      Buffer.from(archivedFile).equals(expectedBytes.get(filePath)),
+      `Packaged archive entry does not match its deterministic source: ${filePath}`,
     );
   }
+  check(
+    entryNames.every(
+      (entry) =>
+        !/(^|\/)(?:node_modules|src|tests?|skills|build|coverage)(?:\/|$)/.test(entry) &&
+        !/(?:KonclaveLocalDaemon|KonclaveLocalService|konclave\.service\.json)/.test(entry),
+    ),
+    'Packaged Agent Plugin contains development, native, or mutable authority state.',
+  );
 
   const repeatedPackage = spawnSync(process.execPath, ['scripts/package-plugin.mjs'], {
     encoding: 'utf8',

@@ -16,10 +16,11 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:package-contract": "node scripts/test-package-contract.mjs",
     "package": "node scripts/package-plugin.mjs",
     "spike:adapter-transport": "node spikes/adapter-transport-probe.mjs",
     "spike:sdk-proxy": "node spikes/sdk-tool-proxy-probe.mjs",
-    "test": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run compile && npm run package && npm run verify:package",
+    "test": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run compile && npm run package && npm run verify:package && npm run test:package-contract",
     "version": "node scripts/sync-version.mjs && git add plugin.json",
     "verify:package": "node scripts/verify-package.mjs"
   },
