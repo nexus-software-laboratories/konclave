@@ -13,17 +13,17 @@ if [ "$source_mode" != 'live' ] && [ "$source_mode" != 'remote' ]; then
 fi
 
 test_root="$(mktemp -d)"
-git_daemon_pid=''
+source_server_pid=''
 cleanup() {
     local status="$?"
     local cleanup_status=0
     trap - EXIT
-    if [ -n "$git_daemon_pid" ] && kill -0 "$git_daemon_pid" 2>/dev/null; then
-        if ! kill "$git_daemon_pid"; then
+    if [ -n "$source_server_pid" ] && kill -0 "$source_server_pid" 2>/dev/null; then
+        if ! kill "$source_server_pid"; then
             cleanup_status=1
         fi
         set +e
-        wait "$git_daemon_pid"
+        wait "$source_server_pid"
         local wait_status="$?"
         set -e
         if [ "$wait_status" -ne 0 ] && [ "$wait_status" -ne 143 ]; then
@@ -259,35 +259,32 @@ exercise_update_and_rollback() {
     git -C "$work" remote add origin "$remote"
     git -C "$work" push --quiet --set-upstream origin main
     git -C "$remote" symbolic-ref HEAD refs/heads/main
+    git -C "$remote" update-server-info
 
     local port
     port="$(
         python3 -c \
             'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
     )"
-    git daemon \
-        --reuseaddr \
-        --export-all \
-        --base-path="$test_root" \
-        --listen=127.0.0.1 \
-        --port="$port" \
-        "$remote" \
-        >"$test_root/git-daemon.log" 2>"$test_root/git-daemon.error.log" &
-    git_daemon_pid="$!"
+    python3 -m http.server "$port" \
+        --bind 127.0.0.1 \
+        --directory "$test_root" \
+        >"$test_root/source-server.log" 2>"$test_root/source-server.error.log" &
+    source_server_pid="$!"
     for _ in $(seq 1 50); do
-        if (echo >"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+        if curl --fail --silent "http://127.0.0.1:$port/fixture.git/HEAD" >/dev/null; then
             break
         fi
         sleep 0.1
     done
-    if ! kill -0 "$git_daemon_pid" 2>/dev/null; then
-        cat "$test_root/git-daemon.log" >&2
-        cat "$test_root/git-daemon.error.log" >&2
-        echo 'Marketplace Git fixture did not start.' >&2
+    if ! kill -0 "$source_server_pid" 2>/dev/null; then
+        cat "$test_root/source-server.log" >&2
+        cat "$test_root/source-server.error.log" >&2
+        echo 'Marketplace HTTP Git fixture did not start.' >&2
         exit 1
     fi
 
-    local source="git://127.0.0.1:$port/fixture.git"
+    local source="http://127.0.0.1:$port/fixture.git"
     "$copilot_command" plugin marketplace add "$source"
     assert_registered "$marketplace"
     install_plugin "$marketplace"
@@ -309,6 +306,7 @@ exercise_update_and_rollback() {
     git -C "$work" add .
     git -C "$work" commit --quiet -m 'update marketplace'
     git -C "$work" push --quiet
+    git -C "$remote" update-server-info
 
     "$copilot_command" plugin marketplace update "$marketplace"
     "$copilot_command" plugin update "konclave@$marketplace"
@@ -319,6 +317,7 @@ exercise_update_and_rollback() {
     git -C "$work" add .
     git -C "$work" commit --quiet -m 'rollback marketplace'
     git -C "$work" push --quiet
+    git -C "$remote" update-server-info
 
     "$copilot_command" plugin marketplace update "$marketplace"
     "$copilot_command" plugin uninstall "konclave@$marketplace"
