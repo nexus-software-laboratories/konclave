@@ -1,0 +1,440 @@
+#Requires -Version 7.4
+
+[CmdletBinding()]
+param(
+    [string]$Repository = 'nexus-software-laboratories/konclave',
+    [string]$BaselineTag = 'v0.1.0',
+    [string]$CandidateTag = 'v0.1.1'
+)
+
+$ErrorActionPreference = 'Stop'
+
+if (-not $IsWindows) {
+    throw 'Native installer lifecycle acceptance requires Windows.'
+}
+
+function Invoke-NativeCommand {
+    param(
+        [string]$Command,
+        [string[]]$Arguments
+    )
+
+    $output = & $Command @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Command failed: $($output -join "`n")"
+    }
+    return @($output)
+}
+
+function Get-ReleaseArtifact {
+    param(
+        $Manifest,
+        [string]$Id
+    )
+
+    $matches = @($Manifest.artifacts | Where-Object id -CEQ $Id)
+    if ($matches.Count -ne 1) {
+        throw "Release artifact is missing or duplicated: $Id"
+    }
+    return $matches[0]
+}
+
+function Expand-SingleZipRoot {
+    param(
+        [string]$Archive,
+        [string]$Destination
+    )
+
+    [IO.Compression.ZipFile]::ExtractToDirectory($Archive, $Destination)
+    $roots = @(Get-ChildItem -LiteralPath $Destination -Directory)
+    if ($roots.Count -ne 1) {
+        throw "Archive does not contain one root: $Archive"
+    }
+    return $roots[0].FullName
+}
+
+function Get-FreePort {
+    $listener = [Net.Sockets.TcpListener]::new(
+        [Net.IPAddress]::Loopback,
+        0
+    )
+    $listener.Start()
+    try {
+        return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
+function Wait-RelayHealth {
+    param(
+        [string]$Endpoint
+    )
+
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        try {
+            $response = Invoke-WebRequest `
+                -Uri "$Endpoint/healthz" `
+                -UseBasicParsing `
+                -TimeoutSec 2
+            if ($response.StatusCode -eq 200) {
+                return
+            }
+        }
+        catch {
+            if ($attempt -eq 119) {
+                throw
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'Relay did not become healthy.'
+}
+
+function Invoke-Installer {
+    param(
+        [string]$Installer,
+        [hashtable]$Arguments
+    )
+
+    $output = & $Installer @Arguments
+    return ($output -join "`n") | ConvertFrom-Json -Depth 20
+}
+
+function Assert-InstallerAction {
+    param(
+        $Result,
+        [string]$Action,
+        [string]$Version
+    )
+
+    if (
+        [string]$Result.action -cne $Action -or
+        [string]$Result.version -cne $Version
+    ) {
+        throw "Installer returned $($Result.action) $($Result.version), expected $Action $Version."
+    }
+}
+
+function Get-KonclavePluginRecords {
+    $json = Invoke-NativeCommand copilot @('plugin', 'list', '--json') |
+        ConvertFrom-Json -Depth 20
+    $matches = [Collections.Generic.List[object]]::new()
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue($json)
+    while ($queue.Count -gt 0) {
+        $value = $queue.Dequeue()
+        if ($value -is [array]) {
+            foreach ($item in $value) {
+                if ($null -ne $item) {
+                    $queue.Enqueue($item)
+                }
+            }
+            continue
+        }
+        if ($value -isnot [Management.Automation.PSCustomObject]) {
+            continue
+        }
+        if (
+            $value.PSObject.Properties['name'] -and
+            [string]$value.name -ceq 'konclave'
+        ) {
+            $matches.Add($value)
+        }
+        foreach ($property in $value.PSObject.Properties) {
+            if (
+                $null -ne $property.Value -and
+                (
+                    $property.Value -is [array] -or
+                    $property.Value -is [Management.Automation.PSCustomObject]
+                )
+            ) {
+                $queue.Enqueue($property.Value)
+            }
+        }
+    }
+    return @($matches)
+}
+
+$root = Join-Path (
+    [IO.Path]::GetTempPath()
+) "konclave-native-lifecycle-$([Guid]::NewGuid().ToString('N'))"
+$baselineRelease = Join-Path $root 'release-0.1.0'
+$candidateRelease = Join-Path $root 'release-0.1.1'
+$bootstrapRoot = Join-Path $root 'bootstrap'
+$dataRoot = Join-Path $root 'data'
+$relayState = Join-Path $root 'relay'
+$copilotHome = Join-Path $root 'copilot-home'
+$relayProcess = $null
+$manager = $null
+$managerInstallRoot = $null
+$managerConfig = Join-Path $dataRoot 'service' 'konclave-local-service.json'
+
+New-Item -ItemType Directory -Path (
+    $root,
+    $baselineRelease,
+    $candidateRelease,
+    $bootstrapRoot,
+    $relayState,
+    $copilotHome
+) | Out-Null
+$previousCopilotHome = $env:COPILOT_HOME
+$env:COPILOT_HOME = $copilotHome
+try {
+    [void](Invoke-NativeCommand gh @(
+        'release',
+        'download',
+        $BaselineTag,
+        '--repo',
+        $Repository,
+        '--dir',
+        $baselineRelease
+    ))
+    [void](Invoke-NativeCommand gh @(
+        'release',
+        'download',
+        $CandidateTag,
+        '--repo',
+        $Repository,
+        '--dir',
+        $candidateRelease
+    ))
+    & (Join-Path $baselineRelease 'Verify-Release.ps1') -Directory $baselineRelease
+    & (Join-Path $candidateRelease 'Verify-Release.ps1') -Directory $candidateRelease
+
+    $candidateManifest = Get-Content -LiteralPath (
+        Join-Path $candidateRelease 'RELEASE.json'
+    ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
+    $clientArtifact = Get-ReleaseArtifact `
+        -Manifest $candidateManifest `
+        -Id 'konclave-client-windows-x64'
+    $relayArtifact = Get-ReleaseArtifact `
+        -Manifest $candidateManifest `
+        -Id 'konclave-relay-windows-x64'
+    $bootstrapClient = Expand-SingleZipRoot `
+        -Archive (Join-Path $candidateRelease $clientArtifact.fileName) `
+        -Destination (Join-Path $bootstrapRoot 'client')
+    $bootstrapRelay = Expand-SingleZipRoot `
+        -Archive (Join-Path $candidateRelease $relayArtifact.fileName) `
+        -Destination (Join-Path $bootstrapRoot 'relay')
+
+    $port = Get-FreePort
+    $endpoint = "http://127.0.0.1:$port"
+    $accessDocument = Join-Path $relayState 'access.json'
+    $enrollmentSource = Join-Path $relayState 'enrollment.credential'
+    [void](Invoke-NativeCommand (
+        Join-Path $bootstrapClient 'bin' 'konclave.exe'
+    ) @(
+        'relay-bootstrap',
+        '--relay-endpoint',
+        $endpoint,
+        '--access-document',
+        $accessDocument,
+        '--external-source',
+        $enrollmentSource
+    ))
+
+    $relayLog = Join-Path $relayState 'relay.log'
+    $previousEnvironment = @{
+        SERVICE_HTTP_ADDRESS = $env:SERVICE_HTTP_ADDRESS
+        SERVICE_HEALTH_ADDRESS = $env:SERVICE_HEALTH_ADDRESS
+        KONCLAVE_RELAY_ACCESS_FILE = $env:KONCLAVE_RELAY_ACCESS_FILE
+        KONCLAVE_RELAY_DATABASE_PATH = $env:KONCLAVE_RELAY_DATABASE_PATH
+    }
+    $env:SERVICE_HTTP_ADDRESS = "127.0.0.1:$port"
+    $env:SERVICE_HEALTH_ADDRESS = "127.0.0.1:$port"
+    $env:KONCLAVE_RELAY_ACCESS_FILE = $accessDocument
+    $env:KONCLAVE_RELAY_DATABASE_PATH = Join-Path $relayState 'relay.sqlite'
+    try {
+        $relayProcess = Start-Process `
+            -FilePath (Join-Path $bootstrapRelay 'bin' 'KonclaveCommunityRelay.exe') `
+            -RedirectStandardOutput $relayLog `
+            -RedirectStandardError (Join-Path $relayState 'relay.error.log') `
+            -PassThru
+    }
+    finally {
+        foreach ($entry in $previousEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable(
+                $entry.Key,
+                $entry.Value,
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+    }
+    Wait-RelayHealth -Endpoint $endpoint
+
+    $installer = Join-Path $candidateRelease 'Install-Konclave.ps1'
+    $serviceIdentity = Join-Path $relayState 'service-identity.key'
+    $profileKeys = Join-Path $relayState 'profile-keys'
+    $installArguments = @{
+        Action = 'Install'
+        ReleaseDirectory = $baselineRelease
+        DataRoot = $dataRoot
+        RelayEndpoint = $endpoint
+        AuthorizationPolicy = 'account-trusted'
+        ExternalSource = $enrollmentSource
+        ServiceIdentityFile = $serviceIdentity
+        ProfileKeyDirectory = $profileKeys
+    }
+    $installed = Invoke-Installer -Installer $installer -Arguments $installArguments
+    Assert-InstallerAction -Result $installed -Action Install -Version '0.1.0'
+    $managerInstallRoot = [string]$installed.installRoot
+    $manager = Join-Path $candidateRelease 'WindowsUserService.ps1'
+
+    $profileSentinel = Join-Path $dataRoot 'profiles' 'retained-profile.sqlite3'
+    [IO.File]::WriteAllText($profileSentinel, 'retained-profile')
+    $authorityPath = Join-Path $dataRoot 'service' 'konclave-local-authorization.sqlite3'
+    $authorityHash = (Get-FileHash -LiteralPath $authorityPath -Algorithm SHA256).Hash
+
+    $verified = Invoke-Installer -Installer $installer -Arguments $installArguments
+    Assert-InstallerAction -Result $verified -Action Verified -Version '0.1.0'
+
+    $legacyRoot = Join-Path $copilotHome 'extensions' 'konclave'
+    New-Item -ItemType Directory -Path $legacyRoot -Force | Out-Null
+    Copy-Item (
+        Join-Path $managerInstallRoot 'share' 'konclave' 'client' 'client.mjs'
+    ) $legacyRoot
+    Copy-Item (
+        Join-Path $managerInstallRoot 'share' 'konclave' 'plugin' `
+            'com.github.copilot' 'extensions' 'konclave' 'extension.mjs'
+    ) $legacyRoot
+    Copy-Item (
+        Join-Path $dataRoot 'service' 'konclave.service.json'
+    ) (
+        Join-Path $legacyRoot 'konclave.service.json'
+    )
+    Remove-Item -LiteralPath (
+        Join-Path $dataRoot 'service' 'konclave.service.json'
+    ) -Force
+    $migrated = Invoke-Installer -Installer $installer -Arguments $installArguments
+    Assert-InstallerAction -Result $migrated -Action Verified -Version '0.1.0'
+    if (-not (Test-Path -LiteralPath (
+        Join-Path $dataRoot 'service' 'konclave.service.json'
+    ) -PathType Leaf)) {
+        throw 'Legacy client sidecar was not migrated to the canonical location.'
+    }
+
+    $activated = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'ActivatePlugin'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $activated -Action PluginActivated -Version '0.1.0'
+    if (
+        (Test-Path -LiteralPath $legacyRoot) -or
+        -not (Test-Path -LiteralPath (
+            Join-Path $dataRoot 'runtime' 'legacy' 'copilot-extension'
+        ) -PathType Container)
+    ) {
+        throw 'Legacy raw extension was not preserved and removed after activation.'
+    }
+    if ((Get-KonclavePluginRecords).Count -ne 1) {
+        throw 'Direct activation did not leave exactly one Konclave plugin.'
+    }
+
+    $updated = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'Update'
+        ReleaseDirectory = $candidateRelease
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $updated -Action Update -Version '0.1.1'
+    $candidateInstallRoot = [string]$updated.installRoot
+
+    $rolledBack = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'Rollback'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $rolledBack -Action RolledBack -Version '0.1.0'
+    $managerInstallRoot = [string]$rolledBack.installRoot
+
+    $candidateService = Join-Path $candidateInstallRoot 'bin' 'KonclaveLocalService.exe'
+    $healthyCandidateService = "$candidateService.healthy"
+    Move-Item -LiteralPath $candidateService -Destination $healthyCandidateService
+    Copy-Item -LiteralPath (
+        Join-Path $env:SystemRoot 'System32' 'where.exe'
+    ) -Destination $candidateService
+    $updateFailed = $false
+    try {
+        [void](Invoke-Installer -Installer $installer -Arguments @{
+            Action = 'Update'
+            ReleaseDirectory = $candidateRelease
+            DataRoot = $dataRoot
+        })
+    }
+    catch {
+        $updateFailed = $true
+    }
+    finally {
+        Remove-Item -LiteralPath $candidateService -Force
+        Move-Item -LiteralPath $healthyCandidateService -Destination $candidateService
+    }
+    if (-not $updateFailed) {
+        throw 'Unhealthy update unexpectedly succeeded.'
+    }
+    $state = Get-Content -LiteralPath (
+        Join-Path $dataRoot 'runtime' 'installation.json'
+    ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 20
+    if ([string]$state.activeVersion -cne '0.1.0') {
+        throw 'Failed update did not retain the previous active version.'
+    }
+    $status = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'Status'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $status -Action Healthy -Version '0.1.0'
+
+    $updatedAgain = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'Update'
+        ReleaseDirectory = $candidateRelease
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $updatedAgain -Action Switch -Version '0.1.1'
+    $managerInstallRoot = [string]$updatedAgain.installRoot
+    $activatedAgain = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'ActivatePlugin'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $activatedAgain -Action PluginActivated -Version '0.1.1'
+    if ((Get-KonclavePluginRecords).Count -ne 1) {
+        throw 'Plugin update created a duplicate Konclave installation.'
+    }
+
+    $uninstalled = Invoke-Installer -Installer $installer -Arguments @{
+        Action = 'Uninstall'
+        DataRoot = $dataRoot
+    }
+    Assert-InstallerAction -Result $uninstalled -Action Uninstalled -Version '0.1.1'
+    $task = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
+    if (
+        $task.Count -ne 0 -or
+        (Test-Path -LiteralPath (Join-Path $dataRoot 'runtime' 'versions')) -or
+        (Test-Path -LiteralPath (Join-Path $dataRoot 'service' 'konclave.service.json')) -or
+        -not (Test-Path -LiteralPath $profileSentinel -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $authorityPath -Algorithm SHA256).Hash -cne $authorityHash -or
+        (Get-KonclavePluginRecords).Count -ne 0
+    ) {
+        throw 'Uninstall did not remove exact runtime state while retaining durable data.'
+    }
+    $managerInstallRoot = $null
+}
+finally {
+    $env:COPILOT_HOME = $previousCopilotHome
+    if ($null -ne $manager -and $null -ne $managerInstallRoot) {
+        $tasks = @(Get-ScheduledTask | Where-Object TaskName -CEQ 'KonclaveLocalService')
+        if ($tasks.Count -ne 0) {
+            & $manager `
+                -Action Uninstall `
+                -InstallRoot $managerInstallRoot `
+                -ConfigPath $managerConfig
+        }
+    }
+    if ($null -ne $relayProcess -and -not $relayProcess.HasExited) {
+        Stop-Process -Id $relayProcess.Id
+        $relayProcess.WaitForExit()
+    }
+    if (Test-Path -LiteralPath $root) {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Write-Output 'Native installer clean, repeat, update, recovery, rollback, and uninstall passed.'

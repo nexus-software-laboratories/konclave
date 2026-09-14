@@ -58,6 +58,7 @@
         "distribution-lifecycle-acceptance",
         "resolve-scope",
         "copilot-plugin-lifecycle",
+        "native-installer-lifecycle",
         "service-failure-contract",
         "generic-client-conformance",
         "installer-lifecycle-conformance",

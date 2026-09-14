@@ -150,12 +150,56 @@ jobs:
             tests/extension-runtime.test.ts \
             tests/service-client.test.ts
 
+  native-installer-lifecycle:
+    name: Native installer lifecycle
+    needs: resolve-scope
+    if: needs.resolve-scope.outputs.run == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: native-installer-lifecycle
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Install current Copilot CLI
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'copilot-cli'
+          npm install `
+            --global `
+            --prefix $prefix `
+            --no-audit `
+            --no-fund `
+            '@github/copilot@1.0.84-5'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Copilot CLI installation failed.'
+          }
+          $prefix >>$env:GITHUB_PATH
+      - name: Exercise native install, update, rollback, and uninstall
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/installation/Test-NativeInstallerLifecycle.ps1
+
   distribution-lifecycle-acceptance:
     name: Distribution lifecycle acceptance
     if: always()
     needs:
       - resolve-scope
       - copilot-plugin-lifecycle
+      - native-installer-lifecycle
       - service-failure-contract
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -165,6 +209,7 @@ jobs:
         env:
           RUN_SCOPE: ${{ needs.resolve-scope.outputs.run }}
           COPILOT_RESULT: ${{ needs.copilot-plugin-lifecycle.result }}
+          NATIVE_RESULT: ${{ needs.native-installer-lifecycle.result }}
           SERVICE_RESULT: ${{ needs.service-failure-contract.result }}
         run: |
           set -euo pipefail
@@ -174,6 +219,10 @@ jobs:
           fi
           if [ "$COPILOT_RESULT" != 'success' ]; then
             echo "::error::Copilot CLI lifecycle concluded with $COPILOT_RESULT."
+            exit 1
+          fi
+          if [ "$NATIVE_RESULT" != 'success' ]; then
+            echo "::error::Native installer lifecycle concluded with $NATIVE_RESULT."
             exit 1
           fi
           if [ "$SERVICE_RESULT" != 'success' ]; then
