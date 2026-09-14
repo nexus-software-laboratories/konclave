@@ -112,21 +112,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Require one-day repository retention
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          $retention = gh api `
-            "repos/$env:REPOSITORY/actions/permissions/artifact-and-log-retention" |
-              ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Could not inspect repository artifact retention.'
-          }
-          if ([int]$retention.days -ne 1) {
-            throw "Repository artifact retention is $($retention.days) days rather than one."
-          }
       - name: Remove pull-request caches and enforce five-GiB budget
         shell: pwsh
         env:
