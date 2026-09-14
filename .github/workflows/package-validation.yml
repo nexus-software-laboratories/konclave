@@ -22,6 +22,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - '.github/workflows/package-validation.yml'
+      - '.github/plugin/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'apps/Konclave.A2AGateway/**'
@@ -32,9 +33,11 @@ on:
       - 'distribution/**'
       - 'docs/distribution/**'
       - 'extensions/Konclave.HostExtension/**'
+      - 'plugins/konclave/**'
       - 'scripts/CargoLock.Functions.ps1'
       - 'scripts/ci/**'
       - 'scripts/installation/**'
+      - 'scripts/marketplace/**'
       - 'scripts/packaging/**'
   workflow_dispatch:
     inputs:

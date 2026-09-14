@@ -22,11 +22,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  marketplace-conformance:
-    name: Marketplace conformance
+  marketplace-materialization:
+    name: Marketplace materialization contract
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    outputs:
+      node: ${{ steps.toolchains.outputs.node }}
+      version: ${{ steps.toolchains.outputs.version }}
     steps:
+      - name: Require exact default head for remote acceptance
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo 'Remote marketplace acceptance must run from the default branch.' >&2
+            exit 1
+          fi
+          default_head="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" \
+              --jq '.object.sha'
+          )"
+          if [ "$GITHUB_SHA" != "$default_head" ]; then
+            echo 'Remote marketplace acceptance requires the current default-branch head.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -38,6 +62,7 @@ jobs:
           $release = Get-Content distribution/release-artifacts.json -Raw |
             ConvertFrom-Json -Depth 100
           "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+          "version=$($release.release.version)" >>$env:GITHUB_OUTPUT
       - uses: ./.github/actions/setup-node
         with:
           node-version: ${{ steps.toolchains.outputs.node }}
@@ -51,3 +76,136 @@ jobs:
           npm run lint
           npm run test:marketplace-contract
           npm run test:marketplace-materializer
+      - name: Download immutable Agent Plugin inputs
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.toolchains.outputs.version }}
+        run: |
+          $tag = "v$env:VERSION"
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" |
+            ConvertFrom-Json -Depth 100
+          if (
+            $LASTEXITCODE -ne 0 -or
+            -not [bool]$release.immutable -or
+            [bool]$release.draft -or
+            -not [bool]$release.prerelease
+          ) {
+            throw 'Marketplace source Release is not an immutable prerelease.'
+          }
+          $releaseRoot = Join-Path $env:RUNNER_TEMP 'marketplace-release'
+          New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+          gh release download $tag `
+            --repo $env:GITHUB_REPOSITORY `
+            --dir $releaseRoot `
+            --pattern RELEASE.json `
+            --pattern SHA256SUMS `
+            --pattern "konclave-$env:VERSION.zip" `
+            --pattern "konclave-$env:VERSION.zip.intoto.jsonl"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Marketplace source Release could not be downloaded.'
+          }
+          "root=$releaseRoot" >>$env:GITHUB_OUTPUT
+      - name: Verify committed marketplace bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node extensions/Konclave.HostExtension/scripts/materialize-marketplace.mjs \
+            --release-directory '${{ steps.release.outputs.root }}' \
+            --output-root "$GITHUB_WORKSPACE" \
+            --check
+          set +e
+          marketplace_ref="$(
+            git ls-remote \
+              --exit-code \
+              --heads \
+              "https://github.com/$GITHUB_REPOSITORY.git" \
+              refs/heads/marketplace 2>&1
+          )"
+          marketplace_status=$?
+          set -e
+          if [ "$marketplace_status" -eq 0 ]; then
+            printf '%s\n' "$marketplace_ref" >&2
+            echo 'A production marketplace branch exists.' >&2
+            exit 1
+          fi
+          if [ "$marketplace_status" -ne 2 ]; then
+            printf '%s\n' "$marketplace_ref" >&2
+            exit "$marketplace_status"
+          fi
+          bash -n scripts/marketplace/Test-DefaultMarketplaceLifecycle.sh
+
+  marketplace-client-lifecycle:
+    name: Marketplace lifecycle ${{ matrix.label }}
+    needs: marketplace-materialization
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: minimum
+            version: 1.0.82
+          - label: current
+            version: 1.0.84-5
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ needs.marketplace-materialization.outputs.node }}
+          npm-cache-scope: marketplace-lifecycle
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Install pinned Copilot CLI
+        shell: bash
+        env:
+          COPILOT_CLI_VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          npm install \
+            --global \
+            --prefix "$RUNNER_TEMP/copilot-cli" \
+            --no-audit \
+            --no-fund \
+            "@github/copilot@$COPILOT_CLI_VERSION"
+      - name: Exercise default-branch marketplace
+        shell: bash
+        env:
+          MARKETPLACE_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.repository || github.workspace }}
+        run: |
+          timeout --foreground --kill-after=30s 12m \
+            bash scripts/marketplace/Test-DefaultMarketplaceLifecycle.sh \
+              "$RUNNER_TEMP/copilot-cli/bin/copilot" \
+              '${{ matrix.version }}' \
+              "$GITHUB_WORKSPACE" \
+              "$MARKETPLACE_SOURCE" \
+              '${{ needs.marketplace-materialization.outputs.version }}'
+
+  marketplace-conformance:
+    name: Marketplace conformance
+    if: always()
+    needs:
+      - marketplace-materialization
+      - marketplace-client-lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check marketplace validation
+        shell: bash
+        env:
+          MATERIALIZATION_RESULT: ${{ needs.marketplace-materialization.result }}
+          LIFECYCLE_RESULT: ${{ needs.marketplace-client-lifecycle.result }}
+        run: |
+          set -euo pipefail
+          if [ "$MATERIALIZATION_RESULT" != 'success' ]; then
+            echo "::error::Marketplace materialization concluded with $MATERIALIZATION_RESULT."
+            exit 1
+          fi
+          if [ "$LIFECYCLE_RESULT" != 'success' ]; then
+            echo "::error::Marketplace lifecycle concluded with $LIFECYCLE_RESULT."
+            exit 1
+          fi
+          echo 'Marketplace conformance passed.'

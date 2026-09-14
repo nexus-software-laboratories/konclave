@@ -50,7 +50,6 @@
         "pr-title/title",
         "pr-review-policy/evaluate",
         "release-publication-conformance",
-        "authorize-marketplace-branch-acceptance",
         "authorize-storage-cleanup",
         "a2a-conformance",
         "adapter-conformance",
@@ -60,7 +59,6 @@
         "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
-        "cleanup-marketplace-branches",
         "distribution-lifecycle-acceptance",
         "resolve-scope",
         "copilot-plugin-lifecycle",
@@ -69,8 +67,8 @@
         "generic-client-conformance",
         "installer-lifecycle-conformance",
         "marketplace-conformance",
-        "marketplace-branch-acceptance",
-        "marketplace-branch-lifecycle",
+        "marketplace-materialization",
+        "marketplace-client-lifecycle",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -189,15 +187,6 @@
       "requiredChecks": [
         "User presence conformance"
       ]
-    },
-    {
-      "source": "project",
-      "path": ".github/workflows/marketplace-branch-acceptance.yml",
-      "roles": [
-        "repository-automation"
-      ],
-      "draftBehavior": "not-applicable",
-      "requiredChecks": []
     },
     {
       "source": "project",

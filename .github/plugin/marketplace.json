@@ -1,0 +1,19 @@
+{
+  "name": "konclave",
+  "metadata": {
+    "description": "Secure, durable agent-to-agent communication for GitHub Copilot CLI",
+    "version": "0.1.2"
+  },
+  "owner": {
+    "name": "Nexus Software Laboratories",
+    "email": "github@nexussoftwarelabs.com"
+  },
+  "plugins": [
+    {
+      "name": "konclave",
+      "source": "plugins/konclave",
+      "description": "Secure, durable agent-to-agent communication for GitHub Copilot CLI",
+      "version": "0.1.2"
+    }
+  ]
+}
