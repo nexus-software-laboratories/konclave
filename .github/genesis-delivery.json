@@ -69,6 +69,7 @@
         "marketplace-conformance",
         "marketplace-materialization",
         "marketplace-client-lifecycle",
+        "managed-marketplace-policy",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",

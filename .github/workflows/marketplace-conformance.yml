@@ -197,12 +197,81 @@ jobs:
               '${{ needs.marketplace-materialization.outputs.version }}' \
               "$SOURCE_MODE"
 
+  managed-marketplace-policy:
+    name: Managed marketplace policy
+    needs: marketplace-materialization
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ needs.marketplace-materialization.outputs.node }}
+          npm-cache-scope: managed-marketplace-policy
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Install current Copilot CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install \
+            --global \
+            --prefix "$RUNNER_TEMP/copilot-cli" \
+            --no-audit \
+            --no-fund \
+            '@github/copilot@1.0.84-5'
+      - name: Install root-owned managed marketplace policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg path "$GITHUB_WORKSPACE" \
+            '{
+              extraKnownMarketplaces: {
+                konclave: {
+                  source: {
+                    source: "directory",
+                    path: $path
+                  },
+                  autoUpdate: false
+                }
+              }
+            }' >"$RUNNER_TEMP/managed-settings.json"
+          sudo install \
+            --directory \
+            --owner root \
+            --group root \
+            --mode 0755 \
+            /etc/github-copilot
+          sudo install \
+            --owner root \
+            --group root \
+            --mode 0644 \
+            "$RUNNER_TEMP/managed-settings.json" \
+            /etc/github-copilot/managed-settings.json
+      - name: Verify managed marketplace precedence
+        shell: bash
+        run: |
+          timeout --foreground --kill-after=30s 5m \
+            bash scripts/marketplace/Test-ManagedMarketplacePolicy.sh \
+              "$RUNNER_TEMP/copilot-cli/bin/copilot" \
+              "$GITHUB_WORKSPACE"
+      - name: Remove managed marketplace policy
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -f -- /etc/github-copilot/managed-settings.json
+
   marketplace-conformance:
     name: Marketplace conformance
     if: always()
     needs:
       - marketplace-materialization
       - marketplace-client-lifecycle
+      - managed-marketplace-policy
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -211,6 +280,7 @@ jobs:
         env:
           MATERIALIZATION_RESULT: ${{ needs.marketplace-materialization.result }}
           LIFECYCLE_RESULT: ${{ needs.marketplace-client-lifecycle.result }}
+          MANAGED_RESULT: ${{ needs.managed-marketplace-policy.result }}
         run: |
           set -euo pipefail
           if [ "$MATERIALIZATION_RESULT" != 'success' ]; then
@@ -219,6 +289,10 @@ jobs:
           fi
           if [ "$LIFECYCLE_RESULT" != 'success' ]; then
             echo "::error::Marketplace lifecycle concluded with $LIFECYCLE_RESULT."
+            exit 1
+          fi
+          if [ "$MANAGED_RESULT" != 'success' ]; then
+            echo "::error::Managed marketplace policy concluded with $MANAGED_RESULT."
             exit 1
           fi
           echo 'Marketplace conformance passed.'
