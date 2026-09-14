@@ -94,6 +94,15 @@ jobs:
           ) {
             throw 'Marketplace source Release is not an immutable prerelease.'
           }
+          $tagRef = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" |
+            ConvertFrom-Json -Depth 20
+          if (
+            $LASTEXITCODE -ne 0 -or
+            [string]$tagRef.object.type -cne 'commit' -or
+            [string]$tagRef.object.sha -cnotmatch '^[0-9a-f]{40}$'
+          ) {
+            throw 'Marketplace source tag is not an exact commit.'
+          }
           $releaseRoot = Join-Path $env:RUNNER_TEMP 'marketplace-release'
           New-Item -ItemType Directory -Path $releaseRoot | Out-Null
           gh release download $tag `
@@ -107,6 +116,7 @@ jobs:
             throw 'Marketplace source Release could not be downloaded.'
           }
           "root=$releaseRoot" >>$env:GITHUB_OUTPUT
+          "source-commit=$($tagRef.object.sha)" >>$env:GITHUB_OUTPUT
       - name: Verify committed marketplace bytes
         shell: bash
         run: |
@@ -114,6 +124,7 @@ jobs:
           node extensions/Konclave.HostExtension/scripts/materialize-marketplace.mjs \
             --release-directory '${{ steps.release.outputs.root }}' \
             --output-root "$GITHUB_WORKSPACE" \
+            --source-commit '${{ steps.release.outputs.source-commit }}' \
             --check
           set +e
           marketplace_ref="$(

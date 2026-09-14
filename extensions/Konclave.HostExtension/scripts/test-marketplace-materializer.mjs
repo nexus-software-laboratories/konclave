@@ -7,13 +7,14 @@ import { tmpdir } from 'node:os';
 import { zipSync } from 'fflate';
 
 import { MarketplaceContractError, marketplaceOutputPaths } from './marketplace-contract.mjs';
-import { materializeMarketplace } from './materialize-marketplace.mjs';
+import { materializeMarketplace as materializeMarketplaceWithSource } from './materialize-marketplace.mjs';
 import {
   agentPluginExtensionEntryPath,
   agentPluginExtensionPackagePath,
 } from './package-contract.mjs';
 
 const version = '0.1.2';
+const sourceCommit = 'a'.repeat(40);
 const root = mkdtempSync(join(tmpdir(), 'konclave-marketplace-'));
 
 function jsonBytes(value) {
@@ -67,7 +68,7 @@ function writeRelease(releaseRoot, mutateArchive = null, mutateManifest = null) 
             {
               uri: 'git+https://github.com/nexus-software-laboratories/konclave',
               digest: {
-                gitCommit: 'a'.repeat(40),
+                gitCommit: sourceCommit,
               },
             },
           ],
@@ -102,6 +103,13 @@ function expectFailure(name, action, expectedCode) {
   );
 }
 
+function materializeMarketplace(options) {
+  return materializeMarketplaceWithSource({
+    expectedSourceCommit: sourceCommit,
+    ...options,
+  });
+}
+
 try {
   const releaseRoot = join(root, 'release');
   const outputRoot = join(root, 'output');
@@ -110,7 +118,7 @@ try {
     releaseDirectory: releaseRoot,
     outputRoot,
   });
-  assert.equal(plan.sourceCommit, 'a'.repeat(40));
+  assert.equal(plan.sourceCommit, sourceCommit);
   assert.deepEqual(
     plan.files.map((file) => file.path),
     marketplaceOutputPaths,
@@ -253,6 +261,20 @@ try {
     'release_provenance_invalid',
   );
 
+  const oversizedArchiveRoot = join(root, 'oversized-archive');
+  writeRelease(oversizedArchiveRoot, (entries) => {
+    entries[agentPluginExtensionEntryPath] = Buffer.alloc(1024 * 1024 + 1, 1);
+  });
+  expectFailure(
+    'oversized archive entry',
+    () =>
+      materializeMarketplace({
+        releaseDirectory: oversizedArchiveRoot,
+        outputRoot: join(root, 'oversized-output'),
+      }),
+    'archive_layout_mismatch',
+  );
+
   const unsafeArchiveRoot = join(root, 'unsafe-archive');
   writeRelease(unsafeArchiveRoot, (entries) => {
     entries['../plugin.json'] = entries['plugin.json'];
@@ -265,6 +287,17 @@ try {
         outputRoot: join(root, 'unsafe-output'),
       }),
     'archive_layout_mismatch',
+  );
+
+  expectFailure(
+    'source commit mismatch',
+    () =>
+      materializeMarketplaceWithSource({
+        releaseDirectory: releaseRoot,
+        outputRoot: join(root, 'source-mismatch-output'),
+        expectedSourceCommit: 'b'.repeat(40),
+      }),
+    'release_source_mismatch',
   );
 } finally {
   rmSync(root, { recursive: true, force: true });

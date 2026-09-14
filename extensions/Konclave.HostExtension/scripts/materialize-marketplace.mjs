@@ -22,18 +22,47 @@ import {
   marketplaceOutputPaths,
   marketplacePluginRoot,
 } from './marketplace-contract.mjs';
+import { agentPluginExtensionEntryPath } from './package-contract.mjs';
 
 const maximumArchiveBytes = 2 * 1024 * 1024;
+const maximumReleaseContractBytes = 1024 * 1024;
 
 function fail(code, message) {
   throw new MarketplaceContractError(code, message);
 }
 
+function readBoundedFile(path, maximumBytes, description) {
+  try {
+    const status = lstatSync(path);
+    if (
+      status.isSymbolicLink() ||
+      !status.isFile() ||
+      status.size === 0 ||
+      status.size > maximumBytes
+    ) {
+      fail('release_contract_invalid', `${description} is unsafe or oversized.`);
+    }
+    return readFileSync(path);
+  } catch (error) {
+    if (error instanceof MarketplaceContractError) {
+      throw error;
+    }
+    fail('release_contract_invalid', `${description} is missing or unsafe.`);
+  }
+}
+
 function readJson(path, description) {
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    fail('release_contract_invalid', `${description} is missing or invalid.`);
+    return JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        readBoundedFile(path, maximumReleaseContractBytes, description),
+      ),
+    );
+  } catch (error) {
+    if (error instanceof MarketplaceContractError) {
+      throw error;
+    }
+    fail('release_contract_invalid', `${description} is invalid JSON.`);
   }
 }
 
@@ -130,29 +159,32 @@ function readReleasePlan(releaseDirectory) {
 
   const artifactFileName = pluginArtifacts[0].fileName;
   const archivePath = resolveManagedPath(releaseRoot, artifactFileName);
-  if (!existsSync(archivePath) || lstatSync(archivePath).isSymbolicLink()) {
-    fail('release_contract_invalid', 'Release Agent Plugin archive is missing or unsafe.');
-  }
-  const archive = readFileSync(archivePath);
-  if (archive.byteLength === 0 || archive.byteLength > maximumArchiveBytes) {
-    fail('release_contract_invalid', 'Release Agent Plugin archive exceeds its size contract.');
-  }
+  const archive = readBoundedFile(archivePath, maximumArchiveBytes, 'Release Agent Plugin archive');
 
   let checksumText;
   try {
-    checksumText = readFileSync(resolve(releaseRoot, 'SHA256SUMS'), 'utf8');
-  } catch {
-    fail('release_contract_invalid', 'Release checksum manifest is missing.');
+    checksumText = new TextDecoder('utf-8', { fatal: true }).decode(
+      readBoundedFile(
+        resolve(releaseRoot, 'SHA256SUMS'),
+        maximumReleaseContractBytes,
+        'Release checksum manifest',
+      ),
+    );
+  } catch (error) {
+    if (error instanceof MarketplaceContractError) {
+      throw error;
+    }
+    fail('release_contract_invalid', 'Release checksum manifest is invalid UTF-8.');
   }
   const checksumLines = checksumText.split(/\r?\n/).filter((line) => line.length > 0);
-  const matchingChecksums = checksumLines.filter((line) => line.endsWith(`  ${artifactFileName}`));
+  const matchingChecksums = checksumLines.flatMap((line) => {
+    const match = /^([0-9a-f]{64}) {2}([^\r\n]+)$/.exec(line);
+    return match?.[2] === artifactFileName ? [match[1]] : [];
+  });
   if (matchingChecksums.length !== 1) {
     fail('release_contract_invalid', 'Release checksum manifest does not name the plugin once.');
   }
-  const expectedDigest = matchingChecksums[0].slice(0, 64);
-  if (!/^[0-9a-f]{64}$/.test(expectedDigest)) {
-    fail('release_contract_invalid', 'Release Agent Plugin checksum is invalid.');
-  }
+  const [expectedDigest] = matchingChecksums;
   const actualDigest = createHash('sha256').update(archive).digest('hex');
   if (actualDigest !== expectedDigest) {
     fail('release_checksum_mismatch', 'Release Agent Plugin checksum does not match.');
@@ -160,10 +192,14 @@ function readReleasePlan(releaseDirectory) {
 
   let provenance;
   try {
-    const statements = readFileSync(
-      resolve(releaseRoot, `${artifactFileName}.intoto.jsonl`),
-      'utf8',
-    )
+    const statements = new TextDecoder('utf-8', { fatal: true })
+      .decode(
+        readBoundedFile(
+          resolve(releaseRoot, `${artifactFileName}.intoto.jsonl`),
+          maximumReleaseContractBytes,
+          'Release Agent Plugin provenance',
+        ),
+      )
       .split(/\r?\n/)
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line));
@@ -200,10 +236,48 @@ function readReleasePlan(releaseDirectory) {
   }
 
   let entries;
+  let archiveContractError = null;
+  const expectedArchivePaths = new Set(
+    marketplaceOutputPaths.slice(1).map((path) => {
+      return path.slice(`${marketplacePluginRoot}/`.length);
+    }),
+  );
+  const seenArchivePaths = new Set();
+  let expandedBytes = 0;
   try {
-    entries = unzipSync(new Uint8Array(archive));
+    entries = unzipSync(new Uint8Array(archive), {
+      filter(file) {
+        const maximumBytes =
+          file.name === agentPluginExtensionEntryPath ? 1024 * 1024 : maximumReleaseContractBytes;
+        if (
+          !expectedArchivePaths.has(file.name) ||
+          seenArchivePaths.has(file.name) ||
+          file.originalSize <= 0 ||
+          file.originalSize > maximumBytes
+        ) {
+          archiveContractError = new MarketplaceContractError(
+            'archive_layout_mismatch',
+            `Release archive entry is unexpected, duplicated, or oversized: ${file.name}`,
+          );
+          return false;
+        }
+        seenArchivePaths.add(file.name);
+        expandedBytes += file.originalSize;
+        if (expandedBytes > 1024 * 1024 + 2 * maximumReleaseContractBytes) {
+          archiveContractError = new MarketplaceContractError(
+            'archive_layout_mismatch',
+            'Release archive expanded size exceeds its contract.',
+          );
+          return false;
+        }
+        return true;
+      },
+    });
   } catch {
     fail('release_archive_invalid', 'Release Agent Plugin archive cannot be decoded.');
+  }
+  if (archiveContractError) {
+    throw archiveContractError;
   }
   const plan = createMarketplacePlan({
     releaseVersion: version,
@@ -216,9 +290,24 @@ function readReleasePlan(releaseDirectory) {
   };
 }
 
-export function materializeMarketplace({ releaseDirectory, outputRoot, checkOnly = false }) {
+export function materializeMarketplace({
+  releaseDirectory,
+  outputRoot,
+  expectedSourceCommit,
+  checkOnly = false,
+}) {
   const root = resolve(outputRoot);
   const plan = readReleasePlan(releaseDirectory);
+  if (
+    typeof expectedSourceCommit !== 'string' ||
+    !/^[0-9a-f]{40}$/.test(expectedSourceCommit) ||
+    plan.sourceCommit !== expectedSourceCommit
+  ) {
+    fail(
+      'release_source_mismatch',
+      'Release provenance does not match the expected source commit.',
+    );
+  }
   if (checkOnly) {
     assertMarketplaceTree(root, plan);
     return plan;
@@ -270,6 +359,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const plan = materializeMarketplace({
     releaseDirectory: option('--release-directory'),
     outputRoot: option('--output-root'),
+    expectedSourceCommit: option('--source-commit'),
     checkOnly: process.argv.includes('--check'),
   });
   console.log(
