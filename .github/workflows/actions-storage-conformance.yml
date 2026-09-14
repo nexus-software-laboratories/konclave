@@ -1,0 +1,52 @@
+name: Actions storage conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+    paths:
+      - '.github/actions/setup-node/action.yml'
+      - '.github/genesis-delivery.json'
+      - '.github/workflows/actions-storage-conformance.yml'
+      - '.github/workflows/package-artifact-cleanup.yml'
+      - '.github/workflows/*.yml'
+      - 'docs/development/ci.md'
+      - 'scripts/ci/ActionsStoragePolicy.Functions.ps1'
+      - 'scripts/ci/Test-ActionsStoragePolicy*.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: actions-storage-conformance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actions-storage-conformance:
+    name: Actions storage conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify cache retention decisions
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'scripts/ci/ActionsStoragePolicy.Functions.ps1',
+            'scripts/ci/Test-ActionsStoragePolicyFunctions.ps1'
+          )) {
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$null,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              throw "$path contains PowerShell parse errors."
+            }
+          }
+          ./scripts/ci/Test-ActionsStoragePolicyFunctions.ps1
