@@ -23,7 +23,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0018: Negotiate protected A2A as a fail-closed native Konclave handoff](../adr/adr-0018-fail-closed-protected-a2a-handoff.md)
 - [ADR 0019: Require harness-owned challenge-bound assertions for HarnessAttested grants](../adr/adr-0019-harness-owned-session-attestation.md)
 - [ADR 0020: Prove UserPresence with native WebAuthn verification](../adr/adr-0020-native-webauthn-user-presence.md)
-- [ADR 0021: Keep immutable artifacts in Releases and publish the marketplace tree on a generated branch](../adr/adr-0021-generated-marketplace-branch.md)
+- [ADR 0022: Publish the Copilot marketplace from the default branch](../adr/adr-0022-default-branch-copilot-marketplace.md)
 
 ## Superseded records
 
@@ -33,6 +33,9 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0011: Exchange content-addressed collaboration policies with local activation](../adr/adr-0011-content-addressed-collaboration-policies.md) —
   superseded by ADR 0012 after free-form policy guidance proved unable to express
   deterministic request and terminal-response intent.
+- [ADR 0021: Keep immutable artifacts in Releases and publish the marketplace tree on a generated branch](../adr/adr-0021-generated-marketplace-branch.md) —
+  superseded by ADR 0022 after maintainer review established that explicit ref
+  support did not outweigh the documented default-branch marketplace convention.
 
 ## When to write one
 

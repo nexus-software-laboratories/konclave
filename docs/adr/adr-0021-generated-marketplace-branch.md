@@ -1,6 +1,6 @@
 ---
 title: Keep immutable artifacts in Releases and publish the marketplace tree on a generated branch
-status: Accepted
+status: Superseded
 date: 2026-09-14
 authors:
   - Konclave maintainers
@@ -10,7 +10,8 @@ tags:
   - marketplace
   - releases
 supersedes: []
-superseded_by: []
+superseded_by:
+  - adr-0022-default-branch-copilot-marketplace
 ---
 
 # Keep immutable artifacts in Releases and publish the marketplace tree on a generated branch
