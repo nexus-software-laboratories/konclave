@@ -14,7 +14,7 @@ on:
       candidate_tag:
         description: Immutable candidate release tag
         required: false
-        default: v0.1.1
+        default: v0.1.2
         type: string
 
 permissions:
@@ -204,10 +204,16 @@ jobs:
           BASELINE_TAG: ${{ inputs.baseline_tag || 'v0.1.0' }}
           CANDIDATE_TAG: ${{ inputs.candidate_tag || 'v0.1.1' }}
           GH_TOKEN: ${{ github.token }}
+          USE_CANDIDATE_INSTALLER: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          ./scripts/installation/Test-NativeInstallerLifecycle.ps1 `
-            -BaselineTag $env:BASELINE_TAG `
-            -CandidateTag $env:CANDIDATE_TAG
+          $arguments = @{
+            BaselineTag = $env:BASELINE_TAG
+            CandidateTag = $env:CANDIDATE_TAG
+          }
+          if ($env:USE_CANDIDATE_INSTALLER -ceq 'true') {
+            $arguments.UseCandidateInstaller = $true
+          }
+          ./scripts/installation/Test-NativeInstallerLifecycle.ps1 @arguments
 
   distribution-lifecycle-acceptance:
     name: Distribution lifecycle acceptance

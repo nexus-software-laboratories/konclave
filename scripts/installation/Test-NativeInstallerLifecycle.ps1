@@ -4,7 +4,8 @@
 param(
     [string]$Repository = 'nexus-software-laboratories/konclave',
     [string]$BaselineTag = 'v0.1.0',
-    [string]$CandidateTag = 'v0.1.1'
+    [string]$CandidateTag = 'v0.1.2',
+    [switch]$UseCandidateInstaller
 )
 
 $ErrorActionPreference = 'Stop'
@@ -323,8 +324,22 @@ try {
     }
     Wait-RelayHealth -Endpoint $endpoint
 
-    $installer = Join-Path $currentInstallerRoot 'Install-Konclave.ps1'
-    $manager = Join-Path $currentInstallerRoot 'WindowsUserService.ps1'
+    $installerRoot = if ($UseCandidateInstaller) {
+        $candidateRelease
+    }
+    else {
+        $currentInstallerRoot
+    }
+    $installer = Join-Path $installerRoot 'Install-Konclave.ps1'
+    $manager = Join-Path $installerRoot 'WindowsUserService.ps1'
+    foreach ($path in @($installer, $manager)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Installer lifecycle support is missing: $path"
+        }
+    }
+    if ($UseCandidateInstaller) {
+        Write-Output 'lifecycle: immutable candidate installer selected'
+    }
     $installArguments = @{
         Action = 'Install'
         ReleaseDirectory = $baselineRelease

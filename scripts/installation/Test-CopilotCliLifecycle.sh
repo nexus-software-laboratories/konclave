@@ -22,6 +22,28 @@ unzip -q "$plugin_archive" -d "$test_root/plugin"
 
 "$copilot_command" --version | grep -F "$expected_cli_version"
 set +e
+timeout_output="$(
+    timeout --foreground --kill-after=1s 4s \
+        python3 "$(dirname "$0")/copilot_prompt_probe.py" \
+            --timeout-seconds 0.2 \
+            --transcript "$test_root/stubborn-process.transcript" \
+            -- python3 -c \
+                'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)' \
+            2>&1
+)"
+timeout_status=$?
+set -e
+printf '%s\n' "$timeout_output"
+if [ "$timeout_status" -eq 0 ]; then
+    echo 'Stubborn prompt fixture unexpectedly succeeded.' >&2
+    exit 1
+fi
+if [ "$timeout_status" -eq 124 ] || [ "$timeout_status" -eq 137 ]; then
+    echo 'Prompt probe did not enforce its own process deadline.' >&2
+    exit 1
+fi
+
+set +e
 install_output="$("$copilot_command" plugin install "$test_root/plugin" 2>&1)"
 install_status=$?
 set -e

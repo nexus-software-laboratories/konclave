@@ -104,57 +104,73 @@ jobs:
               "extensions/Konclave.HostExtension/build/outputs/konclave-${{ steps.toolchains.outputs.plugin-version }}.zip" \
               '${{ steps.toolchains.outputs.plugin-version }}' \
               '${{ github.sha }}'
-      - name: Delete ephemeral marketplace branch
-        if: always()
-        timeout-minutes: 3
+
+  cleanup-marketplace-branches:
+    name: Clean marketplace branches
+    if: ${{ always() && needs.authorize-marketplace-branch-acceptance.result == 'success' }}
+    needs:
+      - authorize-marketplace-branch-acceptance
+      - marketplace-branch-lifecycle
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Delete ephemeral marketplace branches
         shell: bash
         run: |
           set -euo pipefail
-          set +e
-          branch_query="$(
-            timeout --foreground --kill-after=10s 1m \
-              git ls-remote \
-                --exit-code \
-                --heads \
-                origin \
-                "refs/heads/$ACCEPTANCE_BRANCH" 2>&1
-          )"
-          branch_status=$?
-          set -e
-          case "$branch_status" in
-            0)
-              printf '%s\n' "$branch_query"
+          for label in minimum current; do
+            branch="acceptance/marketplace-${GITHUB_RUN_ID}-${label}"
+            set +e
+            branch_query="$(
               timeout --foreground --kill-after=10s 1m \
-                git push origin --delete "$ACCEPTANCE_BRANCH"
-              ;;
-            2)
-              printf 'Ephemeral marketplace branch was not created.\n'
-              ;;
-            *)
+                git ls-remote \
+                  --exit-code \
+                  --heads \
+                  origin \
+                  "refs/heads/$branch" 2>&1
+            )"
+            branch_status=$?
+            set -e
+            case "$branch_status" in
+              0)
+                printf '%s\n' "$branch_query"
+                timeout --foreground --kill-after=10s 1m \
+                  git push origin --delete "$branch"
+                ;;
+              2)
+                printf 'Ephemeral marketplace branch was not created: %s\n' "$branch"
+                ;;
+              *)
+                printf '%s\n' "$branch_query" >&2
+                exit "$branch_status"
+                ;;
+            esac
+
+            set +e
+            branch_query="$(
+              timeout --foreground --kill-after=10s 1m \
+                git ls-remote \
+                  --exit-code \
+                  --heads \
+                  origin \
+                  "refs/heads/$branch" 2>&1
+            )"
+            branch_status=$?
+            set -e
+            if [ "$branch_status" -eq 0 ]; then
+              echo "Ephemeral marketplace branch still exists: $branch" >&2
+              exit 1
+            fi
+            if [ "$branch_status" -ne 2 ]; then
               printf '%s\n' "$branch_query" >&2
               exit "$branch_status"
-              ;;
-          esac
-
-          set +e
-          branch_query="$(
-            timeout --foreground --kill-after=10s 1m \
-              git ls-remote \
-                --exit-code \
-                --heads \
-                origin \
-                "refs/heads/$ACCEPTANCE_BRANCH" 2>&1
-          )"
-          branch_status=$?
-          set -e
-          if [ "$branch_status" -eq 0 ]; then
-            echo 'Ephemeral marketplace branch still exists.' >&2
-            exit 1
-          fi
-          if [ "$branch_status" -ne 2 ]; then
-            printf '%s\n' "$branch_query" >&2
-            exit "$branch_status"
-          fi
+            fi
+          done
 
   marketplace-branch-acceptance:
     name: Marketplace branch acceptance
@@ -162,6 +178,7 @@ jobs:
     needs:
       - authorize-marketplace-branch-acceptance
       - marketplace-branch-lifecycle
+      - cleanup-marketplace-branches
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -169,6 +186,7 @@ jobs:
         shell: bash
         env:
           AUTHORIZATION_RESULT: ${{ needs.authorize-marketplace-branch-acceptance.result }}
+          CLEANUP_RESULT: ${{ needs.cleanup-marketplace-branches.result }}
           RESULT: ${{ needs.marketplace-branch-lifecycle.result }}
         run: |
           set -euo pipefail
@@ -178,6 +196,10 @@ jobs:
           fi
           if [ "$RESULT" != 'success' ]; then
             echo "::error::Marketplace branch matrix concluded with $RESULT."
+            exit 1
+          fi
+          if [ "$CLEANUP_RESULT" != 'success' ]; then
+            echo "::error::Marketplace branch cleanup concluded with $CLEANUP_RESULT."
             exit 1
           fi
           echo 'Non-default marketplace branch acceptance passed.'

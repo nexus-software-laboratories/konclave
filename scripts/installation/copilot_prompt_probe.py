@@ -10,6 +10,23 @@ import termios
 import time
 
 
+def wait_for_exit(pid: int, timeout_seconds: float) -> int | None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+            return status
+        time.sleep(0.05)
+    return None
+
+
+def signal_process_group(pid: int, signal_number: int) -> None:
+    try:
+        os.killpg(pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout-seconds", type=float, required=True)
@@ -66,8 +83,12 @@ def main() -> int:
             break
 
     if status is None:
-        os.kill(pid, signal.SIGTERM)
+        signal_process_group(pid, signal.SIGTERM)
+        status = wait_for_exit(pid, 1.0)
+    if status is None:
+        signal_process_group(pid, signal.SIGKILL)
         _, status = os.waitpid(pid, 0)
+    signal_process_group(pid, signal.SIGKILL)
     os.close(descriptor)
     with open(args.transcript, "wb") as transcript:
         transcript.write(output)
