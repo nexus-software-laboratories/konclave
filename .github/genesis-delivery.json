@@ -29,7 +29,9 @@
     {
       "id": "ubuntu-latest-hosted",
       "source": "github-hosted",
-      "labels": ["ubuntu-latest"],
+      "labels": [
+        "ubuntu-latest"
+      ],
       "jobs": [
         "rust-build-test",
         "rust-lint",
@@ -59,63 +61,97 @@
     {
       "source": "project",
       "path": ".github/workflows/a2a-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "ready-only",
-      "requiredChecks": ["A2A conformance"]
+      "requiredChecks": [
+        "A2A conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/adapter-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "ready-only",
-      "requiredChecks": ["Adapter conformance"]
+      "requiredChecks": [
+        "Adapter conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/agent-plugin-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "full",
-      "requiredChecks": ["Agent plugin conformance"]
+      "requiredChecks": [
+        "Agent plugin conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/authorization-store-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "full",
-      "requiredChecks": ["Authorization store conformance"]
+      "requiredChecks": [
+        "Authorization store conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/client-runtime-config-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "full",
-      "requiredChecks": ["Client runtime config conformance"]
+      "requiredChecks": [
+        "Client runtime config conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/generic-client-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "full",
-      "requiredChecks": ["Generic client conformance"]
+      "requiredChecks": [
+        "Generic client conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/user-presence-conformance.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "full",
-      "requiredChecks": ["User presence conformance"]
+      "requiredChecks": [
+        "User presence conformance"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/package-validation.yml",
-      "roles": ["merge-gate"],
+      "roles": [
+        "merge-gate"
+      ],
       "draftBehavior": "ready-only",
-      "requiredChecks": ["Package validation"]
+      "requiredChecks": [
+        "Package validation"
+      ]
     },
     {
       "source": "project",
       "path": ".github/workflows/package-artifact-cleanup.yml",
-      "roles": ["repository-automation"],
+      "roles": [
+        "repository-automation"
+      ],
       "draftBehavior": "not-applicable",
       "requiredChecks": []
     }
