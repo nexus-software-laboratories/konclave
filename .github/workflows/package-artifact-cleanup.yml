@@ -17,10 +17,36 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  actions: write
   contents: read
 
 jobs:
+  authorize-storage-cleanup:
+    name: Authorize storage cleanup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require trusted manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo 'Manual storage cleanup must run from the default branch.' >&2
+            exit 1
+          fi
+          default_head="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" \
+              --jq '.object.sha'
+          )"
+          if [ "$GITHUB_SHA" != "$default_head" ]; then
+            echo 'Manual storage cleanup requires the current default-branch head.' >&2
+            exit 1
+          fi
+
   delete-run-artifacts:
     name: Delete completed-run artifacts
     if: >-
@@ -33,6 +59,10 @@ jobs:
           github.event.workflow_run.conclusion == 'success'
         )
       )
+    needs: authorize-storage-cleanup
+    permissions:
+      actions: write
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -72,6 +102,10 @@ jobs:
 
   prune-actions-caches:
     name: Bound Actions caches
+    needs: authorize-storage-cleanup
+    permissions:
+      actions: write
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

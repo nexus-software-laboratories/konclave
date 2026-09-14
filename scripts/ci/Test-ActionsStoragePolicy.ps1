@@ -93,11 +93,14 @@ $cleanup = Get-Content -LiteralPath (
 ) -Raw
 foreach ($required in @(
     'name: Actions storage cleanup',
+    'authorize-storage-cleanup:',
+    'Manual storage cleanup requires the current default-branch head.',
     '- Agent plugin conformance',
     "github.event.workflow_run.path == '.github/workflows/agent-plugin-conformance.yml'",
     "github.event.workflow_run.path == '.github/workflows/package-validation.yml'",
     "github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml'",
     'CACHE_BUDGET_BYTES: ''5368709120''',
+    'needs: authorize-storage-cleanup',
     'Pull-request cache remained after cleanup'
 )) {
     if (-not $cleanup.Contains($required)) {

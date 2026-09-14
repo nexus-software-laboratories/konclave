@@ -50,6 +50,7 @@
         "pr-review-policy/evaluate",
         "release-publication-conformance",
         "authorize-marketplace-branch-acceptance",
+        "authorize-storage-cleanup",
         "a2a-conformance",
         "adapter-conformance",
         "actions-storage-conformance",
