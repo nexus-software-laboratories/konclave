@@ -95,7 +95,24 @@ function Set-OwnerOnlyFile {
     )
 
     [void](Assert-SafeInstallationItem -Path $Path -Kind File)
-    if (-not $IsWindows) {
+    if ($IsWindows) {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($null -eq $identity) {
+            throw 'Current Windows user SID is unavailable.'
+        }
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetOwner($identity)
+        $security.SetGroup($identity)
+        $security.SetAccessRuleProtection($true, $false)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$security.AddAccessRule($rule)
+        Set-Acl -LiteralPath $Path -AclObject $security
+    }
+    else {
         $mode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite
         [IO.File]::SetUnixFileMode($Path, $mode)
     }
