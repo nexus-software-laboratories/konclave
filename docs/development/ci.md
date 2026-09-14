@@ -106,6 +106,12 @@ draft to a clean directory, and runs the shipped verifier. The final publish mus
 report an immutable prerelease whose lightweight tag identifies the validated source
 commit. Any earlier failure leaves no published release.
 
+Release immutability is an administrator-owned repository setting. GitHub does not
+allow the credential-free workflow token to read that setting, so maintainers verify
+it before dispatch; the final release response is the workflow's authoritative
+immutability check. If GitHub reports a mutable release, the workflow returns it to
+draft and fails.
+
 `Packaged clean-install acceptance` then extracts the Linux client, relay, and gateway archives
 twice, creates temporary trusted TLS, and drives the packaged shared local service
 through the same authenticated thin-client contract used by Copilot. It repeats the

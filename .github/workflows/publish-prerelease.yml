@@ -128,8 +128,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
           REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
           SOURCE_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -169,6 +169,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           mapfile -d '' assets < <(
@@ -178,7 +179,10 @@ jobs:
             echo 'Validated release set is empty.' >&2
             exit 1
           fi
-          gh release upload "$RELEASE_TAG" "${assets[@]}"
+          gh release upload \
+            "$RELEASE_TAG" \
+            "${assets[@]}" \
+            --repo "$REPOSITORY"
       - name: Re-download and verify draft assets
         shell: pwsh
         env:
@@ -207,7 +211,7 @@ jobs:
             $destination = Join-Path $downloadRoot ([string]$asset.name)
             gh api `
               -H 'Accept: application/octet-stream' `
-              ([string]$asset.url) >$destination
+              "repos/$env:REPOSITORY/releases/assets/$($asset.id)" >$destination
             if ($LASTEXITCODE -ne 0) {
               throw "Could not download draft release asset: $($asset.name)"
             }
