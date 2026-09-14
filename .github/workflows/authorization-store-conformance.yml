@@ -73,6 +73,7 @@ jobs:
         with:
           key: authorization-store-conformance
           cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify durable authorization store
         if: steps.scope.outputs.run == 'true'
         shell: bash

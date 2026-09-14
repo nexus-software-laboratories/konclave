@@ -84,12 +84,18 @@ itself as complete merely by omitting a checksum line. Negative tests mutate, re
 pass. A trusted reusable-workflow caller may retain the complete set as a one-day
 Actions artifact; pull-request validation does not.
 
-The default-branch `Package artifact cleanup` workflow runs after every completed
-package-validation run, including failures and cancellations, and after successful
-prerelease publication. It deletes artifacts belonging to that exact run.
-Publication failures keep the candidate for at most one day so a maintainer can
-diagnose a draft or tag failure without presenting it as a release. Pull-request code
-receives no `actions: write` permission.
+Repository artifact and log retention is capped at one day. The default-branch
+`Actions storage cleanup` workflow runs after Agent Plugin conformance, every
+completed package-validation run including failures and cancellations, and successful
+prerelease publication. It deletes artifacts belonging to that exact run. Publication
+failures keep the candidate for at most one day so a maintainer can diagnose or resume
+a draft or tag failure without presenting it as a release.
+
+Pull requests may restore Rust caches created from `main`, but cannot persist new
+Rust or npm caches. Trusted `main` runs share npm's content-addressed download store
+instead of creating one copy per job. Scheduled and post-package cleanup removes every
+pull-request cache and deletes the oldest trusted caches until the repository is at or
+below 5 GiB. Pull-request code receives no `actions: write` permission.
 
 ## Immutable prerelease publication
 

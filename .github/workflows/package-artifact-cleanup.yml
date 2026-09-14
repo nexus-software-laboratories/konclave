@@ -1,23 +1,68 @@
-name: Package artifact cleanup
+name: Actions storage cleanup
 
 on:
   workflow_run:
     workflows:
+      - Agent plugin conformance
       - Package validation
       - Publish prerelease
     types:
       - completed
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: actions-storage-cleanup
+  cancel-in-progress: false
 
 permissions:
-  actions: write
   contents: read
 
 jobs:
+  authorize-storage-cleanup:
+    name: Authorize storage cleanup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require trusted manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo 'Manual storage cleanup must run from the default branch.' >&2
+            exit 1
+          fi
+          default_head="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" \
+              --jq '.object.sha'
+          )"
+          if [ "$GITHUB_SHA" != "$default_head" ]; then
+            echo 'Manual storage cleanup requires the current default-branch head.' >&2
+            exit 1
+          fi
+
   delete-run-artifacts:
-    name: Delete package run artifacts
+    name: Delete completed-run artifacts
     if: >-
-      github.event.workflow_run.name == 'Package validation' ||
-      github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'workflow_run' &&
+      (
+        github.event.workflow_run.path == '.github/workflows/agent-plugin-conformance.yml' ||
+        github.event.workflow_run.path == '.github/workflows/package-validation.yml' ||
+        (
+          github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml' &&
+          github.event.workflow_run.conclusion == 'success'
+        )
+      )
+    needs: authorize-storage-cleanup
+    permissions:
+      actions: write
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -54,3 +99,82 @@ jobs:
             exit 1
           fi
           echo "Deleted ${#artifact_ids[@]} transient package artifact(s)."
+
+  prune-actions-caches:
+    name: Bound Actions caches
+    needs: authorize-storage-cleanup
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Require one-day repository retention
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $retention = gh api `
+            "repos/$env:REPOSITORY/actions/permissions/artifact-and-log-retention" |
+              ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not inspect repository artifact retention.'
+          }
+          if ([int]$retention.days -ne 1) {
+            throw "Repository artifact retention is $($retention.days) days rather than one."
+          }
+      - name: Remove pull-request caches and enforce five-GiB budget
+        shell: pwsh
+        env:
+          CACHE_BUDGET_BYTES: '5368709120'
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $caches = @(
+            gh api `
+              --paginate `
+              "repos/$env:REPOSITORY/actions/caches?per_page=100" `
+              --jq '.actions_caches[]' |
+                ConvertFrom-Json
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not list repository Actions caches.'
+          }
+          [long]$budget = $env:CACHE_BUDGET_BYTES
+          . ./scripts/ci/ActionsStoragePolicy.Functions.ps1
+          $selection = Select-ActionsCacheDeletion `
+            -Caches $caches `
+            -BudgetBytes $budget
+          foreach ($cacheId in $selection.deleteIds) {
+            gh api `
+              --method DELETE `
+              "repos/$env:REPOSITORY/actions/caches/$cacheId"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not delete Actions cache $cacheId."
+            }
+          }
+          $remaining = @(
+            gh api `
+              --paginate `
+              "repos/$env:REPOSITORY/actions/caches?per_page=100" `
+              --jq '.actions_caches[]' |
+                ConvertFrom-Json
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not verify repository Actions caches.'
+          }
+          [long]$remainingBytes = 0
+          foreach ($cache in $remaining) {
+            $remainingBytes += [long]$cache.size_in_bytes
+            if ([string]$cache.ref -ne 'refs/heads/main') {
+              throw "Pull-request cache remained after cleanup: $($cache.id)"
+            }
+          }
+          if ($remainingBytes -gt $budget) {
+            throw "Actions caches remain above the five-GiB budget: $remainingBytes bytes."
+          }
+          "Actions caches are bounded at $remainingBytes bytes."

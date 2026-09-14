@@ -80,6 +80,8 @@ jobs:
       - name: Cache Rust dependencies
         if: steps.scope.outputs.run == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify standalone A2A gateway
         if: steps.scope.outputs.run == 'true'
         shell: bash

@@ -8,6 +8,7 @@
     "CI",
     "A2A conformance",
     "Adapter conformance",
+    "Actions storage conformance",
     "Agent plugin conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
@@ -49,8 +50,10 @@
         "pr-review-policy/evaluate",
         "release-publication-conformance",
         "authorize-marketplace-branch-acceptance",
+        "authorize-storage-cleanup",
         "a2a-conformance",
         "adapter-conformance",
+        "actions-storage-conformance",
         "agent-plugin-conformance",
         "package-plugin",
         "publish",
@@ -69,7 +72,8 @@
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
-        "delete-run-artifacts"
+        "delete-run-artifacts",
+        "prune-actions-caches"
       ]
     }
   ],
@@ -94,6 +98,17 @@
       "draftBehavior": "ready-only",
       "requiredChecks": [
         "Adapter conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/actions-storage-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Actions storage conformance"
       ]
     },
     {
