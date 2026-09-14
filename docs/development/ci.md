@@ -84,12 +84,15 @@ itself as complete merely by omitting a checksum line. Negative tests mutate, re
 pass. A trusted reusable-workflow caller may retain the complete set as a one-day
 Actions artifact; pull-request validation does not.
 
-Repository artifact and log retention is capped at one day. The default-branch
-`Actions storage cleanup` workflow runs after Agent Plugin conformance, every
-completed package-validation run including failures and cancellations, and successful
-prerelease publication. It deletes artifacts belonging to that exact run. Publication
-failures keep the candidate for at most one day so a maintainer can diagnose or resume
-a draft or tag failure without presenting it as a release.
+Repository artifact and log retention is capped at one day through the repository
+setting. The repository `GITHUB_TOKEN` cannot read that administrative setting, so
+workflows enforce one-day retention on every upload rather than fabricating a runtime
+verification. The default-branch `Actions storage cleanup` workflow runs after Agent
+Plugin conformance, every completed package-validation run including failures and
+cancellations, and successful prerelease publication. It deletes artifacts belonging
+to that exact run. Publication failures keep the candidate for at most one day so a
+maintainer can diagnose or resume a draft or tag failure without presenting it as a
+release.
 
 Pull requests may restore Rust caches created from `main`, but cannot persist new
 Rust or npm caches. Trusted `main` runs share npm's content-addressed download store
