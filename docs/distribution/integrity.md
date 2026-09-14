@@ -76,3 +76,5 @@ tag and assets and supplies GitHub's release attestation.
 Published assets are never replaced. A correction requires a new release version.
 Successful publication deletes its transient Actions artifacts; failed publication
 retains them for at most one day while leaving any partial release in draft state.
+The resume path consumes that exact retained set, reconciles only missing assets, and
+repeats clean-download verification without rebuilding after tag creation.

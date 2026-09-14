@@ -69,6 +69,14 @@ try {
             -Directory $root `
             -Assets @($assets | Select-Object -Skip 1)
     } 'a missing asset'
+    $missing = @(
+        Get-MissingPublishedReleaseAssetNames `
+            -Directory $root `
+            -Assets @($assets | Select-Object -Skip 1)
+    )
+    if ($missing.Count -ne 1 -or $missing[0] -cne [string]$assets[0].name) {
+        throw 'Release publication did not identify the one missing asset.'
+    }
 
     $extraAssets = @($assets) + @(
         [pscustomobject]@{
