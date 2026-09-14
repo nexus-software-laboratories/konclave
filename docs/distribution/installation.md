@@ -133,10 +133,17 @@ configuration remain outside version directories.
 
 The candidate service must pass `konclave doctor` before installation state changes.
 The installer then reports the packaged Agent Plugin path as ready for #108's later
-marketplace integration. `-EnableDirectAgentPlugin` is an explicit pre-marketplace
-compatibility option: it installs the local Agent Plugin only after service health,
-preserves any legacy raw extension under `runtime/legacy/`, removes the original, and
-reports that existing Copilot sessions must restart. It never kills those sessions.
+marketplace integration. Native install, update, and rollback never modify Copilot's
+plugin cache.
+
+`-Action ActivatePlugin` is a separate explicit pre-marketplace compatibility step.
+It first rechecks the active service, then installs the local Agent Plugin, preserves
+any legacy raw extension under `runtime/legacy/`, removes the original, and reports
+that existing Copilot sessions must restart. It never kills those sessions:
+
+```shell
+pwsh ./Install-Konclave.ps1 -Action ActivatePlugin
+```
 
 ## Update, rollback, status, and uninstall
 

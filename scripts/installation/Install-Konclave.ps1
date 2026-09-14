@@ -5,7 +5,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Update', 'Rollback', 'Uninstall', 'Status')]
+    [ValidateSet('Install', 'Update', 'Rollback', 'Uninstall', 'Status', 'ActivatePlugin')]
     [string]$Action = 'Install',
 
     [string]$ReleaseDirectory,
@@ -26,8 +26,6 @@ param(
     [string]$ProfileKeyDirectory,
 
     [switch]$AllowNoRecovery,
-
-    [switch]$EnableDirectAgentPlugin,
 
     [switch]$RemoveState,
 
@@ -117,6 +115,26 @@ function Write-InstallationResult {
 $paths = Get-InstallationPaths -DataRoot $DataRoot
 Initialize-InstallationPaths -Paths $paths
 $state = Read-InstallationState -Path $paths.statePath
+
+if ($Action -ceq 'ActivatePlugin') {
+    if ([string]::IsNullOrEmpty([string]$state.activeVersion)) {
+        throw 'installer.not_installed'
+    }
+    $record = Get-StateVersionRecord -State $state -Version ([string]$state.activeVersion)
+    $root = Get-InstalledVersionRoot -Paths $paths -Record $record
+    [void](Wait-InstalledRuntimeHealth -InstallRoot $root -Paths $paths -Attempts 1 -DelaySeconds 0)
+    $plugin = Enable-InstallerAgentPlugin `
+        -InstallRoot $root `
+        -Paths $paths `
+        -Version ([string]$record.version) `
+        -EnableDirectAgentPlugin
+    Write-InstallationResult `
+        -ResultAction PluginActivated `
+        -Version $record.version `
+        -InstallRoot $root `
+        -Plugin $plugin
+    return
+}
 
 if ($Action -ceq 'Status') {
     $decision = Resolve-InstallationLifecycle -Action Status -State $state
@@ -234,8 +252,7 @@ if ($Action -ceq 'Rollback') {
     $plugin = Enable-InstallerAgentPlugin `
         -InstallRoot $targetRoot `
         -Paths $paths `
-        -Version ([string]$targetRecord.version) `
-        -EnableDirectAgentPlugin:$EnableDirectAgentPlugin
+        -Version ([string]$targetRecord.version)
     Write-InstallationResult `
         -ResultAction RolledBack `
         -Version $targetRecord.version `
@@ -306,8 +323,7 @@ if ($decision.kind -ceq 'Verify') {
     $plugin = Enable-InstallerAgentPlugin `
         -InstallRoot $candidateRoot `
         -Paths $paths `
-        -Version ([string]$candidate.record.version) `
-        -EnableDirectAgentPlugin:$EnableDirectAgentPlugin
+        -Version ([string]$candidate.record.version)
     Write-InstallationResult `
         -ResultAction Verified `
         -Version $candidate.record.version `
@@ -327,8 +343,7 @@ if ($decision.kind -ceq 'Verify') {
 $plugin = Enable-InstallerAgentPlugin `
     -InstallRoot $candidateRoot `
     -Paths $paths `
-    -Version ([string]$candidate.record.version) `
-    -EnableDirectAgentPlugin:$EnableDirectAgentPlugin
+    -Version ([string]$candidate.record.version)
 Write-InstallationResult `
     -ResultAction ([string]$decision.kind) `
     -Version $candidate.record.version `
