@@ -11,6 +11,7 @@
     "Agent plugin conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
+    "Distribution lifecycle acceptance",
     "Generic client conformance",
     "Installer lifecycle conformance",
     "User presence conformance",
@@ -54,6 +55,10 @@
         "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
+        "distribution-lifecycle-acceptance",
+        "resolve-scope",
+        "copilot-plugin-lifecycle",
+        "service-failure-contract",
         "generic-client-conformance",
         "installer-lifecycle-conformance",
         "user-presence-conformance",
@@ -117,6 +122,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Client runtime config conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/distribution-lifecycle-acceptance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Distribution lifecycle acceptance"
       ]
     },
     {

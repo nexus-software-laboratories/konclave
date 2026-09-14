@@ -1,0 +1,183 @@
+name: Distribution lifecycle acceptance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: distribution-lifecycle-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-scope:
+    name: Resolve distribution lifecycle scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - name: Resolve validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(
+              gh api --paginate `
+                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
+                --jq '.[].filename'
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not resolve pull-request files for lifecycle acceptance.'
+            }
+            if ($files.Count -eq 0) {
+              throw 'Pull-request file discovery returned no files.'
+            }
+            $run = $files.Count -ge 3000 -or @(
+              $files | Where-Object {
+                $_ -match '^\.github/genesis-delivery\.json$' -or
+                $_ -match '^\.github/workflows/distribution-lifecycle-acceptance\.yml$' -or
+                $_ -match '^docs/distribution/' -or
+                $_ -match '^extensions/Konclave\.HostExtension/' -or
+                $_ -match '^scripts/installation/'
+              }
+            ).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+
+  copilot-plugin-lifecycle:
+    name: Copilot CLI ${{ matrix.label }} lifecycle
+    needs: resolve-scope
+    if: needs.resolve-scope.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: minimum
+            version: 1.0.82
+          - label: current
+            version: 1.0.84-5
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+          "plugin-version=$($release.release.version)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: distribution-lifecycle-${{ matrix.label }}
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Build Agent Plugin
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run compile
+          npm run package
+          npm run verify:package
+      - name: Install pinned Copilot CLI
+        shell: bash
+        env:
+          COPILOT_CLI_VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          npm install \
+            --global \
+            --prefix "$RUNNER_TEMP/copilot-cli" \
+            --no-audit \
+            --no-fund \
+            "@github/copilot@$COPILOT_CLI_VERSION"
+      - name: Exercise isolated Copilot plugin lifecycle
+        shell: bash
+        run: |
+          bash ./scripts/installation/Test-CopilotCliLifecycle.sh \
+            "$RUNNER_TEMP/copilot-cli/bin/copilot" \
+            '${{ matrix.version }}' \
+            "extensions/Konclave.HostExtension/build/outputs/konclave-${{ steps.toolchains.outputs.plugin-version }}.zip"
+
+  service-failure-contract:
+    name: Extension service-failure contract
+    needs: resolve-scope
+    if: needs.resolve-scope.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: distribution-failure-contract
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify missing, stalled, old, mismatched, and unavailable service behavior
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npm run format:check
+          npm run lint
+          npm run typecheck
+          npm exec -- vitest run \
+            tests/extension-runtime.test.ts \
+            tests/service-client.test.ts
+
+  distribution-lifecycle-acceptance:
+    name: Distribution lifecycle acceptance
+    if: always()
+    needs:
+      - resolve-scope
+      - copilot-plugin-lifecycle
+      - service-failure-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check distribution lifecycle matrix
+        shell: bash
+        env:
+          RUN_SCOPE: ${{ needs.resolve-scope.outputs.run }}
+          COPILOT_RESULT: ${{ needs.copilot-plugin-lifecycle.result }}
+          SERVICE_RESULT: ${{ needs.service-failure-contract.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_SCOPE" != 'true' ]; then
+            echo 'Distribution lifecycle acceptance is not relevant to this change.'
+            exit 0
+          fi
+          if [ "$COPILOT_RESULT" != 'success' ]; then
+            echo "::error::Copilot CLI lifecycle concluded with $COPILOT_RESULT."
+            exit 1
+          fi
+          if [ "$SERVICE_RESULT" != 'success' ]; then
+            echo "::error::Service-failure contract concluded with $SERVICE_RESULT."
+            exit 1
+          fi
+          echo 'Distribution lifecycle acceptance passed.'
