@@ -20,7 +20,11 @@ try {
     foreach ($relative in @(
         'distribution/release-artifacts.schema.json',
         'distribution/UNSIGNED-PRERELEASE.txt',
+        'scripts/installation/Install-Konclave.ps1',
+        'scripts/installation/InstallationLifecycle.Functions.ps1',
+        'scripts/installation/InstallationRuntime.Functions.ps1',
         'scripts/packaging/ReleaseIntegrity.Functions.ps1',
+        'scripts/packaging/ReleasePublication.Functions.ps1',
         'scripts/packaging/Verify-Release.ps1'
     )) {
         Copy-Item (Join-Path $projectRoot $relative) $root

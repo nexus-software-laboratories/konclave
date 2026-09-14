@@ -170,6 +170,13 @@ try {
     ) {
         throw 'Release provenance check returned an unexpected artifact count.'
     }
+    if (
+        (Get-ReleaseProvenanceSourceCommit `
+            -Directory $root `
+            -Manifest $provenanceManifest) -cne $sourceCommit
+    ) {
+        throw 'Release provenance source discovery returned an unexpected commit.'
+    }
     $statement.subject[0].digest.sha256 = '0' * 64
     [IO.File]::WriteAllText(
         $provenancePath,

@@ -484,6 +484,23 @@ function Copy-ClientPayload {
     ) (
         Join-Path $clientSupportRoot 'skills' 'konclave-generic' 'SKILL.md'
     )
+    $installerRoot = Join-Path $DestinationRoot 'share' 'konclave' 'installer'
+    foreach ($relative in @(
+        'Install-Konclave.ps1',
+        'InstallationLifecycle.Functions.ps1',
+        'InstallationRuntime.Functions.ps1'
+    )) {
+        Copy-ReleaseFile (
+            Join-Path $ProjectRoot 'scripts' 'installation' $relative
+        ) (
+            Join-Path $installerRoot $relative
+        )
+    }
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'scripts' 'packaging' 'ReleasePublication.Functions.ps1'
+    ) (
+        Join-Path $installerRoot 'ReleasePublication.Functions.ps1'
+    )
     $policyRoot = Join-Path $DestinationRoot 'share' 'konclave' 'policy'
     foreach ($relative in @(
         'collaboration-policy-source-v1.schema.json',
@@ -543,6 +560,12 @@ function Copy-ClientPayload {
                     'install-service.ps1'
             ) (
                 Join-Path $serviceRoot 'windows' 'install-service.ps1'
+            )
+            Copy-ReleaseFile (
+                Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+                    'manage-user-service.ps1'
+            ) (
+                Join-Path $serviceRoot 'windows' 'manage-user-service.ps1'
             )
         }
         default {

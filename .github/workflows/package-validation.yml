@@ -609,7 +609,11 @@ jobs:
             (Join-Path $releaseRoot 'RELEASE.json') -Force
           Copy-Item distribution/release-artifacts.schema.json $releaseRoot
           Copy-Item distribution/UNSIGNED-PRERELEASE.txt $releaseRoot -Force
+          Copy-Item scripts/installation/Install-Konclave.ps1 $releaseRoot
+          Copy-Item scripts/installation/InstallationLifecycle.Functions.ps1 $releaseRoot
+          Copy-Item scripts/installation/InstallationRuntime.Functions.ps1 $releaseRoot
           Copy-Item scripts/packaging/ReleaseIntegrity.Functions.ps1 $releaseRoot
+          Copy-Item scripts/packaging/ReleasePublication.Functions.ps1 $releaseRoot
           Copy-Item scripts/packaging/Verify-Release.ps1 $releaseRoot
 
           ./scripts/packaging/Test-ReleaseIntegrity.ps1

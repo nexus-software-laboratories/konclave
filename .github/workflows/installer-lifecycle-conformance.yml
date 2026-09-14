@@ -67,8 +67,12 @@ jobs:
         shell: pwsh
         run: |
           foreach ($path in @(
+            'apps/Konclave.LocalDaemon/packaging/windows/manage-user-service.ps1',
+            'scripts/installation/Install-Konclave.ps1',
             'scripts/installation/InstallationLifecycle.Functions.ps1',
-            'scripts/installation/Test-InstallationLifecycle.ps1'
+            'scripts/installation/InstallationRuntime.Functions.ps1',
+            'scripts/installation/Test-InstallationLifecycle.ps1',
+            'scripts/installation/Test-InstallationRuntime.ps1'
           )) {
             $tokens = $null
             $errors = $null
@@ -82,3 +86,12 @@ jobs:
             }
           }
           ./scripts/installation/Test-InstallationLifecycle.ps1
+          ./scripts/installation/Test-InstallationRuntime.ps1
+          bash -n apps/Konclave.LocalDaemon/packaging/systemd/manage-user-service.sh
+          if ($LASTEXITCODE -ne 0) {
+            throw 'systemd user-service manager has invalid shell syntax.'
+          }
+          bash -n apps/Konclave.LocalDaemon/packaging/launchd/manage-agent.sh
+          if ($LASTEXITCODE -ne 0) {
+            throw 'launchd user-service manager has invalid shell syntax.'
+          }

@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 
 $script:MaximumPublishedReleaseFiles = 100
 $script:PortablePublishedReleaseFilePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$'
+$script:PublishedSourceCommitPattern = '^[0-9a-f]{40}$'
 
 function Read-PrereleaseContract {
     param(
@@ -151,6 +152,54 @@ function Assert-PublishedReleaseAssetInventory {
         }
     }
     return $fileNames.Count
+}
+
+function Get-ReleaseProvenanceSourceCommit {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        $Manifest
+    )
+
+    $root = (Resolve-Path -LiteralPath $Directory).Path
+    $commits = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($artifact in $Manifest.artifacts) {
+        $provenancePath = Join-Path (
+            $root
+        ) "$($artifact.fileName).intoto.jsonl"
+        $statement = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 100
+        $dependencies = @(
+            $statement.predicate.buildDefinition.resolvedDependencies |
+                Where-Object {
+                    $digest = $_.PSObject.Properties['digest']
+                    $uri = $_.PSObject.Properties['uri']
+                    $null -ne $digest -and
+                        $null -ne $uri -and
+                        $null -ne $digest.Value.PSObject.Properties['gitCommit']
+                }
+        )
+        if ($dependencies.Count -ne 1) {
+            throw "Release provenance has an invalid source dependency: $($artifact.fileName)"
+        }
+        $commit = [string]$dependencies[0].digest.gitCommit
+        if (
+            $commit -cnotmatch $script:PublishedSourceCommitPattern -or
+            [string]$dependencies[0].uri -cne (
+                'git+https://github.com/nexus-software-laboratories/' +
+                "konclave@$commit"
+            )
+        ) {
+            throw "Release provenance has an invalid source revision: $($artifact.fileName)"
+        }
+        [void]$commits.Add($commit)
+    }
+    if ($commits.Count -ne 1) {
+        throw 'Release provenance does not identify one source revision.'
+    }
+    return [string]@($commits)[0]
 }
 
 function Assert-ReleaseProvenanceSet {
