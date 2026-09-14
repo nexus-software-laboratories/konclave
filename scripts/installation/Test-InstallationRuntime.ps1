@@ -210,7 +210,7 @@ try {
         -Source $legacy `
         -LegacyRoot $paths.legacyRoot
     if (
-        Test-Path -LiteralPath $legacy -or
+        (Test-Path -LiteralPath $legacy) -or
         (Get-Content -LiteralPath (Join-Path $backup 'extension.mjs') -Raw) -cne 'legacy'
     ) {
         throw 'Legacy Copilot extension was not preserved before removal.'
