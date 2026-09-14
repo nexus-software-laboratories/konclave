@@ -615,17 +615,10 @@ jobs:
           ./scripts/packaging/Test-ReleaseIntegrity.ps1
           ./scripts/packaging/Test-ReleaseMetadata.ps1
           ./scripts/packaging/Test-ReleaseRustSbom.ps1
-          . ./scripts/packaging/ReleaseIntegrity.Functions.ps1
-          [void](Test-ReleaseContractCoverage -Directory $releaseRoot)
-          . ./scripts/packaging/ReleasePublication.Functions.ps1
           $sourceCommit = (git rev-parse HEAD).Trim()
-          [void](Assert-ReleaseProvenanceSet `
+          ./scripts/packaging/Complete-ReleaseSet.ps1 `
             -Directory $releaseRoot `
-            -Manifest $release `
-            -SourceCommit $sourceCommit)
-          ./scripts/packaging/Test-PublicReleaseMetadata.ps1 -Directory $releaseRoot
-          ./scripts/packaging/New-ReleaseChecksums.ps1 -Directory $releaseRoot
-          & (Join-Path $releaseRoot 'Verify-Release.ps1') -Directory $releaseRoot
+            -SourceCommit $sourceCommit
       - name: Upload complete validated release set
         if: ${{ inputs.retain_release_set }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

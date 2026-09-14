@@ -49,7 +49,7 @@ jobs:
                 $_ -match '^\.github/workflows/(?:package-artifact-cleanup|package-validation|publish-prerelease|release-publication-conformance)\.yml$' -or
                 $_ -match '^distribution/' -or
                 $_ -match '^docs/(?:development/ci|distribution/(?:installation|integrity))\.md$' -or
-                $_ -match '^scripts/packaging/(?:New-ReleaseProvenance|ReleaseIntegrity\.Functions|ReleasePublication\.Functions|Test-ReleaseIntegrity|Test-ReleasePublication)\.ps1$'
+                $_ -match '^scripts/packaging/(?:Complete-ReleaseSet|New-ReleaseProvenance|ReleaseIntegrity\.Functions|ReleasePublication\.Functions|Test-CompleteReleaseSet|Test-ReleaseIntegrity|Test-ReleasePublication)\.ps1$'
               }
             ).Count -ne 0
           }
@@ -65,9 +65,11 @@ jobs:
         shell: pwsh
         run: |
           foreach ($path in @(
+            'scripts/packaging/Complete-ReleaseSet.ps1',
             'scripts/packaging/New-ReleaseProvenance.ps1',
             'scripts/packaging/ReleaseIntegrity.Functions.ps1',
             'scripts/packaging/ReleasePublication.Functions.ps1',
+            'scripts/packaging/Test-CompleteReleaseSet.ps1',
             'scripts/packaging/Test-ReleaseIntegrity.ps1',
             'scripts/packaging/Test-ReleasePublication.ps1'
           )) {
@@ -85,3 +87,4 @@ jobs:
           ./scripts/packaging/Test-ReleaseIntegrity.ps1
           ./scripts/packaging/Test-ReleaseMetadata.ps1
           ./scripts/packaging/Test-ReleasePublication.ps1
+          ./scripts/packaging/Test-CompleteReleaseSet.ps1
