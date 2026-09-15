@@ -248,6 +248,19 @@ function formatError(error: unknown): string {
   return 'Unknown error';
 }
 
+type ExtensionStartupStage = 'profile' | 'service' | 'session';
+
+function formatStartupFailure(stage: ExtensionStartupStage, error: unknown): string {
+  const detail = formatError(error);
+  if (stage === 'service') {
+    return (
+      `Konclave shared service unavailable: ${detail} ` +
+      `Install or repair the native runtime, then restart Copilot. See ${installationGuideUrl}`
+    );
+  }
+  return `Konclave extension startup failed: ${detail}`;
+}
+
 function normalizeDelay(delayMs: number | undefined): number {
   if (typeof delayMs !== 'number' || Number.isNaN(delayMs) || !Number.isFinite(delayMs)) {
     return 0;
@@ -264,6 +277,7 @@ export async function bootExtension(
   const platform = options.platform ?? process.platform;
   let client: LocalServiceClient | null = null;
   let joinedSession: ExtensionSession | null = null;
+  let startupStage: ExtensionStartupStage = 'profile';
   const commandOutput: CommandOutput = options.commandOutput ?? {
     async write(line, commandOptions) {
       if (joinedSession === null) {
@@ -280,7 +294,9 @@ export async function bootExtension(
     // The profile is derived before anything connects, so a reconnect or reload
     // binds to the same durable profile rather than creating a second one.
     const profile = deriveProfileId(environment);
+    startupStage = 'service';
     client = await connect(environment, runtimeModuleDir, profile, platform);
+    startupStage = 'session';
     const connectedClient = client;
     const policyGate = createCopilotPolicyGate(connectedClient);
     const session = await options.joinSession(
@@ -323,12 +339,9 @@ export async function bootExtension(
     return controller;
   } catch (error) {
     client?.close();
-    // There is no per-session daemon to fall back to. An unavailable or unauthorized
-    // service is reported and the extension exits.
-    options.diagnostics.error(
-      `Konclave shared service unavailable: ${formatError(error)} ` +
-        `Install or repair the native runtime, then restart Copilot. See ${installationGuideUrl}`,
-    );
+    // No startup stage falls back to a per-session daemon; only connection failures
+    // direct the operator to native-service repair.
+    options.diagnostics.error(formatStartupFailure(startupStage, error));
     options.processController.setExitCode(1);
     return null;
   }
