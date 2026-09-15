@@ -35,8 +35,14 @@ configuration. The record contains only:
 
 The extension never discovers an endpoint, trusts a network URL, broadens a
 registration, or starts a service. Missing, malformed, unsafe, or unauthorized state
-fails visibly with no per-session fallback and directs the operator to the native
-installation guide.
+joins the Copilot session in a fail-closed degraded state with only `/konclave`
+repair guidance. It registers no tools, hooks, delivery, MCP server, or per-session
+daemon until a later extension process authenticates to the repaired service.
+
+A healthy connection registers policy-enforcement hooks and therefore requires the
+user's Copilot extension-permission approval. Copilot withholds the entire extension
+when that approval is denied; installation guidance must not represent plugin
+presence alone as command activation.
 
 The installed client gives initial authorization transport a two-second deadline.
 That bound applies independently to the issuer exchange and the first session

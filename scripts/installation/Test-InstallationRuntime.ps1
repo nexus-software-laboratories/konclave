@@ -450,7 +450,11 @@ try {
     if (
         [string]$rendered.taskName -cne 'KonclaveLocalService' -or
         [string]$rendered.logonType -cne 'Interactive' -or
-        [string]$rendered.runLevel -cne 'Limited'
+        [string]$rendered.runLevel -cne 'Limited' -or
+        -not [bool]$rendered.startWhenAvailable -or
+        [bool]$rendered.stopOnIdleEnd -or
+        [int]$rendered.restartCount -ne 999 -or
+        [string]$rendered.restartInterval -cne '00:01:00'
     ) {
         throw 'Windows user-service descriptor is invalid.'
     }

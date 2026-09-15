@@ -15,6 +15,7 @@ import {
   type RegisteredCommand,
 } from './service/commands.js';
 import { createKonclaveTools, type RegisteredTool } from './service/tools.js';
+import { resolveExtensionStartupFailure, type ExtensionStartupStage } from './startup.js';
 
 /**
  * Directory of the running module itself, used to locate a daemon bundled beside
@@ -165,8 +166,8 @@ export interface BootExtensionOptions {
   /**
    * Connects the thin client to the shared per-user service.
    *
-   * Replaced in tests by an in-process service. There is no fallback: when this
-   * fails the extension reports it and exits rather than starting a daemon.
+   * Replaced in tests by an in-process service. There is no daemon fallback: when
+   * this fails the extension exposes only deterministic repair guidance.
    */
   connect?: (
     environment: Readonly<Record<string, string | undefined>>,
@@ -191,6 +192,10 @@ const extensionSignals: readonly ExtensionSignal[] = ['SIGINT', 'SIGTERM'];
 const startupIdleGraceMilliseconds = 5_000;
 const installationGuideUrl =
   'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md';
+const degradedCommandMessage =
+  'Konclave native service is unavailable. Run the installed ' +
+  '`Install-Konclave.ps1 -Action Status`, repair or update the native runtime, ' +
+  `then restart Copilot. See ${installationGuideUrl}`;
 
 const defaultTimers: TimerController = {
   setTimeout(handler, delayMs) {
@@ -247,8 +252,6 @@ function formatError(error: unknown): string {
 
   return 'Unknown error';
 }
-
-type ExtensionStartupStage = 'profile' | 'service' | 'session';
 
 function formatStartupFailure(stage: ExtensionStartupStage, error: unknown): string {
   const detail = formatError(error);
@@ -339,9 +342,22 @@ export async function bootExtension(
     return controller;
   } catch (error) {
     client?.close();
-    // No startup stage falls back to a per-session daemon; only connection failures
-    // direct the operator to native-service repair.
     options.diagnostics.error(formatStartupFailure(startupStage, error));
+    const failure = resolveExtensionStartupFailure(startupStage);
+    if (failure.kind === 'degraded') {
+      try {
+        const session = await options.joinSession(createDegradedExtensionJoinConfig(commandOutput));
+        joinedSession = session;
+        return attachExtension(
+          session,
+          options.diagnostics,
+          options.processController,
+          options.timers,
+        );
+      } catch (joinError) {
+        options.diagnostics.error(formatStartupFailure('session', joinError));
+      }
+    }
     options.processController.setExitCode(1);
     return null;
   }
@@ -371,6 +387,23 @@ export function createExtensionJoinConfig(
     tools: createKonclaveTools({ client }),
     commands: createKonclaveCommands({ client, output }),
     hooks,
+    mcpServers: {},
+  };
+}
+
+export function createDegradedExtensionJoinConfig(output: CommandOutput): JoinSessionConfig {
+  return {
+    tools: [],
+    commands: [
+      {
+        name: 'konclave',
+        description: 'Show Konclave native service repair guidance.',
+        async handler() {
+          await output.write(degradedCommandMessage);
+        },
+      },
+    ],
+    hooks: {},
     mcpServers: {},
   };
 }

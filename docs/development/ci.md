@@ -107,6 +107,11 @@ requests run minimum/current Copilot CLI lifecycle against the local default-bra
 tree. A trusted post-merge dispatch repeats registration through the public
 `owner/repo` source without a ref suffix.
 
+`Extension startup conformance` verifies the finite startup failure policy and the
+runtime join behavior independently. A service connection failure must register
+exactly one deterministic repair command with no tools, hooks, MCP server, or
+delivery; profile derivation and Copilot SDK join failures remain fatal.
+
 ## Immutable prerelease publication
 
 `.github/workflows/publish-prerelease.yml` is manual, main-only, and uses public

@@ -4,7 +4,7 @@
 param(
     [string]$Repository = 'nexus-software-laboratories/konclave',
     [string]$BaselineTag = 'v0.1.0',
-    [string]$CandidateTag = 'v0.1.4',
+    [string]$CandidateTag = 'v0.1.5',
     [switch]$UseCandidateInstaller
 )
 
@@ -384,7 +384,11 @@ try {
             [string]$renderedTask.executable,
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        [string]$taskActions[0].Arguments -cne [string]$renderedTask.arguments
+        [string]$taskActions[0].Arguments -cne [string]$renderedTask.arguments -or
+        -not [bool]$task[0].Settings.StartWhenAvailable -or
+        [bool]$task[0].Settings.IdleSettings.StopOnIdleEnd -or
+        [int]$task[0].Settings.RestartCount -ne [int]$renderedTask.restartCount -or
+        [string]$task[0].Settings.RestartInterval -cne 'PT1M'
     ) {
         throw "Scheduled task action mismatch. Expected $(
             $renderedTask.executable

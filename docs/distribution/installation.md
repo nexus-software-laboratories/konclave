@@ -36,14 +36,14 @@ directory is the installation root used by the commands below.
 Before extraction, verify the complete downloaded release set as described in
 [Verify release integrity and contents](integrity.md).
 
-For the `v0.1.4` prerelease, a clean machine with GitHub CLI and PowerShell can
+For the `v0.1.5` prerelease, a clean machine with GitHub CLI and PowerShell can
 download and verify the complete set without a source checkout:
 
 ```shell
-gh release download v0.1.4 \
+gh release download v0.1.5 \
   --repo nexus-software-laboratories/konclave \
-  --dir konclave-0.1.4
-pwsh ./konclave-0.1.4/Verify-Release.ps1
+  --dir konclave-0.1.5
+pwsh ./konclave-0.1.5/Verify-Release.ps1
 ```
 
 ## Install the Copilot Agent Plugin
@@ -69,10 +69,17 @@ copilot plugin marketplace add nexus-software-laboratories/konclave
 copilot plugin install konclave@konclave
 ```
 
+On the first Copilot session in a repository, approve the extension request to
+register hooks. Choose the repo-scoped persistent approval when Konclave should load
+automatically there. The hooks enforce collaboration policy before model tool use;
+denying the request prevents the complete extension, including `/konclave`, from
+loading.
+
 `marketplace add` registers the catalog only, and `plugin install` installs only the
 thin Agent Plugin. Neither command installs or starts the native runtime. Installing
-the plugin first therefore leaves it visibly failed until the native installer
-reports `Healthy` and Copilot is restarted.
+the plugin first exposes only a fail-closed `/konclave` repair command until the
+native installer reports `Healthy` and Copilot is restarted. Agent tools, hooks, and
+automatic delivery remain unavailable in that degraded state.
 
 Marketplace installation emits no direct-install deprecation warning. The installed
 plugin contains exactly `plugin.json`, the Copilot extension package, and
@@ -196,7 +203,7 @@ pwsh ./Install-Konclave.ps1 -Action Status
 ```
 
 Immutable `v0.1.0` remains the first native rollback baseline and predates the
-installer files. The `v0.1.4` installer can still verify, extract, supervise, and
+installer files. The `v0.1.5` installer can still verify, extract, supervise, and
 retain that older client archive because its release manifest and provenance remain
 self-contained.
 
@@ -326,10 +333,11 @@ bash <install-root>/share/konclave/service/launchd/manage-agent.sh install <inst
 
 On Windows, `manage-user-service.ps1` registers one limited scheduled task for the
 current interactive user, launches the shared service without a visible console
-window, and requires no password in command history. The existing `install-service.ps1`
-remains an optional elevated SCM integration. All managers support install, start,
-stop, status, and uninstall actions and reject a definition that points to another
-binary, user, or configuration.
+window, continues across workstation idle transitions, retries failed service
+processes at one-minute intervals, and requires no password in command history. The
+existing `install-service.ps1` remains an optional elevated SCM integration. All
+managers support install, start, stop, status, and uninstall actions and reject a
+definition that points to another binary, user, or configuration.
 
 ## Profile schema compatibility
 
@@ -370,7 +378,7 @@ The Linux AMD64 container candidate is a Docker-loadable tar archive produced fr
 same build result as the statically validated OCI image:
 
 ```shell
-docker image load --input konclave-community-relay-container-0.1.4-linux-amd64.docker.tar
+docker image load --input konclave-community-relay-container-0.1.5-linux-amd64.docker.tar
 KONCLAVE_RELAY_ACCESS_SOURCE=/absolute/path/to/relay-access.json docker compose --file <relay-root>/share/konclave/relay/compose.example.yaml up --detach
 ```
 
@@ -407,7 +415,7 @@ shutdown behavior are in `<gateway-root>/share/konclave/a2a/README.md`.
 The Linux AMD64 container candidate is a separate Docker-loadable archive:
 
 ```shell
-docker image load --input konclave-a2a-gateway-container-0.1.4-linux-amd64.docker.tar
+docker image load --input konclave-a2a-gateway-container-0.1.5-linux-amd64.docker.tar
 ```
 
 Use `<gateway-root>/share/konclave/a2a/compose.example.yaml`,

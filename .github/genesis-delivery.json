@@ -10,6 +10,7 @@
     "Adapter conformance",
     "Actions storage conformance",
     "Agent plugin conformance",
+    "Extension startup conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
     "Distribution lifecycle acceptance",
@@ -55,6 +56,7 @@
         "adapter-conformance",
         "actions-storage-conformance",
         "agent-plugin-conformance",
+        "extension-startup-conformance",
         "package-plugin",
         "publish",
         "authorization-store-conformance",
@@ -121,6 +123,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Agent plugin conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/extension-startup-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Extension startup conformance"
       ]
     },
     {
