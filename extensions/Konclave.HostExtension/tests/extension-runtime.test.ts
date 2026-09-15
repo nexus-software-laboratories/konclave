@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   bootExtension,
   connectInstalledService,
+  createDegradedExtensionJoinConfig,
   createExtensionJoinConfig,
   createProcessController,
   createStderrDiagnostics,
@@ -283,10 +284,11 @@ describe('bootExtension', () => {
     expect(() => deriveProfileId({})).toThrow();
   });
 
-  it('fails visibly when the shared service is unavailable', async () => {
+  it('registers only repair guidance when the shared service is unavailable', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
-    const joinSession = vi.fn();
+    const sessionMock = createSessionMock();
+    const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
 
     const controller = await bootExtension({
       diagnostics: diagnostics.diagnostics,
@@ -298,14 +300,57 @@ describe('bootExtension', () => {
       },
     });
 
-    // No fallback exists: the extension reports and exits rather than spawning.
-    expect(controller).toBeNull();
-    expect(joinSession).not.toHaveBeenCalled();
-    expect(processController.exitCode).toBe(1);
+    expect(controller).not.toBeNull();
+    expect(joinSession).toHaveBeenCalledTimes(1);
+    expect(processController.exitCode).toBeNull();
+    const joined = joinSession.mock.calls[0]?.[0];
+    if (!joined) {
+      throw new Error('degraded extension did not join the session');
+    }
+    expect(joined.tools).toEqual([]);
+    expect(joined.hooks).toEqual({});
+    expect(joined.mcpServers).toEqual({});
+    expect(joined.commands.map((command) => command.name)).toEqual(['konclave']);
+    await joined.commands[0]?.handler({
+      sessionId: 'session-a',
+      command: '/konclave status',
+      commandName: 'konclave',
+      args: 'status',
+    });
+    expect(sessionMock.log).toHaveBeenCalledWith(
+      'Konclave native service is unavailable. Run the installed ' +
+        '`Install-Konclave.ps1 -Action Status`, repair or update the native runtime, ' +
+        'then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
+      { level: 'info' },
+    );
     expect(diagnostics.stderr).toHaveBeenCalledWith(
       'Konclave shared service unavailable: endpoint unavailable ' +
         'Install or repair the native runtime, then restart Copilot. See ' +
         'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
+    );
+    controller?.dispose();
+  });
+
+  it('fails when the degraded command session cannot join', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockRejectedValue(new Error('degraded join failed')),
+      processController,
+      environment: { SESSION_ID: 'session-a' },
+      connect: async () => {
+        throw new Error('endpoint unavailable');
+      },
+    });
+
+    expect(controller).toBeNull();
+    expect(processController.exitCode).toBe(1);
+    expect(diagnostics.stderr).toHaveBeenNthCalledWith(
+      2,
+      'Konclave extension startup failed: degraded join failed',
     );
   });
 
@@ -329,6 +374,16 @@ describe('bootExtension', () => {
     expect(diagnostics.stderr).toHaveBeenCalledWith(
       'Konclave extension startup failed: SESSION_ID is required to derive the Konclave profile.',
     );
+  });
+
+  it('builds a degraded session with no authority-bearing surfaces', () => {
+    const output = { write: vi.fn() };
+    const config = createDegradedExtensionJoinConfig(output);
+
+    expect(config.tools).toEqual([]);
+    expect(config.hooks).toEqual({});
+    expect(config.mcpServers).toEqual({});
+    expect(config.commands.map((command) => command.name)).toEqual(['konclave']);
   });
 
   it('joins the foreground session with the safe default config and cleans up handlers', async () => {
