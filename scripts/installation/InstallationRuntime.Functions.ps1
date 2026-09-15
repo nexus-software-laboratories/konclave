@@ -304,12 +304,12 @@ function Resolve-KonclaveDataRoot {
         }
         return Join-Path $root 'Konclave'
     }
-    $home = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    if ([string]::IsNullOrWhiteSpace($home)) {
+    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($userProfile)) {
         throw 'User profile directory is unavailable.'
     }
     if ($IsMacOS) {
-        return Join-Path $home 'Library' 'Application Support' 'Konclave'
+        return Join-Path $userProfile 'Library' 'Application Support' 'Konclave'
     }
     if (-not [string]::IsNullOrWhiteSpace($env:XDG_DATA_HOME)) {
         if (-not [IO.Path]::IsPathRooted($env:XDG_DATA_HOME)) {
@@ -317,7 +317,7 @@ function Resolve-KonclaveDataRoot {
         }
         return Join-Path ([IO.Path]::GetFullPath($env:XDG_DATA_HOME)) 'konclave'
     }
-    return Join-Path $home '.local' 'share' 'konclave'
+    return Join-Path $userProfile '.local' 'share' 'konclave'
 }
 
 function Get-InstallationPaths {
@@ -911,13 +911,13 @@ function Wait-InstalledRuntimeHealth {
 function Resolve-LegacyCopilotExtensionRoot {
         $copilotHome = $env:COPILOT_HOME
         if ([string]::IsNullOrWhiteSpace($copilotHome)) {
-            $home = [Environment]::GetFolderPath(
+            $userProfile = [Environment]::GetFolderPath(
                 [Environment+SpecialFolder]::UserProfile
             )
-            if ([string]::IsNullOrWhiteSpace($home)) {
+            if ([string]::IsNullOrWhiteSpace($userProfile)) {
                 throw 'User profile directory is unavailable.'
             }
-            $copilotHome = Join-Path $home '.copilot'
+            $copilotHome = Join-Path $userProfile '.copilot'
         }
         elseif (-not [IO.Path]::IsPathRooted($copilotHome)) {
             throw 'COPILOT_HOME must be absolute.'

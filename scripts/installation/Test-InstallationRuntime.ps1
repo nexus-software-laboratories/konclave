@@ -93,6 +93,28 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     $paths = Get-InstallationPaths -DataRoot (Join-Path $root 'data')
     Initialize-InstallationPaths -Paths $paths
+    $previousCopilotHome = $env:COPILOT_HOME
+    try {
+        [Environment]::SetEnvironmentVariable(
+            'COPILOT_HOME',
+            $null,
+            [EnvironmentVariableTarget]::Process
+        )
+        $defaultLegacyRoot = Resolve-LegacyCopilotExtensionRoot
+        $expectedLegacyRoot = Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        ) '.copilot' 'extensions' 'konclave'
+        if ($defaultLegacyRoot -cne $expectedLegacyRoot) {
+            throw 'Default Copilot extension root resolution failed.'
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            'COPILOT_HOME',
+            $previousCopilotHome,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
     if ($IsWindows) {
         $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
         $identity = $windowsIdentity.User
