@@ -6,6 +6,8 @@ mod adapter;
 mod application;
 #[cfg(feature = "rust-service-mcp")]
 mod authorization_runtime;
+#[cfg(feature = "rust-service-mcp")]
+mod authorization_reload;
 mod clock;
 #[allow(dead_code)]
 mod conversation;
