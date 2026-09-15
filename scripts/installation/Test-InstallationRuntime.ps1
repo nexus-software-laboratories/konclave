@@ -93,6 +93,29 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     $paths = Get-InstallationPaths -DataRoot (Join-Path $root 'data')
     Initialize-InstallationPaths -Paths $paths
+    if ($IsWindows) {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $ownerCases = @(
+            @{ name = 'same owner'; owner = $identity; expected = $true },
+            @{ name = 'different owner'; owner = $system; expected = $false }
+        )
+        foreach ($case in $ownerCases) {
+            if (
+                (Test-WindowsOwnerIdentity `
+                    -Owner $case.owner `
+                    -Identity $identity) -ne [bool]$case.expected
+            ) {
+                throw "Windows owner decision failed: $($case.name)"
+            }
+        }
+        if (-not (Test-WindowsOwnerOnlyAcl `
+            -Acl (Get-Acl -LiteralPath $paths.dataRoot -ErrorAction Stop) `
+            -Identity $identity `
+            -Kind Directory)) {
+            throw 'Installer data root is not owner-protected.'
+        }
+    }
     $record = New-InstalledVersionRecord `
         -Version '0.1.0' `
         -ArtifactSha256 ('1' * 64) `
@@ -101,6 +124,15 @@ try {
         -RootDirectory 'konclave-client-0.1.0-x86_64-unknown-linux-gnu'
     $state = New-InstallationState -ActiveVersion '0.1.0' -Versions @($record)
     Write-InstallationState -Path $paths.statePath -State $state
+    if (
+        $IsWindows -and
+        -not (Test-WindowsOwnerOnlyAcl `
+            -Acl (Get-Acl -LiteralPath $paths.statePath -ErrorAction Stop) `
+            -Identity $identity `
+            -Kind File)
+    ) {
+        throw 'Installer state is not owner-protected.'
+    }
     $roundTrip = Read-InstallationState -Path $paths.statePath
     if (
         [string]$roundTrip.activeVersion -cne '0.1.0' -or
