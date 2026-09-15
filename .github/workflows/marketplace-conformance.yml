@@ -55,14 +55,26 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Resolve pinned Node version
+      - name: Resolve toolchain and published marketplace version
         id: toolchains
         shell: pwsh
         run: |
           $release = Get-Content distribution/release-artifacts.json -Raw |
             ConvertFrom-Json -Depth 100
+          $catalog = Get-Content .github/plugin/marketplace.json -Raw |
+            ConvertFrom-Json -Depth 20
+          $plugins = @($catalog.plugins | Where-Object name -CEQ 'konclave')
+          $version = [string]$catalog.metadata.version
+          if (
+            $version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
+            $plugins.Count -ne 1 -or
+            [string]$plugins[0].source -cne 'plugins/konclave' -or
+            [string]$plugins[0].version -cne $version
+          ) {
+            throw 'Published marketplace catalog identity or version is invalid.'
+          }
           "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
-          "version=$($release.release.version)" >>$env:GITHUB_OUTPUT
+          "version=$version" >>$env:GITHUB_OUTPUT
       - uses: ./.github/actions/setup-node
         with:
           node-version: ${{ steps.toolchains.outputs.node }}
