@@ -7298,11 +7298,32 @@ function createKonclaveTools(options) {
   }));
 }
 
+// src/startup.ts
+function resolveExtensionStartupFailure(stage) {
+  if (stage === "service") {
+    return {
+      kind: "degraded",
+      joinSession: true,
+      registerCommand: true,
+      registerTools: false,
+      startDelivery: false
+    };
+  }
+  return {
+    kind: "fatal",
+    joinSession: false,
+    registerCommand: false,
+    registerTools: false,
+    startDelivery: false
+  };
+}
+
 // src/runtime.ts
 var runtimeModuleDir = dirname(fileURLToPath(import.meta.url));
 var extensionSignals = ["SIGINT", "SIGTERM"];
 var startupIdleGraceMilliseconds = 5e3;
 var installationGuideUrl = "https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md";
+var degradedCommandMessage = `Konclave native service is unavailable. Run the installed \`Install-Konclave.ps1 -Action Status\`, repair or update the native runtime, then restart Copilot. See ${installationGuideUrl}`;
 var defaultTimers = {
   setTimeout(handler, delayMs) {
     return setTimeout(handler, delayMs);
@@ -7432,6 +7453,21 @@ async function bootExtension(options) {
   } catch (error) {
     client?.close();
     options.diagnostics.error(formatStartupFailure(startupStage, error));
+    const failure = resolveExtensionStartupFailure(startupStage);
+    if (failure.kind === "degraded") {
+      try {
+        const session = await options.joinSession(createDegradedExtensionJoinConfig(commandOutput));
+        joinedSession = session;
+        return attachExtension(
+          session,
+          options.diagnostics,
+          options.processController,
+          options.timers
+        );
+      } catch (joinError) {
+        options.diagnostics.error(formatStartupFailure("session", joinError));
+      }
+    }
     options.processController.setExitCode(1);
     return null;
   }
@@ -7448,6 +7484,22 @@ function createExtensionJoinConfig(client, output, hooks = {}) {
     tools: createKonclaveTools({ client }),
     commands: createKonclaveCommands({ client, output }),
     hooks,
+    mcpServers: {}
+  };
+}
+function createDegradedExtensionJoinConfig(output) {
+  return {
+    tools: [],
+    commands: [
+      {
+        name: "konclave",
+        description: "Show Konclave native service repair guidance.",
+        async handler() {
+          await output.write(degradedCommandMessage);
+        }
+      }
+    ],
+    hooks: {},
     mcpServers: {}
   };
 }
