@@ -71,8 +71,9 @@ copilot plugin install konclave@konclave
 
 `marketplace add` registers the catalog only, and `plugin install` installs only the
 thin Agent Plugin. Neither command installs or starts the native runtime. Installing
-the plugin first therefore leaves it visibly failed until the native installer
-reports `Healthy` and Copilot is restarted.
+the plugin first exposes only a fail-closed `/konclave` repair command until the
+native installer reports `Healthy` and Copilot is restarted. Agent tools, hooks, and
+automatic delivery remain unavailable in that degraded state.
 
 Marketplace installation emits no direct-install deprecation warning. The installed
 plugin contains exactly `plugin.json`, the Copilot extension package, and
@@ -326,10 +327,11 @@ bash <install-root>/share/konclave/service/launchd/manage-agent.sh install <inst
 
 On Windows, `manage-user-service.ps1` registers one limited scheduled task for the
 current interactive user, launches the shared service without a visible console
-window, and requires no password in command history. The existing `install-service.ps1`
-remains an optional elevated SCM integration. All managers support install, start,
-stop, status, and uninstall actions and reject a definition that points to another
-binary, user, or configuration.
+window, continues across workstation idle transitions, retries failed service
+processes at one-minute intervals, and requires no password in command history. The
+existing `install-service.ps1` remains an optional elevated SCM integration. All
+managers support install, start, stop, status, and uninstall actions and reject a
+definition that points to another binary, user, or configuration.
 
 ## Profile schema compatibility
 

@@ -30,6 +30,8 @@ if (
     throw 'Service paths contain unsupported task-scheduler characters.'
 }
 $arguments = "--config `"$configurationPath`""
+$restartCount = 999
+$restartInterval = New-TimeSpan -Minutes 1
 
 if ($Action -ceq 'Render') {
     [pscustomobject][ordered]@{
@@ -38,6 +40,10 @@ if ($Action -ceq 'Render') {
         arguments = $arguments
         logonType = 'Interactive'
         runLevel = 'Limited'
+        startWhenAvailable = $true
+        stopOnIdleEnd = $false
+        restartCount = $restartCount
+        restartInterval = $restartInterval.ToString()
     } | ConvertTo-Json -Compress
     return
 }
@@ -69,7 +75,7 @@ function Get-ManagedTask {
     return Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 }
 
-function Assert-ManagedTask {
+function Assert-ManagedTaskOwnership {
     param(
         [Parameter(Mandatory)]
         $Task
@@ -87,6 +93,34 @@ function Assert-ManagedTask {
             $currentSid
     ) {
         throw "Scheduled task '$taskName' is not owned by this installation."
+    }
+}
+
+function Test-ManagedTaskSettings {
+    param(
+        [Parameter(Mandatory)]
+        $Task
+    )
+
+    return (
+        [bool]$Task.Settings.StartWhenAvailable -and
+        -not [bool]$Task.Settings.IdleSettings.StopOnIdleEnd -and
+        [int]$Task.Settings.RestartCount -eq $restartCount -and
+        [string]$Task.Settings.RestartInterval -ceq "PT$(
+            [int]$restartInterval.TotalMinutes
+        )M"
+    )
+}
+
+function Assert-ManagedTask {
+    param(
+        [Parameter(Mandatory)]
+        $Task
+    )
+
+    Assert-ManagedTaskOwnership -Task $Task
+    if (-not (Test-ManagedTaskSettings -Task $Task)) {
+        throw "Scheduled task '$taskName' recovery settings do not match this installation."
     }
 }
 
@@ -116,7 +150,7 @@ function Stop-ManagedTask {
         $Task
     )
 
-    Assert-ManagedTask -Task $Task
+    Assert-ManagedTaskOwnership -Task $Task
     if ($Task.State -eq 'Running') {
         Stop-ScheduledTask -TaskName $taskName
     }
@@ -133,9 +167,14 @@ switch ($Action) {
             throw 'Service binary or configuration is missing.'
         }
         if ($null -ne $task) {
-            Assert-ManagedTask -Task $task
+            Assert-ManagedTaskOwnership -Task $task
+            if (-not (Test-ManagedTaskSettings -Task $task)) {
+                Stop-ManagedTask -Task $task
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+                $task = $null
+            }
         }
-        else {
+        if ($null -eq $task) {
             $taskAction = New-ScheduledTaskAction `
                 -Execute $binaryPath `
                 -Argument $arguments
@@ -147,10 +186,12 @@ switch ($Action) {
             $settings = New-ScheduledTaskSettingsSet `
                 -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries `
+                -DontStopOnIdleEnd `
                 -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -MultipleInstances IgnoreNew `
-                -RestartCount 3 `
-                -RestartInterval (New-TimeSpan -Minutes 1)
+                -RestartCount $restartCount `
+                -RestartInterval $restartInterval `
+                -StartWhenAvailable
             $task = Register-ScheduledTask `
                 -TaskName $taskName `
                 -Action $taskAction `
