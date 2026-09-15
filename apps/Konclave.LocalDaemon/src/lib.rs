@@ -4,7 +4,6 @@ mod activity;
 mod adapter;
 #[allow(dead_code)]
 mod application;
-#[allow(dead_code)]
 #[cfg(feature = "rust-service-mcp")]
 mod authorization_reload;
 #[cfg(feature = "rust-service-mcp")]

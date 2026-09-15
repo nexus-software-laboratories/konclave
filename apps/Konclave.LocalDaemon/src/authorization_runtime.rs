@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::{Condvar, Mutex as StdMutex};
+
 use KonclaveDomainCore::Ed25519PublicKey;
 use KonclaveLocalAuthorizationStore::{
     AuthorizationGeneration, AuthorizationIssuerRecord, AuthorizationMutation,
@@ -21,10 +24,15 @@ use KonclaveUserPresence::NativeWebAuthnCredential;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, watch};
 
+use crate::authorization_reload::{
+    AuthorizationReloadEvent, AuthorizationReloadState, AuthorizationReloadTransition,
+    resolve_authorization_reload_transition,
+};
 use crate::clock::{SystemUnixClock, UnixClock};
 
 pub(crate) const AUTHORIZATION_RELOAD_INTERVAL: Duration = Duration::from_millis(500);
 const AUTHORIZATION_RELOAD_DEADLINE: Duration = Duration::from_millis(500);
+const AUTHORIZATION_RELOAD_COMPLETION_DEADLINE: Duration = Duration::from_secs(30);
 #[cfg(test)]
 pub(crate) const AUTHORIZATION_OBSERVATION_BOUND: Duration = Duration::from_secs(1);
 const GRANT_IDENTIFIER_ATTEMPTS: usize = 4;
@@ -35,6 +43,8 @@ pub(crate) enum AuthorizationRuntimeError {
     Store(LocalAuthorizationStoreError),
     #[error("local authorization projection is invalid")]
     InvalidProjection,
+    #[error("local authorization observation exceeded its deadline")]
+    ObservationDeadlineExceeded,
     #[error("local authorization blocking operation failed")]
     BlockingOperationFailed,
     #[error("local authorization runtime stopped unexpectedly")]
@@ -106,6 +116,44 @@ struct GrantRequest {
     expires_at_unix_milliseconds: u64,
 }
 
+#[cfg(test)]
+pub(crate) struct AuthorizationReloadTestGate {
+    entered: Notify,
+    released: StdMutex<bool>,
+    release: Condvar,
+}
+
+#[cfg(test)]
+impl AuthorizationReloadTestGate {
+    fn new() -> Self {
+        Self {
+            entered: Notify::new(),
+            released: StdMutex::new(false),
+            release: Condvar::new(),
+        }
+    }
+
+    fn block(&self) {
+        self.entered.notify_one();
+        let mut released = self.released.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*released {
+            released = self
+                .release
+                .wait(released)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    pub(crate) async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        *self.released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.release.notify_all();
+    }
+}
+
 pub(crate) struct LiveAuthorizationRuntime {
     store: Arc<LocalAuthorizationStore>,
     registry: InMemorySessionAuthorizationRegistry,
@@ -116,6 +164,8 @@ pub(crate) struct LiveAuthorizationRuntime {
     reload_requested: Notify,
     #[cfg(test)]
     fail_next_reload: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    block_next_reload: StdMutex<Option<Arc<AuthorizationReloadTestGate>>>,
 }
 
 impl LiveAuthorizationRuntime {
@@ -164,6 +214,8 @@ impl LiveAuthorizationRuntime {
             reload_requested: Notify::new(),
             #[cfg(test)]
             fail_next_reload: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            block_next_reload: StdMutex::new(None),
         }))
     }
 
@@ -184,18 +236,54 @@ impl LiveAuthorizationRuntime {
         let mut interval = tokio::time::interval_at(start, AUTHORIZATION_RELOAD_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::select! {
+            let reload = tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        return Ok(());
+                        return match resolve_authorization_reload_transition(
+                            self.reload_state(),
+                            AuthorizationReloadEvent::Shutdown,
+                        ) {
+                            AuthorizationReloadTransition::StopCleanly => Ok(()),
+                            AuthorizationReloadTransition::Publish { .. }
+                            | AuthorizationReloadTransition::FailClosed { .. }
+                            | AuthorizationReloadTransition::StopService => unreachable!(),
+                        };
                     }
+                    false
                 }
                 () = self.reload_requested.notified() => {
-                    self.reload_once().await?;
+                    true
                 }
                 _ = interval.tick() => {
-                    self.reload_once().await?;
+                    true
+                }
+            };
+            if !reload {
+                continue;
+            }
+            if let Some(error) = self.current_failure()
+                && matches!(
+                    resolve_authorization_reload_transition(
+                        self.reload_state(),
+                        authorization_reload_event(error),
+                    ),
+                    AuthorizationReloadTransition::StopService
+                )
+            {
+                return Err(error);
+            }
+            if let Err(error) = self.reload_once().await {
+                match resolve_authorization_reload_transition(
+                    self.reload_state(),
+                    authorization_reload_event(error),
+                ) {
+                    AuthorizationReloadTransition::FailClosed { .. } => {
+                        self.fail_closed(error);
+                    }
+                    AuthorizationReloadTransition::StopService => return Err(error),
+                    AuthorizationReloadTransition::Publish { .. }
+                    | AuthorizationReloadTransition::StopCleanly => unreachable!(),
                 }
             }
         }
@@ -584,9 +672,6 @@ impl LiveAuthorizationRuntime {
     }
 
     async fn reload_once(&self) -> Result<(), AuthorizationRuntimeError> {
-        if let Some(error) = self.current_failure() {
-            return Err(error);
-        }
         #[cfg(test)]
         if self
             .fail_next_reload
@@ -597,10 +682,7 @@ impl LiveAuthorizationRuntime {
             self.fail_closed(error);
             return Err(error);
         }
-
-        let high_water = self
-            .current_generation()
-            .ok_or(AuthorizationRuntimeError::UnexpectedStop)?;
+        let high_water = self.reload_generation();
         self.refresh_locked(SystemUnixClock.now_unix_milliseconds(), high_water)
             .await
     }
@@ -620,16 +702,46 @@ impl LiveAuthorizationRuntime {
         high_water: AuthorizationGeneration,
     ) -> Result<(), AuthorizationRuntimeError> {
         let store = Arc::clone(&self.store);
-        let snapshot = tokio::time::timeout(
+        #[cfg(test)]
+        let reload_gate = self
+            .block_next_reload
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let mut snapshot_task = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(gate) = reload_gate {
+                gate.block();
+            }
+            store.load_snapshot(now_unix_milliseconds, Some(high_water))
+        });
+        let snapshot = match tokio::time::timeout(
             AUTHORIZATION_RELOAD_DEADLINE,
-            tokio::task::spawn_blocking(move || {
-                store.load_snapshot(now_unix_milliseconds, Some(high_water))
-            }),
+            &mut snapshot_task,
         )
         .await
-        .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)
-        .and_then(|result| result.map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed))
-        .and_then(|result| result.map_err(AuthorizationRuntimeError::Store));
+        {
+            Ok(result) => result
+                .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)?
+                .map_err(AuthorizationRuntimeError::Store),
+            Err(_) => {
+                let error = AuthorizationRuntimeError::ObservationDeadlineExceeded;
+                self.fail_closed(error);
+                match tokio::time::timeout(
+                    AUTHORIZATION_RELOAD_COMPLETION_DEADLINE,
+                    &mut snapshot_task,
+                )
+                .await
+                {
+                    Ok(Ok(_)) => return Err(error),
+                    Ok(Err(_)) | Err(_) => {
+                        let worker_error = AuthorizationRuntimeError::BlockingOperationFailed;
+                        self.fail_closed(worker_error);
+                        return Err(worker_error);
+                    }
+                }
+            }
+        };
         match snapshot {
             Ok(snapshot) => self.publish(snapshot, now_unix_milliseconds),
             Err(error) => {
@@ -644,6 +756,17 @@ impl LiveAuthorizationRuntime {
         snapshot: AuthorizationSnapshot,
         now_unix_milliseconds: u64,
     ) -> Result<(), AuthorizationRuntimeError> {
+        if !matches!(
+            resolve_authorization_reload_transition(
+                self.reload_state(),
+                AuthorizationReloadEvent::SnapshotVerified,
+            ),
+            AuthorizationReloadTransition::Publish {
+                next: AuthorizationReloadState::Active
+            }
+        ) {
+            unreachable!();
+        }
         let mut projection = write(&self.projection);
         if snapshot.generation() < projection.generation {
             return Ok(());
@@ -719,6 +842,18 @@ impl LiveAuthorizationRuntime {
             .then_some(projection.generation)
     }
 
+    fn reload_generation(&self) -> AuthorizationGeneration {
+        read(&self.projection).generation
+    }
+
+    fn reload_state(&self) -> AuthorizationReloadState {
+        if self.current_failure().is_some() {
+            AuthorizationReloadState::FailedClosed
+        } else {
+            AuthorizationReloadState::Active
+        }
+    }
+
     fn current_failure(&self) -> Option<AuthorizationRuntimeError> {
         read(&self.projection).failure
     }
@@ -759,10 +894,12 @@ impl LiveAuthorizationRuntime {
         projection: &mut AuthorizationProjection,
         error: AuthorizationRuntimeError,
     ) {
+        if projection.failure == Some(error) {
+            return;
+        }
         projection.failure = Some(error);
         self.status
             .send_replace(AuthorizationRuntimeStatus::Failed(error));
-        self.reload_requested.notify_one();
     }
 
     #[cfg(test)]
@@ -786,6 +923,16 @@ impl LiveAuthorizationRuntime {
     pub(crate) fn fail_next_reload_for_test(&self) {
         self.fail_next_reload
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_next_reload_for_test(&self) -> Arc<AuthorizationReloadTestGate> {
+        let gate = Arc::new(AuthorizationReloadTestGate::new());
+        *self
+            .block_next_reload
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
     }
 }
 
@@ -841,6 +988,20 @@ fn replace_registry(
         .map_err(|_error: LocalServiceTransportError| AuthorizationRuntimeError::InvalidProjection)
 }
 
+const fn authorization_reload_event(
+    error: AuthorizationRuntimeError,
+) -> AuthorizationReloadEvent {
+    match error {
+        AuthorizationRuntimeError::Store(_)
+        | AuthorizationRuntimeError::InvalidProjection
+        | AuthorizationRuntimeError::ObservationDeadlineExceeded => {
+            AuthorizationReloadEvent::ObservationFailed
+        }
+        AuthorizationRuntimeError::BlockingOperationFailed
+        | AuthorizationRuntimeError::UnexpectedStop => AuthorizationReloadEvent::WorkerFailed,
+    }
+}
+
 const fn should_refresh_after_mutation_error(error: LocalAuthorizationStoreError) -> bool {
     matches!(
         error,
@@ -881,8 +1042,9 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        AUTHORIZATION_RELOAD_INTERVAL, AccountTrustedGrantRequest, AuthorizationRuntimeError,
-        AuthorizationRuntimeStatus, InstallationFingerprint, LiveAuthorizationRuntime,
+        AUTHORIZATION_RELOAD_DEADLINE, AUTHORIZATION_RELOAD_INTERVAL,
+        AccountTrustedGrantRequest, AuthorizationRuntimeError, AuthorizationRuntimeStatus,
+        InstallationFingerprint, LiveAuthorizationRuntime,
     };
     use crate::clock::{SystemUnixClock, UnixClock};
 
@@ -1003,6 +1165,81 @@ mod tests {
                 .await,
             Err(LocalServiceErrorCode::Conflict)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_reload_fails_closed_until_a_fresh_snapshot_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_path = root
+            .path()
+            .join("service")
+            .join(LOCAL_SERVICE_INSTALLATION_FILE);
+        let fingerprint = InstallationFingerprint::from_bytes([12; 32]);
+        let setup_path = installation_path.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+            drop(
+                LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    fingerprint,
+                    &AuthorizationPolicy::account_trusted(),
+                    &[issuer()],
+                    1,
+                )
+                .unwrap(),
+            );
+            create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+        })
+        .await
+        .unwrap();
+        let runtime = LiveAuthorizationRuntime::open(&installation_path, fingerprint)
+            .await
+            .unwrap();
+        let mut status = runtime.subscribe();
+        let gate = runtime.block_next_reload_for_test();
+        let delayed_runtime = Arc::clone(&runtime);
+        let delayed = tokio::spawn(async move { delayed_runtime.reload_once().await });
+
+        gate.wait_until_entered().await;
+        tokio::time::advance(AUTHORIZATION_RELOAD_DEADLINE).await;
+        status.changed().await.unwrap();
+        assert_eq!(
+            *status.borrow_and_update(),
+            AuthorizationRuntimeStatus::Failed(
+                AuthorizationRuntimeError::ObservationDeadlineExceeded
+            )
+        );
+        assert!(!runtime.issuer_is_known(
+            IssuerKeyId::from_bytes([7; 16]),
+            IssuerKeyVersion::new(1).unwrap(),
+            Ed25519PublicKey::from_bytes([8; 32]),
+            HarnessKind::Copilot,
+        ));
+
+        gate.release();
+        assert_eq!(
+            delayed.await.unwrap(),
+            Err(AuthorizationRuntimeError::ObservationDeadlineExceeded)
+        );
+        assert!(matches!(
+            *status.borrow(),
+            AuthorizationRuntimeStatus::Failed(
+                AuthorizationRuntimeError::ObservationDeadlineExceeded
+            )
+        ));
+
+        runtime.reload_once().await.unwrap();
+        status.changed().await.unwrap();
+        assert!(matches!(
+            *status.borrow_and_update(),
+            AuthorizationRuntimeStatus::Active(_)
+        ));
+        assert!(runtime.issuer_is_known(
+            IssuerKeyId::from_bytes([7; 16]),
+            IssuerKeyVersion::new(1).unwrap(),
+            Ed25519PublicKey::from_bytes([8; 32]),
+            HarnessKind::Copilot,
+        ));
     }
 
     #[tokio::test(start_paused = true)]

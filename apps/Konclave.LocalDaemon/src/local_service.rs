@@ -6422,9 +6422,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn reload_failure_stops_the_service_and_closes_clients() {
+    async fn reload_failure_closes_clients_and_service_recovers() {
         let fixture = Fixture::new().await;
-        let (_hold_shutdown, stop_rx) = oneshot::channel::<()>();
+        let grant = fixture.grant("session-reload-failure", 81);
+        fixture.persist_grant(grant.clone()).await;
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let mut service = tokio::spawn(run_shared_local_service_until(
             fixture.config(),
             async move {
@@ -6435,27 +6437,60 @@ mod tests {
             result = &mut service => {
                 panic!("shared service exited before the client connected: {result:?}")
             }
-            stream = fixture.connect("session-reload-failure", 81) => stream,
+            stream = fixture.connect_grant(grant.clone(), 81) => stream,
         };
+        let mut status = fixture.authorization.subscribe();
         fixture.authorization.fail_next_reload_for_test();
         fixture.authorization.request_reload();
 
-        let result = tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, &mut service)
-            .await
-            .expect("authorization reload failure did not stop the service")
-            .unwrap();
-        let error = result.expect_err("authorization reload failure returned success");
-        assert!(
-            error
-                .to_string()
-                .contains("local authorization storage is unavailable")
-        );
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                if matches!(
+                    *status.borrow_and_update(),
+                    AuthorizationRuntimeStatus::Failed(_)
+                ) {
+                    break;
+                }
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("authorization reload failure was not published");
         assert!(
             tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
                 .await
                 .unwrap()
                 .is_err()
         );
+        assert!(!service.is_finished());
+
+        fixture.authorization.request_reload();
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                if matches!(
+                    *status.borrow_and_update(),
+                    AuthorizationRuntimeStatus::Active(_)
+                ) {
+                    break;
+                }
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("authorization reload did not recover");
+        let mut recovered = fixture.connect_grant(grant, 82).await;
+        assert!(matches!(
+            request(&mut recovered, 82, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop((client, recovered));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

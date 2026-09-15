@@ -83,6 +83,16 @@ jobs:
             --package KonclaveLocalDaemon \
             --lib \
             authorization_reload::tests
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            delayed_reload_fails_closed_until_a_fresh_snapshot_recovers
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            reload_failure_closes_clients_and_service_recovers
           cargo clippy \
             --locked \
             --package KonclaveLocalDaemon \
