@@ -302,7 +302,9 @@ describe('bootExtension', () => {
     expect(controller).toBeNull();
     expect(joinSession).not.toHaveBeenCalled();
     expect(processController.exitCode).toBe(1);
-    expect(diagnostics.stderr.mock.calls.flat().join(' ')).toContain('shared service unavailable');
+    expect(diagnostics.stderr.mock.calls.flat().join(' ')).toContain(
+      'Install or repair the native runtime, then restart Copilot.',
+    );
   });
 
   it('fails before joining when the host session identity is unavailable', async () => {
@@ -323,7 +325,9 @@ describe('bootExtension', () => {
     expect(joinSession).not.toHaveBeenCalled();
     expect(processController.exitCode).toBe(1);
     expect(diagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: SESSION_ID is required to derive the Konclave profile.',
+      'Konclave shared service unavailable: SESSION_ID is required to derive the Konclave profile. ' +
+        'Install or repair the native runtime, then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
     );
   });
 
@@ -782,7 +786,9 @@ describe('bootExtension', () => {
     expect(controller).toBeNull();
     expect(processController.exitCode).toBe(1);
     expect(diagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: join failed',
+      'Konclave shared service unavailable: join failed ' +
+        'Install or repair the native runtime, then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
     );
     expect(diagnostics.stdout).not.toHaveBeenCalled();
   });
@@ -818,7 +824,9 @@ describe('bootExtension', () => {
 
     expect(failedController).toBeNull();
     expect(failingDiagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: Unknown error',
+      'Konclave shared service unavailable: Unknown error ' +
+        'Install or repair the native runtime, then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
     );
 
     const stringDiagnostics = createDiagnosticsRecorder();
@@ -831,7 +839,9 @@ describe('bootExtension', () => {
 
     expect(stringFailedController).toBeNull();
     expect(stringDiagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: string failure',
+      'Konclave shared service unavailable: string failure ' +
+        'Install or repair the native runtime, then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
     );
   });
 

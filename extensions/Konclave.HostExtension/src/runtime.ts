@@ -189,6 +189,8 @@ export { connectInstalledService };
 
 const extensionSignals: readonly ExtensionSignal[] = ['SIGINT', 'SIGTERM'];
 const startupIdleGraceMilliseconds = 5_000;
+const installationGuideUrl =
+  'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md';
 
 const defaultTimers: TimerController = {
   setTimeout(handler, delayMs) {
@@ -323,7 +325,10 @@ export async function bootExtension(
     client?.close();
     // There is no per-session daemon to fall back to. An unavailable or unauthorized
     // service is reported and the extension exits.
-    options.diagnostics.error(`Konclave shared service unavailable: ${formatError(error)}`);
+    options.diagnostics.error(
+      `Konclave shared service unavailable: ${formatError(error)} ` +
+        `Install or repair the native runtime, then restart Copilot. See ${installationGuideUrl}`,
+    );
     options.processController.setExitCode(1);
     return null;
   }
