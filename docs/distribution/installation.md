@@ -69,6 +69,12 @@ copilot plugin marketplace add nexus-software-laboratories/konclave
 copilot plugin install konclave@konclave
 ```
 
+On the first Copilot session in a repository, approve the extension request to
+register hooks. Choose the repo-scoped persistent approval when Konclave should load
+automatically there. The hooks enforce collaboration policy before model tool use;
+denying the request prevents the complete extension, including `/konclave`, from
+loading.
+
 `marketplace add` registers the catalog only, and `plugin install` installs only the
 thin Agent Plugin. Neither command installs or starts the native runtime. Installing
 the plugin first exposes only a fail-closed `/konclave` repair command until the
