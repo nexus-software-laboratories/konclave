@@ -79,7 +79,9 @@ jobs:
             'scripts/installation/InstallationLifecycle.Functions.ps1',
             'scripts/installation/InstallationRuntime.Functions.ps1',
             'scripts/installation/Test-InstallationLifecycle.ps1',
-            'scripts/installation/Test-InstallationRuntime.ps1'
+            'scripts/installation/Test-InstallationRuntime.ps1',
+            'scripts/packaging/Test-WindowsExecutableSubsystem.ps1',
+            'scripts/packaging/WindowsExecutableSubsystem.Functions.ps1'
           )) {
             $tokens = $null
             $errors = $null
@@ -99,6 +101,7 @@ jobs:
           }
           ./scripts/installation/Test-InstallationLifecycle.ps1
           ./scripts/installation/Test-InstallationRuntime.ps1
+          ./scripts/packaging/Test-WindowsExecutableSubsystem.ps1
           bash -n apps/Konclave.LocalDaemon/packaging/systemd/manage-user-service.sh
           if ($LASTEXITCODE -ne 0) {
             throw 'systemd user-service manager has invalid shell syntax.'
