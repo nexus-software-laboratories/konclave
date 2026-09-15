@@ -93,6 +93,77 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     $paths = Get-InstallationPaths -DataRoot (Join-Path $root 'data')
     Initialize-InstallationPaths -Paths $paths
+    $previousCopilotHome = $env:COPILOT_HOME
+    try {
+        [Environment]::SetEnvironmentVariable(
+            'COPILOT_HOME',
+            $null,
+            [EnvironmentVariableTarget]::Process
+        )
+        $defaultLegacyRoot = Resolve-LegacyCopilotExtensionRoot
+        $expectedLegacyRoot = Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        ) '.copilot' 'extensions' 'konclave'
+        if ($defaultLegacyRoot -cne $expectedLegacyRoot) {
+            throw 'Default Copilot extension root resolution failed.'
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            'COPILOT_HOME',
+            $previousCopilotHome,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+    if ($IsWindows) {
+        $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $identity = $windowsIdentity.User
+        $tokenOwnerIdentity = $windowsIdentity.Owner
+        if ($null -eq $tokenOwnerIdentity) {
+            $tokenOwnerIdentity = $identity
+        }
+        $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $world = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+        $ownerCases = @(
+            @{
+                name = 'user owner'
+                owner = $identity
+                user = $identity
+                tokenOwner = $system
+                expected = 'Preserve'
+            },
+            @{
+                name = 'token owner'
+                owner = $system
+                user = $identity
+                tokenOwner = $system
+                expected = 'Initialize'
+            },
+            @{
+                name = 'foreign owner'
+                owner = $world
+                user = $identity
+                tokenOwner = $system
+                expected = 'Reject'
+            }
+        )
+        foreach ($case in $ownerCases) {
+            if (
+                (Resolve-WindowsOwnerAction `
+                    -Owner $case.owner `
+                    -UserIdentity $case.user `
+                    -TokenOwnerIdentity $case.tokenOwner) -cne [string]$case.expected
+            ) {
+                throw "Windows owner decision failed: $($case.name)"
+            }
+        }
+        if (-not (Test-WindowsOwnerOnlyAcl `
+            -Acl (Get-Acl -LiteralPath $paths.dataRoot -ErrorAction Stop) `
+            -Identity $identity `
+            -Kind Directory)) {
+            throw 'Installer data root is not owner-protected.'
+        }
+    }
     $record = New-InstalledVersionRecord `
         -Version '0.1.0' `
         -ArtifactSha256 ('1' * 64) `
@@ -101,6 +172,15 @@ try {
         -RootDirectory 'konclave-client-0.1.0-x86_64-unknown-linux-gnu'
     $state = New-InstallationState -ActiveVersion '0.1.0' -Versions @($record)
     Write-InstallationState -Path $paths.statePath -State $state
+    if (
+        $IsWindows -and
+        -not (Test-WindowsOwnerOnlyAcl `
+            -Acl (Get-Acl -LiteralPath $paths.statePath -ErrorAction Stop) `
+            -Identity $identity `
+            -Kind File)
+    ) {
+        throw 'Installer state is not owner-protected.'
+    }
     $roundTrip = Read-InstallationState -Path $paths.statePath
     if (
         [string]$roundTrip.activeVersion -cne '0.1.0' -or
@@ -221,6 +301,122 @@ try {
             -SyncWindow 0).Count -gt 0
     ) {
         throw 'Failed update did not restore the previous runnable version.'
+    }
+
+    $legacyRoot = Join-Path $root 'initialization-legacy'
+    New-Item -ItemType Directory -Path $legacyRoot | Out-Null
+    $initializationCases = @(
+        @{
+            name = 'success'
+            failure = ''
+            created = $true
+            removed = $false
+            cleanupFailure = $false
+        },
+        @{
+            name = 'resolver failure'
+            failure = 'resolver'
+            created = $true
+            removed = $true
+            cleanupFailure = $false
+        },
+        @{
+            name = 'initializer failure'
+            failure = 'initializer'
+            created = $true
+            removed = $true
+            cleanupFailure = $false
+        },
+        @{
+            name = 'cleanup failure'
+            failure = 'initializer'
+            created = $true
+            removed = $true
+            cleanupFailure = $true
+        },
+        @{
+            name = 'existing candidate failure'
+            failure = 'initializer'
+            created = $false
+            removed = $false
+            cleanupFailure = $false
+        }
+    )
+    foreach ($case in $initializationCases) {
+        $initializationEvents = [Collections.Generic.List[string]]::new()
+        $failure = [string]$case.failure
+        $cleanupFailure = [bool]$case.cleanupFailure
+        $legacyResolver = {
+            if ($failure -ceq 'resolver') {
+                throw 'synthetic legacy resolver failure'
+            }
+            return $legacyRoot
+        }.GetNewClosure()
+        $runtimeInitializer = {
+            param(
+                $InstallRoot,
+                $InstallationPaths,
+                $Endpoint,
+                $Policy,
+                $EnrollmentSource,
+                $IdentityFile,
+                $KeyDirectory,
+                $ResolvedLegacyRoot,
+                $PermitNoRecovery
+            )
+            $initializationEvents.Add(
+                "Initialize|$InstallRoot|$Endpoint|$Policy|$ResolvedLegacyRoot|$PermitNoRecovery"
+            )
+            if ($failure -ceq 'initializer') {
+                throw 'synthetic runtime initialization failure'
+            }
+        }.GetNewClosure()
+        $candidateRemover = {
+            param($InstallationPaths, $Version)
+            $initializationEvents.Add("Remove|$Version")
+            if ($cleanupFailure) {
+                throw 'synthetic candidate cleanup failure'
+            }
+        }.GetNewClosure()
+        $failed = $false
+        try {
+            Invoke-InstallationInitialization `
+                -InstallRoot 'candidate-root' `
+                -Paths $paths `
+                -RelayEndpoint 'https://relay.example.com' `
+                -AuthorizationPolicy 'account-trusted' `
+                -ExternalSource $null `
+                -ServiceIdentityFile $null `
+                -ProfileKeyDirectory $null `
+                -AllowNoRecovery $false `
+                -CandidateCreated ([bool]$case.created) `
+                -CandidateVersion '0.2.0' `
+                -LegacyRootResolver $legacyResolver `
+                -RuntimeInitializer $runtimeInitializer `
+                -CandidateRemover $candidateRemover
+        }
+        catch {
+            $failed = $true
+            if ([string]::IsNullOrEmpty($failure)) {
+                throw
+            }
+            if (
+                $cleanupFailure -and
+                -not $_.Exception.Message.Contains(
+                    'Runtime initialization failed and candidate cleanup failed',
+                    [StringComparison]::Ordinal
+                )
+            ) {
+                throw 'Initialization cleanup failure lost its combined diagnostic.'
+            }
+        }
+        if ($failed -eq [string]::IsNullOrEmpty($failure)) {
+            throw "Initialization failure decision failed: $($case.name)"
+        }
+        $removed = @($initializationEvents | Where-Object { $_ -ceq 'Remove|0.2.0' }).Count -eq 1
+        if ($removed -ne [bool]$case.removed) {
+            throw "Initialization cleanup decision failed: $($case.name)"
+        }
     }
 
     $unsafeZip = Join-Path $root 'unsafe.zip'

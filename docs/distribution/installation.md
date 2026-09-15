@@ -69,6 +69,11 @@ copilot plugin marketplace add nexus-software-laboratories/konclave
 copilot plugin install konclave@konclave
 ```
 
+`marketplace add` registers the catalog only, and `plugin install` installs only the
+thin Agent Plugin. Neither command installs or starts the native runtime. Installing
+the plugin first therefore leaves it visibly failed until the native installer
+reports `Healthy` and Copilot is restarted.
+
 Marketplace installation emits no direct-install deprecation warning. The installed
 plugin contains exactly `plugin.json`, the Copilot extension package, and
 `extension.mjs`. Extracting the ZIP and installing its directory directly remains a

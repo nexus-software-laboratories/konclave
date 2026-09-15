@@ -46,6 +46,94 @@ function Assert-SafeInstallationItem {
     return $item
 }
 
+function Resolve-WindowsOwnerAction {
+    param(
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$Owner,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$UserIdentity,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$TokenOwnerIdentity
+    )
+
+    if ($Owner.Value -ceq $UserIdentity.Value) {
+        return 'Preserve'
+    }
+    if ($Owner.Value -ceq $TokenOwnerIdentity.Value) {
+        return 'Initialize'
+    }
+    return 'Reject'
+}
+
+function Test-WindowsOwnerOnlyAcl {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.FileSystemSecurity]$Acl,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$Identity,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('File', 'Directory')]
+        [string]$Kind
+    )
+
+    $rules = @($Acl.Access)
+    $expectedInheritance = if ($Kind -ceq 'Directory') {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    }
+    else {
+        [Security.AccessControl.InheritanceFlags]::None
+    }
+    return (
+        $Acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value -ceq $Identity.Value -and
+        $Acl.AreAccessRulesProtected -and
+        $rules.Count -eq 1 -and
+        $rules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $rules[0].FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+        -not $rules[0].IsInherited -and
+        $rules[0].InheritanceFlags -eq $expectedInheritance -and
+        $rules[0].PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
+        $rules[0].IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value -ceq $Identity.Value
+    )
+}
+
+function Get-WindowsPathOwnerState {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$Identity,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$TokenOwnerIdentity
+    )
+
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $owner = $acl.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    )
+    $action = Resolve-WindowsOwnerAction `
+        -Owner $owner `
+        -UserIdentity $Identity `
+        -TokenOwnerIdentity $TokenOwnerIdentity
+    if ($action -ceq 'Reject') {
+        throw "Installer path is not owned by the current Windows user: $Path"
+    }
+    return [pscustomobject]@{
+        acl = $acl
+        action = $action
+    }
+}
+
 function Set-OwnerOnlyDirectory {
     param(
         [Parameter(Mandatory)]
@@ -60,12 +148,29 @@ function Set-OwnerOnlyDirectory {
         New-Item -ItemType Directory -Path $fullPath | Out-Null
     }
     if ($IsWindows) {
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $identity = $windowsIdentity.User
         if ($null -eq $identity) {
             throw 'Current Windows user SID is unavailable.'
         }
+        $tokenOwnerIdentity = $windowsIdentity.Owner
+        if ($null -eq $tokenOwnerIdentity) {
+            $tokenOwnerIdentity = $identity
+        }
+        $ownerState = Get-WindowsPathOwnerState `
+            -Path $fullPath `
+            -Identity $identity `
+            -TokenOwnerIdentity $tokenOwnerIdentity
+        if (Test-WindowsOwnerOnlyAcl `
+            -Acl $ownerState.acl `
+            -Identity $identity `
+            -Kind Directory) {
+            return $fullPath
+        }
         $security = [Security.AccessControl.DirectorySecurity]::new()
-        $security.SetOwner($identity)
+        if ($ownerState.action -ceq 'Initialize') {
+            $security.SetOwner($identity)
+        }
         $security.SetAccessRuleProtection($true, $false)
         $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
             [Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -77,7 +182,13 @@ function Set-OwnerOnlyDirectory {
             [Security.AccessControl.AccessControlType]::Allow
         )
         [void]$security.AddAccessRule($rule)
-        Set-Acl -LiteralPath $fullPath -AclObject $security
+        Set-Acl -LiteralPath $fullPath -AclObject $security -ErrorAction Stop
+        if (-not (Test-WindowsOwnerOnlyAcl `
+            -Acl (Get-Acl -LiteralPath $fullPath -ErrorAction Stop) `
+            -Identity $identity `
+            -Kind Directory)) {
+            throw "Installer directory could not be owner-protected: $fullPath"
+        }
     }
     else {
         $mode = [IO.UnixFileMode]::UserRead -bor
@@ -96,13 +207,29 @@ function Set-OwnerOnlyFile {
 
     [void](Assert-SafeInstallationItem -Path $Path -Kind File)
     if ($IsWindows) {
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $identity = $windowsIdentity.User
         if ($null -eq $identity) {
             throw 'Current Windows user SID is unavailable.'
         }
+        $tokenOwnerIdentity = $windowsIdentity.Owner
+        if ($null -eq $tokenOwnerIdentity) {
+            $tokenOwnerIdentity = $identity
+        }
+        $ownerState = Get-WindowsPathOwnerState `
+            -Path $Path `
+            -Identity $identity `
+            -TokenOwnerIdentity $tokenOwnerIdentity
+        if (Test-WindowsOwnerOnlyAcl `
+            -Acl $ownerState.acl `
+            -Identity $identity `
+            -Kind File) {
+            return
+        }
         $security = [Security.AccessControl.FileSecurity]::new()
-        $security.SetOwner($identity)
-        $security.SetGroup($identity)
+        if ($ownerState.action -ceq 'Initialize') {
+            $security.SetOwner($identity)
+        }
         $security.SetAccessRuleProtection($true, $false)
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $identity,
@@ -110,7 +237,13 @@ function Set-OwnerOnlyFile {
             [Security.AccessControl.AccessControlType]::Allow
         )
         [void]$security.AddAccessRule($rule)
-        Set-Acl -LiteralPath $Path -AclObject $security
+        Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+        if (-not (Test-WindowsOwnerOnlyAcl `
+            -Acl (Get-Acl -LiteralPath $Path -ErrorAction Stop) `
+            -Identity $identity `
+            -Kind File)) {
+            throw "Installer file could not be owner-protected: $Path"
+        }
     }
     else {
         $mode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite
@@ -171,12 +304,12 @@ function Resolve-KonclaveDataRoot {
         }
         return Join-Path $root 'Konclave'
     }
-    $home = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    if ([string]::IsNullOrWhiteSpace($home)) {
+    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($userProfile)) {
         throw 'User profile directory is unavailable.'
     }
     if ($IsMacOS) {
-        return Join-Path $home 'Library' 'Application Support' 'Konclave'
+        return Join-Path $userProfile 'Library' 'Application Support' 'Konclave'
     }
     if (-not [string]::IsNullOrWhiteSpace($env:XDG_DATA_HOME)) {
         if (-not [IO.Path]::IsPathRooted($env:XDG_DATA_HOME)) {
@@ -184,7 +317,7 @@ function Resolve-KonclaveDataRoot {
         }
         return Join-Path ([IO.Path]::GetFullPath($env:XDG_DATA_HOME)) 'konclave'
     }
-    return Join-Path $home '.local' 'share' 'konclave'
+    return Join-Path $userProfile '.local' 'share' 'konclave'
 }
 
 function Get-InstallationPaths {
@@ -778,13 +911,13 @@ function Wait-InstalledRuntimeHealth {
 function Resolve-LegacyCopilotExtensionRoot {
         $copilotHome = $env:COPILOT_HOME
         if ([string]::IsNullOrWhiteSpace($copilotHome)) {
-            $home = [Environment]::GetFolderPath(
+            $userProfile = [Environment]::GetFolderPath(
                 [Environment+SpecialFolder]::UserProfile
             )
-            if ([string]::IsNullOrWhiteSpace($home)) {
+            if ([string]::IsNullOrWhiteSpace($userProfile)) {
                 throw 'User profile directory is unavailable.'
             }
-            $copilotHome = Join-Path $home '.copilot'
+            $copilotHome = Join-Path $userProfile '.copilot'
         }
         elseif (-not [IO.Path]::IsPathRooted($copilotHome)) {
             throw 'COPILOT_HOME must be absolute.'
@@ -1019,6 +1152,117 @@ function Enable-InstallerAgentPlugin {
             }
             pluginRoot = $null
             restartRequired = $directRemoved -or $legacyPreserved
+        }
+    }
+
+    function Invoke-InstallationInitialization {
+        param(
+            [Parameter(Mandatory)]
+            [string]$InstallRoot,
+
+            [Parameter(Mandatory)]
+            $Paths,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [AllowNull()]
+            [string]$AuthorizationPolicy,
+
+            [AllowNull()]
+            [string]$ExternalSource,
+
+            [AllowNull()]
+            [string]$ServiceIdentityFile,
+
+            [AllowNull()]
+            [string]$ProfileKeyDirectory,
+
+            [Parameter(Mandatory)]
+            [bool]$AllowNoRecovery,
+
+            [Parameter(Mandatory)]
+            [bool]$CandidateCreated,
+
+            [Parameter(Mandatory)]
+            [string]$CandidateVersion,
+
+            [scriptblock]$LegacyRootResolver,
+
+            [scriptblock]$RuntimeInitializer,
+
+            [scriptblock]$CandidateRemover
+        )
+
+        if ($null -eq $LegacyRootResolver) {
+            $LegacyRootResolver = {
+                Resolve-LegacyCopilotExtensionRoot
+            }
+        }
+        if ($null -eq $RuntimeInitializer) {
+            $RuntimeInitializer = {
+                param(
+                    $Root,
+                    $InstallationPaths,
+                    $Endpoint,
+                    $Policy,
+                    $EnrollmentSource,
+                    $IdentityFile,
+                    $KeyDirectory,
+                    $LegacyRoot,
+                    $PermitNoRecovery
+                )
+                [void](Initialize-InstalledRuntime `
+                    -InstallRoot $Root `
+                    -Paths $InstallationPaths `
+                    -RelayEndpoint $Endpoint `
+                    -AuthorizationPolicy $Policy `
+                    -ExternalSource $EnrollmentSource `
+                    -ServiceIdentityFile $IdentityFile `
+                    -ProfileKeyDirectory $KeyDirectory `
+                    -LegacyExtensionRoot $LegacyRoot `
+                    -AllowNoRecovery:$PermitNoRecovery)
+            }
+        }
+        if ($null -eq $CandidateRemover) {
+            $CandidateRemover = {
+                param($InstallationPaths, $Version)
+                $versionRoot = Join-Path $InstallationPaths.versionsRoot $Version
+                if (Test-Path -LiteralPath $versionRoot) {
+                    Remove-InstallerDirectory -Path $versionRoot
+                }
+            }
+        }
+
+        try {
+            $legacyRoot = & $LegacyRootResolver
+            if (-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
+                $legacyRoot = $null
+            }
+            & $RuntimeInitializer `
+                $InstallRoot `
+                $Paths `
+                $RelayEndpoint `
+                $AuthorizationPolicy `
+                $ExternalSource `
+                $ServiceIdentityFile `
+                $ProfileKeyDirectory `
+                $legacyRoot `
+                $AllowNoRecovery
+        }
+        catch {
+            $operationError = $_
+            if ($CandidateCreated) {
+                try {
+                    & $CandidateRemover $Paths $CandidateVersion
+                }
+                catch {
+                    throw "Runtime initialization failed and candidate cleanup failed: $(
+                        $operationError.Exception.Message
+                    )`nCleanup: $($_.Exception.Message)"
+                }
+            }
+            throw $operationError
         }
     }
 

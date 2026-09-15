@@ -317,28 +317,17 @@ if ($initializationRequired) {
         }
         throw '-RelayEndpoint is required for the first installation.'
     }
-    $legacyRoot = Resolve-LegacyCopilotExtensionRoot
-    if (-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
-        $legacyRoot = $null
-    }
-    try {
-        [void](Initialize-InstalledRuntime `
-            -InstallRoot $candidateRoot `
-            -Paths $paths `
-            -RelayEndpoint $RelayEndpoint `
-            -AuthorizationPolicy $AuthorizationPolicy `
-            -ExternalSource $ExternalSource `
-            -ServiceIdentityFile $ServiceIdentityFile `
-            -ProfileKeyDirectory $ProfileKeyDirectory `
-            -LegacyExtensionRoot $legacyRoot `
-            -AllowNoRecovery:$AllowNoRecovery)
-    }
-    catch {
-        if ($installedCandidate.created) {
-            Remove-CandidateVersion -Paths $paths -Version $candidate.record.version
-        }
-        throw
-    }
+    [void](Invoke-InstallationInitialization `
+        -InstallRoot $candidateRoot `
+        -Paths $paths `
+        -RelayEndpoint $RelayEndpoint `
+        -AuthorizationPolicy $AuthorizationPolicy `
+        -ExternalSource $ExternalSource `
+        -ServiceIdentityFile $ServiceIdentityFile `
+        -ProfileKeyDirectory $ProfileKeyDirectory `
+        -AllowNoRecovery ([bool]$AllowNoRecovery) `
+        -CandidateCreated ([bool]$installedCandidate.created) `
+        -CandidateVersion ([string]$candidate.record.version))
 }
 
 if ($decision.kind -ceq 'Verify') {
