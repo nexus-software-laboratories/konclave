@@ -7302,6 +7302,7 @@ function createKonclaveTools(options) {
 var runtimeModuleDir = dirname(fileURLToPath(import.meta.url));
 var extensionSignals = ["SIGINT", "SIGTERM"];
 var startupIdleGraceMilliseconds = 5e3;
+var installationGuideUrl = "https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md";
 var defaultTimers = {
   setTimeout(handler, delayMs) {
     return setTimeout(handler, delayMs);
@@ -7352,6 +7353,13 @@ function formatError(error) {
   }
   return "Unknown error";
 }
+function formatStartupFailure(stage, error) {
+  const detail = formatError(error);
+  if (stage === "service") {
+    return `Konclave shared service unavailable: ${detail} Install or repair the native runtime, then restart Copilot. See ${installationGuideUrl}`;
+  }
+  return `Konclave extension startup failed: ${detail}`;
+}
 function normalizeDelay(delayMs) {
   if (typeof delayMs !== "number" || Number.isNaN(delayMs) || !Number.isFinite(delayMs)) {
     return 0;
@@ -7364,6 +7372,7 @@ async function bootExtension(options) {
   const platform = options.platform ?? process.platform;
   let client = null;
   let joinedSession = null;
+  let startupStage = "profile";
   const commandOutput = options.commandOutput ?? {
     async write(line, commandOptions) {
       if (joinedSession === null) {
@@ -7377,7 +7386,9 @@ async function bootExtension(options) {
   };
   try {
     const profile = deriveProfileId(environment);
+    startupStage = "service";
     client = await connect2(environment, runtimeModuleDir, profile, platform);
+    startupStage = "session";
     const connectedClient = client;
     const policyGate = createCopilotPolicyGate(connectedClient);
     const session = await options.joinSession(
@@ -7420,7 +7431,7 @@ async function bootExtension(options) {
     return controller;
   } catch (error) {
     client?.close();
-    options.diagnostics.error(`Konclave shared service unavailable: ${formatError(error)}`);
+    options.diagnostics.error(formatStartupFailure(startupStage, error));
     options.processController.setExitCode(1);
     return null;
   }
