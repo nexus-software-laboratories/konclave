@@ -348,7 +348,8 @@ try {
             param($InstallationPaths, $Version)
             $initializationEvents.Add("Remove|$Version")
         }.GetNewClosure()
-        $action = {
+        $failed = $false
+        try {
             Invoke-InstallationInitialization `
                 -InstallRoot 'candidate-root' `
                 -Paths $paths `
@@ -363,12 +364,15 @@ try {
                 -LegacyRootResolver $legacyResolver `
                 -RuntimeInitializer $runtimeInitializer `
                 -CandidateRemover $candidateRemover
-        }.GetNewClosure()
-        if ([string]::IsNullOrEmpty($failure)) {
-            & $action
         }
-        else {
-            Assert-RuntimeCheckFails $action $case.name
+        catch {
+            $failed = $true
+            if ([string]::IsNullOrEmpty($failure)) {
+                throw
+            }
+        }
+        if ($failed -eq [string]::IsNullOrEmpty($failure)) {
+            throw "Initialization failure decision failed: $($case.name)"
         }
         $removed = @($initializationEvents | Where-Object { $_ -ceq 'Remove|0.2.0' }).Count -eq 1
         if ($removed -ne [bool]$case.removed) {
