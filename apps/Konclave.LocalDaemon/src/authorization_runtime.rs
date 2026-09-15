@@ -1326,9 +1326,7 @@ mod tests {
     fn reload_error_classification_is_exhaustive() {
         let cases = [
             (
-                AuthorizationRuntimeError::Store(
-                    LocalAuthorizationStoreError::StorageUnavailable,
-                ),
+                AuthorizationRuntimeError::Store(LocalAuthorizationStoreError::StorageUnavailable),
                 AuthorizationReloadEvent::ObservationFailed,
             ),
             (
