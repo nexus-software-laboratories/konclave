@@ -109,6 +109,36 @@ try {
                 throw "Windows owner decision failed: $($case.name)"
             }
         }
+        $ownerActionCases = @(
+            @{ name = 'matching new owner'; created = $true; matches = $true; expected = 'Preserve' },
+            @{
+                name = 'matching existing owner'
+                created = $false
+                matches = $true
+                expected = 'Preserve'
+            },
+            @{
+                name = 'new inherited owner'
+                created = $true
+                matches = $false
+                expected = 'Initialize'
+            },
+            @{
+                name = 'existing foreign owner'
+                created = $false
+                matches = $false
+                expected = 'Reject'
+            }
+        )
+        foreach ($case in $ownerActionCases) {
+            if (
+                (Resolve-WindowsOwnerAction `
+                    -Created $case.created `
+                    -OwnerMatches $case.matches) -cne [string]$case.expected
+            ) {
+                throw "Windows owner action failed: $($case.name)"
+            }
+        }
         if (-not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $paths.dataRoot -ErrorAction Stop) `
             -Identity $identity `

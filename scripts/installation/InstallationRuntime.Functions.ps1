@@ -58,6 +58,24 @@ function Test-WindowsOwnerIdentity {
     return $Owner.Value -ceq $Identity.Value
 }
 
+function Resolve-WindowsOwnerAction {
+    param(
+        [Parameter(Mandatory)]
+        [bool]$Created,
+
+        [Parameter(Mandatory)]
+        [bool]$OwnerMatches
+    )
+
+    if ($OwnerMatches) {
+        return 'Preserve'
+    }
+    if ($Created) {
+        return 'Initialize'
+    }
+    return 'Reject'
+}
+
 function Test-WindowsOwnerOnlyAcl {
     param(
         [Parameter(Mandatory)]
@@ -124,22 +142,35 @@ function Set-OwnerOnlyDirectory {
     )
 
     $fullPath = [IO.Path]::GetFullPath($Path)
+    $created = $false
     if (Test-Path -LiteralPath $fullPath) {
         [void](Assert-SafeInstallationItem -Path $fullPath -Kind Directory)
     }
     else {
         New-Item -ItemType Directory -Path $fullPath | Out-Null
+        $created = $true
     }
     if ($IsWindows) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
         if ($null -eq $identity) {
             throw 'Current Windows user SID is unavailable.'
         }
-        $currentAcl = Assert-CurrentWindowsPathOwner -Path $fullPath -Identity $identity
+        $currentAcl = Get-Acl -LiteralPath $fullPath -ErrorAction Stop
+        $ownerAction = Resolve-WindowsOwnerAction `
+            -Created $created `
+            -OwnerMatches (Test-WindowsOwnerIdentity `
+                -Owner $currentAcl.GetOwner([Security.Principal.SecurityIdentifier]) `
+                -Identity $identity)
+        if ($ownerAction -ceq 'Reject') {
+            throw "Installer path is not owned by the current Windows user: $fullPath"
+        }
         if (Test-WindowsOwnerOnlyAcl -Acl $currentAcl -Identity $identity -Kind Directory) {
             return $fullPath
         }
         $security = [Security.AccessControl.DirectorySecurity]::new()
+        if ($ownerAction -ceq 'Initialize') {
+            $security.SetOwner($identity)
+        }
         $security.SetAccessRuleProtection($true, $false)
         $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
             [Security.AccessControl.InheritanceFlags]::ObjectInherit
