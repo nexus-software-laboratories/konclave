@@ -46,7 +46,7 @@ function Assert-SafeInstallationItem {
     return $item
 }
 
-function Test-WindowsOwnerIdentity {
+function Resolve-WindowsOwnerAction {
     param(
         [Parameter(Mandatory)]
         [Security.Principal.SecurityIdentifier]$Owner,
@@ -58,10 +58,13 @@ function Test-WindowsOwnerIdentity {
         [Security.Principal.SecurityIdentifier]$TokenOwnerIdentity
     )
 
-    return (
-        $Owner.Value -ceq $UserIdentity.Value -or
-        $Owner.Value -ceq $TokenOwnerIdentity.Value
-    )
+    if ($Owner.Value -ceq $UserIdentity.Value) {
+        return 'Preserve'
+    }
+    if ($Owner.Value -ceq $TokenOwnerIdentity.Value) {
+        return 'Initialize'
+    }
+    return 'Reject'
 }
 
 function Test-WindowsOwnerOnlyAcl {
@@ -71,9 +74,6 @@ function Test-WindowsOwnerOnlyAcl {
 
         [Parameter(Mandatory)]
         [Security.Principal.SecurityIdentifier]$Identity,
-
-        [Parameter(Mandatory)]
-        [Security.Principal.SecurityIdentifier]$TokenOwnerIdentity,
 
         [Parameter(Mandatory)]
         [ValidateSet('File', 'Directory')]
@@ -89,10 +89,9 @@ function Test-WindowsOwnerOnlyAcl {
         [Security.AccessControl.InheritanceFlags]::None
     }
     return (
-        (Test-WindowsOwnerIdentity `
-            -Owner $Acl.GetOwner([Security.Principal.SecurityIdentifier]) `
-            -UserIdentity $Identity `
-            -TokenOwnerIdentity $TokenOwnerIdentity) -and
+        $Acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value -ceq $Identity.Value -and
         $Acl.AreAccessRulesProtected -and
         $rules.Count -eq 1 -and
         $rules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
@@ -100,16 +99,13 @@ function Test-WindowsOwnerOnlyAcl {
         -not $rules[0].IsInherited -and
         $rules[0].InheritanceFlags -eq $expectedInheritance -and
         $rules[0].PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
-        (Test-WindowsOwnerIdentity `
-            -Owner $rules[0].IdentityReference.Translate(
-                [Security.Principal.SecurityIdentifier]
-            ) `
-            -UserIdentity $Identity `
-            -TokenOwnerIdentity $Identity)
+        $rules[0].IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value -ceq $Identity.Value
     )
 }
 
-function Assert-CurrentWindowsPathOwner {
+function Get-WindowsPathOwnerState {
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -125,13 +121,17 @@ function Assert-CurrentWindowsPathOwner {
     $owner = $acl.GetOwner(
         [Security.Principal.SecurityIdentifier]
     )
-    if (-not (Test-WindowsOwnerIdentity `
+    $action = Resolve-WindowsOwnerAction `
         -Owner $owner `
         -UserIdentity $Identity `
-        -TokenOwnerIdentity $TokenOwnerIdentity)) {
+        -TokenOwnerIdentity $TokenOwnerIdentity
+    if ($action -ceq 'Reject') {
         throw "Installer path is not owned by the current Windows user: $Path"
     }
-    return $acl
+    return [pscustomobject]@{
+        acl = $acl
+        action = $action
+    }
 }
 
 function Set-OwnerOnlyDirectory {
@@ -157,18 +157,20 @@ function Set-OwnerOnlyDirectory {
         if ($null -eq $tokenOwnerIdentity) {
             $tokenOwnerIdentity = $identity
         }
-        $currentAcl = Assert-CurrentWindowsPathOwner `
+        $ownerState = Get-WindowsPathOwnerState `
             -Path $fullPath `
             -Identity $identity `
             -TokenOwnerIdentity $tokenOwnerIdentity
         if (Test-WindowsOwnerOnlyAcl `
-            -Acl $currentAcl `
+            -Acl $ownerState.acl `
             -Identity $identity `
-            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind Directory) {
             return $fullPath
         }
         $security = [Security.AccessControl.DirectorySecurity]::new()
+        if ($ownerState.action -ceq 'Initialize') {
+            $security.SetOwner($identity)
+        }
         $security.SetAccessRuleProtection($true, $false)
         $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
             [Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -184,7 +186,6 @@ function Set-OwnerOnlyDirectory {
         if (-not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $fullPath -ErrorAction Stop) `
             -Identity $identity `
-            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind Directory)) {
             throw "Installer directory could not be owner-protected: $fullPath"
         }
@@ -215,18 +216,20 @@ function Set-OwnerOnlyFile {
         if ($null -eq $tokenOwnerIdentity) {
             $tokenOwnerIdentity = $identity
         }
-        $currentAcl = Assert-CurrentWindowsPathOwner `
+        $ownerState = Get-WindowsPathOwnerState `
             -Path $Path `
             -Identity $identity `
             -TokenOwnerIdentity $tokenOwnerIdentity
         if (Test-WindowsOwnerOnlyAcl `
-            -Acl $currentAcl `
+            -Acl $ownerState.acl `
             -Identity $identity `
-            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind File) {
             return
         }
         $security = [Security.AccessControl.FileSecurity]::new()
+        if ($ownerState.action -ceq 'Initialize') {
+            $security.SetOwner($identity)
+        }
         $security.SetAccessRuleProtection($true, $false)
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $identity,
@@ -238,7 +241,6 @@ function Set-OwnerOnlyFile {
         if (-not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $Path -ErrorAction Stop) `
             -Identity $identity `
-            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind File)) {
             throw "Installer file could not be owner-protected: $Path"
         }

@@ -108,29 +108,29 @@ try {
                 owner = $identity
                 user = $identity
                 tokenOwner = $system
-                expected = $true
+                expected = 'Preserve'
             },
             @{
                 name = 'token owner'
                 owner = $system
                 user = $identity
                 tokenOwner = $system
-                expected = $true
+                expected = 'Initialize'
             },
             @{
                 name = 'foreign owner'
                 owner = $world
                 user = $identity
                 tokenOwner = $system
-                expected = $false
+                expected = 'Reject'
             }
         )
         foreach ($case in $ownerCases) {
             if (
-                (Test-WindowsOwnerIdentity `
+                (Resolve-WindowsOwnerAction `
                     -Owner $case.owner `
                     -UserIdentity $case.user `
-                    -TokenOwnerIdentity $case.tokenOwner) -ne [bool]$case.expected
+                    -TokenOwnerIdentity $case.tokenOwner) -cne [string]$case.expected
             ) {
                 throw "Windows owner decision failed: $($case.name)"
             }
@@ -138,7 +138,6 @@ try {
         if (-not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $paths.dataRoot -ErrorAction Stop) `
             -Identity $identity `
-            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind Directory)) {
             throw 'Installer data root is not owner-protected.'
         }
@@ -156,7 +155,6 @@ try {
         -not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $paths.statePath -ErrorAction Stop) `
             -Identity $identity `
-            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind File)
     ) {
         throw 'Installer state is not owner-protected.'
