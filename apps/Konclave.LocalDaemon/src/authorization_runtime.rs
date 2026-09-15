@@ -715,33 +715,29 @@ impl LiveAuthorizationRuntime {
             }
             store.load_snapshot(now_unix_milliseconds, Some(high_water))
         });
-        let snapshot = match tokio::time::timeout(
-            AUTHORIZATION_RELOAD_DEADLINE,
-            &mut snapshot_task,
-        )
-        .await
-        {
-            Ok(result) => result
-                .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)?
-                .map_err(AuthorizationRuntimeError::Store),
-            Err(_) => {
-                let error = AuthorizationRuntimeError::ObservationDeadlineExceeded;
-                self.fail_closed(error);
-                match tokio::time::timeout(
-                    AUTHORIZATION_RELOAD_COMPLETION_DEADLINE,
-                    &mut snapshot_task,
-                )
-                .await
-                {
-                    Ok(Ok(_)) => return Err(error),
-                    Ok(Err(_)) | Err(_) => {
-                        let worker_error = AuthorizationRuntimeError::BlockingOperationFailed;
-                        self.fail_closed(worker_error);
-                        return Err(worker_error);
+        let snapshot =
+            match tokio::time::timeout(AUTHORIZATION_RELOAD_DEADLINE, &mut snapshot_task).await {
+                Ok(result) => result
+                    .map_err(|_| AuthorizationRuntimeError::BlockingOperationFailed)?
+                    .map_err(AuthorizationRuntimeError::Store),
+                Err(_) => {
+                    let error = AuthorizationRuntimeError::ObservationDeadlineExceeded;
+                    self.fail_closed(error);
+                    match tokio::time::timeout(
+                        AUTHORIZATION_RELOAD_COMPLETION_DEADLINE,
+                        &mut snapshot_task,
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => return Err(error),
+                        Ok(Err(_)) | Err(_) => {
+                            let worker_error = AuthorizationRuntimeError::BlockingOperationFailed;
+                            self.fail_closed(worker_error);
+                            return Err(worker_error);
+                        }
                     }
                 }
-            }
-        };
+            };
         match snapshot {
             Ok(snapshot) => self.publish(snapshot, now_unix_milliseconds),
             Err(error) => {
@@ -988,9 +984,7 @@ fn replace_registry(
         .map_err(|_error: LocalServiceTransportError| AuthorizationRuntimeError::InvalidProjection)
 }
 
-const fn authorization_reload_event(
-    error: AuthorizationRuntimeError,
-) -> AuthorizationReloadEvent {
+const fn authorization_reload_event(error: AuthorizationRuntimeError) -> AuthorizationReloadEvent {
     match error {
         AuthorizationRuntimeError::Store(_)
         | AuthorizationRuntimeError::InvalidProjection
@@ -1042,9 +1036,9 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        AUTHORIZATION_RELOAD_DEADLINE, AUTHORIZATION_RELOAD_INTERVAL,
-        AccountTrustedGrantRequest, AuthorizationRuntimeError, AuthorizationRuntimeStatus,
-        InstallationFingerprint, LiveAuthorizationRuntime,
+        AUTHORIZATION_RELOAD_DEADLINE, AUTHORIZATION_RELOAD_INTERVAL, AccountTrustedGrantRequest,
+        AuthorizationRuntimeError, AuthorizationRuntimeStatus, InstallationFingerprint,
+        LiveAuthorizationRuntime,
     };
     use crate::clock::{SystemUnixClock, UnixClock};
 
