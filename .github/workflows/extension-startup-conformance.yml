@@ -1,0 +1,95 @@
+name: Extension startup conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: extension-startup-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  extension-startup-conformance:
+    name: Extension startup conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve extension startup validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(
+              gh api --paginate `
+                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
+                --jq '.[].filename'
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not resolve pull-request files for extension startup conformance.'
+            }
+            if ($files.Count -eq 0) {
+              throw 'Pull-request file discovery returned no files.'
+            }
+            $run = $files.Count -ge 3000 -or @(
+              $files | Where-Object {
+                $_ -match '^\.github/genesis-delivery\.json$' -or
+                $_ -match '^\.github/workflows/extension-startup-conformance\.yml$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package-lock\.json|package\.json|src/(?:extension|runtime|startup)\.ts|tests/(?:extension-runtime|startup)\.test\.ts)$'
+              }
+            ).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - uses: ./.github/actions/setup-node
+        if: steps.scope.outputs.run == 'true'
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: extension-startup-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify fail-closed extension startup
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        run: |
+          npm ci
+          npx prettier --check \
+            src/extension.ts \
+            src/runtime.ts \
+            src/startup.ts \
+            tests/extension-runtime.test.ts \
+            tests/startup.test.ts
+          npx eslint \
+            src/extension.ts \
+            src/runtime.ts \
+            src/startup.ts \
+            tests/extension-runtime.test.ts \
+            tests/startup.test.ts
+          npx tsc --noEmit
+          npx vitest run \
+            tests/extension-runtime.test.ts \
+            tests/startup.test.ts
