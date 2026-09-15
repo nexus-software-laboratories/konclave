@@ -1040,8 +1040,9 @@ mod tests {
     use super::{
         AUTHORIZATION_RELOAD_DEADLINE, AUTHORIZATION_RELOAD_INTERVAL, AccountTrustedGrantRequest,
         AuthorizationRuntimeError, AuthorizationRuntimeStatus, InstallationFingerprint,
-        LiveAuthorizationRuntime,
+        LiveAuthorizationRuntime, authorization_reload_event,
     };
+    use crate::authorization_reload::AuthorizationReloadEvent;
     use crate::clock::{SystemUnixClock, UnixClock};
 
     fn issuer() -> InstalledIssuerRegistration {
@@ -1319,6 +1320,81 @@ mod tests {
             Ed25519PublicKey::from_bytes([8; 32]),
             HarnessKind::Copilot,
         ));
+    }
+
+    #[test]
+    fn reload_error_classification_is_exhaustive() {
+        let cases = [
+            (
+                AuthorizationRuntimeError::Store(
+                    LocalAuthorizationStoreError::StorageUnavailable,
+                ),
+                AuthorizationReloadEvent::ObservationFailed,
+            ),
+            (
+                AuthorizationRuntimeError::InvalidProjection,
+                AuthorizationReloadEvent::ObservationFailed,
+            ),
+            (
+                AuthorizationRuntimeError::ObservationDeadlineExceeded,
+                AuthorizationReloadEvent::ObservationFailed,
+            ),
+            (
+                AuthorizationRuntimeError::BlockingOperationFailed,
+                AuthorizationReloadEvent::WorkerFailed,
+            ),
+            (
+                AuthorizationRuntimeError::UnexpectedStop,
+                AuthorizationReloadEvent::WorkerFailed,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(authorization_reload_event(error), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_failure_remains_fatal_to_the_reload_loop() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_path = root
+            .path()
+            .join("service")
+            .join(LOCAL_SERVICE_INSTALLATION_FILE);
+        let fingerprint = InstallationFingerprint::from_bytes([14; 32]);
+        let setup_path = installation_path.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+            drop(
+                LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    fingerprint,
+                    &AuthorizationPolicy::account_trusted(),
+                    &[issuer()],
+                    1,
+                )
+                .unwrap(),
+            );
+            create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+        })
+        .await
+        .unwrap();
+        let runtime = LiveAuthorizationRuntime::open(&installation_path, fingerprint)
+            .await
+            .unwrap();
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        runtime.fail_closed(AuthorizationRuntimeError::BlockingOperationFailed);
+        runtime.request_reload();
+
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                Arc::clone(&runtime).run_reload_loop(shutdown_rx),
+            )
+            .await
+            .unwrap(),
+            Err(AuthorizationRuntimeError::BlockingOperationFailed)
+        );
     }
 
     #[tokio::test(start_paused = true)]

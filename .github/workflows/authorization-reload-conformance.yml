@@ -97,6 +97,16 @@ jobs:
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
+            reload_error_classification_is_exhaustive
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            worker_failure_remains_fatal_to_the_reload_loop
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
             reload_failure_closes_clients_and_service_recovers
           cargo clippy \
             --locked \
