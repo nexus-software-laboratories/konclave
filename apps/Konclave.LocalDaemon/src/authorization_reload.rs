@@ -14,12 +14,8 @@ pub(crate) enum AuthorizationReloadEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthorizationReloadTransition {
-    Publish {
-        next: AuthorizationReloadState,
-    },
-    FailClosed {
-        next: AuthorizationReloadState,
-    },
+    Publish { next: AuthorizationReloadState },
+    FailClosed { next: AuthorizationReloadState },
     StopService,
     StopCleanly,
 }
