@@ -22,6 +22,12 @@ test, and Clippy commands plus the daemon's authorization-runtime and local-serv
 tests before client, administration, or package integration relies on new store
 behavior.
 
+`Authorization reload conformance` is the focused draft-capable gate for the daemon's
+failed-closed reload recovery state machine. It runs the exhaustive transition table,
+deterministic delayed-read recovery, a real exclusive SQLite-lock boundary test,
+shared-service client closure and fresh-snapshot recovery, Rust formatting, and
+Clippy before distribution or package integration relies on the behavior.
+
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, full extension formatting and lint,
@@ -181,7 +187,9 @@ crash or excessive-allocation case becomes a permanent regression input.
 - refuse startup without a valid installation-bound authorization store, preserve
   grants across service restart, and observe exact revocation, profile suspension,
   issuer disablement, policy invalidation, and reload failure within the documented
-  one-second live-state bound, including an in-flight long delivery claim;
+  one-second live-state bound, including an in-flight long delivery claim; reload
+  failure must close clients without terminating the service and restore access only
+  after a fresh verified snapshot;
 - prove the issuer cannot invoke operational methods, grants expire without active
   eviction, quota exhaustion denies, and active-registration checks close revoked
   connections;
