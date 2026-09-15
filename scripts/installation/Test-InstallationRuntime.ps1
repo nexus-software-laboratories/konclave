@@ -94,54 +94,51 @@ try {
     $paths = Get-InstallationPaths -DataRoot (Join-Path $root 'data')
     Initialize-InstallationPaths -Paths $paths
     if ($IsWindows) {
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $identity = $windowsIdentity.User
+        $tokenOwnerIdentity = $windowsIdentity.Owner
+        if ($null -eq $tokenOwnerIdentity) {
+            $tokenOwnerIdentity = $identity
+        }
         $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $world = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
         $ownerCases = @(
-            @{ name = 'same owner'; owner = $identity; expected = $true },
-            @{ name = 'different owner'; owner = $system; expected = $false }
+            @{
+                name = 'user owner'
+                owner = $identity
+                user = $identity
+                tokenOwner = $system
+                expected = $true
+            },
+            @{
+                name = 'token owner'
+                owner = $system
+                user = $identity
+                tokenOwner = $system
+                expected = $true
+            },
+            @{
+                name = 'foreign owner'
+                owner = $world
+                user = $identity
+                tokenOwner = $system
+                expected = $false
+            }
         )
         foreach ($case in $ownerCases) {
             if (
                 (Test-WindowsOwnerIdentity `
                     -Owner $case.owner `
-                    -Identity $identity) -ne [bool]$case.expected
+                    -UserIdentity $case.user `
+                    -TokenOwnerIdentity $case.tokenOwner) -ne [bool]$case.expected
             ) {
                 throw "Windows owner decision failed: $($case.name)"
-            }
-        }
-        $ownerActionCases = @(
-            @{ name = 'matching new owner'; created = $true; matches = $true; expected = 'Preserve' },
-            @{
-                name = 'matching existing owner'
-                created = $false
-                matches = $true
-                expected = 'Preserve'
-            },
-            @{
-                name = 'new inherited owner'
-                created = $true
-                matches = $false
-                expected = 'Initialize'
-            },
-            @{
-                name = 'existing foreign owner'
-                created = $false
-                matches = $false
-                expected = 'Reject'
-            }
-        )
-        foreach ($case in $ownerActionCases) {
-            if (
-                (Resolve-WindowsOwnerAction `
-                    -Created $case.created `
-                    -OwnerMatches $case.matches) -cne [string]$case.expected
-            ) {
-                throw "Windows owner action failed: $($case.name)"
             }
         }
         if (-not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $paths.dataRoot -ErrorAction Stop) `
             -Identity $identity `
+            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind Directory)) {
             throw 'Installer data root is not owner-protected.'
         }
@@ -159,6 +156,7 @@ try {
         -not (Test-WindowsOwnerOnlyAcl `
             -Acl (Get-Acl -LiteralPath $paths.statePath -ErrorAction Stop) `
             -Identity $identity `
+            -TokenOwnerIdentity $tokenOwnerIdentity `
             -Kind File)
     ) {
         throw 'Installer state is not owner-protected.'
