@@ -306,19 +306,46 @@ try {
     $legacyRoot = Join-Path $root 'initialization-legacy'
     New-Item -ItemType Directory -Path $legacyRoot | Out-Null
     $initializationCases = @(
-        @{ name = 'success'; failure = ''; created = $true; removed = $false },
-        @{ name = 'resolver failure'; failure = 'resolver'; created = $true; removed = $true },
-        @{ name = 'initializer failure'; failure = 'initializer'; created = $true; removed = $true },
+        @{
+            name = 'success'
+            failure = ''
+            created = $true
+            removed = $false
+            cleanupFailure = $false
+        },
+        @{
+            name = 'resolver failure'
+            failure = 'resolver'
+            created = $true
+            removed = $true
+            cleanupFailure = $false
+        },
+        @{
+            name = 'initializer failure'
+            failure = 'initializer'
+            created = $true
+            removed = $true
+            cleanupFailure = $false
+        },
+        @{
+            name = 'cleanup failure'
+            failure = 'initializer'
+            created = $true
+            removed = $true
+            cleanupFailure = $true
+        },
         @{
             name = 'existing candidate failure'
             failure = 'initializer'
             created = $false
             removed = $false
+            cleanupFailure = $false
         }
     )
     foreach ($case in $initializationCases) {
         $initializationEvents = [Collections.Generic.List[string]]::new()
         $failure = [string]$case.failure
+        $cleanupFailure = [bool]$case.cleanupFailure
         $legacyResolver = {
             if ($failure -ceq 'resolver') {
                 throw 'synthetic legacy resolver failure'
@@ -347,6 +374,9 @@ try {
         $candidateRemover = {
             param($InstallationPaths, $Version)
             $initializationEvents.Add("Remove|$Version")
+            if ($cleanupFailure) {
+                throw 'synthetic candidate cleanup failure'
+            }
         }.GetNewClosure()
         $failed = $false
         try {
@@ -369,6 +399,15 @@ try {
             $failed = $true
             if ([string]::IsNullOrEmpty($failure)) {
                 throw
+            }
+            if (
+                $cleanupFailure -and
+                -not $_.Exception.Message.Contains(
+                    'Runtime initialization failed and candidate cleanup failed',
+                    [StringComparison]::Ordinal
+                )
+            ) {
+                throw 'Initialization cleanup failure lost its combined diagnostic.'
             }
         }
         if ($failed -eq [string]::IsNullOrEmpty($failure)) {
