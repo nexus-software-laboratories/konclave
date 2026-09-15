@@ -303,6 +303,79 @@ try {
         throw 'Failed update did not restore the previous runnable version.'
     }
 
+    $legacyRoot = Join-Path $root 'initialization-legacy'
+    New-Item -ItemType Directory -Path $legacyRoot | Out-Null
+    $initializationCases = @(
+        @{ name = 'success'; failure = ''; created = $true; removed = $false },
+        @{ name = 'resolver failure'; failure = 'resolver'; created = $true; removed = $true },
+        @{ name = 'initializer failure'; failure = 'initializer'; created = $true; removed = $true },
+        @{
+            name = 'existing candidate failure'
+            failure = 'initializer'
+            created = $false
+            removed = $false
+        }
+    )
+    foreach ($case in $initializationCases) {
+        $initializationEvents = [Collections.Generic.List[string]]::new()
+        $failure = [string]$case.failure
+        $legacyResolver = {
+            if ($failure -ceq 'resolver') {
+                throw 'synthetic legacy resolver failure'
+            }
+            return $legacyRoot
+        }.GetNewClosure()
+        $runtimeInitializer = {
+            param(
+                $InstallRoot,
+                $InstallationPaths,
+                $Endpoint,
+                $Policy,
+                $EnrollmentSource,
+                $IdentityFile,
+                $KeyDirectory,
+                $ResolvedLegacyRoot,
+                $PermitNoRecovery
+            )
+            $initializationEvents.Add(
+                "Initialize|$InstallRoot|$Endpoint|$Policy|$ResolvedLegacyRoot|$PermitNoRecovery"
+            )
+            if ($failure -ceq 'initializer') {
+                throw 'synthetic runtime initialization failure'
+            }
+        }.GetNewClosure()
+        $candidateRemover = {
+            param($InstallationPaths, $Version)
+            $initializationEvents.Add("Remove|$Version")
+        }.GetNewClosure()
+        $action = {
+            Invoke-InstallationInitialization `
+                -InstallRoot 'candidate-root' `
+                -Paths $paths `
+                -RelayEndpoint 'https://relay.example.com' `
+                -AuthorizationPolicy 'account-trusted' `
+                -ExternalSource $null `
+                -ServiceIdentityFile $null `
+                -ProfileKeyDirectory $null `
+                -AllowNoRecovery $false `
+                -CandidateCreated ([bool]$case.created) `
+                -CandidateVersion '0.2.0' `
+                -LegacyRootResolver $legacyResolver `
+                -RuntimeInitializer $runtimeInitializer `
+                -CandidateRemover $candidateRemover
+        }.GetNewClosure()
+        if ([string]::IsNullOrEmpty($failure)) {
+            & $action
+        }
+        else {
+            Assert-RuntimeCheckFails $action $case.name
+        }
+        $removed = @($initializationEvents | Where-Object { $_ -ceq 'Remove|0.2.0' }).Count -eq 1
+        if ($removed -ne [bool]$case.removed) {
+            throw "Initialization cleanup decision failed: $($case.name)"
+        }
+    }
+
     $unsafeZip = Join-Path $root 'unsafe.zip'
     Write-TestZip -Path $unsafeZip -EntryName '../escape.txt' -Content 'escape'
     Assert-RuntimeCheckFails {

@@ -1155,6 +1155,117 @@ function Enable-InstallerAgentPlugin {
         }
     }
 
+    function Invoke-InstallationInitialization {
+        param(
+            [Parameter(Mandatory)]
+            [string]$InstallRoot,
+
+            [Parameter(Mandatory)]
+            $Paths,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [AllowNull()]
+            [string]$AuthorizationPolicy,
+
+            [AllowNull()]
+            [string]$ExternalSource,
+
+            [AllowNull()]
+            [string]$ServiceIdentityFile,
+
+            [AllowNull()]
+            [string]$ProfileKeyDirectory,
+
+            [Parameter(Mandatory)]
+            [bool]$AllowNoRecovery,
+
+            [Parameter(Mandatory)]
+            [bool]$CandidateCreated,
+
+            [Parameter(Mandatory)]
+            [string]$CandidateVersion,
+
+            [scriptblock]$LegacyRootResolver,
+
+            [scriptblock]$RuntimeInitializer,
+
+            [scriptblock]$CandidateRemover
+        )
+
+        if ($null -eq $LegacyRootResolver) {
+            $LegacyRootResolver = {
+                Resolve-LegacyCopilotExtensionRoot
+            }
+        }
+        if ($null -eq $RuntimeInitializer) {
+            $RuntimeInitializer = {
+                param(
+                    $Root,
+                    $InstallationPaths,
+                    $Endpoint,
+                    $Policy,
+                    $EnrollmentSource,
+                    $IdentityFile,
+                    $KeyDirectory,
+                    $LegacyRoot,
+                    $PermitNoRecovery
+                )
+                [void](Initialize-InstalledRuntime `
+                    -InstallRoot $Root `
+                    -Paths $InstallationPaths `
+                    -RelayEndpoint $Endpoint `
+                    -AuthorizationPolicy $Policy `
+                    -ExternalSource $EnrollmentSource `
+                    -ServiceIdentityFile $IdentityFile `
+                    -ProfileKeyDirectory $KeyDirectory `
+                    -LegacyExtensionRoot $LegacyRoot `
+                    -AllowNoRecovery:$PermitNoRecovery)
+            }
+        }
+        if ($null -eq $CandidateRemover) {
+            $CandidateRemover = {
+                param($InstallationPaths, $Version)
+                $versionRoot = Join-Path $InstallationPaths.versionsRoot $Version
+                if (Test-Path -LiteralPath $versionRoot) {
+                    Remove-InstallerDirectory -Path $versionRoot
+                }
+            }
+        }
+
+        try {
+            $legacyRoot = & $LegacyRootResolver
+            if (-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
+                $legacyRoot = $null
+            }
+            & $RuntimeInitializer `
+                $InstallRoot `
+                $Paths `
+                $RelayEndpoint `
+                $AuthorizationPolicy `
+                $ExternalSource `
+                $ServiceIdentityFile `
+                $ProfileKeyDirectory `
+                $legacyRoot `
+                $AllowNoRecovery
+        }
+        catch {
+            $operationError = $_
+            if ($CandidateCreated) {
+                try {
+                    & $CandidateRemover $Paths $CandidateVersion
+                }
+                catch {
+                    throw "Runtime initialization failed and candidate cleanup failed: $(
+                        $operationError.Exception.Message
+                    )`nCleanup: $($_.Exception.Message)"
+                }
+            }
+            throw $operationError
+        }
+    }
+
     function Invoke-TransactionalRuntimeSwitch {
         param(
             [Parameter(Mandatory)]
