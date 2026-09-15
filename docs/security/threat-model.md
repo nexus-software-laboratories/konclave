@@ -127,9 +127,12 @@ effective policy as one generation, and polls every 500 milliseconds. Idle
 connections revalidate on publication and long delivery claims revalidate every 250
 milliseconds, so a successful durable change is observed within one second.
 Missing, empty, corrupt, unsafe, mismatched, unsupported, rolled-back, or unreadable
-state fails closed: the daemon stops admission, invalidates the projection, closes
-clients, and terminates rather than continuing with stale authority. AccountTrusted
-does not claim resistance to a hostile same-account durable rollback across process
+state at startup prevents endpoint binding. The same findings during reload stop
+admission, invalidate the projection, and close clients while the service remains
+alive but authority remains denied. A delayed read's late result is discarded, and
+only a subsequent fresh verified snapshot can restore access. Blocking-worker failure
+still terminates the service rather than risking an unowned task. AccountTrusted does
+not claim resistance to a hostile same-account durable rollback across process
 lifetimes.
 
 Terminal local request outcomes are sealed in the profile database and keyed by
@@ -359,7 +362,7 @@ internal route authority.
 | Malicious model/tool input | Schema validation, local authorization, bounded values, and explicit user-controlled policy |
 | Local service client impersonation | Owner-restricted endpoint, verified platform peer account, issuer/session role separation, proof of the exact private key, signed fresh protocol-v2 transcript, exact-profile finite grant, capability checks, and uniform rejection |
 | Account issuer substitution or theft | Exclusive creation, owner-only access, no symlink/reparse traversal, bounded canonical decoding, installer-owned public registration, key versioning, exact-path cleanup, and explicit AccountTrusted semantics |
-| Authorization-state corruption or process-lifetime rollback | Installation fingerprint binding, owner protection, schema and integrity validation, monotonic generation high-water checks, atomic snapshot publication, and fail-stop service shutdown on reload failure |
+| Authorization-state corruption or process-lifetime rollback | Installation fingerprint binding, owner protection, schema and integrity validation, monotonic generation high-water checks, atomic snapshot publication, failed-closed projection invalidation, client closure, late-snapshot discard, fresh-snapshot-only recovery, and fail-stop blocking-worker shutdown |
 | Shared-service endpoint squatting | Owner-protected well-known endpoint, single-instance service ownership, authenticated service/client transcript, and fail-closed startup when endpoint identity conflicts |
 | Cross-profile local attachment | Exact profile, session public key, harness, evidence, policy, expiry, and capabilities signed into one immutable grant binding; no profile-switch request |
 | False timeout or cancellation outcome | Session-scoped authenticated cancellation, explicit pre/post-commit state, sealed terminal-outcome journal, exact retry reconciliation, and no dropped-join cancellation claim |

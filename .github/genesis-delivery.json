@@ -10,6 +10,7 @@
     "Adapter conformance",
     "Actions storage conformance",
     "Agent plugin conformance",
+    "Authorization reload conformance",
     "Extension startup conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
@@ -56,6 +57,7 @@
         "adapter-conformance",
         "actions-storage-conformance",
         "agent-plugin-conformance",
+        "authorization-reload-conformance",
         "extension-startup-conformance",
         "package-plugin",
         "publish",
@@ -145,6 +147,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Authorization store conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/authorization-reload-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Authorization reload conformance"
       ]
     },
     {

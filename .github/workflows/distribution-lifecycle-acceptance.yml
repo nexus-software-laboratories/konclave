@@ -14,7 +14,7 @@ on:
       candidate_tag:
         description: Immutable candidate release tag
         required: false
-        default: v0.1.5
+        default: v0.1.6
         type: string
 
 permissions:
