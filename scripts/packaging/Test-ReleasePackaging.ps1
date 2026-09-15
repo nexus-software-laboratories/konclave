@@ -30,6 +30,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ReleasePackaging.Functions.ps1')
+. (Join-Path $PSScriptRoot 'WindowsExecutableSubsystem.Functions.ps1')
 
 function Expand-ReleaseArchive {
     param(
@@ -193,6 +194,17 @@ function Assert-ReleaseLayout {
                 )
             ) {
                 throw 'Windows client package is missing its shared-service host.'
+            }
+            if ([string]$Artifact.operatingSystem -ceq 'windows') {
+                $serviceExecutable = Join-Path (
+                    $ExtractedRoot
+                ) 'bin/KonclaveLocalService.exe'
+                $subsystem = Get-WindowsExecutableSubsystem -Path $serviceExecutable
+                if (
+                    (Resolve-WindowsExecutableSubsystem -Subsystem $subsystem) -cne 'Gui'
+                ) {
+                    throw 'Windows per-user local service is not windowless.'
+                }
             }
             $installerStateRoot = Join-Path (
                 [IO.Path]::GetTempPath()
