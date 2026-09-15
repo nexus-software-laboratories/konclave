@@ -92,6 +92,11 @@ jobs:
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
+            exclusive_sqlite_lock_fails_closed_without_stopping_recovery
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
             reload_failure_closes_clients_and_service_recovers
           cargo clippy \
             --locked \

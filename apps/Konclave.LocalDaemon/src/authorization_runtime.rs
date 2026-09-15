@@ -1018,7 +1018,8 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     use KonclaveDomainCore::Ed25519PublicKey;
     use KonclaveLocalAuthorizationStore::{
@@ -1033,6 +1034,7 @@ mod tests {
         create_or_verify_owner_protected_file, ensure_owner_protected_directory,
         open_or_create_owner_protected_file,
     };
+    use rusqlite::Connection;
     use tokio::sync::watch;
 
     use super::{
@@ -1222,6 +1224,89 @@ mod tests {
             )
         ));
 
+        runtime.reload_once().await.unwrap();
+        status.changed().await.unwrap();
+        assert!(matches!(
+            *status.borrow_and_update(),
+            AuthorizationRuntimeStatus::Active(_)
+        ));
+        assert!(runtime.issuer_is_known(
+            IssuerKeyId::from_bytes([7; 16]),
+            IssuerKeyVersion::new(1).unwrap(),
+            Ed25519PublicKey::from_bytes([8; 32]),
+            HarnessKind::Copilot,
+        ));
+    }
+
+    #[tokio::test]
+    async fn exclusive_sqlite_lock_fails_closed_without_stopping_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let installation_path = root
+            .path()
+            .join("service")
+            .join(LOCAL_SERVICE_INSTALLATION_FILE);
+        let fingerprint = InstallationFingerprint::from_bytes([13; 32]);
+        let setup_path = installation_path.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_owner_protected_directory(setup_path.parent().unwrap()).unwrap();
+            drop(
+                LocalAuthorizationStore::bootstrap(
+                    &setup_path,
+                    fingerprint,
+                    &AuthorizationPolicy::account_trusted(),
+                    &[issuer()],
+                    1,
+                )
+                .unwrap(),
+            );
+            create_or_verify_owner_protected_file(&setup_path, b"test-installation").unwrap();
+        })
+        .await
+        .unwrap();
+        let runtime = LiveAuthorizationRuntime::open(&installation_path, fingerprint)
+            .await
+            .unwrap();
+        let database_path = authorization_store_path(&installation_path).unwrap();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let database_lock = tokio::task::spawn_blocking(move || {
+            let connection = Connection::open(database_path).unwrap();
+            connection
+                .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+                .unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            connection.execute_batch("ROLLBACK;").unwrap();
+        });
+        locked_rx.await.unwrap();
+
+        let mut status = runtime.subscribe();
+        let delayed_runtime = Arc::clone(&runtime);
+        let delayed = tokio::spawn(async move { delayed_runtime.reload_once().await });
+        tokio::time::timeout(Duration::from_secs(2), status.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *status.borrow_and_update(),
+            AuthorizationRuntimeStatus::Failed(
+                AuthorizationRuntimeError::ObservationDeadlineExceeded
+            )
+        );
+        assert!(!delayed.is_finished());
+        assert!(!runtime.issuer_is_known(
+            IssuerKeyId::from_bytes([7; 16]),
+            IssuerKeyVersion::new(1).unwrap(),
+            Ed25519PublicKey::from_bytes([8; 32]),
+            HarnessKind::Copilot,
+        ));
+
+        release_tx.send(()).unwrap();
+        database_lock.await.unwrap();
+        assert_eq!(
+            delayed.await.unwrap(),
+            Err(AuthorizationRuntimeError::ObservationDeadlineExceeded)
+        );
         runtime.reload_once().await.unwrap();
         status.changed().await.unwrap();
         assert!(matches!(
