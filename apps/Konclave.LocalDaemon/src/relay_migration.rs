@@ -114,9 +114,7 @@ pub(crate) const fn resolve_relay_migration_action(
         | (
             RelayMigrationState::SourceActive | RelayMigrationState::RegistrationPrepared,
             RelayMigrationEvent::Finalize,
-        ) => {
-            RelayMigrationAction::Reject
-        }
+        ) => RelayMigrationAction::Reject,
     }
 }
 
@@ -884,13 +882,7 @@ fn abort_profiles(
         let Some(entry) = journal.profile(profile)? else {
             ensure!(
                 resolve_relay_migration_action(
-                    observed_profile_state(
-                        &active_endpoint,
-                        principal,
-                        None,
-                        source,
-                        destination,
-                    )?,
+                    observed_profile_state(&active_endpoint, principal, None, source, destination,)?,
                     RelayMigrationEvent::Abort,
                 ) == RelayMigrationAction::Complete,
                 "unjournaled profile changed during relay migration"
@@ -944,8 +936,7 @@ pub(crate) fn relay_migration_allows_profile(
     );
     let connection = Connection::open_with_flags(
         &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .context("opening relay migration journal for profile admission")?;
     let version: u32 = connection
@@ -1320,9 +1311,7 @@ mod tests {
         );
         let second_entry = journal.profile(&profiles[1].0).unwrap().unwrap();
         assert_eq!(second_entry.state, JournalProfileState::Prepared);
-        assert!(
-            !relay_migration_allows_profile(&profile_root, &profiles[0].0).unwrap()
-        );
+        assert!(!relay_migration_allows_profile(&profile_root, &profiles[0].0).unwrap());
 
         let resumed_requests = Arc::new(Mutex::new(Vec::new()));
         let resumed = RelayEnrollmentClient::new(FakeEnrollmentTransport {
