@@ -123,4 +123,4 @@ jobs:
             --all-targets \
             -- \
             -D warnings
-          pwsh ./scripts/installation/Test-InstallationRuntime.ps1
+          pwsh ./scripts/installation/Test-RelayMigrationInstaller.ps1

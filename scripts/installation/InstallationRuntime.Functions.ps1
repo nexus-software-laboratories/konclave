@@ -877,6 +877,96 @@ function Invoke-InstalledRelayMigration {
         }
     }
 
+function Invoke-TransactionalRelayMigration {
+        param(
+            [Parameter(Mandatory)]
+            [string]$InstallRoot,
+
+            [Parameter(Mandatory)]
+            $Paths,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [scriptblock]$MigrationInvoker,
+
+            [scriptblock]$ServiceInvoker,
+
+            [scriptblock]$HealthVerifier
+        )
+
+        if ($null -eq $MigrationInvoker) {
+            $MigrationInvoker = {
+                param($Mode)
+                $arguments = @{
+                    InstallRoot = $InstallRoot
+                    ConfigPath = $Paths.serviceConfigPath
+                    RelayEndpoint = $RelayEndpoint
+                }
+                if ($Mode -ceq 'Abort') {
+                    $arguments.Abort = $true
+                }
+                elseif ($Mode -ceq 'Finalize') {
+                    $arguments.Finalize = $true
+                }
+                Invoke-InstalledRelayMigration @arguments
+            }.GetNewClosure()
+        }
+        if ($null -eq $ServiceInvoker) {
+            $ServiceInvoker = {
+                param($Action)
+                Invoke-ServiceManager `
+                    -Action $Action `
+                    -InstallRoot $InstallRoot `
+                    -ConfigPath $Paths.serviceConfigPath
+            }.GetNewClosure()
+        }
+        if ($null -eq $HealthVerifier) {
+            $HealthVerifier = {
+                Wait-InstalledRuntimeHealth -InstallRoot $InstallRoot -Paths $Paths
+            }.GetNewClosure()
+        }
+
+        [void](& $ServiceInvoker 'Stop')
+        try {
+            $migration = & $MigrationInvoker 'Apply'
+        }
+        catch {
+            $migrationError = $_
+            try {
+                [void](& $MigrationInvoker 'Abort')
+                [void](& $ServiceInvoker 'Start')
+                [void](& $HealthVerifier)
+            }
+            catch {
+                throw "Relay migration failed and source recovery did not complete: $(
+                    $migrationError.Exception.Message
+                )`nRecovery: $($_.Exception.Message)"
+            }
+            throw $migrationError
+        }
+        try {
+            [void](& $ServiceInvoker 'Start')
+            [void](& $HealthVerifier)
+            return & $MigrationInvoker 'Finalize'
+        }
+        catch {
+            $healthError = $_
+            try {
+                [void](& $ServiceInvoker 'Stop')
+                [void](& $MigrationInvoker 'Abort')
+                [void](& $ServiceInvoker 'Start')
+                [void](& $HealthVerifier)
+            }
+            catch {
+                throw "Migrated relay did not become healthy and rollback failed: $(
+                    $healthError.Exception.Message
+                )`nRollback: $($_.Exception.Message)"
+            }
+            throw $healthError
+        }
+    }
+
 function Initialize-InstalledRuntime {
         param(
             [Parameter(Mandatory)]

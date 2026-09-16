@@ -200,74 +200,10 @@ if ($Action -ceq 'MigrateRelay') {
     }
     $record = Get-StateVersionRecord -State $state -Version ([string]$state.activeVersion)
     $root = Get-InstalledVersionRoot -Paths $paths -Record $record
-    [void](Invoke-ServiceManager `
-        -Action Stop `
+    $migration = Invoke-TransactionalRelayMigration `
         -InstallRoot $root `
-        -ConfigPath $paths.serviceConfigPath)
-    try {
-        $migration = Invoke-InstalledRelayMigration `
-            -InstallRoot $root `
-            -ConfigPath $paths.serviceConfigPath `
-            -RelayEndpoint $RelayEndpoint
-    }
-    catch {
-        $migrationError = $_
-        try {
-            [void](Invoke-InstalledRelayMigration `
-                -InstallRoot $root `
-                -ConfigPath $paths.serviceConfigPath `
-                -RelayEndpoint $RelayEndpoint `
-                -Abort)
-            [void](Invoke-ServiceManager `
-                -Action Start `
-                -InstallRoot $root `
-                -ConfigPath $paths.serviceConfigPath)
-            [void](Wait-InstalledRuntimeHealth -InstallRoot $root -Paths $paths)
-        }
-        catch {
-            throw "Relay migration failed and source recovery did not complete: $(
-                $migrationError.Exception.Message
-            )`nRecovery: $($_.Exception.Message)"
-        }
-        throw $migrationError
-    }
-    try {
-        [void](Invoke-ServiceManager `
-            -Action Start `
-            -InstallRoot $root `
-            -ConfigPath $paths.serviceConfigPath)
-        [void](Wait-InstalledRuntimeHealth -InstallRoot $root -Paths $paths)
-        $migration = Invoke-InstalledRelayMigration `
-            -InstallRoot $root `
-            -ConfigPath $paths.serviceConfigPath `
-            -RelayEndpoint $RelayEndpoint `
-            -Finalize
-    }
-    catch {
-        $healthError = $_
-        try {
-            [void](Invoke-ServiceManager `
-                -Action Stop `
-                -InstallRoot $root `
-                -ConfigPath $paths.serviceConfigPath)
-            [void](Invoke-InstalledRelayMigration `
-                -InstallRoot $root `
-                -ConfigPath $paths.serviceConfigPath `
-                -RelayEndpoint $RelayEndpoint `
-                -Abort)
-            [void](Invoke-ServiceManager `
-                -Action Start `
-                -InstallRoot $root `
-                -ConfigPath $paths.serviceConfigPath)
-            [void](Wait-InstalledRuntimeHealth -InstallRoot $root -Paths $paths)
-        }
-        catch {
-            throw "Migrated relay did not become healthy and rollback failed: $(
-                $healthError.Exception.Message
-            )`nRollback: $($_.Exception.Message)"
-        }
-        throw $healthError
-    }
+        -Paths $paths `
+        -RelayEndpoint $RelayEndpoint
     Write-RelayMigrationResult `
         -Version ([string]$record.version) `
         -InstallRoot $root `
