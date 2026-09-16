@@ -419,13 +419,18 @@ fn open_path_handle(path: &Path, access: u32, directory: bool) -> io::Result<Own
         } else {
             FILE_ATTRIBUTE_NORMAL
         };
+    let share = if directory {
+        FILE_SHARE_READ
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    };
     // SAFETY: `encoded` is live and NUL-terminated, no security-attribute pointer is
     // supplied, and the returned owned handle is adopted exactly once.
     let raw = unsafe {
         CreateFileW(
             encoded.as_ptr(),
             access,
-            FILE_SHARE_READ,
+            share,
             null_mut(),
             OPEN_EXISTING,
             flags,
@@ -915,8 +920,10 @@ mod tests {
         create_or_verify_owner_restricted_file(&file, b"exact").unwrap();
         assert!(create_or_verify_owner_restricted_file(&file, b"different").is_err());
         let mutable = directory.join("mutable");
+        let mutable_writer = open_or_create_owner_restricted_file(&mutable).unwrap();
         open_or_create_owner_restricted_file(&mutable).unwrap();
-        open_or_create_owner_restricted_file(&mutable).unwrap();
+        open_owner_restricted_file(&mutable).unwrap();
+        drop(mutable_writer);
         let mut value = Vec::new();
         open_owner_restricted_file(&file)
             .unwrap()
