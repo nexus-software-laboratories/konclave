@@ -101,6 +101,7 @@ foreach ($required in @(
     "github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml'",
     "github.event_name != 'workflow_run'",
     'Delete transient artifacts from completed eligible runs',
+    'Get-ActionsArtifactWorkflowRunIds',
     'Select-ActionsArtifactDeletion',
     'Repository still retains',
     'CACHE_BUDGET_BYTES: ''5368709120''',

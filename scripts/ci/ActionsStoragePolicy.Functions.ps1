@@ -2,6 +2,31 @@
 
 Set-StrictMode -Version Latest
 
+function Get-ActionsArtifactWorkflowRunIds {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Artifacts
+    )
+
+    $runIds = foreach ($artifact in $Artifacts) {
+        if ($null -eq $artifact) {
+            throw 'Actions artifact cannot be null.'
+        }
+        $workflowRun = $artifact.PSObject.Properties['workflow_run']
+        if ($null -eq $workflowRun -or $null -eq $workflowRun.Value) {
+            throw 'Actions artifact workflow run is missing.'
+        }
+        [long]$runId = $workflowRun.Value.id
+        if ($runId -le 0) {
+            throw "Actions artifact workflow run identifier is invalid: $runId"
+        }
+        $runId
+    }
+    return @($runIds | Sort-Object -Unique)
+}
+
 function Select-ActionsArtifactDeletion {
     [CmdletBinding()]
     param(

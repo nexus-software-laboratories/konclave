@@ -58,6 +58,47 @@ function New-Cache {
 $agentPluginWorkflow = '.github/workflows/agent-plugin-conformance.yml'
 $packageWorkflow = '.github/workflows/package-validation.yml'
 $publishWorkflow = '.github/workflows/publish-prerelease.yml'
+
+$emptyRunIds = @(
+    Get-ActionsArtifactWorkflowRunIds -Artifacts @()
+)
+if ($emptyRunIds.Count -ne 0) {
+    throw 'Empty Actions artifact inventory produced workflow run identifiers.'
+}
+$runIds = @(
+    Get-ActionsArtifactWorkflowRunIds -Artifacts @(
+        New-Artifact -Id 1 -RunId 12
+        New-Artifact -Id 2 -RunId 11
+        New-Artifact -Id 3 -RunId 12
+    )
+)
+if (($runIds -join ',') -cne '11,12') {
+    throw 'Actions artifact workflow run identifiers were not unique and ordered.'
+}
+$invalidArtifacts = [Collections.Generic.List[object]]::new()
+$invalidArtifacts.Add($null)
+$invalidArtifacts.Add([pscustomobject]@{
+    id = 1
+    size_in_bytes = 1
+})
+$invalidArtifacts.Add((New-Artifact -Id 1 -RunId 0))
+foreach ($invalidArtifact in $invalidArtifacts) {
+    $failed = $false
+    try {
+        [void](Get-ActionsArtifactWorkflowRunIds -Artifacts @($invalidArtifact))
+    }
+    catch {
+        $failed =
+            $_.Exception.Message.IndexOf(
+                'artifact',
+                [StringComparison]::OrdinalIgnoreCase
+            ) -ge 0
+    }
+    if (-not $failed) {
+        throw 'Invalid Actions artifact workflow run was not rejected.'
+    }
+}
+
 $artifactCases = @(
     @{
         name = 'empty'
