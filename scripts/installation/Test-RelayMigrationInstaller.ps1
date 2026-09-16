@@ -78,6 +78,7 @@ if (
         'migration:Finalize'
     ) -or
     [string]$success.result.action -cne 'RelayMigrated' -or
+    [int]$success.result.migratedProfiles -ne 2 -or
     $null -ne $success.error
 ) {
     throw 'Successful relay migration orchestration is invalid.'

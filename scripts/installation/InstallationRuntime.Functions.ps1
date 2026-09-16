@@ -948,7 +948,25 @@ function Invoke-TransactionalRelayMigration {
         try {
             [void](& $ServiceInvoker 'Start')
             [void](& $HealthVerifier)
-            return & $MigrationInvoker 'Finalize'
+            $finalized = & $MigrationInvoker 'Finalize'
+            if (
+                [string]$finalized.action -cne 'RelayMigrated' -or
+                [string]$finalized.sourceEndpoint -cne [string]$migration.sourceEndpoint -or
+                [string]$finalized.destinationEndpoint -cne (
+                    [string]$migration.destinationEndpoint
+                ) -or
+                [int]$finalized.totalProfiles -ne [int]$migration.totalProfiles
+            ) {
+                throw 'Relay migration finalization returned a conflicting result.'
+            }
+            return [pscustomobject][ordered]@{
+                action = [string]$finalized.action
+                sourceEndpoint = [string]$migration.sourceEndpoint
+                destinationEndpoint = [string]$migration.destinationEndpoint
+                totalProfiles = [int]$migration.totalProfiles
+                migratedProfiles = [int]$migration.migratedProfiles
+                unchangedProfiles = [int]$migration.unchangedProfiles
+            }
         }
         catch {
             $healthError = $_

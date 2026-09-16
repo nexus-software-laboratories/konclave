@@ -687,13 +687,13 @@ fn open_profiles(
         let file_type = entry
             .file_type()
             .context("reading relay migration profile file type")?;
+        ensure!(
+            !file_type.is_symlink(),
+            "relay migration profile entry cannot be a link"
+        );
         if !file_type.is_dir() {
             continue;
         }
-        ensure!(
-            !file_type.is_symlink(),
-            "relay migration profile directory cannot be a link"
-        );
         let profile = entry
             .file_name()
             .into_string()
@@ -701,9 +701,13 @@ fn open_profiles(
             .and_then(|value| {
                 ProfileId::parse(value).context("validating relay migration profile name")
             })?;
+        let profile_database = entry.path().join("profile.sqlite");
+        let profile_database_type = std::fs::symlink_metadata(&profile_database)
+            .context("reading relay migration profile database metadata")?
+            .file_type();
         ensure!(
-            entry.path().join("profile.sqlite").is_file(),
-            "relay migration profile database is missing"
+            profile_database_type.is_file() && !profile_database_type.is_symlink(),
+            "relay migration profile database is missing or linked"
         );
         profile_ids.push(profile);
     }
@@ -1002,7 +1006,7 @@ fn replace_relay_installation(
         .context("reading relay installation before replacement")?;
     ensure!(
         observed.endpoint().as_str() == current.endpoint().as_str()
-            || observed.endpoint().as_str() == destination.as_str(),
+            && observed.source() == current.source(),
         "relay installation changed during migration"
     );
     let bytes = replacement
@@ -1274,6 +1278,25 @@ mod tests {
             relay_migration_request_id(&destination, principal),
             relay_migration_request_id(&destination, RelayPrincipalId::from_bytes([8; 32]))
         );
+    }
+
+    #[cfg(all(
+        feature = "rust-service-mcp",
+        feature = "rust-service-sqlite",
+        unix
+    ))]
+    #[test]
+    fn relay_migration_rejects_linked_profile_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        let target = root.path().join("target-profile");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        ensure_owner_protected_directory(&target).unwrap();
+        symlink(&target, profile_root.join("linked-profile")).unwrap();
+
+        assert!(open_profiles(&profile_root, &MigrationCustody::Native).is_err());
     }
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
