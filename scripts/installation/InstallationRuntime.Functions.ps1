@@ -934,7 +934,15 @@ function Invoke-TransactionalRelayMigration {
         catch {
             $migrationError = $_
             try {
-                [void](& $MigrationInvoker 'Abort')
+                $aborted = & $MigrationInvoker 'Abort'
+                if (
+                    [string]$aborted.action -notin @(
+                        'RelayMigrationAborted',
+                        'RelayMigrationNotPending'
+                    )
+                ) {
+                    throw 'Relay migration abort returned a conflicting result.'
+                }
                 [void](& $ServiceInvoker 'Start')
                 [void](& $HealthVerifier)
             }
@@ -972,7 +980,10 @@ function Invoke-TransactionalRelayMigration {
             $healthError = $_
             try {
                 [void](& $ServiceInvoker 'Stop')
-                [void](& $MigrationInvoker 'Abort')
+                $aborted = & $MigrationInvoker 'Abort'
+                if ([string]$aborted.action -cne 'RelayMigrationAborted') {
+                    throw 'Relay migration rollback returned a conflicting result.'
+                }
                 [void](& $ServiceInvoker 'Start')
                 [void](& $HealthVerifier)
             }

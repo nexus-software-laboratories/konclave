@@ -25,11 +25,10 @@ function Invoke-TestRelayMigration {
             throw "synthetic $Mode failure"
         }
         [pscustomobject]@{
-            action = if ($Mode -ceq 'Finalize') {
-                'RelayMigrated'
-            }
-            else {
-                "RelayMigration$Mode"
+            action = switch ($Mode) {
+                'Abort' { 'RelayMigrationAborted' }
+                'Finalize' { 'RelayMigrated' }
+                default { 'RelayMigrationPendingHealth' }
             }
             sourceEndpoint = 'http://127.0.0.1:43180/'
             destinationEndpoint = 'https://relay.example.com/'

@@ -160,7 +160,6 @@ impl RelayMigrationJournal {
         requested_destination: &RelayEndpoint,
     ) -> anyhow::Result<Self> {
         let path = root.join(RELAY_MIGRATION_JOURNAL_FILE);
-        let existed = path.exists();
         drop(
             open_or_create_owner_protected_file(&path)
                 .context("opening owner-protected relay migration journal")?,
@@ -176,7 +175,21 @@ impl RelayMigrationJournal {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .context("reading relay migration journal version")?;
-        if version == 0 && !existed {
+        if version == 0 {
+            let table_count: i64 = connection
+                .query_row(
+                    "SELECT count(*)
+                     FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name NOT LIKE 'sqlite_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("inspecting unversioned relay migration journal")?;
+            ensure!(
+                table_count == 0,
+                "unversioned relay migration journal contains unexpected tables"
+            );
             ensure!(
                 current_endpoint.as_str() != requested_destination.as_str(),
                 "relay migration source and destination must differ"
@@ -1259,6 +1272,27 @@ mod tests {
                 parse_relay_migration_arguments(arguments.into_iter().map(OsString::from)).is_err()
             );
         }
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[test]
+    fn empty_precreated_migration_journal_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        drop(
+            open_or_create_owner_protected_file(
+                &profile_root.join(RELAY_MIGRATION_JOURNAL_FILE),
+            )
+            .unwrap(),
+        );
+        let source = endpoint("http://127.0.0.1:43180");
+        let destination = endpoint("https://relay.example.com");
+
+        let journal =
+            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        assert_eq!(journal.committed_profile_count().unwrap(), 0);
+        journal.delete().unwrap();
     }
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
