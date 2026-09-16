@@ -906,16 +906,13 @@ where
                 tokio::time::sleep(RELAY_MIGRATION_ENROLLMENT_PACING).await;
                 return Ok(response);
             }
-            Err(
-                error @ KonclaveClientError::RelayRejected {
-                    status: 429,
-                    ref relay_code,
-                },
-            ) if relay_code == "relay_enrollment_rate_limited"
+            Err(KonclaveClientError::RelayRejected {
+                status: 429,
+                relay_code,
+            }) if relay_code == "relay_enrollment_rate_limited"
                 && attempt < MAX_RELAY_MIGRATION_ENROLLMENT_ATTEMPTS =>
             {
                 tokio::time::sleep(RELAY_MIGRATION_RATE_LIMIT_BACKOFF).await;
-                drop(error);
             }
             Err(error) => return Err(error),
         }
