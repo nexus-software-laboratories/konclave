@@ -48,15 +48,18 @@ jobs:
           fi
 
   delete-run-artifacts:
-    name: Delete completed-run artifacts
+    name: Delete transient artifacts
     if: >-
-      github.event_name == 'workflow_run' &&
+      github.event_name != 'workflow_run' ||
       (
-        github.event.workflow_run.path == '.github/workflows/agent-plugin-conformance.yml' ||
-        github.event.workflow_run.path == '.github/workflows/package-validation.yml' ||
+        github.event_name == 'workflow_run' &&
         (
-          github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml' &&
-          github.event.workflow_run.conclusion == 'success'
+          github.event.workflow_run.path == '.github/workflows/agent-plugin-conformance.yml' ||
+          github.event.workflow_run.path == '.github/workflows/package-validation.yml' ||
+          (
+            github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml' &&
+            github.event.workflow_run.conclusion == 'success'
+          )
         )
       )
     needs: authorize-storage-cleanup
@@ -66,39 +69,108 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Delete artifacts from completed package run
-        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Delete transient artifacts from completed eligible runs
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          set -euo pipefail
-          mapfile -t artifact_ids < <(
-            gh api \
-              --paginate \
-              "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
-              --jq '.artifacts[].id'
+          . ./scripts/ci/ActionsStoragePolicy.Functions.ps1
+
+          function Get-RepositoryArtifacts {
+            $items = @(
+              gh api `
+                --paginate `
+                "repos/$env:REPOSITORY/actions/artifacts?per_page=100" `
+                --jq '.artifacts[]' |
+                  ConvertFrom-Json
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not list repository Actions artifacts.'
+            }
+            return $items
+          }
+
+          function Get-ArtifactWorkflowRuns {
+            param(
+              [Parameter(Mandatory)]
+              [AllowEmptyCollection()]
+              [object[]]$Artifacts
+            )
+
+            $runs = foreach ($runId in @(
+              $Artifacts.workflow_run.id |
+                Sort-Object -Unique
+            )) {
+              $run = gh api `
+                "repos/$env:REPOSITORY/actions/runs/$runId" |
+                  ConvertFrom-Json -Depth 20
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not read Actions workflow run $runId."
+              }
+              $run
+            }
+            return @($runs)
+          }
+
+          $deleted = 0
+          $alreadyAbsent = 0
+          [long]$deletedBytes = 0
+          for ($pass = 1; $pass -le 3; $pass++) {
+            $artifacts = @(Get-RepositoryArtifacts)
+            $runs = @(Get-ArtifactWorkflowRuns -Artifacts $artifacts)
+            $selection = Select-ActionsArtifactDeletion `
+              -Artifacts $artifacts `
+              -Runs $runs
+            if ($selection.deleteIds.Count -eq 0) {
+              break
+            }
+            $sizesById = [Collections.Generic.Dictionary[long, long]]::new()
+            foreach ($artifact in $artifacts) {
+              $sizesById.Add(
+                [long]$artifact.id,
+                [long]$artifact.size_in_bytes
+              )
+            }
+            foreach ($artifactId in $selection.deleteIds) {
+              $output = gh api `
+                --method DELETE `
+                "repos/$env:REPOSITORY/actions/artifacts/$artifactId" 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                $diagnostics = $output -join "`n"
+                if ($diagnostics -notmatch '\bHTTP 404\b') {
+                  throw "Could not delete Actions artifact $artifactId.`n$diagnostics"
+                }
+                # The local demo may win this exact-artifact deletion race.
+                Write-Output "::notice::Artifact $artifactId was already deleted."
+                $alreadyAbsent++
+                continue
+              }
+              $deleted++
+              $deletedBytes += $sizesById[[long]$artifactId]
+            }
+          }
+
+          $remainingArtifacts = @(Get-RepositoryArtifacts)
+          $remainingRuns = @(
+            Get-ArtifactWorkflowRuns -Artifacts $remainingArtifacts
           )
-          for artifact_id in "${artifact_ids[@]}"; do
-            if ! gh api \
-              --method DELETE \
-              "repos/$REPOSITORY/actions/artifacts/$artifact_id"; then
-              # The local demo has an authenticated exact-run fallback and may
-              # win this deletion race; the final count remains authoritative.
-              echo "::notice::Artifact $artifact_id was already handled by the caller."
-            fi
-          done
-          remaining="$(
-            gh api \
-              "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=1" \
-              --jq '.total_count'
-          )"
-          if [ "$remaining" != '0' ]; then
-            echo "::error::Package run still retains $remaining artifact(s)."
-            exit 1
-          fi
-          echo "Deleted ${#artifact_ids[@]} transient package artifact(s)."
+          $remainingSelection = Select-ActionsArtifactDeletion `
+            -Artifacts $remainingArtifacts `
+            -Runs $remainingRuns
+          if ($remainingSelection.deleteIds.Count -ne 0) {
+            throw (
+              "Repository still retains " +
+              "$($remainingSelection.deleteIds.Count) eligible artifact(s)."
+            )
+          }
+          (
+            "Deleted $deleted transient artifact(s), totaling $deletedBytes bytes; " +
+            "$alreadyAbsent were already absent."
+          )
 
   prune-actions-caches:
     name: Bound Actions caches

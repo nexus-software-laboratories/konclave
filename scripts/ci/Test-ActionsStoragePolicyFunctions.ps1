@@ -6,6 +6,39 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ActionsStoragePolicy.Functions.ps1')
 
+function New-Artifact {
+    param(
+        [long]$Id,
+        [long]$RunId,
+        [long]$Size = 1
+    )
+
+    return [pscustomobject]@{
+        id = $Id
+        size_in_bytes = $Size
+        workflow_run = [pscustomobject]@{
+            id = $RunId
+        }
+    }
+}
+
+function New-WorkflowRun {
+    param(
+        [long]$Id,
+        [string]$Path,
+        [string]$Status = 'completed',
+        [AllowEmptyString()]
+        [string]$Conclusion = 'success'
+    )
+
+    return [pscustomobject]@{
+        id = $Id
+        path = $Path
+        status = $Status
+        conclusion = $Conclusion
+    }
+}
+
 function New-Cache {
     param(
         [long]$Id,
@@ -19,6 +52,145 @@ function New-Cache {
         size_in_bytes = $Size
         ref = $Ref
         last_accessed_at = $LastAccessed
+    }
+}
+
+$agentPluginWorkflow = '.github/workflows/agent-plugin-conformance.yml'
+$packageWorkflow = '.github/workflows/package-validation.yml'
+$publishWorkflow = '.github/workflows/publish-prerelease.yml'
+$artifactCases = @(
+    @{
+        name = 'empty'
+        artifacts = @()
+        runs = @()
+        delete = @()
+        deleteBytes = 0
+    },
+    @{
+        name = 'completed plugin and package runs'
+        artifacts = @(
+            New-Artifact -Id 1 -RunId 11 -Size 40
+            New-Artifact -Id 2 -RunId 12 -Size 60
+        )
+        runs = @(
+            New-WorkflowRun -Id 11 -Path $agentPluginWorkflow -Conclusion 'failure'
+            New-WorkflowRun -Id 12 -Path $packageWorkflow -Conclusion 'cancelled'
+        )
+        delete = @(1, 2)
+        deleteBytes = 100
+    },
+    @{
+        name = 'successful publication'
+        artifacts = @(New-Artifact -Id 3 -RunId 13 -Size 75)
+        runs = @(New-WorkflowRun -Id 13 -Path $publishWorkflow)
+        delete = @(3)
+        deleteBytes = 75
+    },
+    @{
+        name = 'failed publication retained for resume'
+        artifacts = @(New-Artifact -Id 4 -RunId 14 -Size 80)
+        runs = @(New-WorkflowRun -Id 14 -Path $publishWorkflow -Conclusion 'failure')
+        delete = @()
+        deleteBytes = 0
+    },
+    @{
+        name = 'active and unrelated runs retained'
+        artifacts = @(
+            New-Artifact -Id 5 -RunId 15 -Size 20
+            New-Artifact -Id 6 -RunId 16 -Size 30
+        )
+        runs = @(
+            New-WorkflowRun `
+                -Id 15 `
+                -Path $packageWorkflow `
+                -Status 'in_progress' `
+                -Conclusion ''
+            New-WorkflowRun -Id 16 -Path '.github/workflows/other.yml'
+        )
+        delete = @()
+        deleteBytes = 0
+    },
+    @{
+        name = 'mixed repository sweep'
+        artifacts = @(
+            New-Artifact -Id 7 -RunId 17 -Size 10
+            New-Artifact -Id 8 -RunId 18 -Size 20
+            New-Artifact -Id 9 -RunId 19 -Size 30
+        )
+        runs = @(
+            New-WorkflowRun -Id 17 -Path $packageWorkflow
+            New-WorkflowRun -Id 18 -Path $publishWorkflow -Conclusion 'failure'
+            New-WorkflowRun -Id 19 -Path '.github/workflows/other.yml'
+        )
+        delete = @(7)
+        deleteBytes = 10
+    }
+)
+
+foreach ($case in $artifactCases) {
+    $result = Select-ActionsArtifactDeletion `
+        -Artifacts $case.artifacts `
+        -Runs $case.runs
+    $actualIds = @($result.deleteIds)
+    $expectedIds = @($case.delete)
+    if (
+        ($actualIds -join ',') -cne ($expectedIds -join ',') -or
+        [long]$result.deleteBytes -ne [long]$case.deleteBytes -or
+        [int]$result.retainedCount -ne ($case.artifacts.Count - $expectedIds.Count)
+    ) {
+        throw "Actions artifact selection failed: $($case.name)"
+    }
+}
+
+foreach ($invalid in @(
+    @{
+        artifacts = @(New-Artifact -Id 0 -RunId 1)
+        runs = @(New-WorkflowRun -Id 1 -Path $packageWorkflow)
+        error = 'artifact identifier'
+    },
+    @{
+        artifacts = @(
+            New-Artifact -Id 1 -RunId 1
+            New-Artifact -Id 1 -RunId 1
+        )
+        runs = @(New-WorkflowRun -Id 1 -Path $packageWorkflow)
+        error = 'duplicated'
+    },
+    @{
+        artifacts = @(New-Artifact -Id 1 -RunId 1 -Size -1)
+        runs = @(New-WorkflowRun -Id 1 -Path $packageWorkflow)
+        error = 'negative'
+    },
+    @{
+        artifacts = @(New-Artifact -Id 1 -RunId 2)
+        runs = @(New-WorkflowRun -Id 1 -Path $packageWorkflow)
+        error = 'workflow run'
+    },
+    @{
+        artifacts = @()
+        runs = @(
+            New-WorkflowRun -Id 1 -Path $packageWorkflow
+            New-WorkflowRun -Id 1 -Path $packageWorkflow
+        )
+        error = 'workflow run identifier'
+    },
+    @{
+        artifacts = @()
+        runs = @(New-WorkflowRun -Id 1 -Path '')
+        error = 'path'
+    }
+)) {
+    $failed = $false
+    try {
+        [void](Select-ActionsArtifactDeletion `
+            -Artifacts $invalid.artifacts `
+            -Runs $invalid.runs)
+    }
+    catch {
+        $failed = $_.Exception.Message.Contains([string]$invalid.error)
+    }
+    if (-not $failed) {
+        throw "Invalid Actions artifact input was not rejected: $($invalid.error)"
     }
 }
 
@@ -144,4 +316,7 @@ foreach ($invalid in @(
     }
 }
 
-Write-Output "Actions storage decision tests passed: $($cases.Count) finite cases."
+Write-Output (
+    "Actions storage decision tests passed: $($artifactCases.Count) artifact and " +
+    "$($cases.Count) cache cases."
+)
