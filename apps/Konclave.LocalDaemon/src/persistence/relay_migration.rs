@@ -21,9 +21,7 @@ impl ProfileStore {
         if active_endpoint.as_str() == destination.as_str() {
             return Ok(false);
         }
-        if active_endpoint.as_str() != source.as_str()
-            || source.as_str() == destination.as_str()
-        {
+        if active_endpoint.as_str() != source.as_str() || source.as_str() == destination.as_str() {
             return Err(ProfileStoreError::RelayMigrationConflict);
         }
         let migrated = credential
@@ -41,11 +39,7 @@ impl ProfileStore {
                  WHERE singleton_id = 1
                    AND relay_endpoint = ?3
                    AND sealed_relay_credential IS NOT NULL",
-                params![
-                    destination.as_str(),
-                    migrated.as_bytes(),
-                    source.as_str(),
-                ],
+                params![destination.as_str(), migrated.as_bytes(), source.as_str(),],
             )
             .map_err(|_| ProfileStoreError::Storage)?
             != 1

@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 use KonclaveClientLibrary::{
-    default_profile_root, RelayEnrollmentCredential, RelayEnrollmentSourceConfig,
-    RelayInstallationConfig, RELAY_INSTALLATION_CONFIG_FILE,
-    relay_enrollment_installation_id,
+    default_profile_root, relay_enrollment_installation_id, RelayEnrollmentCredential,
+    RelayEnrollmentSourceConfig, RelayInstallationConfig, RELAY_INSTALLATION_CONFIG_FILE,
 };
 use KonclaveSecretStorage::NativeEnrollmentCredentialStore;
 

@@ -12,8 +12,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let report =
-        konclave_local_daemon::run_relay_migration(std::env::args_os().skip(1)).await?;
+    let report = konclave_local_daemon::run_relay_migration(std::env::args_os().skip(1)).await?;
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }

@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveClientLibrary::{
     EnrollmentRequestId, HttpRelayEnrollmentTransport, RELAY_INSTALLATION_CONFIG_FILE,
-    RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentRequest,
-    RelayEnrollmentSourceConfig, RelayEnrollmentTransport, RelayInstallationConfig,
-    RelayPrincipalId, relay_enrollment_installation_id,
+    RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentRequest, RelayEnrollmentSourceConfig,
+    RelayEnrollmentTransport, RelayInstallationConfig, RelayPrincipalId,
+    relay_enrollment_installation_id,
 };
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveCryptographicCore::fill_random;
@@ -196,10 +196,7 @@ impl RelayMigrationJournal {
                             source_endpoint,
                             destination_endpoint
                          ) VALUES (1, ?1, ?2)",
-                        params![
-                            current_endpoint.as_str(),
-                            requested_destination.as_str(),
-                        ],
+                        params![current_endpoint.as_str(), requested_destination.as_str(),],
                     )
                     .context("recording relay migration contract")?
                     == 1,
@@ -240,18 +237,14 @@ impl RelayMigrationJournal {
         ensure!(
             source.as_str() != destination.as_str()
                 && destination.as_str() == requested_destination.as_str()
-                && (
-                    current_endpoint.as_str() == source.as_str()
-                        || current_endpoint.as_str() == destination.as_str()
-                ),
+                && (current_endpoint.as_str() == source.as_str()
+                    || current_endpoint.as_str() == destination.as_str()),
             "relay migration journal conflicts with the requested endpoints"
         );
         let profile_count: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM relay_migration_profile",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT count(*) FROM relay_migration_profile", [], |row| {
+                row.get(0)
+            })
             .context("counting relay migration profiles")?;
         ensure!(
             (0..=i64::try_from(MAX_RELAY_MIGRATION_PROFILES).unwrap_or(i64::MAX))
@@ -369,8 +362,7 @@ impl RelayMigrationJournal {
             .profile(&entry.profile)?
             .context("committed relay migration profile disappeared")?;
         ensure!(
-            current.request == entry.request
-                && current.state == JournalProfileState::Committed,
+            current.request == entry.request && current.state == JournalProfileState::Committed,
             "relay migration profile commit conflicts with the journal"
         );
         Ok(())
@@ -431,9 +423,7 @@ impl RelayMigrationLock {
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(TryLockError::WouldBlock) => bail!("another relay migration is active"),
-            Err(TryLockError::Error(error)) => {
-                Err(error).context("acquiring relay migration lock")
-            }
+            Err(TryLockError::Error(error)) => Err(error).context("acquiring relay migration lock"),
         }
     }
 }
@@ -549,9 +539,7 @@ async fn migrate_relay_endpoint(
         });
     }
     let profiles = open_profiles(&root, &custody)?;
-    if !RelayMigrationJournal::exists(&root)
-        && current_endpoint.as_str() == destination.as_str()
-    {
+    if !RelayMigrationJournal::exists(&root) && current_endpoint.as_str() == destination.as_str() {
         for (_, store) in &profiles {
             let (endpoint, _) = store.relay_migration_identity()?;
             ensure!(
@@ -573,8 +561,7 @@ async fn migrate_relay_endpoint(
     let destination = journal.destination.clone();
     ensure_journal_profiles_exist(&journal, &profiles)?;
     if abort {
-        let (restored, unchanged) =
-            abort_profiles(&profiles, &journal, &source, &destination)?;
+        let (restored, unchanged) = abort_profiles(&profiles, &journal, &source, &destination)?;
         replace_relay_installation(&root, &current_installation, &source)?;
         journal.delete()?;
         return Ok(RelayMigrationReport {
@@ -862,8 +849,7 @@ mod tests {
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use KonclaveClientLibrary::{
-        KonclaveClientError, RelayAccessCredential, RelayEnrollmentOutcome,
-        RelayEnrollmentResponse,
+        KonclaveClientError, RelayAccessCredential, RelayEnrollmentOutcome, RelayEnrollmentResponse,
     };
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use KonclaveSecretStorage::{
@@ -1024,7 +1010,12 @@ mod tests {
         );
         for arguments in [
             Vec::<&str>::new(),
-            vec!["--config", "relative", "--relay-endpoint", "https://relay.example.com"],
+            vec![
+                "--config",
+                "relative",
+                "--relay-endpoint",
+                "https://relay.example.com",
+            ],
             vec!["--config", absolute, "--other", "https://relay.example.com"],
             vec![
                 "--config",
@@ -1068,10 +1059,7 @@ mod tests {
             profiles[0].1.relay_migration_identity().unwrap().0,
             destination
         );
-        assert_eq!(
-            profiles[1].1.relay_migration_identity().unwrap().0,
-            source
-        );
+        assert_eq!(profiles[1].1.relay_migration_identity().unwrap().0, source);
         let second_entry = journal.profile(&profiles[1].0).unwrap().unwrap();
         assert_eq!(second_entry.state, JournalProfileState::Prepared);
 
@@ -1091,10 +1079,7 @@ mod tests {
             &[second_entry.request]
         );
         for (profile, store) in &profiles {
-            assert_eq!(
-                store.relay_migration_identity().unwrap().0,
-                destination
-            );
+            assert_eq!(store.relay_migration_identity().unwrap().0, destination);
             assert_eq!(
                 journal.profile(profile).unwrap().unwrap().state,
                 JournalProfileState::Committed

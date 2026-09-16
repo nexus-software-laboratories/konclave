@@ -15,8 +15,7 @@ pub const RELAY_INSTALLATION_CONFIG_FILE: &str = "relay-installation.conf";
 
 const MAX_INSTALLATION_CONFIG_BYTES: usize = 4 * 1024;
 const MAX_INSTALLATION_ID_BYTES: usize = 64;
-const RELAY_ENROLLMENT_INSTALLATION_DOMAIN: &[u8] =
-    b"konclave:relay-enrollment-installation:1\0";
+const RELAY_ENROLLMENT_INSTALLATION_DOMAIN: &[u8] = b"konclave:relay-enrollment-installation:1\0";
 
 /// Derives the native credential-store identifier for one enrollment authority and
 /// exact relay endpoint.
