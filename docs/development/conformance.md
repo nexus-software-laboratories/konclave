@@ -28,13 +28,16 @@ deterministic delayed-read recovery, a real exclusive SQLite-lock boundary test,
 shared-service client closure and fresh-snapshot recovery, Rust formatting, and
 Clippy before distribution or package integration relies on the behavior.
 
-`Relay migration conformance` is the focused draft-capable gate for moving durable
-profiles between self-hosted relay endpoints. It runs the exhaustive migration
-transition table, shared installation-identity derivation, exact endpoint-bound
-credential resealing, interrupted apply/resume and local abort, partial-migration
-profile admission denial, exact retry after stable enrollment rate limiting, repeated
-migration against a real enrollment endpoint, a real 30-profile batch above one relay
-rate window, installer argument contracts, Rust formatting, and all-target Clippy.
+`Relay migration conformance` and `Relay migration Windows conformance` are the
+focused draft-capable gates for moving durable profiles between self-hosted relay
+endpoints. They run the exhaustive migration transition table, shared
+installation-identity derivation, exact endpoint-bound credential resealing,
+interrupted apply/resume and local abort, partial-migration profile admission denial,
+exact retry after stable enrollment rate limiting, repeated migration against a real
+enrollment endpoint, a real 30-profile batch above one relay rate window, installer
+argument contracts, Rust formatting, and component lint. The Windows gate additionally
+proves exact owner-restricted file replacement and the packaged PowerShell
+orchestration scope.
 
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared

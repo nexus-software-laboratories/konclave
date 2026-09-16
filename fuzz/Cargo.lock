@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "KonclaveClientLibrary"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveCryptographicCore"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveDomainCore"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "thiserror",
  "zeroize",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveProtectedHttp"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "reqwest",
  "rustls",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveProtocolContracts"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveRelayAuthentication",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveRelayAuthentication"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "KonclaveDomainCore",
  "sha2",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveSecretStorage"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "KonclaveWindowsSecurity",
  "aws-lc-rs",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveWindowsSecurity"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "thiserror",
  "tokio",
@@ -446,7 +446,7 @@ checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
 name = "fallible-streaming-iterator"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
