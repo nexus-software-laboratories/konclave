@@ -212,7 +212,11 @@ installation configuration last, and restarts the service. A separate owner-prot
 journal survives process interruption. If apply or health validation fails, the
 installer aborts the journal locally, restores every changed profile and the source
 installation configuration, and restarts the source service. A successful health
-check finalizes and removes the journal.
+check finalizes and removes the journal. Relay installation replacement remains
+atomic and owner-protected on every supported platform. If abort is interrupted after
+profiles return to the source but before journal removal, repeating abort completes
+that exact recovery; repeating apply instead resumes the deterministic destination
+requests.
 
 The migration preserves profile identity, MLS conversations, and relay principals.
 It does not copy opaque envelopes or cursors stored by the source relay. Coordinate

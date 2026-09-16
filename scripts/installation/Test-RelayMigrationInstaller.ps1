@@ -132,4 +132,96 @@ if (
     throw 'Profile-root protection failure did not restore the source service.'
 }
 
+$defaultEvents = [Collections.Generic.List[string]]::new()
+$functionNames = @(
+    'Invoke-InstalledRelayMigration',
+    'Invoke-ServiceManager',
+    'Set-OwnerOnlyDirectory',
+    'Wait-InstalledRuntimeHealth'
+)
+$originalFunctions = @{}
+foreach ($name in $functionNames) {
+    $originalFunctions[$name] = (Get-Item -LiteralPath "Function:$name").ScriptBlock
+}
+try {
+    Set-Item -LiteralPath Function:Invoke-ServiceManager -Value {
+        param(
+            [string]$Action,
+            [string]$InstallRoot,
+            [string]$ConfigPath
+        )
+        $defaultEvents.Add("service:$Action")
+    }
+    Set-Item -LiteralPath Function:Set-OwnerOnlyDirectory -Value {
+        param([string]$Path)
+        $defaultEvents.Add('protect')
+        return $Path
+    }
+    Set-Item -LiteralPath Function:Wait-InstalledRuntimeHealth -Value {
+        param(
+            [string]$InstallRoot,
+            $Paths
+        )
+        $defaultEvents.Add('health')
+    }
+    Set-Item -LiteralPath Function:Invoke-InstalledRelayMigration -Value {
+        param(
+            [string]$InstallRoot,
+            [string]$ConfigPath,
+            [string]$RelayEndpoint,
+            [switch]$Abort,
+            [switch]$Finalize
+        )
+        $mode = if ($Abort) {
+            'Abort'
+        }
+        elseif ($Finalize) {
+            'Finalize'
+        }
+        else {
+            'Apply'
+        }
+        $defaultEvents.Add("migration:$mode")
+        [pscustomobject]@{
+            action = if ($Finalize) {
+                'RelayMigrated'
+            }
+            elseif ($Abort) {
+                'RelayMigrationAborted'
+            }
+            else {
+                'RelayMigrationPendingHealth'
+            }
+            sourceEndpoint = 'http://127.0.0.1:43180/'
+            destinationEndpoint = 'https://relay.example.com/'
+            totalProfiles = 2
+            migratedProfiles = 2
+            unchangedProfiles = 0
+        }
+    }
+
+    $defaultPaths = [pscustomobject]@{
+        serviceConfigPath = 'C:\Konclave\service.json'
+        profileRoot = 'C:\Konclave\profiles'
+    }
+    $defaultResult = Invoke-TransactionalRelayMigration `
+        -InstallRoot 'C:\Konclave\runtime' `
+        -Paths $defaultPaths `
+        -RelayEndpoint 'https://relay.example.com'
+    if (
+        ($defaultEvents -join '|') -cne (
+            'service:Stop|protect|migration:Apply|service:Start|health|' +
+            'migration:Finalize'
+        ) -or
+        [string]$defaultResult.action -cne 'RelayMigrated'
+    ) {
+        throw 'Default relay migration orchestration lost installer function scope.'
+    }
+}
+finally {
+    foreach ($name in $functionNames) {
+        Set-Item -LiteralPath "Function:$name" -Value $originalFunctions[$name]
+    }
+}
+
 Write-Output 'Relay migration installer orchestration passed.'
