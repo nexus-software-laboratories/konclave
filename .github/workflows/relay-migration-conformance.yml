@@ -237,6 +237,7 @@ jobs:
           }
           cargo clippy `
             --locked `
+            --no-deps `
             --package KonclaveWindowsSecurity `
             --all-targets `
             -- `
@@ -246,6 +247,7 @@ jobs:
           }
           cargo clippy `
             --locked `
+            --no-deps `
             --package KonclaveSecretStorage `
             --all-targets `
             -- `
@@ -255,6 +257,7 @@ jobs:
           }
           cargo clippy `
             --locked `
+            --no-deps `
             --package KonclaveLocalDaemon `
             --all-targets `
             -- `
