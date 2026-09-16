@@ -17,8 +17,6 @@ use KonclaveClientLibrary::{
     relay_enrollment_installation_id,
 };
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
-use KonclaveCryptographicCore::fill_random;
-#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveDomainCore::ProtocolVersion;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveLocalServiceTransport::{LocalServiceInstallation, LocalServiceProfileCustody};
@@ -36,6 +34,8 @@ use fs4::{FileExt, TryLockError};
 use rusqlite::{Connection, OptionalExtension as _, params};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use serde::Serialize;
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+use sha2::{Digest as _, Sha256};
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use crate::persistence::{LockedProfile, ProfileId, ProfileStore};
@@ -50,6 +50,8 @@ const RELAY_MIGRATION_LOCK_FILE: &str = "relay-endpoint-migration.lock";
 const RELAY_MIGRATION_JOURNAL_SCHEMA_VERSION: u32 = 1;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 const MAX_RELAY_MIGRATION_PROFILES: usize = 256;
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+const RELAY_MIGRATION_REQUEST_DOMAIN: &[u8] = b"konclave:relay-migration-request:1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayMigrationState {
@@ -305,11 +307,9 @@ impl RelayMigrationJournal {
             );
             return Ok(existing);
         }
-        let mut request_id = [0_u8; EnrollmentRequestId::LENGTH];
-        fill_random(&mut request_id).context("generating relay migration request identifier")?;
         let request = RelayEnrollmentRequest::new(
             ProtocolVersion::application_v1(),
-            EnrollmentRequestId::from_bytes(request_id),
+            relay_migration_request_id(&self.destination, principal),
             principal,
         );
         ensure!(
@@ -336,6 +336,21 @@ impl RelayMigrationJournal {
             request,
             state: JournalProfileState::Prepared,
         })
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    fn relay_migration_request_id(
+        destination: &RelayEndpoint,
+        principal: RelayPrincipalId,
+    ) -> EnrollmentRequestId {
+        let mut digest = Sha256::new();
+        digest.update(RELAY_MIGRATION_REQUEST_DOMAIN);
+        digest.update(destination.as_str().as_bytes());
+        digest.update(principal.as_bytes());
+        let digest = digest.finalize();
+        let mut request_id = [0_u8; EnrollmentRequestId::LENGTH];
+        request_id.copy_from_slice(&digest[..EnrollmentRequestId::LENGTH]);
+        EnrollmentRequestId::from_bytes(request_id)
     }
 
     fn mark_committed(&self, entry: &JournalProfile) -> anyhow::Result<()> {
@@ -849,7 +864,8 @@ mod tests {
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use KonclaveClientLibrary::{
-        KonclaveClientError, RelayAccessCredential, RelayEnrollmentOutcome, RelayEnrollmentResponse,
+        KonclaveClientError, RelayAccessCredential, RelayEnrollmentCredential,
+        RelayEnrollmentOutcome, RelayEnrollmentResponse,
     };
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use KonclaveSecretStorage::{
@@ -861,6 +877,8 @@ mod tests {
     use super::*;
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use crate::persistence::{LockedProfile, ProfileId, ProfileStore};
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    use crate::test_support::TestRelay;
 
     #[test]
     fn relay_migration_transition_table_is_exhaustive() {
@@ -1032,6 +1050,28 @@ mod tests {
     }
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[test]
+    fn relay_migration_request_identity_is_stable_and_destination_bound() {
+        let principal = RelayPrincipalId::from_bytes([7; 32]);
+        let destination = endpoint("https://relay.example.com");
+        assert_eq!(
+            relay_migration_request_id(&destination, principal),
+            relay_migration_request_id(&destination, principal)
+        );
+        assert_ne!(
+            relay_migration_request_id(&destination, principal),
+            relay_migration_request_id(&endpoint("https://other.example.com"), principal)
+        );
+        assert_ne!(
+            relay_migration_request_id(&destination, principal),
+            relay_migration_request_id(
+                &destination,
+                RelayPrincipalId::from_bytes([8; 32])
+            )
+        );
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     #[tokio::test]
     async fn interrupted_profile_migration_resumes_exact_requests() {
         let root = tempfile::tempdir().unwrap();
@@ -1130,5 +1170,71 @@ mod tests {
             );
         }
         journal.delete().unwrap();
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[tokio::test]
+    async fn real_relay_accepts_repeat_migration_to_one_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        let source = endpoint("http://127.0.0.1:43180");
+        let enrollment = [11; RelayEnrollmentCredential::LENGTH];
+        let relay = TestRelay::start_enrollment(enrollment).await;
+        let destination = endpoint(&relay.endpoint);
+        let profiles = vec![open_store(&profile_root, "profile-a", 12)];
+        let first_journal =
+            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let first = RelayEnrollmentClient::new(
+            HttpRelayEnrollmentTransport::new(
+                destination.clone(),
+                RelayEnrollmentCredential::from_bytes(enrollment),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            apply_profiles(
+                &profiles,
+                &first_journal,
+                &source,
+                &destination,
+                &first,
+            )
+            .await
+            .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            abort_profiles(&profiles, &first_journal, &source, &destination).unwrap(),
+            (1, 0)
+        );
+        first_journal.delete().unwrap();
+
+        let second_journal =
+            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let second = RelayEnrollmentClient::new(
+            HttpRelayEnrollmentTransport::new(
+                destination.clone(),
+                RelayEnrollmentCredential::from_bytes(enrollment),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            apply_profiles(
+                &profiles,
+                &second_journal,
+                &source,
+                &destination,
+                &second,
+            )
+            .await
+            .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            profiles[0].1.relay_migration_identity().unwrap().0.as_str(),
+            destination.as_str()
+        );
+        second_journal.delete().unwrap();
     }
 }

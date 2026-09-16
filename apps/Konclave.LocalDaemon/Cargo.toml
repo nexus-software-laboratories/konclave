@@ -55,6 +55,7 @@ rmcp = { version = "3.1.2", features = ["client", "server", "transport-io"], opt
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
+sha2.workspace = true
 tempfile = "3.27.0"
 thiserror.workspace = true
 tracing = { version = "0.1.44", optional = true }
@@ -76,7 +77,6 @@ KonclaveCommunityRelay = { path = "../Konclave.CommunityRelay" }
 KonclaveRelayCore = { path = "../../crates/Konclave.RelayCore" }
 axum = "0.8.9"
 rmcp = { version = "3.1.2", features = ["transport-child-process"] }
-sha2.workspace = true
 tokio = { version = "1.53.1", features = ["process", "test-util"] }
 tokio-tungstenite = "0.30.0"
 tracing = "0.1.44"
