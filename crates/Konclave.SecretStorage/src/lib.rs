@@ -27,6 +27,7 @@ pub use native::{
 pub use owner_file::{
     create_or_verify_owner_protected_file, ensure_owner_protected_directory,
     open_or_create_owner_protected_file, open_owner_protected_file,
+    replace_owner_protected_file,
 };
 pub use sealed_blob::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,

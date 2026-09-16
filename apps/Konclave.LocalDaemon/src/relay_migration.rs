@@ -5,8 +5,6 @@ use std::ffi::OsString;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use std::fs::File;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
-use std::io::Write as _;
-#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use std::path::{Path, PathBuf};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use std::time::Duration;
@@ -25,8 +23,8 @@ use KonclaveLocalServiceTransport::{LocalServiceInstallation, LocalServiceProfil
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveSecretStorage::{
     ExternalWrappingKeyProvider, NativeEnrollmentCredentialStore, NativeWrappingKeyProvider,
-    SecretSealer, ensure_owner_protected_directory, open_or_create_owner_protected_file,
-    open_owner_protected_file,
+    SecretSealer, create_or_verify_owner_protected_file, ensure_owner_protected_directory,
+    open_or_create_owner_protected_file, open_owner_protected_file, replace_owner_protected_file,
 };
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use anyhow::{Context as _, bail, ensure};
@@ -48,6 +46,8 @@ use crate::runtime::{load_installation_credential, read_relay_installation};
 const RELAY_MIGRATION_JOURNAL_FILE: &str = "relay-endpoint-migration.sqlite3";
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 const RELAY_MIGRATION_LOCK_FILE: &str = "relay-endpoint-migration.lock";
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+const RELAY_MIGRATION_REPLACEMENT_FILE: &str = "relay-installation.migration.tmp";
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 const RELAY_MIGRATION_JOURNAL_SCHEMA_VERSION: u32 = 1;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -1094,18 +1094,24 @@ fn replace_relay_installation(
     let bytes = replacement
         .encode()
         .context("encoding destination relay installation")?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(root).context("creating relay installation replacement")?;
-    temporary
-        .write_all(&bytes)
-        .context("writing relay installation replacement")?;
-    temporary
-        .as_file()
-        .sync_all()
-        .context("syncing relay installation replacement")?;
-    temporary
-        .persist(&path)
-        .map_err(|error| error.error)
+    let temporary = root.join(RELAY_MIGRATION_REPLACEMENT_FILE);
+    match std::fs::symlink_metadata(&temporary) {
+        Ok(_) => {
+            drop(
+                open_owner_protected_file(&temporary)
+                    .context("opening stale relay installation replacement")?,
+            );
+            std::fs::remove_file(&temporary)
+                .context("removing stale relay installation replacement")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).context("inspecting stale relay installation replacement");
+        }
+    }
+    create_or_verify_owner_protected_file(&temporary, &bytes)
+        .context("creating relay installation replacement")?;
+    replace_owner_protected_file(&temporary, &path)
         .context("replacing relay installation configuration")?;
     let verified = open_owner_protected_file(&path)
         .context("opening replaced relay installation configuration")?;

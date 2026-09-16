@@ -20,7 +20,7 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid,
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, INHERITED_ACE, IsValidSid,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
     OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenUser,
 };
@@ -28,7 +28,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+    FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
@@ -315,9 +316,6 @@ pub fn create_or_verify_owner_restricted_file(path: &Path, expected: &[u8]) -> i
 
 /// Opens an owner-only ordinary file without following its final reparse point.
 ///
-/// The file may carry the exact owner-only ACE explicitly or inherit that sole ACE
-/// from its separately verified owner-restricted parent directory.
-///
 /// # Errors
 ///
 /// Returns an operating-system error when the file is absent, linked, not owned by
@@ -332,6 +330,46 @@ pub fn open_owner_restricted_file(path: &Path) -> io::Result<File> {
     verify_file_handle(&handle)?;
     verify_owner_only_handle(handle.as_raw_handle().cast::<c_void>(), &identity.sid, 0)?;
     Ok(File::from(handle))
+}
+
+/// Atomically replaces one owner-restricted file with another in the same directory.
+///
+/// Both source and destination must already be exact owner-restricted ordinary files.
+/// The replacement preserves the source file's verified descriptor and is flushed
+/// through the Windows move operation before returning.
+///
+/// # Errors
+///
+/// Returns an operating-system error when either path is unsafe, their parents differ,
+/// the atomic replacement fails, or the resulting destination is not owner-restricted.
+pub fn replace_owner_restricted_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if source_parent != destination_parent {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    drop(open_owner_restricted_file(source)?);
+    drop(open_owner_restricted_file(destination)?);
+    let encoded_source = wide_path(source)?;
+    let encoded_destination = wide_path(destination)?;
+    // SAFETY: both paths are live NUL-terminated buffers for verified ordinary files
+    // in one owner-restricted directory, and Windows consumes them during this call.
+    if unsafe {
+        MoveFileExW(
+            encoded_source.as_ptr(),
+            encoded_destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(open_owner_restricted_file(destination)?);
+    Ok(())
 }
 
 fn verify_owner_restricted_directory_path(path: &Path) -> io::Result<()> {
@@ -792,7 +830,7 @@ fn verify_owner_only_handle(
     // SAFETY: `ace` points to the first complete ACE in the live ACL.
     let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
     if u32::from(allowed.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
-        || !owner_only_ace_flags_match(expected_ace_flags, u32::from(allowed.Header.AceFlags))
+        || u32::from(allowed.Header.AceFlags) != expected_ace_flags
     {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
@@ -807,10 +845,6 @@ fn verify_owner_only_handle(
     Ok(())
 }
 
-const fn owner_only_ace_flags_match(expected: u32, actual: u32) -> bool {
-    actual == expected || (expected == 0 && actual == INHERITED_ACE)
-}
-
 fn security_io_error(_error: WindowsSecurityError) -> io::Error {
     io::Error::from(io::ErrorKind::PermissionDenied)
 }
@@ -821,10 +855,10 @@ mod tests {
     use std::os::windows::io::AsRawHandle as _;
 
     use super::{
-        CONTAINER_INHERIT_ACE, INHERITED_ACE, OBJECT_INHERIT_ACE, WindowsAccountVerifier,
-        create_or_verify_owner_restricted_file, create_owner_restricted_named_pipe,
-        ensure_owner_restricted_directory, open_or_create_owner_restricted_file,
-        open_owner_restricted_file, owner_only_ace_flags_match, verify_owner_only_handle,
+        WindowsAccountVerifier, create_or_verify_owner_restricted_file,
+        create_owner_restricted_named_pipe, ensure_owner_restricted_directory,
+        open_or_create_owner_restricted_file, open_owner_restricted_file,
+        replace_owner_restricted_file, verify_owner_only_handle,
     };
 
     fn endpoint(name: &str) -> String {
@@ -894,19 +928,15 @@ mod tests {
         std::fs::hard_link(&mutable, &linked).unwrap();
         assert!(open_or_create_owner_restricted_file(&mutable).is_err());
 
-        let inherited = directory.join("inherited");
-        std::fs::write(&inherited, b"inherited").unwrap();
-        open_owner_restricted_file(&inherited).unwrap();
-    }
-
-    #[test]
-    fn owner_only_file_ace_flags_accept_only_explicit_or_inherited_entries() {
-        assert!(owner_only_ace_flags_match(0, 0));
-        assert!(owner_only_ace_flags_match(0, INHERITED_ACE));
-        assert!(!owner_only_ace_flags_match(0, OBJECT_INHERIT_ACE));
-        assert!(!owner_only_ace_flags_match(
-            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERITED_ACE,
-        ));
+        let replacement = directory.join("replacement");
+        create_or_verify_owner_restricted_file(&replacement, b"replacement").unwrap();
+        replace_owner_restricted_file(&replacement, &file).unwrap();
+        let mut replaced = Vec::new();
+        open_owner_restricted_file(&file)
+            .unwrap()
+            .read_to_end(&mut replaced)
+            .unwrap();
+        assert_eq!(replaced, b"replacement");
+        assert!(!replacement.exists());
     }
 }

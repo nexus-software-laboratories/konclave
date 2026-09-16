@@ -53,6 +53,21 @@ pub fn open_owner_protected_file(path: &Path) -> Result<File, SecretStorageError
     platform::open_file(path)
 }
 
+/// Atomically replaces one owner-only file with another in the same directory.
+///
+/// Both files must already satisfy the platform's exact owner-only policy.
+///
+/// # Errors
+///
+/// Returns a finite unavailable or unsafe-storage error when either path is unsafe,
+/// their parents differ, replacement fails, or the result cannot be verified.
+pub fn replace_owner_protected_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), SecretStorageError> {
+    platform::replace_file(source, destination)
+}
+
 #[cfg(unix)]
 mod platform {
     use std::fs::{DirBuilder, File, OpenOptions};
@@ -186,6 +201,21 @@ mod platform {
         Ok(file)
     }
 
+    pub(super) fn replace_file(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), SecretStorageError> {
+        if source.parent() != destination.parent() {
+            return Err(SecretStorageError::OwnerProtectedStorageUnsafe);
+        }
+        drop(open_file(source)?);
+        drop(open_file(destination)?);
+        std::fs::rename(source, destination)
+            .map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+        drop(open_file(destination)?);
+        Ok(())
+    }
+
     fn verify_directory(metadata: &std::fs::Metadata) -> Result<(), SecretStorageError> {
         if !metadata.is_dir()
             || metadata.file_type().is_symlink()
@@ -247,6 +277,14 @@ mod platform {
         KonclaveWindowsSecurity::open_owner_restricted_file(path).map_err(map_error)
     }
 
+    pub(super) fn replace_file(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), SecretStorageError> {
+        KonclaveWindowsSecurity::replace_owner_restricted_file(source, destination)
+            .map_err(map_error)
+    }
+
     fn map_error(error: std::io::Error) -> SecretStorageError {
         match error.kind() {
             std::io::ErrorKind::AlreadyExists => SecretStorageError::OwnerProtectedStorageConflict,
@@ -306,6 +344,27 @@ mod tests {
         let mut contents = Vec::new();
         reopened.read_to_end(&mut contents).unwrap();
         assert_eq!(contents, b"state");
+    }
+
+    #[test]
+    fn owner_protected_file_replacement_is_atomic_and_exact() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private");
+        ensure_owner_protected_directory(&directory).unwrap();
+        let destination = directory.join("destination");
+        let replacement = directory.join("replacement");
+        create_or_verify_owner_protected_file(&destination, b"before").unwrap();
+        create_or_verify_owner_protected_file(&replacement, b"after").unwrap();
+
+        replace_owner_protected_file(&replacement, &destination).unwrap();
+
+        let mut contents = Vec::new();
+        open_owner_protected_file(&destination)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
+        assert_eq!(contents, b"after");
+        assert!(!replacement.exists());
     }
 
     #[cfg(unix)]
