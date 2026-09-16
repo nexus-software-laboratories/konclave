@@ -1035,14 +1035,16 @@ mod tests {
     #[tokio::test]
     async fn interrupted_profile_migration_resumes_exact_requests() {
         let root = tempfile::tempdir().unwrap();
-        ensure_owner_protected_directory(root.path()).unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
         let source = endpoint("http://127.0.0.1:43180");
         let destination = endpoint("https://relay.example.com");
         let profiles = vec![
-            open_store(root.path(), "profile-a", 7),
-            open_store(root.path(), "profile-b", 8),
+            open_store(&profile_root, "profile-a", 7),
+            open_store(&profile_root, "profile-b", 8),
         ];
-        let journal = RelayMigrationJournal::open(root.path(), &source, &destination).unwrap();
+        let journal =
+            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
         let first_requests = Arc::new(Mutex::new(Vec::new()));
         let first = RelayEnrollmentClient::new(FakeEnrollmentTransport {
             requests: Arc::clone(&first_requests),
@@ -1098,14 +1100,16 @@ mod tests {
     #[tokio::test]
     async fn interrupted_profile_migration_aborts_without_network() {
         let root = tempfile::tempdir().unwrap();
-        ensure_owner_protected_directory(root.path()).unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
         let source = endpoint("http://127.0.0.1:43180");
         let destination = endpoint("https://relay.example.com");
         let profiles = vec![
-            open_store(root.path(), "profile-a", 9),
-            open_store(root.path(), "profile-b", 10),
+            open_store(&profile_root, "profile-a", 9),
+            open_store(&profile_root, "profile-b", 10),
         ];
-        let journal = RelayMigrationJournal::open(root.path(), &source, &destination).unwrap();
+        let journal =
+            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let client = RelayEnrollmentClient::new(FakeEnrollmentTransport {
             requests,
