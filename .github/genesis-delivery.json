@@ -18,6 +18,7 @@
     "Generic client conformance",
     "Installer lifecycle conformance",
     "Marketplace conformance",
+    "Relay migration conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -74,6 +75,7 @@
         "marketplace-materialization",
         "marketplace-client-lifecycle",
         "managed-marketplace-policy",
+        "relay-migration-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -169,6 +171,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Client runtime config conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/relay-migration-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Relay migration conformance"
       ]
     },
     {
