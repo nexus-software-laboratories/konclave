@@ -1056,21 +1056,11 @@ mod tests {
         );
         assert_eq!(first_requests.lock().unwrap().len(), 1);
         assert_eq!(
-            profiles[0]
-                .1
-                .relay_migration_identity()
-                .unwrap()
-                .0
-                .as_str(),
+            profiles[0].1.relay_migration_identity().unwrap().0.as_str(),
             destination.as_str()
         );
         assert_eq!(
-            profiles[1]
-                .1
-                .relay_migration_identity()
-                .unwrap()
-                .0
-                .as_str(),
+            profiles[1].1.relay_migration_identity().unwrap().0.as_str(),
             source.as_str()
         );
         let second_entry = journal.profile(&profiles[1].0).unwrap().unwrap();

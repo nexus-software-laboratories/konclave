@@ -92,8 +92,7 @@ mod tests {
                 .migrate_relay_endpoint(&source, &destination, principal)
                 .unwrap()
         );
-        let (migrated_endpoint, migrated_principal) =
-            store.relay_migration_identity().unwrap();
+        let (migrated_endpoint, migrated_principal) = store.relay_migration_identity().unwrap();
         assert_eq!(migrated_endpoint.as_str(), destination.as_str());
         assert_eq!(migrated_principal, principal);
         assert!(
@@ -104,8 +103,7 @@ mod tests {
         drop(store);
 
         let reopened = open_test_store(root.path(), "migration-profile");
-        let (reopened_endpoint, reopened_principal) =
-            reopened.relay_migration_identity().unwrap();
+        let (reopened_endpoint, reopened_principal) = reopened.relay_migration_identity().unwrap();
         assert_eq!(reopened_endpoint.as_str(), destination.as_str());
         assert_eq!(reopened_principal, principal);
     }
@@ -140,8 +138,7 @@ mod tests {
                 .unwrap_err(),
             ProfileStoreError::RelayMigrationConflict
         );
-        let (retained_endpoint, retained_principal) =
-            store.relay_migration_identity().unwrap();
+        let (retained_endpoint, retained_principal) = store.relay_migration_identity().unwrap();
         assert_eq!(retained_endpoint.as_str(), source.as_str());
         assert_eq!(retained_principal, principal);
     }
