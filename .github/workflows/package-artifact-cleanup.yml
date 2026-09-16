@@ -102,8 +102,7 @@ jobs:
             )
 
             $runs = foreach ($runId in @(
-              $Artifacts.workflow_run.id |
-                Sort-Object -Unique
+              Get-ActionsArtifactWorkflowRunIds -Artifacts $Artifacts
             )) {
               $run = gh api `
                 "repos/$env:REPOSITORY/actions/runs/$runId" |
