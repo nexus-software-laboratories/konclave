@@ -16,8 +16,7 @@ use KonclaveClientLibrary::{
     EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError,
     RELAY_INSTALLATION_CONFIG_FILE, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentRequest,
     RelayEnrollmentResponse, RelayEnrollmentSourceConfig, RelayEnrollmentTransport,
-    RelayInstallationConfig, RelayPrincipalId,
-    relay_enrollment_installation_id,
+    RelayInstallationConfig, RelayPrincipalId, relay_enrollment_installation_id,
 };
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveDomainCore::ProtocolVersion;
