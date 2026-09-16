@@ -37,10 +37,9 @@ pub(crate) const fn resolve_relay_migration_action(
         | (RelayMigrationState::SourceActive, RelayMigrationEvent::Abort) => {
             RelayMigrationAction::Complete
         }
-        (
-            RelayMigrationState::RegistrationPrepared,
-            RelayMigrationEvent::RegistrationAccepted,
-        ) => RelayMigrationAction::CommitDestination,
+        (RelayMigrationState::RegistrationPrepared, RelayMigrationEvent::RegistrationAccepted) => {
+            RelayMigrationAction::CommitDestination
+        }
         (RelayMigrationState::RegistrationPrepared, RelayMigrationEvent::Abort) => {
             RelayMigrationAction::ClearPreparation
         }
