@@ -19,10 +19,10 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSidSubAuthority,
-    GetSidSubAuthorityCount, GetTokenInformation, INHERITED_ACE, IsValidSid, OBJECT_INHERIT_ACE,
-    OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TOKEN_USER, TokenIntegrityLevel, TokenUser,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, INHERITED_ACE, IsValidSid,
+    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
@@ -792,10 +792,7 @@ fn verify_owner_only_handle(
     // SAFETY: `ace` points to the first complete ACE in the live ACL.
     let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
     if u32::from(allowed.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
-        || !owner_only_ace_flags_match(
-            expected_ace_flags,
-            u32::from(allowed.Header.AceFlags),
-        )
+        || !owner_only_ace_flags_match(expected_ace_flags, u32::from(allowed.Header.AceFlags))
     {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
