@@ -771,9 +771,7 @@ fn open_profiles(
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 fn uninitialized_profile_directory(directory: &Path) -> anyhow::Result<bool> {
     let mut lock_seen = false;
-    for entry in
-        std::fs::read_dir(directory).context("reading uninitialized profile directory")?
-    {
+    for entry in std::fs::read_dir(directory).context("reading uninitialized profile directory")? {
         let entry = entry.context("reading uninitialized profile entry")?;
         let file_type = entry
             .file_type()
@@ -1373,13 +1371,13 @@ mod tests {
         let lock_only = profile_root.join("lock-profile");
         ensure_owner_protected_directory(&empty).unwrap();
         ensure_owner_protected_directory(&lock_only).unwrap();
-        drop(
-            open_or_create_owner_protected_file(&lock_only.join("profile.lock")).unwrap(),
-        );
+        drop(open_or_create_owner_protected_file(&lock_only.join("profile.lock")).unwrap());
 
-        assert!(open_profiles(&profile_root, &MigrationCustody::Native)
-            .unwrap()
-            .is_empty());
+        assert!(
+            open_profiles(&profile_root, &MigrationCustody::Native)
+                .unwrap()
+                .is_empty()
+        );
 
         let partial = profile_root.join("partial-profile");
         ensure_owner_protected_directory(&partial).unwrap();
