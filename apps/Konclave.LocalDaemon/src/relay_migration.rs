@@ -1280,11 +1280,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(
-        feature = "rust-service-mcp",
-        feature = "rust-service-sqlite",
-        unix
-    ))]
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite", unix))]
     #[test]
     fn relay_migration_rejects_linked_profile_entries() {
         use std::os::unix::fs::symlink;
