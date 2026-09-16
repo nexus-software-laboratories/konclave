@@ -29,6 +29,29 @@ $abortArguments = @(
 if ($abortArguments[-1] -cne '--abort') {
     throw 'Relay migration abort arguments are invalid.'
 }
+$finalizeArguments = @(
+    Get-RelayMigrationArguments `
+        -ConfigPath 'C:\Konclave\service.json' `
+        -RelayEndpoint 'https://relay.example.com' `
+        -Finalize
+)
+if ($finalizeArguments[-1] -cne '--finalize') {
+    throw 'Relay migration finalize arguments are invalid.'
+}
+$conflictingMigrationModeRejected = $false
+try {
+    [void](Get-RelayMigrationArguments `
+        -ConfigPath 'C:\Konclave\service.json' `
+        -RelayEndpoint 'https://relay.example.com' `
+        -Abort `
+        -Finalize)
+}
+catch {
+    $conflictingMigrationModeRejected = $true
+}
+if (-not $conflictingMigrationModeRejected) {
+    throw 'Relay migration accepted conflicting terminal modes.'
+}
 
 function Write-TestZip {
     param(

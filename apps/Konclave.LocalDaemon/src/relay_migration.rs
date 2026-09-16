@@ -65,6 +65,7 @@ pub(crate) enum RelayMigrationEvent {
     Apply,
     RegistrationAccepted,
     Abort,
+    Finalize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,8 @@ pub(crate) enum RelayMigrationAction {
     RegisterDestination,
     CommitDestination,
     ClearPreparation,
+    RestoreSource,
+    Finalize,
     Complete,
     Reject,
 }
@@ -98,11 +101,20 @@ pub(crate) const fn resolve_relay_migration_action(
         (RelayMigrationState::RegistrationPrepared, RelayMigrationEvent::Abort) => {
             RelayMigrationAction::ClearPreparation
         }
+        (RelayMigrationState::DestinationActive, RelayMigrationEvent::Abort) => {
+            RelayMigrationAction::RestoreSource
+        }
+        (RelayMigrationState::DestinationActive, RelayMigrationEvent::Finalize) => {
+            RelayMigrationAction::Finalize
+        }
         (
             RelayMigrationState::SourceActive | RelayMigrationState::DestinationActive,
             RelayMigrationEvent::RegistrationAccepted,
         )
-        | (RelayMigrationState::DestinationActive, RelayMigrationEvent::Abort) => {
+        | (
+            RelayMigrationState::SourceActive | RelayMigrationState::RegistrationPrepared,
+            RelayMigrationEvent::Finalize,
+        ) => {
             RelayMigrationAction::Reject
         }
     }
@@ -393,6 +405,31 @@ impl RelayMigrationJournal {
             .collect()
     }
 
+    fn committed_profile_count(&self) -> anyhow::Result<usize> {
+        let (total, committed): (i64, i64) = self
+            .connection
+            .query_row(
+                "SELECT
+                    count(*),
+                    coalesce(sum(CASE WHEN state = 2 THEN 1 ELSE 0 END), 0)
+                 FROM relay_migration_profile",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .context("counting committed relay migration profiles")?;
+        ensure!(
+            total == committed
+                && (0..=i64::try_from(MAX_RELAY_MIGRATION_PROFILES).unwrap_or(i64::MAX))
+                    .contains(&total)
+                && resolve_relay_migration_action(
+                    RelayMigrationState::DestinationActive,
+                    RelayMigrationEvent::Finalize,
+                ) == RelayMigrationAction::Finalize,
+            "relay migration has uncommitted profiles"
+        );
+        usize::try_from(total).context("converting relay migration profile count")
+    }
+
     fn delete(self) -> anyhow::Result<()> {
         let path = self.path.clone();
         drop(self.connection);
@@ -462,12 +499,21 @@ pub struct RelayMigrationReport {
     pub unchanged_profiles: usize,
 }
 
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayMigrationMode {
+    Apply,
+    Abort,
+    Finalize,
+}
+
 /// Parses and executes one exact relay endpoint migration command.
 ///
 /// Supported arguments are `--config <absolute-path> --relay-endpoint <url>` with an
-/// optional final `--abort`. Apply registers every existing principal on the
-/// destination before resealing its credential. Abort restores every journaled
-/// profile to the source endpoint without a network operation.
+/// optional final `--abort` or `--finalize`. Apply registers every existing principal
+/// on the destination before resealing its credential. Abort restores every
+/// journaled profile to the source endpoint without a network operation. Finalize
+/// removes the journal only after the restarted service has passed health validation.
 ///
 /// # Errors
 ///
@@ -478,15 +524,15 @@ pub struct RelayMigrationReport {
 pub async fn run_relay_migration(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> anyhow::Result<RelayMigrationReport> {
-    let (installation_path, destination, abort) =
+    let (installation_path, destination, mode) =
         parse_relay_migration_arguments(arguments.into_iter())?;
-    migrate_relay_endpoint(&installation_path, &destination, abort).await
+    migrate_relay_endpoint(&installation_path, &destination, mode).await
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 fn parse_relay_migration_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> anyhow::Result<(PathBuf, String, bool)> {
+) -> anyhow::Result<(PathBuf, String, RelayMigrationMode)> {
     ensure!(
         arguments.next().as_deref() == Some(std::ffi::OsStr::new("--config")),
         "--config and one absolute installation path are required"
@@ -507,23 +553,26 @@ fn parse_relay_migration_arguments(
         .next()
         .and_then(|value| value.into_string().ok())
         .context("--relay-endpoint requires one Unicode destination URL")?;
-    let abort = match arguments.next() {
-        None => false,
-        Some(value) if value == "--abort" => true,
-        Some(_) => bail!("the only optional relay migration argument is --abort"),
+    let mode = match arguments.next() {
+        None => RelayMigrationMode::Apply,
+        Some(value) if value == "--abort" => RelayMigrationMode::Abort,
+        Some(value) if value == "--finalize" => RelayMigrationMode::Finalize,
+        Some(_) => {
+            bail!("the only optional relay migration arguments are --abort and --finalize")
+        }
     };
     ensure!(
         arguments.next().is_none(),
         "relay migration received additional arguments"
     );
-    Ok((installation_path, destination, abort))
+    Ok((installation_path, destination, mode))
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 async fn migrate_relay_endpoint(
     installation_path: &Path,
     requested_destination: &str,
-    abort: bool,
+    mode: RelayMigrationMode,
 ) -> anyhow::Result<RelayMigrationReport> {
     let destination =
         RelayEndpoint::parse(requested_destination).context("validating destination relay")?;
@@ -543,7 +592,7 @@ async fn migrate_relay_endpoint(
     let current_installation = read_relay_installation(&root)?
         .context("relay installation configuration is unavailable")?;
     let current_endpoint = current_installation.endpoint().clone();
-    if abort && !RelayMigrationJournal::exists(&root) {
+    if mode == RelayMigrationMode::Abort && !RelayMigrationJournal::exists(&root) {
         return Ok(RelayMigrationReport {
             action: "RelayMigrationNotPending",
             source_endpoint: current_endpoint.as_str().to_string(),
@@ -553,8 +602,15 @@ async fn migrate_relay_endpoint(
             unchanged_profiles: 0,
         });
     }
-    let profiles = open_profiles(&root, &custody)?;
-    if !RelayMigrationJournal::exists(&root) && current_endpoint.as_str() == destination.as_str() {
+    ensure!(
+        mode != RelayMigrationMode::Finalize || RelayMigrationJournal::exists(&root),
+        "relay migration has no pending journal to finalize"
+    );
+    if mode == RelayMigrationMode::Apply
+        && !RelayMigrationJournal::exists(&root)
+        && current_endpoint.as_str() == destination.as_str()
+    {
+        let profiles = open_profiles(&root, &custody)?;
         for (_, store) in &profiles {
             let (endpoint, _) = store.relay_migration_identity()?;
             ensure!(
@@ -574,8 +630,25 @@ async fn migrate_relay_endpoint(
     let journal = RelayMigrationJournal::open(&root, &current_endpoint, &destination)?;
     let source = journal.source.clone();
     let destination = journal.destination.clone();
+    if mode == RelayMigrationMode::Finalize {
+        ensure!(
+            current_installation.endpoint().as_str() == destination.as_str(),
+            "relay installation did not reach the migration destination"
+        );
+        let total_profiles = journal.committed_profile_count()?;
+        journal.delete()?;
+        return Ok(RelayMigrationReport {
+            action: "RelayMigrated",
+            source_endpoint: source.as_str().to_string(),
+            destination_endpoint: destination.as_str().to_string(),
+            total_profiles,
+            migrated_profiles: 0,
+            unchanged_profiles: total_profiles,
+        });
+    }
+    let profiles = open_profiles(&root, &custody)?;
     ensure_journal_profiles_exist(&journal, &profiles)?;
-    if abort {
+    if mode == RelayMigrationMode::Abort {
         let (restored, unchanged) = abort_profiles(&profiles, &journal, &source, &destination)?;
         replace_relay_installation(&root, &current_installation, &source)?;
         journal.delete()?;
@@ -595,9 +668,8 @@ async fn migrate_relay_endpoint(
     let (migrated, unchanged) =
         apply_profiles(&profiles, &journal, &source, &destination, &client).await?;
     replace_relay_installation(&root, &current_installation, &destination)?;
-    journal.delete()?;
     Ok(RelayMigrationReport {
-        action: "RelayMigrated",
+        action: "RelayMigrationPendingHealth",
         source_endpoint: source.as_str().to_string(),
         destination_endpoint: destination.as_str().to_string(),
         total_profiles: profiles.len(),
@@ -703,53 +775,97 @@ where
     let mut migrated = 0;
     let mut unchanged = 0;
     for (profile, store) in profiles {
-        let (active_endpoint, principal) = store
-            .relay_migration_identity()
-            .context("reading relay migration profile identity")?;
-        let entry = match journal.profile(profile)? {
-            Some(entry) => {
-                ensure!(
-                    entry.request.principal_id() == principal,
-                    "relay migration journal principal does not match the profile"
-                );
-                entry
+        loop {
+            let (active_endpoint, principal) = store
+                .relay_migration_identity()
+                .context("reading relay migration profile identity")?;
+            let entry = journal.profile(profile)?;
+            let state = observed_profile_state(
+                &active_endpoint,
+                principal,
+                entry.as_ref(),
+                source,
+                destination,
+            )?;
+            match resolve_relay_migration_action(state, RelayMigrationEvent::Apply) {
+                RelayMigrationAction::PrepareRegistration => {
+                    journal.prepare(profile, principal)?;
+                }
+                RelayMigrationAction::RegisterDestination => {
+                    let entry = entry.context("prepared relay migration entry is missing")?;
+                    let response = client
+                        .register(entry.request)
+                        .await
+                        .context("registering existing principal on destination relay")?;
+                    ensure!(
+                        resolve_relay_migration_action(
+                            state,
+                            RelayMigrationEvent::RegistrationAccepted,
+                        ) == RelayMigrationAction::CommitDestination
+                            && response.request_id() == entry.request.request_id()
+                            && response.principal_id() == principal,
+                        "destination relay returned a conflicting migration response"
+                    );
+                    store
+                        .migrate_relay_endpoint(source, destination, principal)
+                        .context("committing profile relay endpoint migration")?;
+                    journal.mark_committed(&entry)?;
+                    migrated += 1;
+                    break;
+                }
+                RelayMigrationAction::Complete => {
+                    if let Some(entry) = entry
+                        && entry.state == JournalProfileState::Prepared
+                    {
+                        journal.mark_committed(&entry)?;
+                    }
+                    unchanged += 1;
+                    break;
+                }
+                RelayMigrationAction::CommitDestination
+                | RelayMigrationAction::ClearPreparation
+                | RelayMigrationAction::RestoreSource
+                | RelayMigrationAction::Finalize
+                | RelayMigrationAction::Reject => {
+                    bail!("relay migration profile apply transition is invalid")
+                }
             }
-            None => {
-                ensure!(
-                    active_endpoint.as_str() == source.as_str(),
-                    "unjournaled profile does not use the migration source"
-                );
-                journal.prepare(profile, principal)?
-            }
-        };
-        if active_endpoint.as_str() == destination.as_str() {
-            if entry.state == JournalProfileState::Prepared {
-                journal.mark_committed(&entry)?;
-            }
-            unchanged += 1;
-            continue;
         }
-        ensure!(
-            active_endpoint.as_str() == source.as_str()
-                && entry.state == JournalProfileState::Prepared,
-            "relay migration profile state conflicts with its active endpoint"
-        );
-        let response = client
-            .register(entry.request)
-            .await
-            .context("registering existing principal on destination relay")?;
-        ensure!(
-            response.request_id() == entry.request.request_id()
-                && response.principal_id() == principal,
-            "destination relay returned a conflicting migration response"
-        );
-        store
-            .migrate_relay_endpoint(source, destination, principal)
-            .context("committing profile relay endpoint migration")?;
-        journal.mark_committed(&entry)?;
-        migrated += 1;
     }
     Ok((migrated, unchanged))
+}
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+fn observed_profile_state(
+    active_endpoint: &RelayEndpoint,
+    principal: RelayPrincipalId,
+    entry: Option<&JournalProfile>,
+    source: &RelayEndpoint,
+    destination: &RelayEndpoint,
+) -> anyhow::Result<RelayMigrationState> {
+    if let Some(entry) = entry {
+        ensure!(
+            entry.request.principal_id() == principal,
+            "relay migration journal principal does not match the profile"
+        );
+    }
+    if active_endpoint.as_str() == source.as_str() {
+        return match entry {
+            None => Ok(RelayMigrationState::SourceActive),
+            Some(entry) if entry.state == JournalProfileState::Prepared => {
+                Ok(RelayMigrationState::RegistrationPrepared)
+            }
+            Some(_) => bail!("committed relay migration profile still uses the source"),
+        };
+    }
+    if active_endpoint.as_str() == destination.as_str() {
+        ensure!(
+            entry.is_some(),
+            "unjournaled profile already uses the migration destination"
+        );
+        return Ok(RelayMigrationState::DestinationActive);
+    }
+    bail!("relay migration profile uses an unrelated endpoint")
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -767,30 +883,99 @@ fn abort_profiles(
             .context("reading relay migration profile identity during abort")?;
         let Some(entry) = journal.profile(profile)? else {
             ensure!(
-                active_endpoint.as_str() == source.as_str(),
+                resolve_relay_migration_action(
+                    observed_profile_state(
+                        &active_endpoint,
+                        principal,
+                        None,
+                        source,
+                        destination,
+                    )?,
+                    RelayMigrationEvent::Abort,
+                ) == RelayMigrationAction::Complete,
                 "unjournaled profile changed during relay migration"
             );
             unchanged += 1;
             continue;
         };
-        ensure!(
-            entry.request.principal_id() == principal,
-            "relay migration abort principal does not match the profile"
-        );
-        if active_endpoint.as_str() == source.as_str() {
-            unchanged += 1;
-            continue;
+        match resolve_relay_migration_action(
+            observed_profile_state(
+                &active_endpoint,
+                principal,
+                Some(&entry),
+                source,
+                destination,
+            )?,
+            RelayMigrationEvent::Abort,
+        ) {
+            RelayMigrationAction::ClearPreparation | RelayMigrationAction::Complete => {
+                unchanged += 1;
+            }
+            RelayMigrationAction::RestoreSource => {
+                store
+                    .migrate_relay_endpoint(destination, source, principal)
+                    .context("restoring profile relay endpoint during abort")?;
+                restored += 1;
+            }
+            RelayMigrationAction::PrepareRegistration
+            | RelayMigrationAction::RegisterDestination
+            | RelayMigrationAction::CommitDestination
+            | RelayMigrationAction::Finalize
+            | RelayMigrationAction::Reject => {
+                bail!("relay migration profile abort transition is invalid")
+            }
         }
-        ensure!(
-            active_endpoint.as_str() == destination.as_str(),
-            "relay migration abort found an unrelated profile endpoint"
-        );
-        store
-            .migrate_relay_endpoint(destination, source, principal)
-            .context("restoring profile relay endpoint during abort")?;
-        restored += 1;
     }
     Ok((restored, unchanged))
+}
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+pub(crate) fn relay_migration_allows_profile(
+    root: &Path,
+    profile: &ProfileId,
+) -> anyhow::Result<bool> {
+    let path = root.join(RELAY_MIGRATION_JOURNAL_FILE);
+    if !path.exists() {
+        return Ok(true);
+    }
+    drop(
+        open_owner_protected_file(&path)
+            .context("opening relay migration journal for profile admission")?,
+    );
+    let connection = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("opening relay migration journal for profile admission")?;
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .context("reading relay migration journal admission version")?;
+    ensure!(
+        version == RELAY_MIGRATION_JOURNAL_SCHEMA_VERSION,
+        "relay migration journal admission schema is unsupported"
+    );
+    let pending: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM relay_migration_profile WHERE state <> 2",
+            [],
+            |row| row.get(0),
+        )
+        .context("counting pending relay migration profiles")?;
+    if pending != 0 {
+        return Ok(false);
+    }
+    let state: Option<i64> = connection
+        .query_row(
+            "SELECT state
+             FROM relay_migration_profile
+             WHERE profile_id = ?1",
+            params![profile.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading relay migration profile admission")?;
+    Ok(state == Some(JournalProfileState::Committed as i64))
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -926,7 +1111,22 @@ mod tests {
             (
                 RelayMigrationState::DestinationActive,
                 RelayMigrationEvent::Abort,
+                RelayMigrationAction::RestoreSource,
+            ),
+            (
+                RelayMigrationState::SourceActive,
+                RelayMigrationEvent::Finalize,
                 RelayMigrationAction::Reject,
+            ),
+            (
+                RelayMigrationState::RegistrationPrepared,
+                RelayMigrationEvent::Finalize,
+                RelayMigrationAction::Reject,
+            ),
+            (
+                RelayMigrationState::DestinationActive,
+                RelayMigrationEvent::Finalize,
+                RelayMigrationAction::Finalize,
             ),
         ];
 
@@ -1008,10 +1208,10 @@ mod tests {
             (
                 PathBuf::from(absolute),
                 "https://relay.example.com".to_string(),
-                false,
+                RelayMigrationMode::Apply,
             )
         );
-        assert!(
+        assert_eq!(
             parse_relay_migration_arguments(
                 [
                     "--config",
@@ -1024,7 +1224,24 @@ mod tests {
                 .map(OsString::from),
             )
             .unwrap()
-            .2
+            .2,
+            RelayMigrationMode::Abort
+        );
+        assert_eq!(
+            parse_relay_migration_arguments(
+                [
+                    "--config",
+                    absolute,
+                    "--relay-endpoint",
+                    "https://relay.example.com",
+                    "--finalize",
+                ]
+                .into_iter()
+                .map(OsString::from),
+            )
+            .unwrap()
+            .2,
+            RelayMigrationMode::Finalize
         );
         for arguments in [
             Vec::<&str>::new(),
@@ -1103,6 +1320,9 @@ mod tests {
         );
         let second_entry = journal.profile(&profiles[1].0).unwrap().unwrap();
         assert_eq!(second_entry.state, JournalProfileState::Prepared);
+        assert!(
+            !relay_migration_allows_profile(&profile_root, &profiles[0].0).unwrap()
+        );
 
         let resumed_requests = Arc::new(Mutex::new(Vec::new()));
         let resumed = RelayEnrollmentClient::new(FakeEnrollmentTransport {
@@ -1128,8 +1348,24 @@ mod tests {
                 journal.profile(profile).unwrap().unwrap().state,
                 JournalProfileState::Committed
             );
+            assert!(relay_migration_allows_profile(&profile_root, profile).unwrap());
         }
+        assert_eq!(journal.committed_profile_count().unwrap(), profiles.len());
+        assert!(
+            !relay_migration_allows_profile(
+                &profile_root,
+                &ProfileId::parse("new-profile").unwrap()
+            )
+            .unwrap()
+        );
         journal.delete().unwrap();
+        assert!(
+            relay_migration_allows_profile(
+                &profile_root,
+                &ProfileId::parse("new-profile").unwrap()
+            )
+            .unwrap()
+        );
     }
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]

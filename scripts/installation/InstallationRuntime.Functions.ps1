@@ -818,9 +818,14 @@ function Get-RelayMigrationArguments {
             [Parameter(Mandatory)]
             [string]$RelayEndpoint,
 
-            [switch]$Abort
+            [switch]$Abort,
+
+            [switch]$Finalize
         )
 
+        if ($Abort -and $Finalize) {
+            throw 'Relay migration cannot abort and finalize together.'
+        }
         $arguments = @(
             '--config',
             $ConfigPath,
@@ -829,6 +834,9 @@ function Get-RelayMigrationArguments {
         )
         if ($Abort) {
             $arguments += '--abort'
+        }
+        elseif ($Finalize) {
+            $arguments += '--finalize'
         }
         return $arguments
     }
@@ -844,7 +852,9 @@ function Invoke-InstalledRelayMigration {
             [Parameter(Mandatory)]
             [string]$RelayEndpoint,
 
-            [switch]$Abort
+            [switch]$Abort,
+
+            [switch]$Finalize
         )
 
         $suffix = if ($IsWindows) { '.exe' } else { '' }
@@ -853,7 +863,8 @@ function Invoke-InstalledRelayMigration {
         $arguments = Get-RelayMigrationArguments `
             -ConfigPath $ConfigPath `
             -RelayEndpoint $RelayEndpoint `
-            -Abort:$Abort
+            -Abort:$Abort `
+            -Finalize:$Finalize
         $output = & $migration @arguments 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "Konclave relay migration failed: $($output -join "`n")"

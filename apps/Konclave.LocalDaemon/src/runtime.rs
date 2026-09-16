@@ -134,6 +134,10 @@ impl ServiceProfileSettings {
 
 impl ProfileSource for ServiceProfileSettings {
     fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig> {
+        #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+        if !crate::relay_migration::relay_migration_allows_profile(&self.root, profile)? {
+            bail!("profile access is unavailable while relay migration is incomplete");
+        }
         // The installation record is re-read per profile because enrollment is a
         // per-profile operation whose source may be added, rotated, or withdrawn
         // while the service is already hosting other profiles.

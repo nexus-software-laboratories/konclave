@@ -237,6 +237,11 @@ if ($Action -ceq 'MigrateRelay') {
             -InstallRoot $root `
             -ConfigPath $paths.serviceConfigPath)
         [void](Wait-InstalledRuntimeHealth -InstallRoot $root -Paths $paths)
+        $migration = Invoke-InstalledRelayMigration `
+            -InstallRoot $root `
+            -ConfigPath $paths.serviceConfigPath `
+            -RelayEndpoint $RelayEndpoint `
+            -Finalize
     }
     catch {
         $healthError = $_
@@ -248,7 +253,8 @@ if ($Action -ceq 'MigrateRelay') {
             [void](Invoke-InstalledRelayMigration `
                 -InstallRoot $root `
                 -ConfigPath $paths.serviceConfigPath `
-                -RelayEndpoint ([string]$migration.sourceEndpoint))
+                -RelayEndpoint $RelayEndpoint `
+                -Abort)
             [void](Invoke-ServiceManager `
                 -Action Start `
                 -InstallRoot $root `
