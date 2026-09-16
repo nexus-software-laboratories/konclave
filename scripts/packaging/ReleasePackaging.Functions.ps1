@@ -456,8 +456,12 @@ function Copy-ClientPayload {
 
     $suffix = if ([string]$Artifact.operatingSystem -ceq 'windows') { '.exe' } else { '' }
     $cliSource = Join-Path $BinaryDirectory "KonclaveCommandLine$suffix"
+    $migrationSource = Join-Path $BinaryDirectory "KonclaveRelayMigration$suffix"
     $serviceSource = Join-Path $BinaryDirectory "KonclaveLocalService$suffix"
     Copy-ReleaseFile $cliSource (Join-Path $DestinationRoot 'bin' "konclave$suffix")
+    Copy-ReleaseFile $migrationSource (
+        Join-Path $DestinationRoot 'bin' "KonclaveRelayMigration$suffix"
+    )
     Copy-ReleaseFile $serviceSource (
         Join-Path $DestinationRoot 'bin' "KonclaveLocalService$suffix"
     )

@@ -48,7 +48,9 @@ jobs:
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/genesis-delivery\.json$' -or
                 $_ -match '^\.github/workflows/relay-migration-conformance\.yml$' -or
-                $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:bin/relay_migration|enrollment_persistence|lib|persistence|relay_migration|runtime)\.rs)$' -or
+                $_ -match '^apps/Konclave\.CommandLine/(?:Cargo\.toml|src/installation\.rs)$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:bin/relay_migration|enrollment_persistence|lib|persistence|relay_migration|runtime)\.rs|src/persistence/relay_migration\.rs)$' -or
+                $_ -match '^crates/Konclave\.ClientLibrary/' -or
                 $_ -match '^scripts/installation/' -or
                 $_ -match '^scripts/packaging/' -or
                 $_ -match '^distribution/'
@@ -79,15 +81,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo fmt \
+            --package KonclaveClientLibrary \
+            --package KonclaveCommandLine \
+            --package KonclaveLocalDaemon \
+            -- \
+            --check
+          cargo test \
+            --locked \
+            --package KonclaveClientLibrary \
+            relay_enrollment_installation
           cargo test \
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
             relay_migration::tests
-          cargo clippy \
+          cargo test \
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
+            persistence::relay_migration::tests
+          cargo test \
+            --locked \
+            --package KonclaveCommandLine \
+            native_installation_identity
+          cargo clippy \
+            --locked \
+            --package KonclaveClientLibrary \
+            --all-targets \
             -- \
             -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveCommandLine \
+            --all-targets \
+            -- \
+            -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --all-targets \
+            -- \
+            -D warnings
+          pwsh ./scripts/installation/Test-InstallationRuntime.ps1

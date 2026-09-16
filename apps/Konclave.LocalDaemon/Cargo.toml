@@ -20,6 +20,11 @@ path = "src/bin/shared_service.rs"
 required-features = ["rust-service-mcp"]
 
 [[bin]]
+name = "KonclaveRelayMigration"
+path = "src/bin/relay_migration.rs"
+required-features = ["rust-service-mcp", "rust-service-sqlite"]
+
+[[bin]]
 name = "windows_service"
 path = "src/bin/windows_service.rs"
 required-features = ["rust-service-windows-service"]

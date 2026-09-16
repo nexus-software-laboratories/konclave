@@ -3,6 +3,9 @@ use std::io::Read;
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{RelayEndpoint, RelayEnrollmentCredential};
@@ -12,6 +15,22 @@ pub const RELAY_INSTALLATION_CONFIG_FILE: &str = "relay-installation.conf";
 
 const MAX_INSTALLATION_CONFIG_BYTES: usize = 4 * 1024;
 const MAX_INSTALLATION_ID_BYTES: usize = 64;
+const RELAY_ENROLLMENT_INSTALLATION_DOMAIN: &[u8] =
+    b"konclave:relay-enrollment-installation:1\0";
+
+/// Derives the native credential-store identifier for one enrollment authority and
+/// exact relay endpoint.
+#[must_use]
+pub fn relay_enrollment_installation_id(
+    credential: &RelayEnrollmentCredential,
+    endpoint: &RelayEndpoint,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(RELAY_ENROLLMENT_INSTALLATION_DOMAIN);
+    digest.update(credential.authority_id().as_bytes());
+    digest.update(endpoint.as_str().as_bytes());
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
 
 /// Resolves the platform-default shared profile root.
 ///
@@ -418,6 +437,27 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    #[test]
+    fn relay_enrollment_installation_identity_binds_authority_and_endpoint() {
+        let first = RelayEnrollmentCredential::from_bytes([1; 32]);
+        let second = RelayEnrollmentCredential::from_bytes([2; 32]);
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let other_endpoint = RelayEndpoint::parse("https://other.example.com").unwrap();
+
+        assert_eq!(
+            relay_enrollment_installation_id(&first, &endpoint),
+            relay_enrollment_installation_id(&first, &endpoint)
+        );
+        assert_ne!(
+            relay_enrollment_installation_id(&first, &endpoint),
+            relay_enrollment_installation_id(&first, &other_endpoint)
+        );
+        assert_ne!(
+            relay_enrollment_installation_id(&first, &endpoint),
+            relay_enrollment_installation_id(&second, &endpoint)
+        );
+    }
 
     #[test]
     fn platform_profile_roots_follow_native_conventions() {

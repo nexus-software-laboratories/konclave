@@ -88,3 +88,6 @@ pub fn parse_shared_service_installation_path(
 ) -> anyhow::Result<std::path::PathBuf> {
     shared_service_arguments::parse_installation_path(arguments.into_iter())
 }
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+pub use relay_migration::{RelayMigrationReport, run_relay_migration};
