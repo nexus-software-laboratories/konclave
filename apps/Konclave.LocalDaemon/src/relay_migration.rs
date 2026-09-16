@@ -935,12 +935,11 @@ fn observed_profile_state(
         );
     }
     if active_endpoint.as_str() == source.as_str() {
+        // Abort can restore a committed profile before global configuration and
+        // journal cleanup. The exact journal request remains safe to abort or reapply.
         return match entry {
             None => Ok(RelayMigrationState::SourceActive),
-            Some(entry) if entry.state == JournalProfileState::Prepared => {
-                Ok(RelayMigrationState::RegistrationPrepared)
-            }
-            Some(_) => bail!("committed relay migration profile still uses the source"),
+            Some(_) => Ok(RelayMigrationState::RegistrationPrepared),
         };
     }
     if active_endpoint.as_str() == destination.as_str() {
@@ -1565,6 +1564,66 @@ mod tests {
                 source.as_str()
             );
         }
+        journal.delete().unwrap();
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[tokio::test]
+    async fn restored_committed_profile_can_abort_or_reapply() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        let source = endpoint("http://127.0.0.1:43180");
+        let destination = endpoint("https://relay.example.com");
+        let profiles = vec![open_store(&profile_root, "profile-a", 11)];
+        let journal = RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let first_requests = Arc::new(Mutex::new(Vec::new()));
+        let first = RelayEnrollmentClient::new(FakeEnrollmentTransport {
+            requests: Arc::clone(&first_requests),
+            fail_at: None,
+        });
+
+        assert_eq!(
+            apply_profiles(&profiles, &journal, &source, &destination, &first)
+                .await
+                .unwrap(),
+            (1, 0)
+        );
+        let entry = journal.profile(&profiles[0].0).unwrap().unwrap();
+        let principal = entry.request.principal_id();
+        profiles[0]
+            .1
+            .migrate_relay_endpoint(&destination, &source, principal)
+            .unwrap();
+
+        assert_eq!(
+            abort_profiles(&profiles, &journal, &source, &destination).unwrap(),
+            (0, 1)
+        );
+        assert_eq!(
+            profiles[0].1.relay_migration_identity().unwrap().0.as_str(),
+            source.as_str()
+        );
+
+        let resumed_requests = Arc::new(Mutex::new(Vec::new()));
+        let resumed = RelayEnrollmentClient::new(FakeEnrollmentTransport {
+            requests: Arc::clone(&resumed_requests),
+            fail_at: None,
+        });
+        assert_eq!(
+            apply_profiles(&profiles, &journal, &source, &destination, &resumed)
+                .await
+                .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            resumed_requests.lock().unwrap().as_slice(),
+            &[entry.request]
+        );
+        assert_eq!(
+            profiles[0].1.relay_migration_identity().unwrap().0.as_str(),
+            destination.as_str()
+        );
         journal.delete().unwrap();
     }
 

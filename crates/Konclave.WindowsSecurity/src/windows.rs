@@ -19,10 +19,10 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid,
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
-    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenUser,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSidSubAuthority,
+    GetSidSubAuthorityCount, GetTokenInformation, INHERITED_ACE, IsValidSid, OBJECT_INHERIT_ACE,
+    OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TOKEN_USER, TokenIntegrityLevel, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
@@ -314,6 +314,9 @@ pub fn create_or_verify_owner_restricted_file(path: &Path, expected: &[u8]) -> i
 }
 
 /// Opens an owner-only ordinary file without following its final reparse point.
+///
+/// The file may carry the exact owner-only ACE explicitly or inherit that sole ACE
+/// from its separately verified owner-restricted parent directory.
 ///
 /// # Errors
 ///
@@ -789,7 +792,10 @@ fn verify_owner_only_handle(
     // SAFETY: `ace` points to the first complete ACE in the live ACL.
     let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
     if u32::from(allowed.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
-        || u32::from(allowed.Header.AceFlags) != expected_ace_flags
+        || !owner_only_ace_flags_match(
+            expected_ace_flags,
+            u32::from(allowed.Header.AceFlags),
+        )
     {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
@@ -804,6 +810,10 @@ fn verify_owner_only_handle(
     Ok(())
 }
 
+const fn owner_only_ace_flags_match(expected: u32, actual: u32) -> bool {
+    actual == expected || (expected == 0 && actual == INHERITED_ACE)
+}
+
 fn security_io_error(_error: WindowsSecurityError) -> io::Error {
     io::Error::from(io::ErrorKind::PermissionDenied)
 }
@@ -814,9 +824,10 @@ mod tests {
     use std::os::windows::io::AsRawHandle as _;
 
     use super::{
-        WindowsAccountVerifier, create_or_verify_owner_restricted_file,
-        create_owner_restricted_named_pipe, ensure_owner_restricted_directory,
-        open_or_create_owner_restricted_file, open_owner_restricted_file, verify_owner_only_handle,
+        CONTAINER_INHERIT_ACE, INHERITED_ACE, OBJECT_INHERIT_ACE, WindowsAccountVerifier,
+        create_or_verify_owner_restricted_file, create_owner_restricted_named_pipe,
+        ensure_owner_restricted_directory, open_or_create_owner_restricted_file,
+        open_owner_restricted_file, owner_only_ace_flags_match, verify_owner_only_handle,
     };
 
     fn endpoint(name: &str) -> String {
@@ -885,5 +896,20 @@ mod tests {
         let linked = directory.join("linked");
         std::fs::hard_link(&mutable, &linked).unwrap();
         assert!(open_or_create_owner_restricted_file(&mutable).is_err());
+
+        let inherited = directory.join("inherited");
+        std::fs::write(&inherited, b"inherited").unwrap();
+        open_owner_restricted_file(&inherited).unwrap();
+    }
+
+    #[test]
+    fn owner_only_file_ace_flags_accept_only_explicit_or_inherited_entries() {
+        assert!(owner_only_ace_flags_match(0, 0));
+        assert!(owner_only_ace_flags_match(0, INHERITED_ACE));
+        assert!(!owner_only_ace_flags_match(0, OBJECT_INHERIT_ACE));
+        assert!(!owner_only_ace_flags_match(
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERITED_ACE,
+        ));
     }
 }
