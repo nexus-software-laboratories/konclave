@@ -192,6 +192,24 @@ their profile, conversation, operation scope, identifier, counter or cursor, and
 authenticated sender where applicable. Metadata is cross-checked against the opened
 record before recovery proceeds.
 
+Relay endpoint migration therefore never edits the plaintext endpoint alone. The
+installer stops the shared service and the migration helper acquires every existing
+profile lock before network effects. A separate owner-protected SQLite journal under
+the profile root records one source, one destination, and each profile's deterministic
+registration request and existing principal identifier. The existing data-plane
+credential remains sealed in its profile database until the destination accepts that
+exact principal. One conditional update then reseals the same credential under the
+destination endpoint.
+
+An interrupted migration remains resumable because the destination sees the same
+request identifier on every attempt. Abort uses the journal to reseal committed
+profiles back under the source endpoint without another network request. While any
+profile remains uncommitted, the shared service denies all profile opens. After every
+profile commits, a health-check restart permits only the journaled profiles and denies
+new profile creation. Finalization removes the journal only after health succeeds.
+Profile schema, device identity, MLS state, conversations, and relay principal
+identity do not change.
+
 An unconfigured profile can be provisioned outside MCP by setting both
 `KONCLAVE_RELAY_ENDPOINT` and `KONCLAVE_RELAY_CREDENTIAL_FILE` in the daemon
 environment. The endpoint must satisfy TLS-or-loopback policy. The credential file is

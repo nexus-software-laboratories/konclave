@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use KonclaveClientLibrary::{RelayAccessCredential, RelayEndpoint};
+use KonclaveClientLibrary::{RelayAccessCredential, RelayEndpoint, RelayPrincipalId};
 use KonclaveCryptographicCore::{
     ConversationSigningMaterial, DeviceIdentity, MlsWelcome, VerifiedDeviceCredentialBinding,
     derive_collaboration_policy_digest, verify_device_credential_binding,
@@ -43,6 +43,7 @@ use crate::clock::{SystemUnixClock, UnixClock};
 mod collaboration_policy_exchange;
 mod collaboration_policy_operation;
 mod directed_request_handling;
+mod relay_migration;
 pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
 pub(crate) use collaboration_policy_operation::CollaborationPolicyActivationOperation;
 pub(crate) use directed_request_handling::{
@@ -9151,6 +9152,8 @@ pub(crate) enum ProfileStoreError {
     RelayAlreadyConfigured,
     #[error("profile relay enrollment state conflicts with the requested operation")]
     RelayEnrollmentConflict,
+    #[error("profile relay migration state conflicts with the requested operation")]
+    RelayMigrationConflict,
     #[error("conversation already exists")]
     ConversationExists,
     #[error("conversation does not exist")]

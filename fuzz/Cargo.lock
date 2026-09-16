@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "KonclaveClientLibrary"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
@@ -18,6 +18,7 @@ dependencies = [
  "log",
  "reqwest",
  "rustix",
+ "sha2",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
@@ -27,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveCryptographicCore"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
@@ -42,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveDomainCore"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "thiserror",
  "zeroize",
@@ -50,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveProtectedHttp"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "reqwest",
  "rustls",
@@ -59,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveProtocolContracts"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveRelayAuthentication",
@@ -71,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveRelayAuthentication"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "KonclaveDomainCore",
  "sha2",
@@ -80,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveSecretStorage"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "KonclaveWindowsSecurity",
  "aws-lc-rs",
@@ -93,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveWindowsSecurity"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "thiserror",
  "tokio",

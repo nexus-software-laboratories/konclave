@@ -7,6 +7,52 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'InstallationRuntime.Functions.ps1')
 
+$migrationArguments = @(
+    Get-RelayMigrationArguments `
+        -ConfigPath 'C:\Konclave\service.json' `
+        -RelayEndpoint 'https://relay.example.com'
+)
+if (
+    ($migrationArguments -join '|') -cne (
+        '--config|C:\Konclave\service.json|--relay-endpoint|' +
+        'https://relay.example.com'
+    )
+) {
+    throw 'Relay migration apply arguments are invalid.'
+}
+$abortArguments = @(
+    Get-RelayMigrationArguments `
+        -ConfigPath 'C:\Konclave\service.json' `
+        -RelayEndpoint 'https://relay.example.com' `
+        -Abort
+)
+if ($abortArguments[-1] -cne '--abort') {
+    throw 'Relay migration abort arguments are invalid.'
+}
+$finalizeArguments = @(
+    Get-RelayMigrationArguments `
+        -ConfigPath 'C:\Konclave\service.json' `
+        -RelayEndpoint 'https://relay.example.com' `
+        -Finalize
+)
+if ($finalizeArguments[-1] -cne '--finalize') {
+    throw 'Relay migration finalize arguments are invalid.'
+}
+$conflictingMigrationModeRejected = $false
+try {
+    [void](Get-RelayMigrationArguments `
+        -ConfigPath 'C:\Konclave\service.json' `
+        -RelayEndpoint 'https://relay.example.com' `
+        -Abort `
+        -Finalize)
+}
+catch {
+    $conflictingMigrationModeRejected = $true
+}
+if (-not $conflictingMigrationModeRejected) {
+    throw 'Relay migration accepted conflicting terminal modes.'
+}
+
 function Write-TestZip {
     param(
         [string]$Path,

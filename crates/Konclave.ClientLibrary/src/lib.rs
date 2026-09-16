@@ -30,7 +30,7 @@ pub use health::check_relay_health;
 pub use http::{RelayClient, RelayTransport};
 pub use installation::{
     RELAY_INSTALLATION_CONFIG_FILE, RelayEnrollmentSourceConfig, RelayInstallationConfig,
-    RelayInstallationConfigError, default_profile_root,
+    RelayInstallationConfigError, default_profile_root, relay_enrollment_installation_id,
 };
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
 pub use websocket::RelayWatchSession;

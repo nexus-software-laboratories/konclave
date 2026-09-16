@@ -810,6 +810,192 @@ function Invoke-InstalledCli {
         return @($output)
     }
 
+function Get-RelayMigrationArguments {
+        param(
+            [Parameter(Mandatory)]
+            [string]$ConfigPath,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [switch]$Abort,
+
+            [switch]$Finalize
+        )
+
+        if ($Abort -and $Finalize) {
+            throw 'Relay migration cannot abort and finalize together.'
+        }
+        $arguments = @(
+            '--config',
+            $ConfigPath,
+            '--relay-endpoint',
+            $RelayEndpoint
+        )
+        if ($Abort) {
+            $arguments += '--abort'
+        }
+        elseif ($Finalize) {
+            $arguments += '--finalize'
+        }
+        return $arguments
+    }
+
+function Invoke-InstalledRelayMigration {
+        param(
+            [Parameter(Mandatory)]
+            [string]$InstallRoot,
+
+            [Parameter(Mandatory)]
+            [string]$ConfigPath,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [switch]$Abort,
+
+            [switch]$Finalize
+        )
+
+        $suffix = if ($IsWindows) { '.exe' } else { '' }
+        $migration = Join-Path $InstallRoot 'bin' "KonclaveRelayMigration$suffix"
+        [void](Assert-SafeInstallationItem -Path $migration -Kind File)
+        $arguments = Get-RelayMigrationArguments `
+            -ConfigPath $ConfigPath `
+            -RelayEndpoint $RelayEndpoint `
+            -Abort:$Abort `
+            -Finalize:$Finalize
+        $output = & $migration @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Konclave relay migration failed: $($output -join "`n")"
+        }
+        try {
+            return ($output -join "`n") | ConvertFrom-Json -Depth 20
+        }
+        catch {
+            throw 'Konclave relay migration returned malformed output.'
+        }
+    }
+
+function Invoke-TransactionalRelayMigration {
+        param(
+            [Parameter(Mandatory)]
+            [string]$InstallRoot,
+
+            [Parameter(Mandatory)]
+            $Paths,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [scriptblock]$MigrationInvoker,
+
+            [scriptblock]$ServiceInvoker,
+
+            [scriptblock]$HealthVerifier
+        )
+
+        if ($null -eq $MigrationInvoker) {
+            $MigrationInvoker = {
+                param($Mode)
+                $arguments = @{
+                    InstallRoot = $InstallRoot
+                    ConfigPath = $Paths.serviceConfigPath
+                    RelayEndpoint = $RelayEndpoint
+                }
+                if ($Mode -ceq 'Abort') {
+                    $arguments.Abort = $true
+                }
+                elseif ($Mode -ceq 'Finalize') {
+                    $arguments.Finalize = $true
+                }
+                Invoke-InstalledRelayMigration @arguments
+            }.GetNewClosure()
+        }
+        if ($null -eq $ServiceInvoker) {
+            $ServiceInvoker = {
+                param($Action)
+                Invoke-ServiceManager `
+                    -Action $Action `
+                    -InstallRoot $InstallRoot `
+                    -ConfigPath $Paths.serviceConfigPath
+            }.GetNewClosure()
+        }
+        if ($null -eq $HealthVerifier) {
+            $HealthVerifier = {
+                Wait-InstalledRuntimeHealth -InstallRoot $InstallRoot -Paths $Paths
+            }.GetNewClosure()
+        }
+
+        [void](& $ServiceInvoker 'Stop')
+        try {
+            $migration = & $MigrationInvoker 'Apply'
+        }
+        catch {
+            $migrationError = $_
+            try {
+                $aborted = & $MigrationInvoker 'Abort'
+                if (
+                    [string]$aborted.action -notin @(
+                        'RelayMigrationAborted',
+                        'RelayMigrationNotPending'
+                    )
+                ) {
+                    throw 'Relay migration abort returned a conflicting result.'
+                }
+                [void](& $ServiceInvoker 'Start')
+                [void](& $HealthVerifier)
+            }
+            catch {
+                throw "Relay migration failed and source recovery did not complete: $(
+                    $migrationError.Exception.Message
+                )`nRecovery: $($_.Exception.Message)"
+            }
+            throw $migrationError
+        }
+        try {
+            [void](& $ServiceInvoker 'Start')
+            [void](& $HealthVerifier)
+            $finalized = & $MigrationInvoker 'Finalize'
+            if (
+                [string]$finalized.action -cne 'RelayMigrated' -or
+                [string]$finalized.sourceEndpoint -cne [string]$migration.sourceEndpoint -or
+                [string]$finalized.destinationEndpoint -cne (
+                    [string]$migration.destinationEndpoint
+                ) -or
+                [int]$finalized.totalProfiles -ne [int]$migration.totalProfiles
+            ) {
+                throw 'Relay migration finalization returned a conflicting result.'
+            }
+            return [pscustomobject][ordered]@{
+                action = [string]$finalized.action
+                sourceEndpoint = [string]$migration.sourceEndpoint
+                destinationEndpoint = [string]$migration.destinationEndpoint
+                totalProfiles = [int]$migration.totalProfiles
+                migratedProfiles = [int]$migration.migratedProfiles
+                unchangedProfiles = [int]$migration.unchangedProfiles
+            }
+        }
+        catch {
+            $healthError = $_
+            try {
+                [void](& $ServiceInvoker 'Stop')
+                $aborted = & $MigrationInvoker 'Abort'
+                if ([string]$aborted.action -cne 'RelayMigrationAborted') {
+                    throw 'Relay migration rollback returned a conflicting result.'
+                }
+                [void](& $ServiceInvoker 'Start')
+                [void](& $HealthVerifier)
+            }
+            catch {
+                throw "Migrated relay did not become healthy and rollback failed: $(
+                    $healthError.Exception.Message
+                )`nRollback: $($_.Exception.Message)"
+            }
+            throw $healthError
+        }
+    }
+
 function Initialize-InstalledRuntime {
         param(
             [Parameter(Mandatory)]

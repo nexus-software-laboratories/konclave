@@ -352,6 +352,7 @@ internal route authority.
 | Pairing expiry after membership commit | Separate completion deadline; recover the exact Welcome or issue a durable compensating MLS removal |
 | Remote pairing credential escalation | Never embed a wildcard or durable relay credential; require pre-provisioned access or an exact-route short-lived principal |
 | Enrollment authority theft or abuse | Separate enrollment/data-plane derivation domains, authenticate before body processing, fixed server grants, rate/concurrency/principal caps, verifier-only configuration, rotation, and revocation |
+| Relay endpoint substitution during migration | System-trusted TLS, exact source/destination journal binding, deterministic principal-registration identity, all-profile locking, endpoint-bound credential resealing only after authenticated destination acceptance, partial-state admission denial, health-before-finalize, and local journaled abort |
 | Credential or capability substitution | Device-root binding validation covers identity and the conversation key; a separate root signature authenticates nonzero capability bits, while a missing assertion means no capability; optional out-of-band fingerprint comparison authenticates the intended device |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |
 | Protocol downgrade | Signed capability negotiation across every remote recipient of a group application message and fail-closed version selection |

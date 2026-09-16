@@ -30,6 +30,8 @@ mod persistence;
 mod profile_runtime;
 #[allow(dead_code)]
 mod profile_supervisor;
+#[allow(dead_code)]
+mod relay_migration;
 mod runtime;
 mod service;
 #[cfg(feature = "rust-service-mcp")]
@@ -86,3 +88,6 @@ pub fn parse_shared_service_installation_path(
 ) -> anyhow::Result<std::path::PathBuf> {
     shared_service_arguments::parse_installation_path(arguments.into_iter())
 }
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+pub use relay_migration::{RelayMigrationReport, run_relay_migration};
