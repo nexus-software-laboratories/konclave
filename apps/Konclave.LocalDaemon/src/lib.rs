@@ -30,6 +30,8 @@ mod persistence;
 mod profile_runtime;
 #[allow(dead_code)]
 mod profile_supervisor;
+#[allow(dead_code)]
+mod relay_migration;
 mod runtime;
 mod service;
 #[cfg(feature = "rust-service-mcp")]
