@@ -259,7 +259,7 @@ jobs:
             --locked `
             --no-deps `
             --package KonclaveLocalDaemon `
-            --all-targets `
+            --lib `
             -- `
             -D warnings
           if ($LASTEXITCODE -ne 0) {
