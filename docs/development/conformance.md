@@ -32,8 +32,9 @@ Clippy before distribution or package integration relies on the behavior.
 profiles between self-hosted relay endpoints. It runs the exhaustive migration
 transition table, shared installation-identity derivation, exact endpoint-bound
 credential resealing, interrupted apply/resume and local abort, partial-migration
-profile admission denial, repeated migration against a real enrollment endpoint,
-installer argument contracts, Rust formatting, and all-target Clippy.
+profile admission denial, exact retry after stable enrollment rate limiting, repeated
+migration against a real enrollment endpoint, a real 30-profile batch above one relay
+rate window, installer argument contracts, Rust formatting, and all-target Clippy.
 
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared

@@ -8,13 +8,15 @@ use std::fs::File;
 use std::io::Write as _;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use std::path::{Path, PathBuf};
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+use std::time::Duration;
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveClientLibrary::{
-    EnrollmentRequestId, HttpRelayEnrollmentTransport, RELAY_INSTALLATION_CONFIG_FILE,
-    RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentRequest, RelayEnrollmentSourceConfig,
-    RelayEnrollmentTransport, RelayInstallationConfig, RelayPrincipalId,
-    relay_enrollment_installation_id,
+    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError,
+    RELAY_INSTALLATION_CONFIG_FILE, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentRequest,
+    RelayEnrollmentResponse, RelayEnrollmentSourceConfig, RelayEnrollmentTransport,
+    RelayInstallationConfig, RelayPrincipalId, relay_enrollment_installation_id,
 };
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveDomainCore::ProtocolVersion;
@@ -52,6 +54,12 @@ const RELAY_MIGRATION_JOURNAL_SCHEMA_VERSION: u32 = 1;
 const MAX_RELAY_MIGRATION_PROFILES: usize = 256;
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 const RELAY_MIGRATION_REQUEST_DOMAIN: &[u8] = b"konclave:relay-migration-request:1\0";
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+const RELAY_MIGRATION_ENROLLMENT_PACING: Duration = Duration::from_millis(100);
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+const RELAY_MIGRATION_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+const MAX_RELAY_MIGRATION_ENROLLMENT_ATTEMPTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayMigrationState {
@@ -843,8 +851,7 @@ where
                 }
                 RelayMigrationAction::RegisterDestination => {
                     let entry = entry.context("prepared relay migration entry is missing")?;
-                    let response = client
-                        .register(entry.request)
+                    let response = register_destination_principal(client, entry.request)
                         .await
                         .context("registering existing principal on destination relay")?;
                     ensure!(
@@ -883,6 +890,34 @@ where
         }
     }
     Ok((migrated, unchanged))
+}
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+async fn register_destination_principal<T>(
+    client: &RelayEnrollmentClient<T>,
+    request: RelayEnrollmentRequest,
+) -> Result<RelayEnrollmentResponse, KonclaveClientError>
+where
+    T: RelayEnrollmentTransport,
+{
+    for attempt in 1..=MAX_RELAY_MIGRATION_ENROLLMENT_ATTEMPTS {
+        match client.register(request).await {
+            Ok(response) => {
+                tokio::time::sleep(RELAY_MIGRATION_ENROLLMENT_PACING).await;
+                return Ok(response);
+            }
+            Err(KonclaveClientError::RelayRejected {
+                status: 429,
+                relay_code,
+            }) if relay_code == "relay_enrollment_rate_limited"
+                && attempt < MAX_RELAY_MIGRATION_ENROLLMENT_ATTEMPTS =>
+            {
+                tokio::time::sleep(RELAY_MIGRATION_RATE_LIMIT_BACKOFF).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -1088,12 +1123,13 @@ fn replace_relay_installation(
 #[cfg(test)]
 mod tests {
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use std::sync::{Arc, Mutex};
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use KonclaveClientLibrary::{
-        KonclaveClientError, RelayAccessCredential, RelayEnrollmentCredential,
-        RelayEnrollmentOutcome, RelayEnrollmentResponse,
+        RelayAccessCredential, RelayEnrollmentCredential, RelayEnrollmentOutcome,
     };
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     use KonclaveSecretStorage::{
@@ -1182,6 +1218,35 @@ mod tests {
     struct FakeEnrollmentTransport {
         requests: Arc<Mutex<Vec<RelayEnrollmentRequest>>>,
         fail_at: Option<usize>,
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    struct RateLimitedEnrollmentTransport {
+        requests: Arc<Mutex<Vec<RelayEnrollmentRequest>>>,
+        limit_once: AtomicBool,
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[async_trait]
+    impl RelayEnrollmentTransport for RateLimitedEnrollmentTransport {
+        async fn register(
+            &self,
+            request: RelayEnrollmentRequest,
+        ) -> Result<RelayEnrollmentResponse, KonclaveClientError> {
+            self.requests.lock().unwrap().push(request);
+            if self.limit_once.swap(false, Ordering::SeqCst) {
+                return Err(KonclaveClientError::RelayRejected {
+                    status: 429,
+                    relay_code: "relay_enrollment_rate_limited".to_string(),
+                });
+            }
+            Ok(RelayEnrollmentResponse::new(
+                request.version(),
+                request.request_id(),
+                request.principal_id(),
+                RelayEnrollmentOutcome::AlreadyRegistered,
+            ))
+        }
     }
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -1504,6 +1569,34 @@ mod tests {
     }
 
     #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_registration_retries_the_exact_request() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        let source = endpoint("http://127.0.0.1:43180");
+        let destination = endpoint("https://relay.example.com");
+        let profiles = vec![open_store(&profile_root, "profile-a", 13)];
+        let journal = RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = RelayEnrollmentClient::new(RateLimitedEnrollmentTransport {
+            requests: Arc::clone(&requests),
+            limit_once: AtomicBool::new(true),
+        });
+
+        assert_eq!(
+            apply_profiles(&profiles, &journal, &source, &destination, &client)
+                .await
+                .unwrap(),
+            (1, 0)
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        journal.delete().unwrap();
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
     #[tokio::test]
     async fn real_relay_accepts_repeat_migration_to_one_destination() {
         let root = tempfile::tempdir().unwrap();
@@ -1555,5 +1648,43 @@ mod tests {
             destination.as_str()
         );
         second_journal.delete().unwrap();
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[tokio::test]
+    async fn real_relay_accepts_rate_limited_profile_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        let source = endpoint("http://127.0.0.1:43180");
+        let enrollment = [14; RelayEnrollmentCredential::LENGTH];
+        let relay = TestRelay::start_enrollment(enrollment).await;
+        let destination = endpoint(&relay.endpoint);
+        let profiles = (0..30)
+            .map(|index| {
+                open_store(
+                    &profile_root,
+                    &format!("profile-{index:02}"),
+                    u8::try_from(index + 1).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let journal = RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let client = RelayEnrollmentClient::new(
+            HttpRelayEnrollmentTransport::new(
+                destination.clone(),
+                RelayEnrollmentCredential::from_bytes(enrollment),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            apply_profiles(&profiles, &journal, &source, &destination, &client)
+                .await
+                .unwrap(),
+            (30, 0)
+        );
+        assert_eq!(journal.committed_profile_count().unwrap(), 30);
+        journal.delete().unwrap();
     }
 }
