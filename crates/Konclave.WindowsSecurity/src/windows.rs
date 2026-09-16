@@ -28,7 +28,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+    FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
@@ -177,10 +178,10 @@ pub fn create_owner_restricted_named_pipe(
 pub fn ensure_owner_restricted_directory(path: &Path) -> io::Result<()> {
     let encoded = wide_path(path)?;
     let (identity, descriptor) = owner_only_security(true)?;
-    let mut attributes = security_attributes(&descriptor)?;
+    let attributes = security_attributes(&descriptor)?;
     // SAFETY: `encoded` is NUL-terminated, `attributes` references a live
     // self-relative descriptor, and Windows copies that descriptor on creation.
-    if unsafe { CreateDirectoryW(encoded.as_ptr(), &mut attributes) } == 0 {
+    if unsafe { CreateDirectoryW(encoded.as_ptr(), &attributes) } == 0 {
         // SAFETY: the immediately preceding Win32 call failed on this thread.
         let error = unsafe { GetLastError() };
         if error != ERROR_ALREADY_EXISTS {
@@ -211,7 +212,7 @@ pub fn open_or_create_owner_restricted_file(path: &Path) -> io::Result<File> {
     )?;
     let encoded = wide_path(path)?;
     let (identity, descriptor) = owner_only_security(false)?;
-    let mut attributes = security_attributes(&descriptor)?;
+    let attributes = security_attributes(&descriptor)?;
     // SAFETY: every pointer references live initialized storage, the path is
     // NUL-terminated, and the returned handle is adopted exactly once below.
     let raw = unsafe {
@@ -219,7 +220,7 @@ pub fn open_or_create_owner_restricted_file(path: &Path) -> io::Result<File> {
             encoded.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            &mut attributes,
+            &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             null_mut(),
@@ -262,7 +263,7 @@ pub fn create_or_verify_owner_restricted_file(path: &Path, expected: &[u8]) -> i
     )?;
     let encoded = wide_path(path)?;
     let (identity, descriptor) = owner_only_security(false)?;
-    let mut attributes = security_attributes(&descriptor)?;
+    let attributes = security_attributes(&descriptor)?;
     // SAFETY: every pointer references live initialized storage, the path is
     // NUL-terminated, and the returned handle is adopted exactly once below.
     let raw = unsafe {
@@ -270,7 +271,7 @@ pub fn create_or_verify_owner_restricted_file(path: &Path, expected: &[u8]) -> i
             encoded.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             0,
-            &mut attributes,
+            &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             null_mut(),
@@ -331,6 +332,46 @@ pub fn open_owner_restricted_file(path: &Path) -> io::Result<File> {
     Ok(File::from(handle))
 }
 
+/// Atomically replaces one owner-restricted file with another in the same directory.
+///
+/// Both source and destination must already be exact owner-restricted ordinary files.
+/// The replacement preserves the source file's verified descriptor and is flushed
+/// through the Windows move operation before returning.
+///
+/// # Errors
+///
+/// Returns an operating-system error when either path is unsafe, their parents differ,
+/// the atomic replacement fails, or the resulting destination is not owner-restricted.
+pub fn replace_owner_restricted_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if source_parent != destination_parent {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    drop(open_owner_restricted_file(source)?);
+    drop(open_owner_restricted_file(destination)?);
+    let encoded_source = wide_path(source)?;
+    let encoded_destination = wide_path(destination)?;
+    // SAFETY: both paths are live NUL-terminated buffers for verified ordinary files
+    // in one owner-restricted directory, and Windows consumes them during this call.
+    if unsafe {
+        MoveFileExW(
+            encoded_source.as_ptr(),
+            encoded_destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(open_owner_restricted_file(destination)?);
+    Ok(())
+}
+
 fn verify_owner_restricted_directory_path(path: &Path) -> io::Result<()> {
     let identity = current_process_identity().map_err(security_io_error)?;
     let handle = open_path_handle(path, GENERIC_READ, true)?;
@@ -378,13 +419,18 @@ fn open_path_handle(path: &Path, access: u32, directory: bool) -> io::Result<Own
         } else {
             FILE_ATTRIBUTE_NORMAL
         };
+    let share = if directory {
+        FILE_SHARE_READ
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    };
     // SAFETY: `encoded` is live and NUL-terminated, no security-attribute pointer is
     // supplied, and the returned owned handle is adopted exactly once.
     let raw = unsafe {
         CreateFileW(
             encoded.as_ptr(),
             access,
-            FILE_SHARE_READ,
+            share,
             null_mut(),
             OPEN_EXISTING,
             flags,
@@ -816,7 +862,8 @@ mod tests {
     use super::{
         WindowsAccountVerifier, create_or_verify_owner_restricted_file,
         create_owner_restricted_named_pipe, ensure_owner_restricted_directory,
-        open_or_create_owner_restricted_file, open_owner_restricted_file, verify_owner_only_handle,
+        open_or_create_owner_restricted_file, open_owner_restricted_file,
+        replace_owner_restricted_file, verify_owner_only_handle,
     };
 
     fn endpoint(name: &str) -> String {
@@ -873,8 +920,10 @@ mod tests {
         create_or_verify_owner_restricted_file(&file, b"exact").unwrap();
         assert!(create_or_verify_owner_restricted_file(&file, b"different").is_err());
         let mutable = directory.join("mutable");
+        let mutable_writer = open_or_create_owner_restricted_file(&mutable).unwrap();
         open_or_create_owner_restricted_file(&mutable).unwrap();
-        open_or_create_owner_restricted_file(&mutable).unwrap();
+        open_owner_restricted_file(&mutable).unwrap();
+        drop(mutable_writer);
         let mut value = Vec::new();
         open_owner_restricted_file(&file)
             .unwrap()
@@ -885,5 +934,16 @@ mod tests {
         let linked = directory.join("linked");
         std::fs::hard_link(&mutable, &linked).unwrap();
         assert!(open_or_create_owner_restricted_file(&mutable).is_err());
+
+        let replacement = directory.join("replacement");
+        create_or_verify_owner_restricted_file(&replacement, b"replacement").unwrap();
+        replace_owner_restricted_file(&replacement, &file).unwrap();
+        let mut replaced = Vec::new();
+        open_owner_restricted_file(&file)
+            .unwrap()
+            .read_to_end(&mut replaced)
+            .unwrap();
+        assert_eq!(replaced, b"replacement");
+        assert!(!replacement.exists());
     }
 }

@@ -19,6 +19,7 @@
     "Installer lifecycle conformance",
     "Marketplace conformance",
     "Relay migration conformance",
+    "Relay migration Windows conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -81,6 +82,16 @@
         "container-ci",
         "delete-run-artifacts",
         "prune-actions-caches"
+      ]
+    },
+    {
+      "id": "windows-latest-hosted",
+      "source": "github-hosted",
+      "labels": [
+        "windows-latest"
+      ],
+      "jobs": [
+        "relay-migration-windows-conformance"
       ]
     }
   ],
@@ -181,7 +192,8 @@
       ],
       "draftBehavior": "full",
       "requiredChecks": [
-        "Relay migration conformance"
+        "Relay migration conformance",
+        "Relay migration Windows conformance"
       ]
     },
     {

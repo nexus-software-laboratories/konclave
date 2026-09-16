@@ -912,7 +912,7 @@ function Invoke-TransactionalRelayMigration {
                     $arguments.Finalize = $true
                 }
                 Invoke-InstalledRelayMigration @arguments
-            }.GetNewClosure()
+            }
         }
         if ($null -eq $ServiceInvoker) {
             $ServiceInvoker = {
@@ -921,17 +921,17 @@ function Invoke-TransactionalRelayMigration {
                     -Action $Action `
                     -InstallRoot $InstallRoot `
                     -ConfigPath $Paths.serviceConfigPath
-            }.GetNewClosure()
+            }
         }
         if ($null -eq $HealthVerifier) {
             $HealthVerifier = {
                 Wait-InstalledRuntimeHealth -InstallRoot $InstallRoot -Paths $Paths
-            }.GetNewClosure()
+            }
         }
         if ($null -eq $ProfileRootProtector) {
             $ProfileRootProtector = {
                 [void](Set-OwnerOnlyDirectory -Path $Paths.profileRoot)
-            }.GetNewClosure()
+            }
         }
 
         [void](& $ServiceInvoker 'Stop')

@@ -207,6 +207,11 @@ profiles back under the source endpoint without another network request. While a
 profile remains uncommitted, the shared service denies all profile opens. After every
 profile commits, a health-check restart permits only the journaled profiles and denies
 new profile creation. Finalization removes the journal only after health succeeds.
+If abort stops after restoring a committed profile but before deleting its journal
+row, the source endpoint plus the exact destination-bound request is a recoverable
+prepared state. Another abort completes local cleanup without network access; another
+apply reuses that request before recommitting the destination. Installation
+configuration replacement is atomic and retains the owner-protected file policy.
 Profile schema, device identity, MLS state, conversations, and relay principal
 identity do not change.
 

@@ -17,4 +17,5 @@ pub use windows::{
     WindowsAccountVerifier, WindowsSecurityError, create_or_verify_owner_restricted_file,
     create_owner_restricted_named_pipe, ensure_owner_restricted_directory,
     open_or_create_owner_restricted_file, open_owner_restricted_file,
+    replace_owner_restricted_file,
 };
