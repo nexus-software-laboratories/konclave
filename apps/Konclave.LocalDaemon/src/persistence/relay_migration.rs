@@ -70,7 +70,7 @@ mod tests {
         SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([3; 32])).unwrap()
     }
 
-    fn store(root: &Path, profile: &str) -> ProfileStore {
+    fn open_test_store(root: &Path, profile: &str) -> ProfileStore {
         LockedProfile::acquire(root, ProfileId::parse(profile).unwrap())
             .unwrap()
             .open_store(sealer())
@@ -84,7 +84,7 @@ mod tests {
         let destination = endpoint("https://relay.example.com");
         let credential = RelayAccessCredential::from_bytes([7; 32]);
         let principal = credential.principal_id();
-        let store = store(root.path(), "migration-profile");
+        let store = open_test_store(root.path(), "migration-profile");
         store.configure_relay(&source, &credential).unwrap();
 
         assert!(
@@ -92,10 +92,10 @@ mod tests {
                 .migrate_relay_endpoint(&source, &destination, principal)
                 .unwrap()
         );
-        assert_eq!(
-            store.relay_migration_identity().unwrap(),
-            (destination.clone(), principal)
-        );
+        let (migrated_endpoint, migrated_principal) =
+            store.relay_migration_identity().unwrap();
+        assert_eq!(migrated_endpoint.as_str(), destination.as_str());
+        assert_eq!(migrated_principal, principal);
         assert!(
             !store
                 .migrate_relay_endpoint(&source, &destination, principal)
@@ -103,11 +103,11 @@ mod tests {
         );
         drop(store);
 
-        let reopened = store(root.path(), "migration-profile");
-        assert_eq!(
-            reopened.relay_migration_identity().unwrap(),
-            (destination, principal)
-        );
+        let reopened = open_test_store(root.path(), "migration-profile");
+        let (reopened_endpoint, reopened_principal) =
+            reopened.relay_migration_identity().unwrap();
+        assert_eq!(reopened_endpoint.as_str(), destination.as_str());
+        assert_eq!(reopened_principal, principal);
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         let destination = endpoint("https://relay.example.com");
         let credential = RelayAccessCredential::from_bytes([8; 32]);
         let principal = credential.principal_id();
-        let store = store(root.path(), "migration-profile");
+        let store = open_test_store(root.path(), "migration-profile");
         store.configure_relay(&source, &credential).unwrap();
 
         assert_eq!(
@@ -140,9 +140,9 @@ mod tests {
                 .unwrap_err(),
             ProfileStoreError::RelayMigrationConflict
         );
-        assert_eq!(
-            store.relay_migration_identity().unwrap(),
-            (source, principal)
-        );
+        let (retained_endpoint, retained_principal) =
+            store.relay_migration_identity().unwrap();
+        assert_eq!(retained_endpoint.as_str(), source.as_str());
+        assert_eq!(retained_principal, principal);
     }
 }

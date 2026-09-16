@@ -31,7 +31,7 @@ use KonclaveSecretStorage::{
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use anyhow::{Context as _, bail, ensure};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
-use fs4::{FileExt as _, TryLockError};
+use fs4::{FileExt, TryLockError};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use rusqlite::{Connection, OptionalExtension as _, params};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -418,9 +418,9 @@ struct RelayMigrationLock {
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 impl RelayMigrationLock {
     fn acquire(root: &Path) -> anyhow::Result<Self> {
-        let file = open_or_create_owner_protected_file(root.join(RELAY_MIGRATION_LOCK_FILE))
+        let file = open_or_create_owner_protected_file(&root.join(RELAY_MIGRATION_LOCK_FILE))
             .context("opening owner-protected relay migration lock")?;
-        match file.try_lock() {
+        match FileExt::try_lock(&file) {
             Ok(()) => Ok(Self { _file: file }),
             Err(TryLockError::WouldBlock) => bail!("another relay migration is active"),
             Err(TryLockError::Error(error)) => Err(error).context("acquiring relay migration lock"),
@@ -1056,10 +1056,23 @@ mod tests {
         );
         assert_eq!(first_requests.lock().unwrap().len(), 1);
         assert_eq!(
-            profiles[0].1.relay_migration_identity().unwrap().0,
-            destination
+            profiles[0]
+                .1
+                .relay_migration_identity()
+                .unwrap()
+                .0
+                .as_str(),
+            destination.as_str()
         );
-        assert_eq!(profiles[1].1.relay_migration_identity().unwrap().0, source);
+        assert_eq!(
+            profiles[1]
+                .1
+                .relay_migration_identity()
+                .unwrap()
+                .0
+                .as_str(),
+            source.as_str()
+        );
         let second_entry = journal.profile(&profiles[1].0).unwrap().unwrap();
         assert_eq!(second_entry.state, JournalProfileState::Prepared);
 
@@ -1079,7 +1092,10 @@ mod tests {
             &[second_entry.request]
         );
         for (profile, store) in &profiles {
-            assert_eq!(store.relay_migration_identity().unwrap().0, destination);
+            assert_eq!(
+                store.relay_migration_identity().unwrap().0.as_str(),
+                destination.as_str()
+            );
             assert_eq!(
                 journal.profile(profile).unwrap().unwrap().state,
                 JournalProfileState::Committed
@@ -1116,7 +1132,10 @@ mod tests {
             (1, 1)
         );
         for (_, store) in &profiles {
-            assert_eq!(store.relay_migration_identity().unwrap().0, source);
+            assert_eq!(
+                store.relay_migration_identity().unwrap().0.as_str(),
+                source.as_str()
+            );
         }
         journal.delete().unwrap();
     }
