@@ -338,21 +338,6 @@ impl RelayMigrationJournal {
         })
     }
 
-    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
-    fn relay_migration_request_id(
-        destination: &RelayEndpoint,
-        principal: RelayPrincipalId,
-    ) -> EnrollmentRequestId {
-        let mut digest = Sha256::new();
-        digest.update(RELAY_MIGRATION_REQUEST_DOMAIN);
-        digest.update(destination.as_str().as_bytes());
-        digest.update(principal.as_bytes());
-        let digest = digest.finalize();
-        let mut request_id = [0_u8; EnrollmentRequestId::LENGTH];
-        request_id.copy_from_slice(&digest[..EnrollmentRequestId::LENGTH]);
-        EnrollmentRequestId::from_bytes(request_id)
-    }
-
     fn mark_committed(&self, entry: &JournalProfile) -> anyhow::Result<()> {
         let changed = self
             .connection
@@ -417,6 +402,21 @@ impl RelayMigrationJournal {
         );
         std::fs::remove_file(&path).context("deleting completed relay migration journal")
     }
+}
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+fn relay_migration_request_id(
+    destination: &RelayEndpoint,
+    principal: RelayPrincipalId,
+) -> EnrollmentRequestId {
+    let mut digest = Sha256::new();
+    digest.update(RELAY_MIGRATION_REQUEST_DOMAIN);
+    digest.update(destination.as_str().as_bytes());
+    digest.update(principal.as_bytes());
+    let digest = digest.finalize();
+    let mut request_id = [0_u8; EnrollmentRequestId::LENGTH];
+    request_id.copy_from_slice(&digest[..EnrollmentRequestId::LENGTH]);
+    EnrollmentRequestId::from_bytes(request_id)
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
