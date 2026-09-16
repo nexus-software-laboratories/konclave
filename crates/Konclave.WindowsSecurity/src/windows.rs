@@ -178,10 +178,10 @@ pub fn create_owner_restricted_named_pipe(
 pub fn ensure_owner_restricted_directory(path: &Path) -> io::Result<()> {
     let encoded = wide_path(path)?;
     let (identity, descriptor) = owner_only_security(true)?;
-    let mut attributes = security_attributes(&descriptor)?;
+    let attributes = security_attributes(&descriptor)?;
     // SAFETY: `encoded` is NUL-terminated, `attributes` references a live
     // self-relative descriptor, and Windows copies that descriptor on creation.
-    if unsafe { CreateDirectoryW(encoded.as_ptr(), &mut attributes) } == 0 {
+    if unsafe { CreateDirectoryW(encoded.as_ptr(), &attributes) } == 0 {
         // SAFETY: the immediately preceding Win32 call failed on this thread.
         let error = unsafe { GetLastError() };
         if error != ERROR_ALREADY_EXISTS {
@@ -212,7 +212,7 @@ pub fn open_or_create_owner_restricted_file(path: &Path) -> io::Result<File> {
     )?;
     let encoded = wide_path(path)?;
     let (identity, descriptor) = owner_only_security(false)?;
-    let mut attributes = security_attributes(&descriptor)?;
+    let attributes = security_attributes(&descriptor)?;
     // SAFETY: every pointer references live initialized storage, the path is
     // NUL-terminated, and the returned handle is adopted exactly once below.
     let raw = unsafe {
@@ -220,7 +220,7 @@ pub fn open_or_create_owner_restricted_file(path: &Path) -> io::Result<File> {
             encoded.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            &mut attributes,
+            &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             null_mut(),
@@ -263,7 +263,7 @@ pub fn create_or_verify_owner_restricted_file(path: &Path, expected: &[u8]) -> i
     )?;
     let encoded = wide_path(path)?;
     let (identity, descriptor) = owner_only_security(false)?;
-    let mut attributes = security_attributes(&descriptor)?;
+    let attributes = security_attributes(&descriptor)?;
     // SAFETY: every pointer references live initialized storage, the path is
     // NUL-terminated, and the returned handle is adopted exactly once below.
     let raw = unsafe {
@@ -271,7 +271,7 @@ pub fn create_or_verify_owner_restricted_file(path: &Path, expected: &[u8]) -> i
             encoded.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             0,
-            &mut attributes,
+            &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             null_mut(),
