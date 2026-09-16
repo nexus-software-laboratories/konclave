@@ -1281,16 +1281,13 @@ mod tests {
         let profile_root = root.path().join("profiles");
         ensure_owner_protected_directory(&profile_root).unwrap();
         drop(
-            open_or_create_owner_protected_file(
-                &profile_root.join(RELAY_MIGRATION_JOURNAL_FILE),
-            )
-            .unwrap(),
+            open_or_create_owner_protected_file(&profile_root.join(RELAY_MIGRATION_JOURNAL_FILE))
+                .unwrap(),
         );
         let source = endpoint("http://127.0.0.1:43180");
         let destination = endpoint("https://relay.example.com");
 
-        let journal =
-            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let journal = RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
         assert_eq!(journal.committed_profile_count().unwrap(), 0);
         journal.delete().unwrap();
     }
