@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "konclave",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Secure, durable agent-to-agent communication for GitHub Copilot CLI",
   "author": {
     "name": "Nexus Software Laboratories",
