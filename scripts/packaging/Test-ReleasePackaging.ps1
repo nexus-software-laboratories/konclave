@@ -117,6 +117,7 @@ function Assert-ReleaseLayout {
             foreach ($relative in @(
                 "bin/konclave$suffix",
                 "bin/KonclaveLocalService$suffix",
+                "bin/KonclaveRelayMigration$suffix",
                 'share/konclave/plugin/plugin.json',
                 'share/konclave/plugin/com.github.copilot/extensions/konclave/extension.mjs',
                 'share/konclave/plugin/com.github.copilot/extensions/konclave/package.json',
@@ -364,7 +365,13 @@ try {
         if ($RunBinaries -and [string]$artifact.operatingSystem -cne 'windows') {
             $suffix = ''
             $executables = switch ($kind) {
-                'client' { @("bin/konclave$suffix", "bin/KonclaveLocalService$suffix") }
+                'client' {
+                    @(
+                        "bin/konclave$suffix",
+                        "bin/KonclaveLocalService$suffix",
+                        "bin/KonclaveRelayMigration$suffix"
+                    )
+                }
                 'relay' { @("bin/KonclaveCommunityRelay$suffix") }
                 'gateway' { @("bin/KonclaveA2AGateway$suffix") }
                 default { throw "Unsupported executable package kind: $kind" }

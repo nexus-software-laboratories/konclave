@@ -417,7 +417,7 @@ fn prepare_enrollment(
     })
 }
 
-fn load_installation_credential(
+pub(crate) fn load_installation_credential(
     installation: &RelayInstallationConfig,
 ) -> anyhow::Result<RelayEnrollmentCredential> {
     if let Some(credential) = installation

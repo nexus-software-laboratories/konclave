@@ -810,6 +810,62 @@ function Invoke-InstalledCli {
         return @($output)
     }
 
+function Get-RelayMigrationArguments {
+        param(
+            [Parameter(Mandatory)]
+            [string]$ConfigPath,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [switch]$Abort
+        )
+
+        $arguments = @(
+            '--config',
+            $ConfigPath,
+            '--relay-endpoint',
+            $RelayEndpoint
+        )
+        if ($Abort) {
+            $arguments += '--abort'
+        }
+        return $arguments
+    }
+
+function Invoke-InstalledRelayMigration {
+        param(
+            [Parameter(Mandatory)]
+            [string]$InstallRoot,
+
+            [Parameter(Mandatory)]
+            [string]$ConfigPath,
+
+            [Parameter(Mandatory)]
+            [string]$RelayEndpoint,
+
+            [switch]$Abort
+        )
+
+        $suffix = if ($IsWindows) { '.exe' } else { '' }
+        $migration = Join-Path $InstallRoot 'bin' "KonclaveRelayMigration$suffix"
+        [void](Assert-SafeInstallationItem -Path $migration -Kind File)
+        $arguments = Get-RelayMigrationArguments `
+            -ConfigPath $ConfigPath `
+            -RelayEndpoint $RelayEndpoint `
+            -Abort:$Abort
+        $output = & $migration @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Konclave relay migration failed: $($output -join "`n")"
+        }
+        try {
+            return ($output -join "`n") | ConvertFrom-Json -Depth 20
+        }
+        catch {
+            throw 'Konclave relay migration returned malformed output.'
+        }
+    }
+
 function Initialize-InstalledRuntime {
         param(
             [Parameter(Mandatory)]

@@ -18,6 +18,7 @@ dependencies = [
  "log",
  "reqwest",
  "rustix",
+ "sha2",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
