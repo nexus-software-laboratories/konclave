@@ -715,9 +715,19 @@ fn open_profiles(
                 ProfileId::parse(value).context("validating relay migration profile name")
             })?;
         let profile_database = entry.path().join("profile.sqlite");
-        let profile_database_type = std::fs::symlink_metadata(&profile_database)
-            .context("reading relay migration profile database metadata")?
-            .file_type();
+        let profile_database_type = match std::fs::symlink_metadata(&profile_database) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ensure!(
+                    uninitialized_profile_directory(&entry.path())?,
+                    "relay migration profile database is missing with partial state"
+                );
+                continue;
+            }
+            Err(error) => {
+                return Err(error).context("reading relay migration profile database metadata");
+            }
+        };
         ensure!(
             profile_database_type.is_file() && !profile_database_type.is_symlink(),
             "relay migration profile database is missing or linked"
@@ -756,6 +766,31 @@ fn open_profiles(
         profiles.push((profile, store));
     }
     Ok(profiles)
+}
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+fn uninitialized_profile_directory(directory: &Path) -> anyhow::Result<bool> {
+    let mut lock_seen = false;
+    for entry in std::fs::read_dir(directory).context("reading uninitialized profile directory")? {
+        let entry = entry.context("reading uninitialized profile entry")?;
+        let file_type = entry
+            .file_type()
+            .context("reading uninitialized profile entry type")?;
+        if entry.file_name() != "profile.lock"
+            || lock_seen
+            || !file_type.is_file()
+            || file_type.is_symlink()
+            || entry
+                .metadata()
+                .context("reading uninitialized profile lock metadata")?
+                .len()
+                != 0
+        {
+            return Ok(false);
+        }
+        lock_seen = true;
+    }
+    Ok(true)
 }
 
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -1323,6 +1358,30 @@ mod tests {
         ensure_owner_protected_directory(&target).unwrap();
         symlink(&target, profile_root.join("linked-profile")).unwrap();
 
+        assert!(open_profiles(&profile_root, &MigrationCustody::Native).is_err());
+    }
+
+    #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+    #[test]
+    fn relay_migration_skips_only_exact_uninitialized_profile_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_root = root.path().join("profiles");
+        ensure_owner_protected_directory(&profile_root).unwrap();
+        let empty = profile_root.join("empty-profile");
+        let lock_only = profile_root.join("lock-profile");
+        ensure_owner_protected_directory(&empty).unwrap();
+        ensure_owner_protected_directory(&lock_only).unwrap();
+        drop(open_or_create_owner_protected_file(&lock_only.join("profile.lock")).unwrap());
+
+        assert!(
+            open_profiles(&profile_root, &MigrationCustody::Native)
+                .unwrap()
+                .is_empty()
+        );
+
+        let partial = profile_root.join("partial-profile");
+        ensure_owner_protected_directory(&partial).unwrap();
+        std::fs::write(partial.join("unexpected"), b"partial").unwrap();
         assert!(open_profiles(&profile_root, &MigrationCustody::Native).is_err());
     }
 
