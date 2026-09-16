@@ -1043,8 +1043,7 @@ mod tests {
             open_store(&profile_root, "profile-a", 7),
             open_store(&profile_root, "profile-b", 8),
         ];
-        let journal =
-            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let journal = RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
         let first_requests = Arc::new(Mutex::new(Vec::new()));
         let first = RelayEnrollmentClient::new(FakeEnrollmentTransport {
             requests: Arc::clone(&first_requests),
@@ -1108,8 +1107,7 @@ mod tests {
             open_store(&profile_root, "profile-a", 9),
             open_store(&profile_root, "profile-b", 10),
         ];
-        let journal =
-            RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
+        let journal = RelayMigrationJournal::open(&profile_root, &source, &destination).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let client = RelayEnrollmentClient::new(FakeEnrollmentTransport {
             requests,
