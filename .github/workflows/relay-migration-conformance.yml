@@ -51,6 +51,7 @@ jobs:
                 $_ -match '^apps/Konclave\.CommandLine/(?:Cargo\.toml|src/installation\.rs)$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:bin/relay_migration|enrollment_persistence|lib|persistence|relay_migration|runtime)\.rs|src/persistence/relay_migration\.rs)$' -or
                 $_ -match '^crates/Konclave\.ClientLibrary/' -or
+                $_ -match '^crates/Konclave\.SecretStorage/' -or
                 $_ -match '^crates/Konclave\.WindowsSecurity/' -or
                 $_ -match '^scripts/installation/' -or
                 $_ -match '^scripts/packaging/' -or
@@ -86,6 +87,7 @@ jobs:
             --package KonclaveClientLibrary \
             --package KonclaveCommandLine \
             --package KonclaveLocalDaemon \
+            --package KonclaveSecretStorage \
             -- \
             --check
           cargo test \
@@ -106,6 +108,10 @@ jobs:
             --locked \
             --package KonclaveCommandLine \
             native_installation_identity
+          cargo test \
+            --locked \
+            --package KonclaveSecretStorage \
+            owner_file::tests
           cargo clippy \
             --locked \
             --package KonclaveClientLibrary \
@@ -121,6 +127,12 @@ jobs:
           cargo clippy \
             --locked \
             --package KonclaveLocalDaemon \
+            --all-targets \
+            -- \
+            -D warnings
+          cargo clippy \
+            --locked \
+            --package KonclaveSecretStorage \
             --all-targets \
             -- \
             -D warnings
@@ -162,6 +174,7 @@ jobs:
                 $_ -match '^apps/Konclave\.CommandLine/(?:Cargo\.toml|src/installation\.rs)$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:bin/relay_migration|enrollment_persistence|lib|persistence|relay_migration|runtime)\.rs|src/persistence/relay_migration\.rs)$' -or
                 $_ -match '^crates/Konclave\.ClientLibrary/' -or
+                $_ -match '^crates/Konclave\.SecretStorage/' -or
                 $_ -match '^crates/Konclave\.WindowsSecurity/' -or
                 $_ -match '^scripts/installation/' -or
                 $_ -match '^scripts/packaging/' -or
@@ -195,6 +208,7 @@ jobs:
           cargo fmt `
             --package KonclaveWindowsSecurity `
             --package KonclaveLocalDaemon `
+            --package KonclaveSecretStorage `
             -- `
             --check
           if ($LASTEXITCODE -ne 0) {
@@ -205,6 +219,13 @@ jobs:
             --package KonclaveWindowsSecurity
           if ($LASTEXITCODE -ne 0) {
             throw 'Windows owner-restricted storage tests failed.'
+          }
+          cargo test `
+            --locked `
+            --package KonclaveSecretStorage `
+            'owner_file::tests'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows owner-protected storage adapter tests failed.'
           }
           cargo test `
             --locked `
@@ -222,6 +243,15 @@ jobs:
             -D warnings
           if ($LASTEXITCODE -ne 0) {
             throw 'Windows owner-restricted storage lint failed.'
+          }
+          cargo clippy `
+            --locked `
+            --package KonclaveSecretStorage `
+            --all-targets `
+            -- `
+            -D warnings
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows owner-protected storage adapter lint failed.'
           }
           cargo clippy `
             --locked `
