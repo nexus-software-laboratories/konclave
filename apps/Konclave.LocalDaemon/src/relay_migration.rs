@@ -1064,10 +1064,7 @@ mod tests {
         );
         assert_ne!(
             relay_migration_request_id(&destination, principal),
-            relay_migration_request_id(
-                &destination,
-                RelayPrincipalId::from_bytes([8; 32])
-            )
+            relay_migration_request_id(&destination, RelayPrincipalId::from_bytes([8; 32]))
         );
     }
 
@@ -1193,15 +1190,9 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            apply_profiles(
-                &profiles,
-                &first_journal,
-                &source,
-                &destination,
-                &first,
-            )
-            .await
-            .unwrap(),
+            apply_profiles(&profiles, &first_journal, &source, &destination, &first,)
+                .await
+                .unwrap(),
             (1, 0)
         );
         assert_eq!(
@@ -1220,15 +1211,9 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            apply_profiles(
-                &profiles,
-                &second_journal,
-                &source,
-                &destination,
-                &second,
-            )
-            .await
-            .unwrap(),
+            apply_profiles(&profiles, &second_journal, &source, &destination, &second,)
+                .await
+                .unwrap(),
             (1, 0)
         );
         assert_eq!(
