@@ -48,6 +48,12 @@ function Invoke-TestRelayMigration {
             throw 'synthetic health failure'
         }
     }.GetNewClosure()
+    $protect = {
+        $events.Add('protect')
+        if ($Failure -ceq 'protect') {
+            throw 'synthetic profile-root protection failure'
+        }
+    }.GetNewClosure()
 
     $error = $null
     try {
@@ -57,7 +63,8 @@ function Invoke-TestRelayMigration {
             -RelayEndpoint 'https://relay.example.com' `
             -MigrationInvoker $migration `
             -ServiceInvoker $service `
-            -HealthVerifier $health
+            -HealthVerifier $health `
+            -ProfileRootProtector $protect
     }
     catch {
         $error = $_
@@ -73,7 +80,7 @@ function Invoke-TestRelayMigration {
 $success = Invoke-TestRelayMigration
 if (
     ($success.events -join '|') -cne (
-        'service:Stop|migration:Apply|service:Start|health|' +
+        'service:Stop|protect|migration:Apply|service:Start|health|' +
         'migration:Finalize'
     ) -or
     [string]$success.result.action -cne 'RelayMigrated' -or
@@ -86,7 +93,7 @@ if (
 $applyFailure = Invoke-TestRelayMigration -Failure 'migration:Apply'
 if (
     ($applyFailure.events -join '|') -cne (
-        'service:Stop|migration:Apply|migration:Abort|service:Start|health'
+        'service:Stop|protect|migration:Apply|migration:Abort|service:Start|health'
     ) -or
     $null -eq $applyFailure.error
 ) {
@@ -96,7 +103,7 @@ if (
 $healthFailure = Invoke-TestRelayMigration -Failure 'health'
 if (
     ($healthFailure.events -join '|') -cne (
-        'service:Stop|migration:Apply|service:Start|health|service:Stop|' +
+        'service:Stop|protect|migration:Apply|service:Start|health|service:Stop|' +
         'migration:Abort|service:Start|health'
     ) -or
     $null -eq $healthFailure.error
@@ -107,12 +114,22 @@ if (
 $finalizeFailure = Invoke-TestRelayMigration -Failure 'migration:Finalize'
 if (
     ($finalizeFailure.events -join '|') -cne (
-        'service:Stop|migration:Apply|service:Start|health|' +
+        'service:Stop|protect|migration:Apply|service:Start|health|' +
         'migration:Finalize|service:Stop|migration:Abort|service:Start|health'
     ) -or
     $null -eq $finalizeFailure.error
 ) {
     throw 'Relay migration finalize failure did not abort and restore the source service.'
+}
+
+$protectionFailure = Invoke-TestRelayMigration -Failure 'protect'
+if (
+    ($protectionFailure.events -join '|') -cne (
+        'service:Stop|protect|migration:Abort|service:Start|health'
+    ) -or
+    $null -eq $protectionFailure.error
+) {
+    throw 'Profile-root protection failure did not restore the source service.'
 }
 
 Write-Output 'Relay migration installer orchestration passed.'

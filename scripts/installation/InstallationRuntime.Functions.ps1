@@ -892,7 +892,9 @@ function Invoke-TransactionalRelayMigration {
 
             [scriptblock]$ServiceInvoker,
 
-            [scriptblock]$HealthVerifier
+            [scriptblock]$HealthVerifier,
+
+            [scriptblock]$ProfileRootProtector
         )
 
         if ($null -eq $MigrationInvoker) {
@@ -926,9 +928,15 @@ function Invoke-TransactionalRelayMigration {
                 Wait-InstalledRuntimeHealth -InstallRoot $InstallRoot -Paths $Paths
             }.GetNewClosure()
         }
+        if ($null -eq $ProfileRootProtector) {
+            $ProfileRootProtector = {
+                [void](Set-OwnerOnlyDirectory -Path $Paths.profileRoot)
+            }.GetNewClosure()
+        }
 
         [void](& $ServiceInvoker 'Stop')
         try {
+            [void](& $ProfileRootProtector)
             $migration = & $MigrationInvoker 'Apply'
         }
         catch {
