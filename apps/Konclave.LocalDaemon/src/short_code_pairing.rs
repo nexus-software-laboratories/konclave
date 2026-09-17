@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 const STATE_MAGIC: &[u8; 4] = b"KSCP";
 const STATE_VERSION: u8 = 1;
-const MAX_STATE_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_SHORT_CODE_STATE_BYTES: usize = 128 * 1024;
 const MAX_OPAQUE_STATE_BYTES: usize = 16 * 1024;
 const MAX_STAGE_BYTES: usize = 10 * 1024;
 
@@ -203,7 +203,7 @@ impl ShortCodeOperationState {
             &mut output,
             self.capability_text.as_ref().map(|value| value.as_bytes()),
         )?;
-        if output.len() > MAX_STATE_BYTES {
+        if output.len() > MAX_SHORT_CODE_STATE_BYTES {
             return Err(ShortCodeStateError::InvalidEncoding);
         }
         Ok(output)
@@ -215,7 +215,7 @@ impl ShortCodeOperationState {
     ///
     /// Returns a typed malformed, trailing, or cryptographic-state error.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, ShortCodeStateError> {
-        if bytes.len() > MAX_STATE_BYTES {
+        if bytes.len() > MAX_SHORT_CODE_STATE_BYTES {
             return Err(ShortCodeStateError::InvalidEncoding);
         }
         let mut input = bytes;

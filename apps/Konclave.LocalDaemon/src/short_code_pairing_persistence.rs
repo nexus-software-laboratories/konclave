@@ -7,11 +7,13 @@ use super::{
     PROFILE_SCHEMA_VERSION, ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer,
 };
 use crate::short_code_pairing::{
-    ShortCodeOperationState, ShortCodePhase, ShortCodeRole, ShortCodeStateError,
+    MAX_SHORT_CODE_STATE_BYTES, ShortCodeOperationState, ShortCodePhase, ShortCodeRole,
+    ShortCodeStateError,
 };
 
 const MAX_ACTIVE_SHORT_CODE_OPERATIONS: usize = 16;
 const MAX_SHORT_CODE_OPERATION_RECORDS: usize = 64;
+const MAX_SEALED_SHORT_CODE_STATE_BYTES: usize = MAX_SHORT_CODE_STATE_BYTES + 64;
 const SHORT_CODE_RECORD_CONTEXT_VERSION: &[u8] = b"short-code-operation-v1";
 
 /// One authenticated durable short-code operation checkpoint.
@@ -373,7 +375,7 @@ impl ProfileStore {
             .lock()?
             .query_row(
                 &query,
-                params![identifier, super::MAX_SEALED_RECORD_BYTES],
+                params![identifier, MAX_SEALED_SHORT_CODE_STATE_BYTES],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -419,7 +421,7 @@ impl ProfileStore {
         let generation = from_sql_integer(generation)?;
         if sealed_length < 1
             || usize::try_from(sealed_length).ok() != Some(sealed_state.len())
-            || sealed_state.len() > super::MAX_SEALED_RECORD_BYTES
+            || sealed_state.len() > MAX_SEALED_SHORT_CODE_STATE_BYTES
         {
             return Err(ProfileStoreError::CorruptData);
         }
