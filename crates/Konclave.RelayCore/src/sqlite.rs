@@ -1567,7 +1567,11 @@ mod tests {
         let retained: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM relay_pairing_rendezvous WHERE lookup_id = ?1",
         )
-        .bind(PairingRendezvousId::from_bytes(bytes(7)).as_bytes().as_slice())
+        .bind(
+            PairingRendezvousId::from_bytes(bytes(7))
+                .as_bytes()
+                .as_slice(),
+        )
         .fetch_one(&repository.pool)
         .await
         .unwrap();

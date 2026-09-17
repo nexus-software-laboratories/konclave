@@ -16,14 +16,14 @@ mod pairing_rendezvous;
 mod protected_http;
 mod websocket;
 
-pub use KonclaveRelayAuthentication::{
-    EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,
-    RelayEnrollmentRequest, RelayEnrollmentResponse, RelayPrincipalId,
-};
 pub use KonclaveDomainCore::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
     PairingRendezvousTakeRequest,
+};
+pub use KonclaveRelayAuthentication::{
+    EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,
+    RelayEnrollmentRequest, RelayEnrollmentResponse, RelayPrincipalId,
 };
 pub use credential::RelayAccessCredential;
 pub use endpoint::RelayEndpoint;
