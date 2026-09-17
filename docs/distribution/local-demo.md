@@ -88,11 +88,11 @@ In the first session:
 /konclave connect
 ```
 
-Keep that command running and copy its single ephemeral capability to the other
-session:
+Keep that command running and copy its single 26-character ephemeral token to the
+other session:
 
 ```text
-/konclave connect <capability>
+/konclave connect <token>
 ```
 
 Both sessions display the current durable phase, the action expected from the other
@@ -105,6 +105,9 @@ completion, restart it and continue the durable pairing with:
 
 An expired command requests cancellation before returning. Neither side reports
 `connected` until its completed conversation is durable in the local profile.
+
+If compact rendezvous is unavailable, `/konclave pair member` and
+`/konclave join <capability>` retain the full-capability recovery flow.
 
 Both commands complete with the same conversation identifier. Send from either side
 with:

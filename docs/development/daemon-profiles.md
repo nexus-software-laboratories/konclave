@@ -548,12 +548,16 @@ Stdio is the local process capability boundary, and every handler also passes an
 explicit method allowlist before parsing or side effects. Identifiers and bounded
 protocol values use canonical lowercase hex.
 
-The paved pairing surface is `create_pairing_capability`,
+The paved pairing surface adds `create_pairing_rendezvous` and
+`redeem_pairing_rendezvous` to `create_pairing_capability`,
 `redeem_pairing_capability`, `get_pairing_status`, `authorize_pairing_joiner`,
-`authorize_pairing_inviter`, `sync_pairing`, and `cancel_pairing`. Only the
-short-lived capability crosses between sessions. Invitation, JoinProof, Welcome,
-relay cursor/route, peer bindings, directional keys, and sealed operation state stay
-behind the daemon boundary. Capability request and response buffers are not
+`authorize_pairing_inviter`, `sync_pairing`, and `cancel_pairing`. Compact creation
+always requests `member`; redemption rejects any encrypted capability requesting
+another role. The relay sees only bounded encrypted rendezvous data, while the
+26-character token crosses between sessions. The full capability remains available
+through the explicit recovery operations. Invitation, JoinProof, Welcome, relay
+cursor/route, peer bindings, directional keys, and sealed operation state stay behind
+the daemon boundary. Capability and token request/response buffers are not
 debug-formatted and are zeroized after use. `sync_pairing` is available for explicit
 diagnosis; ordinary progress is automatic and does not depend on an agent polling.
 

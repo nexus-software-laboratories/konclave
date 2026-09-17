@@ -81,10 +81,10 @@ Command output defaults to `normal`, which combines status and operation metadat
 into concise summaries and suppresses diagnostic phase, grant, cursor, and policy
 detail. `/konclave output verbose` restores the complete field-by-field view for the
 current extension process; `/konclave output normal` switches back. The setting is
-intentionally process-local and resets to normal on restart. Capability handoff,
-failure recovery, exact retry identifiers, policy accept/reject commands, message
-bodies, and explicit policy inspection remain visible when they are required to
-continue safely.
+intentionally process-local and resets to normal on restart. Compact token handoff,
+full-capability recovery, exact retry identifiers, policy accept/reject commands,
+message bodies, and explicit policy inspection remain visible when they are required
+to continue safely.
 
 ```text
 /konclave help
@@ -93,7 +93,7 @@ continue safely.
 /konclave identity
 /konclave conversations
 /konclave connect
-/konclave connect <capability>
+/konclave connect <token>
 /konclave connect resume <pairing>
 /konclave pair [member|administrator]
 /konclave join <capability>
