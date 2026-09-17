@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         protocol_root.join("application.proto"),
         protocol_root.join("collaboration_policy.proto"),
         protocol_root.join("relay.proto"),
+        protocol_root.join("short_code_pairing.proto"),
         protocol_root.join("enrollment.proto"),
     ];
 

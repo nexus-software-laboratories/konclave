@@ -23,6 +23,7 @@ $contracts = [ordered]@{
     'pairing-rendezvous-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'relay-migration-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'release-publication-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'short-code-pairing-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'user-presence-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'package-validation.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'pr-title.yml' = '    types: [opened, edited, synchronize, reopened]'

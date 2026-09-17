@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
+use KonclaveClientLibrary::{KonclaveClientError, RelayTransport, ShortCodePairingTransport};
 use KonclaveDomainCore::DeviceId;
 use tokio::time;
 
@@ -35,7 +35,7 @@ pub(crate) struct PairingSupervisor<T> {
 
 impl<T> PairingSupervisor<T>
 where
-    T: RelayTransport + 'static,
+    T: RelayTransport + ShortCodePairingTransport + 'static,
 {
     #[must_use]
     pub(crate) fn new(pairings: Option<PairingService<T>>, stable_retry_seed: DeviceId) -> Self {
@@ -77,7 +77,7 @@ where
             let result = tokio::select! {
                 biased;
                 _ = &mut shutdown => return Ok(()),
-                result = pairings.sync_active_once(now) => result,
+                result = pairings.sync_all_active_once(now) => result,
             };
             match result {
                 Ok(_) => {
@@ -164,7 +164,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use KonclaveClientLibrary::{RelayEndpoint, RelayWatchSession};
+    use KonclaveClientLibrary::{
+        RelayEndpoint, RelayWatchSession, ShortCodeAttemptClaimRequest,
+        ShortCodeAttemptMessageRequest, ShortCodeAttemptMessageResult,
+        ShortCodeAttemptPublishRequest, ShortCodeAttemptPublishResult, ShortCodeAttemptReadRequest,
+        ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest,
+    };
     use KonclaveDomainCore::{
         AcknowledgeRequest, ConversationRole, RelayEnvelope, ReplayPage, ReplayRequest,
         StoredRelayEnvelope,
@@ -221,6 +226,51 @@ mod tests {
             &self,
             _: ReplayRequest,
         ) -> Result<RelayWatchSession, KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+    }
+
+    #[async_trait]
+    impl ShortCodePairingTransport for FailingPairingRelay {
+        async fn publish_short_code_attempt(
+            &self,
+            _: ShortCodeAttemptPublishRequest,
+        ) -> Result<ShortCodeAttemptPublishResult, KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+
+        async fn claim_short_code_attempt(
+            &self,
+            _: &ShortCodeAttemptClaimRequest,
+        ) -> Result<ShortCodeAttemptSnapshot, KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+
+        async fn publish_short_code_message(
+            &self,
+            _: &ShortCodeAttemptMessageRequest,
+        ) -> Result<ShortCodeAttemptMessageResult, KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+
+        async fn read_short_code_attempt(
+            &self,
+            _: ShortCodeAttemptReadRequest,
+        ) -> Result<ShortCodeAttemptSnapshot, KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+
+        async fn cancel_short_code_attempt(
+            &self,
+            _: ShortCodeAttemptReadRequest,
+        ) -> Result<(), KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+
+        async fn take_short_code_capability(
+            &self,
+            _: ShortCodeCapabilityTakeRequest,
+        ) -> Result<Vec<u8>, KonclaveClientError> {
             Err(KonclaveClientError::TransportUnavailable)
         }
     }

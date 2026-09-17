@@ -9,15 +9,18 @@ use KonclaveClientLibrary::{
     EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError,
     PairingRendezvousTransport, RelayAccessCredential, RelayClient, RelayEndpoint,
     RelayEnrollmentClient, RelayEnrollmentCredential, RelayEnrollmentOutcome,
-    RelayEnrollmentRequest, RelayPrincipalId, RelayTransport,
+    RelayEnrollmentRequest, RelayPrincipalId, RelayTransport, ShortCodeAttemptClaimRequest,
+    ShortCodeAttemptPublishRequest, ShortCodeAttemptSnapshot, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingTransport,
 };
 use KonclaveDomainCore::{
     DeliveryClass, EnvelopeId, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
-    PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord, ProtocolVersion,
-    RelayEnvelope, RoutingId,
+    MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, PairingRendezvousId, PairingRendezvousNonce,
+    PairingRendezvousRecord, ProtocolVersion, RelayEnvelope, RoutingId,
 };
 use KonclaveProtocolContracts::v1::{
     decode_relay_enrollment_request, encode_relay_enrollment_response,
+    encode_short_code_attempt_snapshot,
 };
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -97,6 +100,37 @@ fn pairing_rendezvous() -> PairingRendezvousRecord {
     .unwrap()
 }
 
+fn short_code_attempt() -> ShortCodeAttemptPublishRequest {
+    ShortCodeAttemptPublishRequest::new(
+        ProtocolVersion::application_v1(),
+        ShortCodePairingLocator::from_bytes([12; ShortCodePairingLocator::LENGTH]),
+        ShortCodePairingAttemptId::from_bytes([13; ShortCodePairingAttemptId::LENGTH]),
+        u64::MAX / 2,
+    )
+    .unwrap()
+}
+
+fn short_code_claim() -> ShortCodeAttemptClaimRequest {
+    ShortCodeAttemptClaimRequest::new(
+        ProtocolVersion::application_v1(),
+        ShortCodePairingLocator::from_bytes([12; ShortCodePairingLocator::LENGTH]),
+        vec![1],
+    )
+    .unwrap()
+}
+
+fn short_code_snapshot() -> ShortCodeAttemptSnapshot {
+    ShortCodeAttemptSnapshot::new(
+        ProtocolVersion::application_v1(),
+        ShortCodePairingAttemptId::from_bytes([13; ShortCodePairingAttemptId::LENGTH]),
+        u64::MAX / 2,
+        false,
+        false,
+        Vec::new(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn clients_never_forward_bearer_credentials_across_redirects() {
     let target_hit = Arc::new(AtomicBool::new(false));
@@ -111,6 +145,7 @@ async fn clients_never_forward_bearer_credentials_across_redirects() {
     let target = Router::new()
         .route("/v1/envelopes", post(target_handler.clone()))
         .route("/v1/pairing-rendezvous", post(target_handler.clone()))
+        .route("/v1/short-code-attempts", post(target_handler.clone()))
         .route("/v1/enrollment/principals", post(target_handler));
     let (target_address, target_shutdown, target_server) = serve(target).await;
     let location = format!("http://{target_address}/v1/envelopes");
@@ -129,6 +164,16 @@ async fn clients_never_forward_bearer_credentials_across_redirects() {
             "/v1/pairing-rendezvous",
             post({
                 let location = format!("http://{target_address}/v1/pairing-rendezvous");
+                move || {
+                    let location = location.clone();
+                    async move { Redirect::temporary(&location) }
+                }
+            }),
+        )
+        .route(
+            "/v1/short-code-attempts",
+            post({
+                let location = format!("http://{target_address}/v1/short-code-attempts");
                 move || {
                     let location = location.clone();
                     async move { Redirect::temporary(&location) }
@@ -157,6 +202,14 @@ async fn clients_never_forward_bearer_credentials_across_redirects() {
         .unwrap_err();
     assert!(matches!(
         pairing_error,
+        KonclaveClientError::RelayRejected { status: 307, .. }
+    ));
+    let short_code_error = client(address)
+        .publish_short_code_attempt(short_code_attempt())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        short_code_error,
         KonclaveClientError::RelayRejected { status: 307, .. }
     ));
     assert!(!target_hit.load(Ordering::SeqCst));
@@ -192,6 +245,63 @@ async fn client_rejects_oversized_chunked_success_responses() {
     assert!(matches!(
         error,
         KonclaveClientError::ResponseTooLarge { .. }
+    ));
+
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn short_code_client_requires_exact_status_and_bounded_snapshot() {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&request_count);
+    let router = Router::new().route(
+        "/v1/short-code-attempts/claim",
+        post(move || {
+            let request_index = observed.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if request_index == 0 {
+                    return Response::builder()
+                        .status(StatusCode::CREATED)
+                        .header(CONTENT_TYPE, "application/protobuf")
+                        .body(Body::from(
+                            encode_short_code_attempt_snapshot(&short_code_snapshot()).unwrap(),
+                        ))
+                        .unwrap();
+                }
+                let body = vec![0_u8; MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES + 1];
+                let (first, second) = body.split_at(body.len() / 2);
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "application/protobuf")
+                    .body(Body::from_stream(stream::iter([
+                        Ok::<_, Infallible>(Bytes::copy_from_slice(first)),
+                        Ok::<_, Infallible>(Bytes::copy_from_slice(second)),
+                    ])))
+                    .unwrap()
+            }
+        }),
+    );
+    let (address, shutdown, server) = serve(router).await;
+    let client = client(address);
+
+    assert!(matches!(
+        client
+            .claim_short_code_attempt(&short_code_claim())
+            .await
+            .err()
+            .unwrap(),
+        KonclaveClientError::InvalidResponse
+    ));
+    assert!(matches!(
+        client
+            .claim_short_code_attempt(&short_code_claim())
+            .await
+            .err()
+            .unwrap(),
+        KonclaveClientError::ResponseTooLarge {
+            maximum: MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES
+        }
     ));
 
     shutdown.send(()).unwrap();

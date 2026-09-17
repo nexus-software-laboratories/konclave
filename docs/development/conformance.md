@@ -47,6 +47,17 @@ client redirect safety, a complete two-client daemon pairing, generated local-se
 tool contracts, generated TypeScript protocol bindings and schema checks, extension
 command acceptance, Rust and TypeScript formatting, and component lint.
 
+`Short-code pairing conformance` is the focused draft-capable gate for the
+non-bearer human-code authorization flow. It runs the pure confirmation transition
+table, six-digit code and locator validation, RFC 9807 OPAQUE registration/login and
+wrong-code cases, opaque state canonicalization, deterministic transcript/SAS
+vectors, role-separated encrypted-channel tests, bounded protocol codecs, relay
+policy and SQLite migration, authenticated HTTP and real client transport acceptance,
+generated TypeScript protocol checks, sealed daemon schema migration and restart
+recovery, malicious-relay and wrong-code rejection, mutual-confirmation-to-MLS
+acceptance, deterministic local tool contracts, extension command acceptance, Rust
+and TypeScript formatting, strict lint, and the pinned security-dependency policy.
+
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, full extension formatting and lint,

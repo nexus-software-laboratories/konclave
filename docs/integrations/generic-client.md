@@ -151,6 +151,18 @@ returned 26-character token to `redeem_pairing_rendezvous`. The full-capability 
 below remains the recovery interface and the path for explicit administrator
 requests.
 
+For manual or voice transfer, `create_short_code_pairing` returns a six-digit code
+that grants no authority. The peer calls `claim_short_code_pairing`; both sides use
+`sync_short_code_pairing` or automatic daemon progress until
+`get_short_code_pairing_status` returns the same SAS and the opposite bounded device
+identifier. Each operator must compare those values independently and call
+`confirm_short_code_pairing` with the exact attempt, peer, and SAS. Only after both
+confirmations does the status expose a standard member-only `pairing_id`.
+`cancel_short_code_pairing` is idempotent for active verification work. A Generic
+client must present confirmation as a direct human-entered command and never infer it
+from code possession, elapsed time, or model output. Paved agent tool tables omit the
+confirmation operation entirely.
+
 1. One side calls `create_pairing_capability` and transfers only the returned
    capability to the intended peer.
 2. The peer calls `redeem_pairing_capability`, `create_conversation`, and

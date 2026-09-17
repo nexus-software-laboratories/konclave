@@ -6,6 +6,8 @@ mod error;
 mod identifiers;
 mod model;
 mod pairing_rendezvous;
+mod short_code_pairing;
+mod short_code_relay;
 
 pub use collaboration_policy::{
     COLLABORATION_POLICY_BUNDLE_MAJOR, COLLABORATION_POLICY_BUNDLE_MINOR,
@@ -28,7 +30,8 @@ pub use identifiers::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, MembershipOperationId, MessageId, NotificationId,
     PairingContextHash, PairingId, PairingMessageId, PairingNonce, PairingRendezvousId,
-    PairingRendezvousNonce, RoutingId,
+    PairingRendezvousNonce, RoutingId, ShortCodeCapabilityTakeId, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingTranscriptHash,
 };
 pub use model::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_PROTOCOL_MAJOR,
@@ -47,4 +50,16 @@ pub use model::{
 pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
+};
+pub use short_code_pairing::{
+    MAX_SHORT_CODE_PAIRING_SAS, ShortCodeConfirmationEvent, ShortCodeConfirmationRecord,
+    ShortCodeConfirmationState, ShortCodeIdentityRecord, ShortCodePairingSas,
+    transition_short_code_confirmation,
+};
+pub use short_code_relay::{
+    MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+    MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, MAX_SHORT_CODE_RELAY_STAGES, ShortCodeAttemptClaimRequest,
+    ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest, ShortCodeRelayMessage,
+    ShortCodeRelayStage,
 };

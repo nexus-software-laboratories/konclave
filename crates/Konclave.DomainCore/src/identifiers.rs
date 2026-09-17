@@ -122,6 +122,30 @@ define_fixed_bytes!(
     "pairing_rendezvous_nonce"
 );
 define_fixed_bytes!(
+    /// Random identifier for one short-code pairing attempt.
+    ShortCodePairingAttemptId,
+    16,
+    "short_code_pairing_attempt_id"
+);
+define_fixed_bytes!(
+    /// Caller-stable identifier for one logical short-code capability retrieval.
+    ShortCodeCapabilityTakeId,
+    16,
+    "short_code_capability_take_id"
+);
+define_fixed_bytes!(
+    /// Code-derived non-secret relay locator for one short-code pairing attempt.
+    ShortCodePairingLocator,
+    32,
+    "short_code_pairing_locator"
+);
+define_fixed_bytes!(
+    /// Digest of one canonical short-code pairing transcript.
+    ShortCodePairingTranscriptHash,
+    32,
+    "short_code_pairing_transcript_hash"
+);
+define_fixed_bytes!(
     /// Public AES-GCM nonce carried by one pairing envelope.
     PairingNonce,
     12,

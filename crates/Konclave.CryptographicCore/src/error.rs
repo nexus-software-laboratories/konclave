@@ -137,6 +137,18 @@ pub enum KonclaveCryptographicError {
     #[error("pairing payload exceeds {maximum} bytes (actual: {actual})")]
     PairingPayloadTooLarge { maximum: usize, actual: usize },
 
+    /// A human-entered short-code pairing code is malformed.
+    #[error("short-code pairing code is invalid")]
+    InvalidShortCodePairingCode,
+
+    /// OPAQUE authentication or key confirmation failed without revealing why.
+    #[error("short-code pairing authentication failed")]
+    ShortCodePairingAuthenticationFailed,
+
+    /// Serialized OPAQUE state is malformed, non-canonical, or unsupported.
+    #[error("short-code pairing state is invalid")]
+    InvalidShortCodePairingState,
+
     /// Domain validation rejected a cryptographic input or result.
     #[error(transparent)]
     Domain(#[from] KonclaveDomainError),
@@ -179,6 +191,11 @@ impl KonclaveCryptographicError {
             Self::InvalidKeyMaterial => "invalid_key_material",
             Self::PairingAuthenticationFailed => "pairing_authentication_failed",
             Self::PairingPayloadTooLarge { .. } => "pairing_payload_too_large",
+            Self::InvalidShortCodePairingCode => "invalid_short_code_pairing_code",
+            Self::ShortCodePairingAuthenticationFailed => {
+                "short_code_pairing_authentication_failed"
+            }
+            Self::InvalidShortCodePairingState => "invalid_short_code_pairing_state",
             Self::Domain(error) => error.code(),
         }
     }

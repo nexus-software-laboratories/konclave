@@ -1257,7 +1257,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_directed_request_handling_state;
+                    "DROP TABLE daemon_short_code_pairing;
+                     DROP TABLE daemon_directed_request_handling_state;
                      DROP TABLE daemon_directed_request_handling;
                      DROP TABLE daemon_collaboration_policy_operation_state;
                      DROP TABLE daemon_collaboration_policy_operation;
@@ -1304,7 +1305,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_directed_request_handling_state;
+                    "DROP TABLE daemon_short_code_pairing;
+                     DROP TABLE daemon_directed_request_handling_state;
                      DROP TABLE daemon_directed_request_handling;
                      DROP TABLE daemon_collaboration_policy_operation_state;
                      DROP TABLE daemon_collaboration_policy_operation;

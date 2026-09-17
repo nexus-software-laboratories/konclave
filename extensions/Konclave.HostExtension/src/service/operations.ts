@@ -15,6 +15,11 @@ export const toolOperations = [
   'get_identity',
   'create_pairing_capability',
   'create_pairing_rendezvous',
+  'create_short_code_pairing',
+  'claim_short_code_pairing',
+  'get_short_code_pairing_status',
+  'sync_short_code_pairing',
+  'cancel_short_code_pairing',
   'redeem_pairing_capability',
   'redeem_pairing_rendezvous',
   'get_pairing_status',
@@ -67,11 +72,17 @@ export const serviceOperations = {
   status: 'service.status',
 } as const;
 
+/** Human-entered deterministic commands intentionally absent from the agent tool surface. */
+export const verificationOperations = {
+  confirmShortCodePairing: 'confirm_short_code_pairing',
+} as const;
+
 export const allOperations: readonly string[] = [
   ...toolOperations,
   ...Object.values(deliveryOperations),
   ...Object.values(collaborationOperations),
   ...Object.values(serviceOperations),
+  ...Object.values(verificationOperations),
 ];
 
 export function isKnownOperation(name: string): boolean {

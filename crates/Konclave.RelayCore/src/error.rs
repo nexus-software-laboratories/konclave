@@ -62,6 +62,38 @@ pub enum RelayError {
     #[error("relay principal pairing rendezvous capacity is exhausted")]
     PairingRendezvousPrincipalCapacityExceeded,
 
+    /// A short-code attempt deadline exceeds the fixed active lifetime.
+    #[error("short-code pairing deadline exceeds the permitted lifetime")]
+    InvalidShortCodeDeadline,
+
+    /// A short-code attempt is already expired.
+    #[error("short-code pairing attempt is expired")]
+    ExpiredShortCodeAttempt,
+
+    /// A short-code identifier or existing stage conflicts with different state.
+    #[error("short-code pairing attempt conflicts with existing state")]
+    ShortCodeAttemptConflict,
+
+    /// A short-code attempt is absent or intentionally hidden from this caller.
+    #[error("short-code pairing attempt is unavailable")]
+    ShortCodeAttemptUnavailable,
+
+    /// One principal exhausted its bounded short-code claim window.
+    #[error("short-code pairing claim rate is exhausted")]
+    ShortCodeClaimRateLimited,
+
+    /// The relay-wide active short-code attempt bound is exhausted.
+    #[error("relay short-code pairing capacity is exhausted")]
+    ShortCodeGlobalCapacityExceeded,
+
+    /// One creator's active short-code attempt bound is exhausted.
+    #[error("relay creator short-code pairing capacity is exhausted")]
+    ShortCodeCreatorCapacityExceeded,
+
+    /// An opaque stage was published by the wrong role or out of order.
+    #[error("short-code pairing stage is invalid")]
+    InvalidShortCodeStage,
+
     /// A previously registered principal has been revoked.
     #[error("relay principal is revoked")]
     PrincipalRevoked,
@@ -118,6 +150,14 @@ impl RelayError {
             Self::PairingRendezvousPrincipalCapacityExceeded => {
                 "relay_pairing_rendezvous_principal_capacity"
             }
+            Self::InvalidShortCodeDeadline => "relay_short_code_pairing_deadline_invalid",
+            Self::ExpiredShortCodeAttempt => "relay_short_code_pairing_expired",
+            Self::ShortCodeAttemptConflict => "relay_short_code_pairing_conflict",
+            Self::ShortCodeAttemptUnavailable => "relay_short_code_pairing_unavailable",
+            Self::ShortCodeClaimRateLimited => "relay_short_code_pairing_rate_limited",
+            Self::ShortCodeGlobalCapacityExceeded => "relay_short_code_pairing_global_capacity",
+            Self::ShortCodeCreatorCapacityExceeded => "relay_short_code_pairing_creator_capacity",
+            Self::InvalidShortCodeStage => "relay_short_code_pairing_stage_invalid",
             Self::PrincipalRevoked => "relay_principal_revoked",
             Self::UnsupportedEnrollmentVersion => "relay_enrollment_version_unsupported",
             Self::ClockUnavailable => "relay_clock_unavailable",

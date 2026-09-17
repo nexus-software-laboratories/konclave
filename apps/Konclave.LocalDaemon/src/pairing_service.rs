@@ -27,7 +27,13 @@ use crate::pairing::{
     PairingObservationResult, PairingOperationState, PairingStateError, generate_pairing_message_id,
 };
 use crate::persistence::pairing::{PairingCheckpoint, PairingPhase, PairingRole};
+use crate::persistence::short_code_pairing::ShortCodePeerBinding;
 use crate::persistence::{ProfileStore, ProfileStoreError};
+use crate::short_code_pairing::ShortCodeStateError;
+
+#[path = "short_code_pairing_service.rs"]
+mod short_code;
+pub(crate) use short_code::ShortCodePairingStatus;
 
 const PAIRING_REPLAY_LIMIT: u32 = 8;
 const ACTIVE_PAIRING_PAGE_SIZE: usize = 32;
@@ -74,6 +80,7 @@ pub(crate) struct PairingService<T> {
     transport: Arc<T>,
     relay_endpoint: RelayEndpoint,
     mutation_locks: PairingMutationLocks,
+    short_code_mutation_locks: short_code::ShortCodeMutationLocks,
 }
 
 impl<T> Clone for PairingService<T> {
@@ -85,6 +92,7 @@ impl<T> Clone for PairingService<T> {
             transport: Arc::clone(&self.transport),
             relay_endpoint: self.relay_endpoint.clone(),
             mutation_locks: self.mutation_locks.clone(),
+            short_code_mutation_locks: self.short_code_mutation_locks.clone(),
         }
     }
 }
@@ -132,6 +140,7 @@ where
             transport,
             relay_endpoint,
             mutation_locks: PairingMutationLocks::default(),
+            short_code_mutation_locks: short_code::ShortCodeMutationLocks::default(),
         }
     }
 
@@ -419,11 +428,24 @@ where
         now_unix_seconds: u64,
     ) -> Result<(), PairingServiceError> {
         let _mutation = self.mutation_locks.acquire(pairing_id).await;
+        let store = Arc::clone(&self.store);
+        let short_code_binding =
+            tokio::task::spawn_blocking(move || store.short_code_peer_binding(pairing_id))
+                .await
+                .map_err(|_| PairingServiceError::Task)??;
         let checkpoint = self.load_checkpoint(pairing_id).await?;
         if checkpoint.role != PairingRole::Inviter {
             return Err(PairingServiceError::InvalidTransition);
         }
         let mut state = PairingOperationState::from_checkpoint(&checkpoint)?;
+        match short_code_binding {
+            ShortCodePeerBinding::Unlinked => {}
+            ShortCodePeerBinding::Verified(peer)
+                if peer == state.capability().offer().device_id() => {}
+            ShortCodePeerBinding::Verified(_) | ShortCodePeerBinding::Blocked => {
+                return Err(PairingServiceError::AuthorizationMismatch);
+            }
+        }
         if matches!(
             checkpoint.phase,
             PairingPhase::InviterAwaitingJoinProof
@@ -504,6 +526,18 @@ where
         now_unix_seconds: u64,
     ) -> Result<(), PairingServiceError> {
         let _mutation = self.mutation_locks.acquire(pairing_id).await;
+        let store = Arc::clone(&self.store);
+        let short_code_binding =
+            tokio::task::spawn_blocking(move || store.short_code_peer_binding(pairing_id))
+                .await
+                .map_err(|_| PairingServiceError::Task)??;
+        match short_code_binding {
+            ShortCodePeerBinding::Unlinked => {}
+            ShortCodePeerBinding::Verified(peer) if peer == expected_inviter_device_id => {}
+            ShortCodePeerBinding::Verified(_) | ShortCodePeerBinding::Blocked => {
+                return Err(PairingServiceError::AuthorizationMismatch);
+            }
+        }
         let checkpoint = self.load_checkpoint(pairing_id).await?;
         if checkpoint.role != PairingRole::Joiner {
             return Err(PairingServiceError::InvalidTransition);
@@ -1701,6 +1735,8 @@ pub(crate) enum PairingServiceError {
     RendezvousCleanup,
     #[error("compact pairing rendezvous supports only the member role")]
     InvalidRendezvousRole,
+    #[error("short-code pairing exchange was rejected")]
+    ShortCodeRejected,
     #[error(transparent)]
     Application(#[from] ApplicationServiceError),
     #[error(transparent)]
@@ -1715,6 +1751,8 @@ pub(crate) enum PairingServiceError {
     Protocol(#[from] KonclaveProtocolError),
     #[error(transparent)]
     State(#[from] PairingStateError),
+    #[error(transparent)]
+    ShortCodeState(#[from] ShortCodeStateError),
 }
 
 #[cfg(test)]

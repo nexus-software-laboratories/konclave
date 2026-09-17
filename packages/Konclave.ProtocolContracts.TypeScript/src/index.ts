@@ -30,4 +30,5 @@ export * from './generated/konclave/protocol/v1/enrollment_pb.js';
 export * from './generated/konclave/protocol/v1/identity_pb.js';
 export * from './generated/konclave/protocol/v1/membership_pb.js';
 export * from './generated/konclave/protocol/v1/pairing_rendezvous_pb.js';
+export * from './generated/konclave/protocol/v1/short_code_pairing_pb.js';
 export * from './generated/konclave/protocol/v1/relay_pb.js';

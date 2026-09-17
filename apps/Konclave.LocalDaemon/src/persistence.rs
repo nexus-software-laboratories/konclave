@@ -54,8 +54,10 @@ pub(crate) use directed_request_handling::{
 pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
+#[path = "short_code_pairing_persistence.rs"]
+pub(crate) mod short_code_pairing;
 
-const PROFILE_SCHEMA_VERSION: u32 = 18;
+const PROFILE_SCHEMA_VERSION: u32 = 19;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -422,6 +424,8 @@ impl LockedProfile {
         };
         store.initialize_collaboration_policy_operation_schema(source_version)?;
         store.initialize_directed_request_handling_schema()?;
+        store.initialize_short_code_pairing_schema()?;
+        store.verify_short_code_pairings()?;
         store.active_conversation_id()?;
         store.verify_collaboration_policies()?;
         store.backfill_collaboration_policy_exchange_records()?;
@@ -9235,7 +9239,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION | 17 | 16 => return Ok(()),
+        PROFILE_SCHEMA_VERSION | 18 | 17 | 16 => return Ok(()),
         15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
@@ -12365,7 +12369,8 @@ mod tests {
         downgrade_device_identity_to_legacy(connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -14647,7 +14652,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -14681,7 +14687,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -14732,7 +14739,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -14762,7 +14770,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -14813,7 +14822,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -14843,7 +14853,8 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -16313,7 +16324,8 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -17919,7 +17931,8 @@ mod tests {
         downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -17999,7 +18012,8 @@ mod tests {
         downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
                  DROP TABLE daemon_collaboration_policy_operation;
@@ -18058,7 +18072,8 @@ mod tests {
         set_device_identity_schema_floor(&connection, 17);
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  PRAGMA user_version = 17;",
             )
@@ -18114,7 +18129,8 @@ mod tests {
         set_device_identity_schema_floor(&connection, 17);
         connection
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  CREATE TABLE daemon_directed_request_handling (
                     sentinel INTEGER NOT NULL
@@ -18167,7 +18183,8 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TABLE daemon_directed_request_handling_state;
+                "DROP TABLE daemon_short_code_pairing;
+                 DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  PRAGMA user_version = 17;",
             )

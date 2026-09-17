@@ -38,6 +38,8 @@ mod service;
 mod shared_runtime;
 #[cfg(feature = "rust-service-mcp")]
 mod shared_service_arguments;
+#[allow(dead_code)]
+mod short_code_pairing;
 #[cfg(test)]
 mod test_support;
 

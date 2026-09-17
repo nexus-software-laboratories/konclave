@@ -24,6 +24,8 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0019: Require harness-owned challenge-bound assertions for HarnessAttested grants](../adr/adr-0019-harness-owned-session-attestation.md)
 - [ADR 0020: Prove UserPresence with native WebAuthn verification](../adr/adr-0020-native-webauthn-user-presence.md)
 - [ADR 0022: Publish the Copilot marketplace from the default branch](../adr/adr-0022-default-branch-copilot-marketplace.md)
+- [ADR 0023: Encrypt compact pairing rendezvous at the endpoints](../adr/adr-0023-encrypted-pairing-rendezvous.md)
+- [ADR 0024: Require OPAQUE mutual verification for six-digit pairing codes](../adr/adr-0024-opaque-short-code-mutual-verification.md)
 
 ## Superseded records
 

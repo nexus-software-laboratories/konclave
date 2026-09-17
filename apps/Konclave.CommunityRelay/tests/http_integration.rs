@@ -4,13 +4,19 @@ use KonclaveCommunityRelay::http::{HttpState, router};
 use KonclaveDomainCore::{
     AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_RELAY_ENVELOPE_BYTES, PairingRendezvousId,
     PairingRendezvousNonce, PairingRendezvousRecord, PairingRendezvousTakeRequest, ProtocolVersion,
-    RelayEnvelope, ReplayRequest, RoutingId,
+    RelayEnvelope, ReplayRequest, RoutingId, ShortCodeAttemptClaimRequest,
+    ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
+    ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodeRelayStage,
 };
 use KonclaveProtocolContracts::v1::{
     decode_acknowledge_request, decode_pairing_rendezvous_record, decode_relay_enrollment_response,
-    decode_replay_page, decode_stored_relay_envelope, encode_acknowledge_request,
-    encode_pairing_rendezvous_record, encode_pairing_rendezvous_take_request,
-    encode_relay_enrollment_request, encode_relay_envelope, encode_replay_request,
+    decode_replay_page, decode_short_code_attempt_snapshot, decode_short_code_capability_response,
+    decode_stored_relay_envelope, encode_acknowledge_request, encode_pairing_rendezvous_record,
+    encode_pairing_rendezvous_take_request, encode_relay_enrollment_request, encode_relay_envelope,
+    encode_replay_request, encode_short_code_attempt_claim_request,
+    encode_short_code_attempt_message_request, encode_short_code_attempt_publish_request,
+    encode_short_code_attempt_read_request, encode_short_code_capability_take_request,
 };
 use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayPrincipalId,
@@ -71,6 +77,56 @@ async fn response_bytes(response: axum::response::Response) -> Vec<u8> {
         .await
         .unwrap()
         .to_vec()
+}
+
+fn short_code_attempt(
+    locator: u8,
+    attempt: u8,
+    deadline_unix_seconds: u64,
+) -> ShortCodeAttemptPublishRequest {
+    ShortCodeAttemptPublishRequest::new(
+        ProtocolVersion::application_v1(),
+        ShortCodePairingLocator::from_bytes([locator; ShortCodePairingLocator::LENGTH]),
+        ShortCodePairingAttemptId::from_bytes([attempt; ShortCodePairingAttemptId::LENGTH]),
+        deadline_unix_seconds,
+    )
+    .unwrap()
+}
+
+fn short_code_message(
+    attempt_id: ShortCodePairingAttemptId,
+    stage: ShortCodeRelayStage,
+) -> ShortCodeAttemptMessageRequest {
+    ShortCodeAttemptMessageRequest::new(
+        ProtocolVersion::application_v1(),
+        attempt_id,
+        stage,
+        vec![stage as u8],
+    )
+    .unwrap()
+}
+
+async fn enroll_data_token(
+    app: &axum::Router,
+    enrollment_token: &[u8],
+    data_token: &[u8; RelayPrincipalId::LENGTH],
+    request_id: u8,
+) {
+    let request = RelayEnrollmentRequest::new(
+        ProtocolVersion::application_v1(),
+        EnrollmentRequestId::from_bytes([request_id; EnrollmentRequestId::LENGTH]),
+        RelayPrincipalId::from_access_token(data_token),
+    );
+    let response = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/enrollment/principals",
+            encode_relay_enrollment_request(&request).unwrap(),
+            Some(enrollment_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -336,6 +392,398 @@ async fn pairing_rendezvous_publish_and_take_are_authenticated_one_time_operatio
             "relay_pairing_rendezvous_unavailable"
         );
     }
+}
+
+#[tokio::test]
+async fn short_code_pairing_enforces_roles_order_isolation_rates_and_idempotent_take() {
+    let relay = TestRelay::with_enrollment(true).await;
+    let creator_token = relay.token;
+    let enrollment_token = relay.enrollment_token.unwrap();
+    let claimant_token = [31_u8; RelayPrincipalId::LENGTH];
+    let observer_token = [32_u8; RelayPrincipalId::LENGTH];
+    let rate_limited_token = [33_u8; RelayPrincipalId::LENGTH];
+    let app = router(
+        HttpState::new(env!("CARGO_PKG_NAME"), relay.application),
+        relay.access,
+        tokio::sync::watch::channel(false).1,
+    );
+    enroll_data_token(&app, &enrollment_token, &claimant_token, 41).await;
+    enroll_data_token(&app, &enrollment_token, &observer_token, 42).await;
+    enroll_data_token(&app, &enrollment_token, &rate_limited_token, 43).await;
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            vec![0; KonclaveDomainCore::MAX_SHORT_CODE_RELAY_MESSAGE_BYTES + 1],
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let expired = short_code_attempt(51, 61, 1);
+    let expired = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            encode_short_code_attempt_publish_request(expired).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(expired.status(), StatusCode::GONE);
+
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 600;
+    let excessive = short_code_attempt(54, 64, deadline + 600);
+    let excessive = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            encode_short_code_attempt_publish_request(excessive).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(excessive.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let publish = short_code_attempt(52, 62, deadline);
+    let encoded_publish = encode_short_code_attempt_publish_request(publish).unwrap();
+    let published = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            encoded_publish.clone(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::CREATED);
+    let duplicate = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            encoded_publish.clone(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let conflicting_owner = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            encoded_publish,
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflicting_owner.status(), StatusCode::CONFLICT);
+
+    let claim = ShortCodeAttemptClaimRequest::new(
+        ProtocolVersion::application_v1(),
+        publish.locator(),
+        vec![71],
+    )
+    .unwrap();
+    let creator_cannot_claim = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/claim",
+            encode_short_code_attempt_claim_request(&claim).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(creator_cannot_claim.status(), StatusCode::NOT_FOUND);
+    let claimed = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/claim",
+            encode_short_code_attempt_claim_request(&claim).unwrap(),
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(), StatusCode::OK);
+    let claimed = decode_short_code_attempt_snapshot(&response_bytes(claimed).await).unwrap();
+    assert_eq!(
+        claimed.message(ShortCodeRelayStage::CredentialRequest),
+        Some(&[71][..])
+    );
+    let claim_race_loser = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/claim",
+            encode_short_code_attempt_claim_request(&claim).unwrap(),
+            Some(&observer_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(claim_race_loser.status(), StatusCode::NOT_FOUND);
+    let isolated = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/read",
+            encode_short_code_attempt_read_request(ShortCodeAttemptReadRequest::new(
+                ProtocolVersion::application_v1(),
+                publish.attempt_id(),
+            ))
+            .unwrap(),
+            Some(&observer_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(isolated.status(), StatusCode::NOT_FOUND);
+
+    let out_of_order = short_code_message(publish.attempt_id(), ShortCodeRelayStage::Capability);
+    let out_of_order = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/messages",
+            encode_short_code_attempt_message_request(&out_of_order).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out_of_order.status(), StatusCode::CONFLICT);
+    let wrong_role = short_code_message(
+        publish.attempt_id(),
+        ShortCodeRelayStage::CredentialResponse,
+    );
+    let wrong_role = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/messages",
+            encode_short_code_attempt_message_request(&wrong_role).unwrap(),
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_role.status(), StatusCode::CONFLICT);
+
+    for (stage, token) in [
+        (ShortCodeRelayStage::CredentialResponse, &creator_token[..]),
+        (
+            ShortCodeRelayStage::ClaimantFinalization,
+            &claimant_token[..],
+        ),
+        (ShortCodeRelayStage::CreatorIdentity, &creator_token[..]),
+        (
+            ShortCodeRelayStage::ClaimantConfirmation,
+            &claimant_token[..],
+        ),
+        (ShortCodeRelayStage::CreatorConfirmation, &creator_token[..]),
+    ] {
+        let message = short_code_message(publish.attempt_id(), stage);
+        let encoded = encode_short_code_attempt_message_request(&message).unwrap();
+        let response = app
+            .clone()
+            .oneshot(protobuf_request(
+                "/v1/short-code-attempts/messages",
+                encoded.clone(),
+                Some(token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        if stage == ShortCodeRelayStage::CredentialResponse {
+            let duplicate = app
+                .clone()
+                .oneshot(protobuf_request(
+                    "/v1/short-code-attempts/messages",
+                    encoded,
+                    Some(token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(duplicate.status(), StatusCode::OK);
+        }
+    }
+
+    let capability = short_code_message(publish.attempt_id(), ShortCodeRelayStage::Capability);
+    let capability_payload = capability.payload().to_vec();
+    let capability = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/messages",
+            encode_short_code_attempt_message_request(&capability).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(capability.status(), StatusCode::CREATED);
+
+    for token in [&creator_token[..], &claimant_token[..]] {
+        let snapshot = app
+            .clone()
+            .oneshot(protobuf_request(
+                "/v1/short-code-attempts/read",
+                encode_short_code_attempt_read_request(ShortCodeAttemptReadRequest::new(
+                    ProtocolVersion::application_v1(),
+                    publish.attempt_id(),
+                ))
+                .unwrap(),
+                Some(token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        let snapshot = decode_short_code_attempt_snapshot(&response_bytes(snapshot).await).unwrap();
+        assert_eq!(snapshot.messages().len(), 6);
+        assert!(snapshot.message(ShortCodeRelayStage::Capability).is_none());
+    }
+
+    let take_request = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        publish.attempt_id(),
+        ShortCodeCapabilityTakeId::from_bytes([81; ShortCodeCapabilityTakeId::LENGTH]),
+    );
+    let creator_take = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/capability/take",
+            encode_short_code_capability_take_request(take_request).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(creator_take.status(), StatusCode::NOT_FOUND);
+    let claimant_take = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/capability/take",
+            encode_short_code_capability_take_request(take_request).unwrap(),
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(claimant_take.status(), StatusCode::OK);
+    let (version, attempt_id, payload) =
+        decode_short_code_capability_response(&response_bytes(claimant_take).await).unwrap();
+    assert_eq!(version, ProtocolVersion::application_v1());
+    assert_eq!(attempt_id, publish.attempt_id());
+    assert_eq!(payload, capability_payload);
+    let retry = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/capability/take",
+            encode_short_code_capability_take_request(take_request).unwrap(),
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let conflicting_take = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        publish.attempt_id(),
+        ShortCodeCapabilityTakeId::from_bytes([82; ShortCodeCapabilityTakeId::LENGTH]),
+    );
+    let conflicting_take = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/capability/take",
+            encode_short_code_capability_take_request(conflicting_take).unwrap(),
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflicting_take.status(), StatusCode::NOT_FOUND);
+
+    let cancellable = short_code_attempt(53, 63, deadline);
+    let publish_cancellable = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts",
+            encode_short_code_attempt_publish_request(cancellable).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(publish_cancellable.status(), StatusCode::CREATED);
+    let cancellation_claim = ShortCodeAttemptClaimRequest::new(
+        ProtocolVersion::application_v1(),
+        cancellable.locator(),
+        vec![72],
+    )
+    .unwrap();
+    let cancellation_claim = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/claim",
+            encode_short_code_attempt_claim_request(&cancellation_claim).unwrap(),
+            Some(&observer_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancellation_claim.status(), StatusCode::OK);
+    let cancel_request = ShortCodeAttemptReadRequest::new(
+        ProtocolVersion::application_v1(),
+        cancellable.attempt_id(),
+    );
+    for _ in 0..2 {
+        let cancelled = app
+            .clone()
+            .oneshot(protobuf_request(
+                "/v1/short-code-attempts/cancel",
+                encode_short_code_attempt_read_request(cancel_request).unwrap(),
+                Some(&observer_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+    }
+    let cancelled_read = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/read",
+            encode_short_code_attempt_read_request(cancel_request).unwrap(),
+            Some(&creator_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled_read.status(), StatusCode::NOT_FOUND);
+
+    for locator in 100..110 {
+        let unknown = ShortCodeAttemptClaimRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingLocator::from_bytes([locator; ShortCodePairingLocator::LENGTH]),
+            vec![73],
+        )
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(protobuf_request(
+                "/v1/short-code-attempts/claim",
+                encode_short_code_attempt_claim_request(&unknown).unwrap(),
+                Some(&rate_limited_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let limited = ShortCodeAttemptClaimRequest::new(
+        ProtocolVersion::application_v1(),
+        ShortCodePairingLocator::from_bytes([110; ShortCodePairingLocator::LENGTH]),
+        vec![73],
+    )
+    .unwrap();
+    let limited = app
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/claim",
+            encode_short_code_attempt_claim_request(&limited).unwrap(),
+            Some(&rate_limited_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        limited.headers().get("x-konclave-error-code").unwrap(),
+        "relay_short_code_pairing_rate_limited"
+    );
 }
 
 #[tokio::test]

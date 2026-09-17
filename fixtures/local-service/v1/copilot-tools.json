@@ -404,6 +404,78 @@
     }
   },
   {
+    "name": "cancel_short_code_pairing",
+    "description": "Cancel one active short-code attempt and any unreleased member-pairing reservation.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_confirmed": {
+          "type": "boolean"
+        },
+        "local_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "peer_confirmed": {
+          "type": "boolean"
+        },
+        "peer_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": "string"
+        },
+        "sas": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt_id",
+        "local_role",
+        "phase",
+        "local_device_id",
+        "deadline_unix_seconds",
+        "local_confirmed",
+        "peer_confirmed"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "change_member_role",
     "description": "Submit an encrypted Commit changing one conversation device role.",
     "inputSchema": {
@@ -451,6 +523,78 @@
         "conversation_id",
         "operation_id",
         "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "claim_short_code_pairing",
+    "description": "Enter one six-digit code to begin OPAQUE verification; the code alone grants no membership authority.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_confirmed": {
+          "type": "boolean"
+        },
+        "local_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "peer_confirmed": {
+          "type": "boolean"
+        },
+        "peer_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": "string"
+        },
+        "sas": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt_id",
+        "local_role",
+        "phase",
+        "local_device_id",
+        "deadline_unix_seconds",
+        "local_confirmed",
+        "peer_confirmed"
       ],
       "type": "object"
     }
@@ -766,6 +910,87 @@
     }
   },
   {
+    "name": "create_short_code_pairing",
+    "description": "Create a six-digit member-pairing code that grants no authority until both devices explicitly confirm the same SAS and peer identity.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ShortCodePairingStatusResult": {
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "local_confirmed": {
+              "type": "boolean"
+            },
+            "local_device_id": {
+              "type": "string"
+            },
+            "local_role": {
+              "type": "string"
+            },
+            "pairing_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "peer_confirmed": {
+              "type": "boolean"
+            },
+            "peer_device_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "phase": {
+              "type": "string"
+            },
+            "sas": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "attempt_id",
+            "local_role",
+            "phase",
+            "local_device_id",
+            "deadline_unix_seconds",
+            "local_confirmed",
+            "peer_confirmed"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "verification": {
+          "$ref": "#/$defs/ShortCodePairingStatusResult"
+        }
+      },
+      "required": [
+        "code",
+        "verification"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "delivery_status",
     "description": "Report automatic delivery health, and one conversation's mute state when given.",
     "inputSchema": {
@@ -1042,6 +1267,78 @@
         "joiner_device_id",
         "requested_role",
         "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_short_code_pairing_status",
+    "description": "Show one short-code attempt's bounded peer identity, SAS, confirmations, deadline, and resulting pairing identifier.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_confirmed": {
+          "type": "boolean"
+        },
+        "local_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "peer_confirmed": {
+          "type": "boolean"
+        },
+        "peer_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": "string"
+        },
+        "sas": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt_id",
+        "local_role",
+        "phase",
+        "local_device_id",
+        "deadline_unix_seconds",
+        "local_confirmed",
+        "peer_confirmed"
       ],
       "type": "object"
     }
@@ -2468,6 +2765,97 @@
       "required": [
         "pairing",
         "processed_records"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "sync_short_code_pairing",
+    "description": "Process bounded OPAQUE, identity, confirmation, or capability stages for one short-code attempt.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ShortCodePairingStatusResult": {
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "local_confirmed": {
+              "type": "boolean"
+            },
+            "local_device_id": {
+              "type": "string"
+            },
+            "local_role": {
+              "type": "string"
+            },
+            "pairing_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "peer_confirmed": {
+              "type": "boolean"
+            },
+            "peer_device_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "phase": {
+              "type": "string"
+            },
+            "sas": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "attempt_id",
+            "local_role",
+            "phase",
+            "local_device_id",
+            "deadline_unix_seconds",
+            "local_confirmed",
+            "peer_confirmed"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "processed_stages": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verification": {
+          "$ref": "#/$defs/ShortCodePairingStatusResult"
+        }
+      },
+      "required": [
+        "verification",
+        "processed_stages"
       ],
       "type": "object"
     }
