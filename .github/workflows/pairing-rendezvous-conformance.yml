@@ -54,7 +54,8 @@ jobs:
                 $_ -match '^fixtures/local-service/v1/copilot-tools\.json$' -or
                 $_ -match '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$' -or
                 $_ -match '^apps/Konclave\.(?:CommunityRelay|LocalDaemon)/(?:Cargo\.toml|src/.*|tests/.*)$' -or
-                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*)$'
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*)$' -or
+                $_ -match '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
               }
             ).Count -ne 0
           }
@@ -83,7 +84,7 @@ jobs:
         with:
           node-version: 24
           npm-cache-scope: pairing-rendezvous-conformance
-          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json', 'packages/Konclave.ProtocolContracts.TypeScript/package-lock.json') }}
       - name: Verify pairing rendezvous integration
         if: steps.scope.outputs.run == 'true'
         shell: bash
@@ -160,5 +161,8 @@ jobs:
             --all-targets \
             -- \
             -D warnings
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript ci --no-audit --no-fund
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript run build
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript test
           npm --prefix extensions/Konclave.HostExtension ci --no-audit --no-fund
           npm --prefix extensions/Konclave.HostExtension test
