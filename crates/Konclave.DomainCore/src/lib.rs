@@ -8,6 +8,7 @@ mod model;
 mod pairing_rendezvous;
 mod short_code_pairing;
 mod short_code_relay;
+mod trusted_devices;
 
 pub use collaboration_policy::{
     COLLABORATION_POLICY_BUNDLE_MAJOR, COLLABORATION_POLICY_BUNDLE_MINOR,
@@ -62,4 +63,10 @@ pub use short_code_relay::{
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
     ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest, ShortCodeRelayMessage,
     ShortCodeRelayStage,
+};
+pub use trusted_devices::{
+    MAX_TRUSTED_DEVICE_ALIAS_BYTES, TrustedDeviceAlias, TrustedDeviceAliasDecision,
+    TrustedDeviceBinding, TrustedDeviceBindingStatus, TrustedDeviceEvidence,
+    TrustedDeviceResolution, decide_trusted_device_alias, resolve_trusted_device,
+    trusted_device_binding_status,
 };

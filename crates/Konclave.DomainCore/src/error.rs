@@ -116,6 +116,18 @@ pub enum KonclaveDomainError {
     /// A short-code pairing confirmation event contradicts its durable state.
     #[error("short-code pairing confirmation transition is invalid")]
     InvalidShortCodePairingTransition,
+
+    /// A requested local alias still belongs to another active device root.
+    #[error("trusted-device alias belongs to another active device")]
+    TrustedDeviceAliasConflict,
+
+    /// Current authenticated evidence contradicts the stored device root.
+    #[error("trusted-device root no longer matches authenticated state")]
+    TrustedDeviceRootMismatch,
+
+    /// No current authenticated conversation contains the stored device.
+    #[error("trusted device is no longer a current conversation member")]
+    TrustedDeviceRemoved,
 }
 
 impl KonclaveDomainError {
@@ -148,6 +160,9 @@ impl KonclaveDomainError {
             Self::InvalidPairingEnvelope { .. } => "invalid_pairing_envelope",
             Self::ShortCodePairingExpired => "short_code_pairing_expired",
             Self::InvalidShortCodePairingTransition => "invalid_short_code_pairing_transition",
+            Self::TrustedDeviceAliasConflict => "trusted_device_alias_conflict",
+            Self::TrustedDeviceRootMismatch => "trusted_device_root_mismatch",
+            Self::TrustedDeviceRemoved => "trusted_device_removed",
         }
     }
 }
