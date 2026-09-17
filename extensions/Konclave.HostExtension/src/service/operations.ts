@@ -77,12 +77,23 @@ export const verificationOperations = {
   confirmShortCodePairing: 'confirm_short_code_pairing',
 } as const;
 
+/** Local address-book and repeat-pairing commands intentionally absent from agent tools. */
+export const trustedDeviceOperations = {
+  list: 'list_trusted_devices',
+  setAlias: 'set_trusted_device_alias',
+  startRepeatPairing: 'start_repeat_pairing',
+  getRepeatPairingStatus: 'get_repeat_pairing_status',
+  syncRepeatPairing: 'sync_repeat_pairing',
+  cancelRepeatPairing: 'cancel_repeat_pairing',
+} as const;
+
 export const allOperations: readonly string[] = [
   ...toolOperations,
   ...Object.values(deliveryOperations),
   ...Object.values(collaborationOperations),
   ...Object.values(serviceOperations),
   ...Object.values(verificationOperations),
+  ...Object.values(trustedDeviceOperations),
 ];
 
 export function isKnownOperation(name: string): boolean {

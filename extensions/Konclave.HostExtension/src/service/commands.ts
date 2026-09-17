@@ -14,7 +14,11 @@ import {
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
-import { serviceOperations, verificationOperations } from './operations.js';
+import {
+  serviceOperations,
+  trustedDeviceOperations,
+  verificationOperations,
+} from './operations.js';
 import {
   PairingHandoffError,
   pairingRendezvousTokenCharacters,
@@ -113,6 +117,8 @@ const shortCodeAttemptIdCharacters = 32;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
+const repeatPairingOperationIdCharacters = 32;
+const maxTrustedDeviceAliasBytes = 32;
 const policyProposalIdCharacters = 32;
 const policyDigestCharacters = 64;
 const uint64Maximum = 18_446_744_073_709_551_615n;
@@ -178,6 +184,41 @@ interface ShortCodePairingStatus {
   readonly localConfirmed: boolean;
   readonly peerConfirmed: boolean;
   readonly pairingId: string | undefined;
+}
+
+type RepeatPairingRole = 'initiator' | 'responder';
+type TrustedDeviceStatus = 'active' | 'removed' | 'root_mismatch' | 'unsupported';
+
+const repeatPairingPhases = [
+  'initiator_sending_request',
+  'initiator_awaiting_response',
+  'initiator_redeeming_capability',
+  'initiator_creating_conversation',
+  'initiator_pairing',
+  'responder_issuing_capability',
+  'responder_reserving_pairing',
+  'responder_sending_response',
+  'responder_pairing',
+  'completed',
+  'cancelling',
+  'cancelled',
+] as const;
+type RepeatPairingPhase = (typeof repeatPairingPhases)[number];
+
+interface RepeatPairingStatus {
+  readonly operationId: string;
+  readonly role: RepeatPairingRole;
+  readonly phase: RepeatPairingPhase;
+  readonly peerDeviceId: string;
+  readonly conversationId: string;
+  readonly pairingId: string | undefined;
+  readonly deadlineUnixSeconds: number;
+}
+
+interface TrustedDevice {
+  readonly alias: string;
+  readonly deviceId: string;
+  readonly status: TrustedDeviceStatus;
 }
 
 interface MessageSummary {
@@ -305,6 +346,8 @@ const helpLines = [
   '  /konclave status                                    Show profile, delivery, and relay state.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
+  '  /konclave devices                                   List local trusted-device aliases.',
+  '  /konclave device alias <device> <alias>             Bind a local alias to a current member.',
   '  /konclave connect [--copy|--qr]                     Create a compact two-session connection token.',
   '  /konclave connect --short                           Create a six-digit mutually verified connection code.',
   '  /konclave connect <six-digit-code>                  Join a short-code verification attempt.',
@@ -314,7 +357,10 @@ const helpLines = [
   '  /konclave clipboard clear                           Clear a token copied by this session.',
   '  /konclave pair [member|administrator]               Create a full recovery capability.',
   '  /konclave join <capability>                         Redeem a full recovery capability.',
-  '  /konclave new                                       Create a conversation for an approved peer.',
+  '  /konclave new                                       Create an empty conversation.',
+  '  /konclave new <alias>                               Create and connect a new conversation.',
+  '  /konclave repeat <operation>                        Resume one alias-based connection.',
+  '  /konclave cancel-repeat <operation>                 Cancel one alias-based connection.',
   '  /konclave pairing <pairing>                         Show authenticated pairing state.',
   '  /konclave verification <attempt>                    Show short-code verification state.',
   '  /konclave verify <attempt> <peer> <sas>             Explicitly confirm displayed short-code values.',
@@ -428,6 +474,23 @@ function isShortCodeRole(value: string): value is ShortCodeRole {
 
 function isShortCodePhase(value: string): value is ShortCodePhase {
   return shortCodePhases.some((phase) => phase === value);
+}
+
+function isRepeatPairingRole(value: string): value is RepeatPairingRole {
+  return value === 'initiator' || value === 'responder';
+}
+
+function isRepeatPairingPhase(value: string): value is RepeatPairingPhase {
+  return repeatPairingPhases.some((phase) => phase === value);
+}
+
+function isTrustedDeviceStatus(value: string): value is TrustedDeviceStatus {
+  return (
+    value === 'active' ||
+    value === 'removed' ||
+    value === 'root_mismatch' ||
+    value === 'unsupported'
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -586,6 +649,136 @@ function parsePairingRendezvous(value: unknown): {
   return {
     pairing: parsePairingStatus(value.pairing),
     token: handoff.token,
+  };
+}
+
+function parseRepeatPairingStatus(value: unknown): RepeatPairingStatus {
+  if (!isRecord(value)) {
+    throw new Error('the local service repeat-pairing response is malformed');
+  }
+  const role = requiredString(value, 'role', 'the local service repeat-pairing role is malformed');
+  const phase = requiredString(
+    value,
+    'phase',
+    'the local service repeat-pairing phase is malformed',
+  );
+  if (!isRepeatPairingRole(role) || !isRepeatPairingPhase(phase)) {
+    throw new Error('the local service repeat-pairing state is malformed');
+  }
+  return {
+    operationId: requireHexIdentifier(
+      requiredString(
+        value,
+        'operation_id',
+        'the local service repeat-pairing operation is malformed',
+      ),
+      repeatPairingOperationIdCharacters,
+      'repeat-pairing operation identifier',
+    ),
+    role,
+    phase,
+    peerDeviceId: requireHexIdentifier(
+      requiredString(value, 'peer_device_id', 'the local service repeat-pairing peer is malformed'),
+      deviceIdCharacters,
+      'peer device identifier',
+    ),
+    conversationId: requireHexIdentifier(
+      requiredString(
+        value,
+        'conversation_id',
+        'the local service repeat-pairing conversation is malformed',
+      ),
+      conversationIdCharacters,
+      'conversation identifier',
+    ),
+    pairingId: optionalIdentifier(value, 'pairing_id', pairingIdCharacters, 'pairing identifier'),
+    deadlineUnixSeconds: requiredNonnegativeSafeInteger(
+      value,
+      'deadline_unix_seconds',
+      'the local service repeat-pairing deadline is malformed',
+    ),
+  };
+}
+
+function parseTrustedDeviceAlias(value: string): string {
+  if (
+    Buffer.byteLength(value, 'utf8') === 0 ||
+    Buffer.byteLength(value, 'utf8') > maxTrustedDeviceAliasBytes ||
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(value)
+  ) {
+    throw new Error(
+      'device alias must contain 1-32 lowercase letters, digits, or interior hyphens',
+    );
+  }
+  return value;
+}
+
+function parseTrustedDevices(value: unknown): readonly TrustedDevice[] {
+  if (!isRecord(value) || !Array.isArray(value.devices) || value.devices.length > 256) {
+    throw new Error('the local service trusted-device response is malformed');
+  }
+  return value.devices.map((device) => {
+    if (!isRecord(device)) {
+      throw new Error('the local service trusted-device response is malformed');
+    }
+    const alias = parseTrustedDeviceAlias(
+      requiredString(device, 'alias', 'the local service trusted-device alias is malformed'),
+    );
+    const status = requiredString(
+      device,
+      'status',
+      'the local service trusted-device status is malformed',
+    );
+    if (!isTrustedDeviceStatus(status)) {
+      throw new Error('the local service trusted-device status is malformed');
+    }
+    return {
+      alias,
+      deviceId: requireHexIdentifier(
+        requiredString(
+          device,
+          'device_id',
+          'the local service trusted-device identity is malformed',
+        ),
+        deviceIdCharacters,
+        'device identifier',
+      ),
+      status,
+    };
+  });
+}
+
+function parseTrustedDeviceAliasResult(value: unknown): {
+  readonly alias: string;
+  readonly deviceId: string;
+  readonly decision: 'inserted' | 'unchanged' | 'renamed' | 'rebound_stale';
+} {
+  if (!isRecord(value)) {
+    throw new Error('the local service trusted-device alias response is malformed');
+  }
+  const decision = requiredString(
+    value,
+    'decision',
+    'the local service trusted-device alias decision is malformed',
+  );
+  if (
+    decision !== 'inserted' &&
+    decision !== 'unchanged' &&
+    decision !== 'renamed' &&
+    decision !== 'rebound_stale'
+  ) {
+    throw new Error('the local service trusted-device alias decision is malformed');
+  }
+  return {
+    alias: parseTrustedDeviceAlias(
+      requiredString(value, 'alias', 'the local service trusted-device alias is malformed'),
+    ),
+    deviceId: requireHexIdentifier(
+      requiredString(value, 'device_id', 'the local service trusted-device identity is malformed'),
+      deviceIdCharacters,
+      'device identifier',
+    ),
+    decision,
   };
 }
 
@@ -1815,6 +2008,74 @@ async function renderShortCodeVerification(
   );
 }
 
+async function renderRepeatPairing(
+  presentation: CommandPresentation,
+  alias: string | undefined,
+  status: RepeatPairingStatus,
+): Promise<void> {
+  const subject = alias === undefined ? status.peerDeviceId : alias;
+  await presentation.write(
+    `repeat connection ${status.operationId}: ${status.phase}; ${subject} -> ${status.conversationId}`,
+  );
+  await presentation.detail(`peer device: ${status.peerDeviceId}`);
+  if (status.pairingId !== undefined) {
+    await presentation.detail(`pairing: ${status.pairingId}`);
+  }
+  await presentation.detail(`expires: ${formatPairingExpiry(status.deadlineUnixSeconds)}`);
+}
+
+async function completeRepeatPairing(
+  client: LocalServiceClient,
+  initialStatus: RepeatPairingStatus,
+  alias: string | undefined,
+  presentation: CommandPresentation,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<RepeatPairingStatus> {
+  let status = initialStatus;
+  let nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+  await renderRepeatPairing(presentation, alias, status);
+  for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+    if (status.phase === 'completed') {
+      return status;
+    }
+    if (status.phase === 'cancelled') {
+      throw new Error(`repeat connection ${status.operationId} was cancelled`);
+    }
+    const deadline = Math.min(commandDeadline, status.deadlineUnixSeconds * 1_000);
+    if (!Number.isSafeInteger(deadline) || nowUnixMilliseconds() >= deadline) {
+      throw new ConnectTimeoutError(
+        `repeat connection ${status.operationId} timed out; resume with /konclave repeat ${status.operationId}`,
+      );
+    }
+    const previousPhase = status.phase;
+    await sleep(connectPollMilliseconds);
+    const synced = parseRepeatPairingStatus(
+      await client.request(
+        trustedDeviceOperations.syncRepeatPairing,
+        { operation_id: status.operationId },
+        { deadlineMs: Math.min(30_000, deadline - nowUnixMilliseconds()) },
+      ),
+    );
+    if (
+      synced.operationId !== status.operationId ||
+      synced.conversationId !== status.conversationId ||
+      synced.peerDeviceId !== status.peerDeviceId
+    ) {
+      throw new Error('the local service repeat-pairing identity is malformed');
+    }
+    status = synced;
+    if (status.phase !== previousPhase || nowUnixMilliseconds() >= nextProgressAt) {
+      await renderRepeatPairing(presentation, alias, status);
+      nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+    }
+  }
+  throw new ConnectTimeoutError(
+    `repeat connection ${status.operationId} exceeded its progress limit; resume with /konclave repeat ${status.operationId}`,
+  );
+}
+
 async function waitForShortCodeSas(
   client: LocalServiceClient,
   initialStatus: ShortCodePairingStatus,
@@ -2403,6 +2664,42 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'devices': {
+        requireNoArguments(argumentsText, subcommand);
+        const devices = parseTrustedDevices(await client.request(trustedDeviceOperations.list, {}));
+        if (devices.length === 0) {
+          await presentation.write('trusted devices: none');
+          await presentation.detail('assign one with /konclave device alias <device> <alias>');
+          return;
+        }
+        for (const device of devices) {
+          await presentation.write(`${device.alias}: ${device.status}; ${device.deviceId}`);
+        }
+        return;
+      }
+      case 'device': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 3, 3, '/konclave device alias <device> <alias>');
+        if (parts[0]?.toLowerCase() !== 'alias') {
+          throw new Error('usage: /konclave device alias <device> <alias>');
+        }
+        const deviceId = requireHexIdentifier(parts[1], deviceIdCharacters, 'device identifier');
+        const alias = parseTrustedDeviceAlias(parts[2] ?? '');
+        const result = parseTrustedDeviceAliasResult(
+          await client.request(trustedDeviceOperations.setAlias, {
+            device_id: deviceId,
+            alias,
+          }),
+        );
+        if (result.deviceId !== deviceId || result.alias !== alias) {
+          throw new Error('the local service trusted-device alias identity is malformed');
+        }
+        await presentation.write(
+          `trusted device ${result.alias}: ${result.decision}; ${result.deviceId}`,
+        );
+        await presentation.detail(`next: /konclave new ${result.alias}`);
+        return;
+      }
       case 'clipboard': {
         const parts = parseCommandArguments(argumentsText);
         requireArgumentCount(parts, 1, 1, '/konclave clipboard clear');
@@ -2626,16 +2923,103 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         return;
       }
       case 'new': {
-        requireNoArguments(argumentsText, subcommand);
-        const conversationId = parseConversation(await client.request('create_conversation', {}));
-        activeConversationId = conversationId;
-        await presentation.write(`conversation created: ${conversationId}`);
-        await presentation.detail(
-          'conversation created durably; it remains if the pending pairing is abandoned',
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 0, 1, '/konclave new [alias]');
+        if (parts.length === 0) {
+          const conversationId = parseConversation(await client.request('create_conversation', {}));
+          activeConversationId = conversationId;
+          await presentation.write(`conversation created: ${conversationId}`);
+          await presentation.detail(
+            'conversation created durably; it remains if the pending pairing is abandoned',
+          );
+          await presentation.detail(
+            'next: use this conversation when approving an inviter-side pairing or sending a message',
+          );
+          return;
+        }
+        const alias = parseTrustedDeviceAlias(parts[0] ?? '');
+        const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
+        const started = parseRepeatPairingStatus(
+          await client.request(trustedDeviceOperations.startRepeatPairing, { alias }),
         );
-        await presentation.detail(
-          'next: use this conversation when approving an inviter-side pairing or sending a message',
+        const completed = await completeRepeatPairing(
+          client,
+          started,
+          alias,
+          presentation,
+          commandDeadline,
+          nowUnixMilliseconds,
+          sleep,
         );
+        const selected = selectedConversation(
+          await client.request('set_active_conversation', {
+            conversation_id: completed.conversationId,
+          }),
+        );
+        if (selected !== completed.conversationId) {
+          throw new Error('the local service selected a different repeat-pairing conversation');
+        }
+        activeConversationId = completed.conversationId;
+        await presentation.write(`connected ${alias}: ${completed.conversationId}`);
+        await presentation.detail('next: /konclave send -- <message>');
+        return;
+      }
+      case 'repeat': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave repeat <operation>');
+        const operationId = requireHexIdentifier(
+          parts[0],
+          repeatPairingOperationIdCharacters,
+          'repeat-pairing operation identifier',
+        );
+        const status = parseRepeatPairingStatus(
+          await client.request(trustedDeviceOperations.getRepeatPairingStatus, {
+            operation_id: operationId,
+          }),
+        );
+        if (status.operationId !== operationId) {
+          throw new Error('the local service returned another repeat-pairing operation');
+        }
+        const completed = await completeRepeatPairing(
+          client,
+          status,
+          undefined,
+          presentation,
+          nowUnixMilliseconds() + maxConnectWaitMilliseconds,
+          nowUnixMilliseconds,
+          sleep,
+        );
+        if (completed.phase === 'completed') {
+          const selected = selectedConversation(
+            await client.request('set_active_conversation', {
+              conversation_id: completed.conversationId,
+            }),
+          );
+          if (selected !== completed.conversationId) {
+            throw new Error('the local service selected a different repeat-pairing conversation');
+          }
+          activeConversationId = completed.conversationId;
+          await presentation.write(`connected: ${completed.conversationId}`);
+        }
+        return;
+      }
+      case 'cancel-repeat': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave cancel-repeat <operation>');
+        const operationId = requireHexIdentifier(
+          parts[0],
+          repeatPairingOperationIdCharacters,
+          'repeat-pairing operation identifier',
+        );
+        const status = parseRepeatPairingStatus(
+          await client.request(trustedDeviceOperations.cancelRepeatPairing, {
+            operation_id: operationId,
+          }),
+        );
+        if (status.operationId !== operationId) {
+          throw new Error('the local service cancelled another repeat-pairing operation');
+        }
+        await renderRepeatPairing(presentation, undefined, status);
         return;
       }
       case 'pairing': {
