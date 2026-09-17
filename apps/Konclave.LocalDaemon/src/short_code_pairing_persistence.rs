@@ -26,6 +26,12 @@ pub(crate) struct ShortCodeCheckpoint {
     pub(crate) state: ShortCodeOperationState,
 }
 
+pub(crate) enum ShortCodePeerBinding {
+    Unlinked,
+    Verified(DeviceId),
+    Blocked,
+}
+
 impl ProfileStore {
     pub(super) fn initialize_short_code_pairing_schema(&self) -> Result<(), ProfileStoreError> {
         let current_version: u32 = self
@@ -597,31 +603,43 @@ impl ProfileStore {
     /// # Errors
     ///
     /// Returns malformed-data or storage when a retained binding cannot authenticate.
-    pub(crate) fn verified_short_code_peer(
+    pub(crate) fn short_code_peer_binding(
         &self,
         pairing_id: PairingId,
-    ) -> Result<Option<DeviceId>, ProfileStoreError> {
+    ) -> Result<ShortCodePeerBinding, ProfileStoreError> {
         let locator: Option<Vec<u8>> = self
             .lock()?
             .query_row(
                 "SELECT locator
                  FROM daemon_short_code_pairing
-                 WHERE pairing_id = ?1 AND phase IN (5, 11)",
+                 WHERE pairing_id = ?1",
                 params![pairing_id.as_bytes().as_slice()],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|_| ProfileStoreError::Storage)?;
-        locator
-            .map(|value| {
-                let locator = ShortCodePairingLocator::from_slice(&value)
-                    .map_err(|_| ProfileStoreError::CorruptData)?;
-                self.load_short_code_pairing_by_locator(locator)?
-                    .state
-                    .peer_device_id
-                    .ok_or(ProfileStoreError::CorruptData)
-            })
-            .transpose()
+        let Some(value) = locator else {
+            return Ok(ShortCodePeerBinding::Unlinked);
+        };
+        let locator = ShortCodePairingLocator::from_slice(&value)
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        let checkpoint = self.load_short_code_pairing_by_locator(locator)?;
+        if matches!(
+            checkpoint.phase,
+            ShortCodePhase::CreatorPublishingCapability
+                | ShortCodePhase::CreatorCompleted
+                | ShortCodePhase::ClaimantTakingCapability
+                | ShortCodePhase::ClaimantCompleted
+        ) && checkpoint.state.confirmation
+            == KonclaveDomainCore::ShortCodeConfirmationState::Confirmed
+        {
+            return checkpoint
+                .state
+                .peer_device_id
+                .map(ShortCodePeerBinding::Verified)
+                .ok_or(ProfileStoreError::CorruptData);
+        }
+        Ok(ShortCodePeerBinding::Blocked)
     }
 
     /// Deletes one terminal short-code record.

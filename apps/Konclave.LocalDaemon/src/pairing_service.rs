@@ -27,6 +27,7 @@ use crate::pairing::{
     PairingObservationResult, PairingOperationState, PairingStateError, generate_pairing_message_id,
 };
 use crate::persistence::pairing::{PairingCheckpoint, PairingPhase, PairingRole};
+use crate::persistence::short_code_pairing::ShortCodePeerBinding;
 use crate::persistence::{ProfileStore, ProfileStoreError};
 use crate::short_code_pairing::ShortCodeStateError;
 
@@ -428,8 +429,8 @@ where
     ) -> Result<(), PairingServiceError> {
         let _mutation = self.mutation_locks.acquire(pairing_id).await;
         let store = Arc::clone(&self.store);
-        let verified_peer =
-            tokio::task::spawn_blocking(move || store.verified_short_code_peer(pairing_id))
+        let short_code_binding =
+            tokio::task::spawn_blocking(move || store.short_code_peer_binding(pairing_id))
                 .await
                 .map_err(|_| PairingServiceError::Task)??;
         let checkpoint = self.load_checkpoint(pairing_id).await?;
@@ -437,8 +438,13 @@ where
             return Err(PairingServiceError::InvalidTransition);
         }
         let mut state = PairingOperationState::from_checkpoint(&checkpoint)?;
-        if verified_peer.is_some_and(|peer| peer != state.capability().offer().device_id()) {
-            return Err(PairingServiceError::AuthorizationMismatch);
+        match short_code_binding {
+            ShortCodePeerBinding::Unlinked => {}
+            ShortCodePeerBinding::Verified(peer)
+                if peer == state.capability().offer().device_id() => {}
+            ShortCodePeerBinding::Verified(_) | ShortCodePeerBinding::Blocked => {
+                return Err(PairingServiceError::AuthorizationMismatch);
+            }
         }
         if matches!(
             checkpoint.phase,
@@ -521,12 +527,16 @@ where
     ) -> Result<(), PairingServiceError> {
         let _mutation = self.mutation_locks.acquire(pairing_id).await;
         let store = Arc::clone(&self.store);
-        let verified_peer =
-            tokio::task::spawn_blocking(move || store.verified_short_code_peer(pairing_id))
+        let short_code_binding =
+            tokio::task::spawn_blocking(move || store.short_code_peer_binding(pairing_id))
                 .await
                 .map_err(|_| PairingServiceError::Task)??;
-        if verified_peer.is_some_and(|peer| peer != expected_inviter_device_id) {
-            return Err(PairingServiceError::AuthorizationMismatch);
+        match short_code_binding {
+            ShortCodePeerBinding::Unlinked => {}
+            ShortCodePeerBinding::Verified(peer) if peer == expected_inviter_device_id => {}
+            ShortCodePeerBinding::Verified(_) | ShortCodePeerBinding::Blocked => {
+                return Err(PairingServiceError::AuthorizationMismatch);
+            }
         }
         let checkpoint = self.load_checkpoint(pairing_id).await?;
         if checkpoint.role != PairingRole::Joiner {

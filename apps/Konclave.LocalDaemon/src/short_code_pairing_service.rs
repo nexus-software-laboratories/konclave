@@ -1419,6 +1419,7 @@ mod tests {
         routes: BTreeMap<KonclaveDomainCore::RoutingId, Vec<StoredRelayEnvelope>>,
         attempts: BTreeMap<ShortCodePairingLocator, StoredShortCodeAttempt>,
         tamper_creator_identity_for: Option<RelayPrincipalId>,
+        fail_after_capability_publish: bool,
     }
 
     #[derive(Clone)]
@@ -1457,6 +1458,10 @@ mod tests {
 
         fn tamper_creator_identity_for(&self, principal: RelayPrincipalId) {
             self.core.lock().unwrap().tamper_creator_identity_for = Some(principal);
+        }
+
+        fn fail_after_capability_publish(&self) {
+            self.core.lock().unwrap().fail_after_capability_publish = true;
         }
     }
 
@@ -1586,19 +1591,26 @@ mod tests {
                 .values_mut()
                 .find(|attempt| attempt.publish().attempt_id() == request.attempt_id())
                 .ok_or_else(unavailable)?;
-            match decide_short_code_message(self.principal, request, attempt, NOW)
+            let outcome = match decide_short_code_message(self.principal, request, attempt, NOW)
                 .map_err(client_relay_error)?
             {
                 ShortCodeMessageDecision::Insert => {
                     attempt
                         .insert_message(request.stage(), request.payload().to_vec())
                         .map_err(client_relay_error)?;
-                    Ok(ShortCodeAttemptMessageResult::Published)
+                    ShortCodeAttemptMessageResult::Published
                 }
                 ShortCodeMessageDecision::Identical => {
-                    Ok(ShortCodeAttemptMessageResult::AlreadyPublished)
+                    ShortCodeAttemptMessageResult::AlreadyPublished
                 }
+            };
+            if request.stage() == ShortCodeRelayStage::Capability
+                && core.fail_after_capability_publish
+            {
+                core.fail_after_capability_publish = false;
+                return Err(KonclaveClientError::TransportUnavailable);
             }
+            Ok(outcome)
         }
 
         async fn read_short_code_attempt(
@@ -1922,6 +1934,127 @@ mod tests {
                 .member(creator_device_id)
                 .map(KonclaveDomainCore::Member::role),
             Some(ConversationRole::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_publish_response_loss_keeps_verified_peer_binding_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let creator = open_coordinator(root.path(), "response-loss-creator");
+        let claimant = open_coordinator(root.path(), "response-loss-claimant");
+        let creator_device_id = creator.device_id().unwrap();
+        let claimant_device_id = claimant.device_id().unwrap();
+        let core = Arc::new(Mutex::new(MemoryCore::default()));
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let creator_transport = MemoryShortCodeRelay::new(Arc::clone(&core), 1);
+        let creator_service = service(creator, creator_transport.clone(), &endpoint);
+        let claimant_service = service(
+            claimant,
+            MemoryShortCodeRelay::new(Arc::clone(&core), 2),
+            &endpoint,
+        );
+        let created = creator_service
+            .create_short_code_pairing(NOW)
+            .await
+            .unwrap();
+        let attempt_id = created.status.attempt_id;
+        claimant_service
+            .claim_short_code_pairing(&created.code, NOW)
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            creator_service
+                .sync_short_code_pairing(attempt_id, NOW)
+                .await
+                .unwrap();
+            claimant_service
+                .sync_short_code_pairing(attempt_id, NOW)
+                .await
+                .unwrap();
+            if creator_service
+                .short_code_status(attempt_id)
+                .await
+                .unwrap()
+                .sas
+                .is_some()
+                && claimant_service
+                    .short_code_status(attempt_id)
+                    .await
+                    .unwrap()
+                    .sas
+                    .is_some()
+            {
+                break;
+            }
+        }
+        let creator_sas = creator_service
+            .short_code_status(attempt_id)
+            .await
+            .unwrap()
+            .sas
+            .unwrap();
+        let claimant_sas = claimant_service
+            .short_code_status(attempt_id)
+            .await
+            .unwrap()
+            .sas
+            .unwrap();
+        creator_service
+            .confirm_short_code_pairing(attempt_id, claimant_device_id, creator_sas, NOW)
+            .await
+            .unwrap();
+        claimant_service
+            .confirm_short_code_pairing(attempt_id, creator_device_id, claimant_sas, NOW)
+            .await
+            .unwrap();
+        creator_transport.fail_after_capability_publish();
+        assert!(matches!(
+            creator_service
+                .sync_short_code_pairing(attempt_id, NOW)
+                .await,
+            Err(PairingServiceError::Client(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        let status = creator_service.short_code_status(attempt_id).await.unwrap();
+        assert_eq!(status.phase, ShortCodePhase::CreatorPublishingCapability);
+        let pairing_id = status.pairing_id.unwrap();
+        let conversation_id = KonclaveDomainCore::ConversationId::from_bytes([9; 32]);
+        assert!(matches!(
+            creator_service
+                .authorize_inviter(
+                    pairing_id,
+                    DeviceId::from_bytes([0xff; DeviceId::LENGTH]),
+                    conversation_id,
+                    ConversationRole::Member,
+                    NOW,
+                )
+                .await,
+            Err(PairingServiceError::AuthorizationMismatch)
+        ));
+        assert!(matches!(
+            creator_service
+                .authorize_inviter(
+                    pairing_id,
+                    claimant_device_id,
+                    conversation_id,
+                    ConversationRole::Member,
+                    NOW,
+                )
+                .await,
+            Err(PairingServiceError::InvalidTransition)
+        ));
+        creator_service
+            .sync_short_code_pairing(attempt_id, NOW)
+            .await
+            .unwrap();
+        assert_eq!(
+            creator_service
+                .short_code_status(attempt_id)
+                .await
+                .unwrap()
+                .phase,
+            ShortCodePhase::CreatorCompleted
         );
     }
 
