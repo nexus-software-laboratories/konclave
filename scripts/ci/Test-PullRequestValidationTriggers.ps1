@@ -7,12 +7,22 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $workflowRoot = Join-Path $repositoryRoot '.github' 'workflows'
 $contracts = [ordered]@{
-    'ci.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
-    'a2a-conformance.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
-    'adapter-conformance.yml' = '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
-    'authorization-store-conformance.yml' = '    types: [opened, edited, synchronize, reopened]'
-    'generic-client-conformance.yml' = '    types: [opened, edited, synchronize, reopened]'
-    'user-presence-conformance.yml' = '    types: [opened, edited, synchronize, reopened]'
+    'ci.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'a2a-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'adapter-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'actions-storage-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'agent-plugin-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'authorization-reload-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'authorization-store-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'client-runtime-config-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'distribution-lifecycle-acceptance.yml' = '    types: [opened, synchronize, reopened]'
+    'extension-startup-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'generic-client-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'installer-lifecycle-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'marketplace-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'relay-migration-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'release-publication-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'user-presence-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'package-validation.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'pr-title.yml' = '    types: [opened, edited, synchronize, reopened]'
     'pr-base.yml' = '    types: [opened, edited, synchronize, reopened]'
@@ -34,6 +44,37 @@ $reviewPolicyTrigger =
     '    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]'
 if ($reviewPolicyTrigger -cnotin $reviewPolicyLines) {
     throw 'Review policy must re-evaluate ready and draft transitions.'
+}
+
+$prBase = Get-Content -LiteralPath (Join-Path $workflowRoot 'pr-base.yml') -Raw
+foreach ($required in @(
+    'PREVIOUS_BASE_REF: ${{ github.event.changes.base.ref.from || '''' }}',
+    'Close and reopen it, or push a new commit'
+)) {
+    if (-not $prBase.Contains($required)) {
+        throw "PR base retarget recovery is missing '$required'."
+    }
+}
+
+$dependabot = Get-Content -LiteralPath (
+    Join-Path $repositoryRoot '.github' 'dependabot.yml'
+) -Raw
+foreach ($group in @(
+    'cargo-minor-and-patch',
+    'github-actions-minor-and-patch'
+)) {
+    if (-not $dependabot.Contains("      ${group}:")) {
+        throw "Dependabot is missing the '$group' update group."
+    }
+}
+if (
+    [regex]::Matches($dependabot, '(?m)^        patterns:$').Count -ne 2 -or
+    [regex]::Matches($dependabot, '(?m)^          - "\*"$').Count -ne 2 -or
+    [regex]::Matches($dependabot, '(?m)^        update-types:$').Count -ne 2 -or
+    [regex]::Matches($dependabot, '(?m)^          - "minor"$').Count -ne 2 -or
+    [regex]::Matches($dependabot, '(?m)^          - "patch"$').Count -ne 2
+) {
+    throw 'Dependabot routine-update grouping is incomplete.'
 }
 
 $ciLines = @(Get-Content -LiteralPath (Join-Path $workflowRoot 'ci.yml'))

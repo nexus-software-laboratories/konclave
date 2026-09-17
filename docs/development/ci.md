@@ -16,6 +16,10 @@ Validation is grouped per pull request. A new head revision cancels the prior ru
 that pull request, while each manual dispatch uses its unique run identifier. Stale
 commits therefore cannot consume runner capacity or report after the current head.
 
+Routine Dependabot minor and patch updates are grouped once per Cargo and GitHub
+Actions ecosystem. Major updates remain separate so compatibility changes stay
+independently reviewable without recreating the weekly routine-update fan-out.
+
 ## Reuse validation on ready promotion
 
 Draft pull requests perform only lightweight validation planning and publish
@@ -23,14 +27,16 @@ Draft pull requests perform only lightweight validation planning and publish
 deferred. Moving a pull request to ready-for-review triggers fresh full validation on
 the unchanged head and publishes the required `CI` and component check contexts.
 
-CI retains the `edited` event because retargeting a pull request onto `main`
-changes its validation eligibility without creating a new head SHA. The title and
-base checks also react to edits, and Review policy reacts to ready/draft transitions
-because its approval rule depends on that state.
+Code-validation workflows do not run for metadata-only `edited` events. The title,
+base, and Review policy checks still react to edits because their decisions depend on
+pull-request metadata. Retargeting onto `main` makes the base check fail once with an
+explicit instruction to close and reopen the pull request or push a new commit; that
+subsequent event launches every eligible code-validation workflow against the current
+base.
 
 `scripts/ci/Test-PullRequestValidationTriggers.ps1` owns this trigger contract and
-prevents `ready_for_review` from being reintroduced into full CI, packaging, title,
-or base workflows while preserving it for Review policy.
+prevents metadata edits from reintroducing code-validation fan-out while preserving
+ready/draft transitions for workflows whose execution scope depends on that state.
 
 ## Fork boundary
 
@@ -49,10 +55,9 @@ required check uses a read-only pull-request file query and runs the external su
 only when A2A contracts, gateway code, provenance, or harness files changed. It
 checks out no source for unrelated changes. Relevant runs also format, test, and
 Clippy the standalone gateway host and format/Clippy the packaged A2A acceptance
-harness before executing external code. Draft promotion does not trigger another run
-for an unchanged commit. An `edited` event resolves the pull request's files and
-reruns the full check when the diff is A2A-relevant, preventing a no-op result from
-masking a prior failure; unrelated diffs keep the lightweight scope-only result.
+harness before executing external code. Ready and draft transitions still rerun
+validation because execution scope depends on that state. Metadata edits retain the
+existing exact-head result instead of scheduling another scope-only runner.
 
 The adapter-conformance workflow follows the same hosted-only boundary. Its stable
 check validates the persistent shared-local-service client, harness-neutral adapter
@@ -89,11 +94,13 @@ setting. The repository `GITHUB_TOKEN` cannot read that administrative setting, 
 workflows enforce one-day retention on every upload rather than fabricating a runtime
 verification. The default-branch `Actions storage cleanup` workflow runs after Agent
 Plugin conformance, every completed package-validation run including failures and
-cancellations, and successful prerelease publication. Cleanup remains serialized, but
-every surviving invocation sweeps artifacts from all completed eligible runs so
-GitHub's pending-concurrency coalescing cannot orphan bytes during a burst. Failed
-publication runs keep their candidate for at most one day so a maintainer can
-diagnose or resume a draft or tag failure without presenting it as a release.
+cancellations, and successful prerelease publication. Cleanup uses one global
+concurrency group and cancels superseded runs because every invocation reconciles all
+completed eligible runs and repository caches, not only the event that launched it.
+The newest invocation therefore subsumes older queued or interrupted cleanup without
+orphaning bytes. Failed publication runs keep their candidate for at most one day so
+a maintainer can diagnose or resume a draft or tag failure without presenting it as
+a release.
 
 Pull requests may restore Rust caches created from `main`, but cannot persist new
 Rust or npm caches. Trusted `main` runs share npm's content-addressed download store

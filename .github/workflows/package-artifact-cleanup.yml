@@ -13,8 +13,10 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # Every run reconciles all eligible artifacts and caches, so the newest trigger
+  # subsumes any older cleanup still queued or running.
   group: actions-storage-cleanup
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read

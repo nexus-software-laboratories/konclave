@@ -3,7 +3,7 @@ name: Marketplace conformance
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
     paths:
       - '.github/genesis-delivery.json'
       - '.github/plugin/**'
