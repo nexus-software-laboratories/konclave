@@ -16,6 +16,11 @@ mod pairing_rendezvous;
 mod protected_http;
 mod websocket;
 
+pub use KonclaveDomainCore::{
+    MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
+    PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
+    PairingRendezvousTakeRequest,
+};
 pub use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,
     RelayEnrollmentRequest, RelayEnrollmentResponse, RelayPrincipalId,
@@ -35,9 +40,8 @@ pub use installation::{
 };
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
 pub use pairing_rendezvous::{
-    MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, PAIRING_RENDEZVOUS_TOKEN_CHARACTERS,
-    PairingRendezvousRecord, PairingRendezvousTokenText, create_pairing_rendezvous,
-    open_pairing_rendezvous,
+    PAIRING_RENDEZVOUS_TOKEN_CHARACTERS, PairingRendezvousTokenText, create_pairing_rendezvous,
+    open_pairing_rendezvous, pairing_rendezvous_take_request,
 };
 pub use websocket::RelayWatchSession;
 

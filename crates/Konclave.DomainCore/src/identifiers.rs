@@ -110,6 +110,18 @@ define_fixed_bytes!(
     "pairing_message_id"
 );
 define_fixed_bytes!(
+    /// Opaque lookup identifier for one encrypted pairing rendezvous.
+    PairingRendezvousId,
+    32,
+    "pairing_rendezvous_id"
+);
+define_fixed_bytes!(
+    /// Public AES-GCM nonce for one encrypted pairing rendezvous.
+    PairingRendezvousNonce,
+    12,
+    "pairing_rendezvous_nonce"
+);
+define_fixed_bytes!(
     /// Public AES-GCM nonce carried by one pairing envelope.
     PairingNonce,
     12,

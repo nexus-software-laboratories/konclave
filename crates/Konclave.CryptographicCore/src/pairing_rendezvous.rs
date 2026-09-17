@@ -1,7 +1,7 @@
 use aws_lc_rs::hkdf::{self, KeyType};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use KonclaveDomainCore::ProtocolVersion;
+use KonclaveDomainCore::{PairingRendezvousId, ProtocolVersion};
 use KonclaveSecretStorage::{
     AUTHENTICATED_CIPHER_KEY_BYTES, AuthenticatedCipher, AuthenticatedCiphertext,
     SecretStorageError,
@@ -11,8 +11,6 @@ use crate::{KonclaveCryptographicError, fill_random};
 
 /// Byte length of one compact pairing rendezvous token.
 pub const PAIRING_RENDEZVOUS_TOKEN_BYTES: usize = 16;
-/// Byte length of one non-secret relay rendezvous lookup identifier.
-pub const PAIRING_RENDEZVOUS_LOOKUP_BYTES: usize = 32;
 /// Maximum plaintext bytes protected by one rendezvous record.
 pub const MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES: usize = 8 * 1024;
 
@@ -58,7 +56,7 @@ impl PairingRendezvousSecret {
 
 /// Token-derived lookup identity and authenticated-encryption key.
 pub struct PairingRendezvousKeySchedule {
-    lookup_id: [u8; PAIRING_RENDEZVOUS_LOOKUP_BYTES],
+    lookup_id: PairingRendezvousId,
     cipher: AuthenticatedCipher,
 }
 
@@ -74,15 +72,15 @@ impl PairingRendezvousKeySchedule {
         let lookup_id = derive(&prk, LOOKUP_INFO)?;
         let encryption_key = derive(&prk, ENCRYPTION_KEY_INFO)?;
         Ok(Self {
-            lookup_id: *lookup_id,
+            lookup_id: PairingRendezvousId::from_bytes(*lookup_id),
             cipher: AuthenticatedCipher::new(&encryption_key),
         })
     }
 
     /// Returns the non-secret relay lookup identifier.
     #[must_use]
-    pub const fn lookup_id(&self) -> &[u8; PAIRING_RENDEZVOUS_LOOKUP_BYTES] {
-        &self.lookup_id
+    pub const fn lookup_id(&self) -> PairingRendezvousId {
+        self.lookup_id
     }
 
     /// Encrypts one bounded capability under a fresh nonce.
@@ -97,7 +95,7 @@ impl PairingRendezvousKeySchedule {
     ) -> Result<AuthenticatedCiphertext, KonclaveCryptographicError> {
         self.cipher
             .seal_with_associated_data(plaintext, MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, |nonce| {
-                canonical_header(&self.lookup_id, expires_at_unix_seconds, nonce)
+                canonical_header(self.lookup_id, expires_at_unix_seconds, nonce)
             })
             .map_err(rendezvous_cipher_error)
     }
@@ -113,7 +111,7 @@ impl PairingRendezvousKeySchedule {
         expires_at_unix_seconds: u64,
         ciphertext: &AuthenticatedCiphertext,
     ) -> Result<Zeroizing<Vec<u8>>, KonclaveCryptographicError> {
-        let header = canonical_header(&self.lookup_id, expires_at_unix_seconds, ciphertext.nonce());
+        let header = canonical_header(self.lookup_id, expires_at_unix_seconds, ciphertext.nonce());
         self.cipher
             .open(&header, ciphertext, MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES)
             .map_err(rendezvous_cipher_error)
@@ -148,7 +146,7 @@ impl KeyType for FixedLength {
 }
 
 fn canonical_header(
-    lookup_id: &[u8; PAIRING_RENDEZVOUS_LOOKUP_BYTES],
+    lookup_id: PairingRendezvousId,
     expires_at_unix_seconds: u64,
     nonce: &[u8; 12],
 ) -> Vec<u8> {
@@ -157,7 +155,7 @@ fn canonical_header(
     output.extend_from_slice(RECORD_AAD_DOMAIN);
     output.extend_from_slice(&version.major().to_be_bytes());
     output.extend_from_slice(&version.minor().to_be_bytes());
-    output.extend_from_slice(lookup_id);
+    output.extend_from_slice(lookup_id.as_bytes());
     output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
     output.extend_from_slice(nonce);
     output
@@ -210,7 +208,7 @@ mod tests {
             PairingRendezvousKeySchedule::derive(&PairingRendezvousSecret::from_bytes(token))
                 .unwrap();
         assert_eq!(
-            schedule.lookup_id(),
+            schedule.lookup_id().as_bytes(),
             &[
                 0x8e, 0x07, 0x5d, 0x02, 0xf5, 0x2f, 0xad, 0xae, 0xc4, 0x9c, 0x1e, 0x55, 0xde, 0xa2,
                 0xe8, 0x58, 0x1d, 0x7f, 0xa3, 0x62, 0x0e, 0x8a, 0x4b, 0x17, 0x19, 0x11, 0xf4, 0xe8,

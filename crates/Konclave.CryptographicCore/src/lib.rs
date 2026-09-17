@@ -33,8 +33,8 @@ pub use mls::{
 };
 pub use pairing::{PAIRING_SECRET_BYTES, PairingKeySchedule, PairingSecret};
 pub use pairing_rendezvous::{
-    MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_LOOKUP_BYTES,
-    PAIRING_RENDEZVOUS_TOKEN_BYTES, PairingRendezvousKeySchedule, PairingRendezvousSecret,
+    MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_TOKEN_BYTES,
+    PairingRendezvousKeySchedule, PairingRendezvousSecret,
 };
 
 #[cfg(test)]

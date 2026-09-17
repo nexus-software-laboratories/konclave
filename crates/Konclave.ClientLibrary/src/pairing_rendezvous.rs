@@ -1,20 +1,19 @@
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use KonclaveCryptographicCore::{
-    MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_LOOKUP_BYTES,
-    PAIRING_RENDEZVOUS_TOKEN_BYTES, PairingRendezvousKeySchedule, PairingRendezvousSecret,
+    MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_TOKEN_BYTES,
+    PairingRendezvousKeySchedule, PairingRendezvousSecret,
 };
-use KonclaveSecretStorage::{AUTHENTICATED_CIPHER_NONCE_BYTES, AuthenticatedCiphertext};
+use KonclaveDomainCore::{
+    PairingRendezvousNonce, PairingRendezvousRecord, PairingRendezvousTakeRequest, ProtocolVersion,
+};
+use KonclaveSecretStorage::AuthenticatedCiphertext;
 
 use crate::{KonclaveClientError, PairingCapability};
 
 const TOKEN_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Character length of one canonical compact pairing rendezvous token.
 pub const PAIRING_RENDEZVOUS_TOKEN_CHARACTERS: usize = 26;
-/// Maximum ciphertext bytes stored by one compact pairing rendezvous.
-pub const MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES: usize =
-    MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES + KonclaveSecretStorage::AUTHENTICATED_CIPHER_TAG_BYTES;
-
 /// Canonical case-insensitive Crockford Base32 pairing rendezvous token.
 ///
 /// The text implements neither `Clone` nor `Debug` and zeroizes on drop.
@@ -26,70 +25,6 @@ impl PairingRendezvousTokenText {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
-    }
-}
-
-/// Opaque capability ciphertext stored under one non-secret relay lookup identifier.
-pub struct PairingRendezvousRecord {
-    lookup_id: [u8; PAIRING_RENDEZVOUS_LOOKUP_BYTES],
-    expires_at_unix_seconds: u64,
-    ciphertext: AuthenticatedCiphertext,
-}
-
-impl PairingRendezvousRecord {
-    /// Validates and owns one relay-returned rendezvous record.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-rendezvous error for malformed lookup, expiry, nonce, or
-    /// ciphertext bounds.
-    pub fn new(
-        lookup_id: &[u8],
-        expires_at_unix_seconds: u64,
-        nonce: &[u8],
-        ciphertext: Vec<u8>,
-    ) -> Result<Self, KonclaveClientError> {
-        if expires_at_unix_seconds == 0 {
-            return Err(KonclaveClientError::InvalidPairingRendezvous);
-        }
-        let lookup_id = lookup_id
-            .try_into()
-            .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
-        let ciphertext = AuthenticatedCiphertext::from_parts(
-            nonce,
-            ciphertext,
-            MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES,
-        )
-        .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
-        Ok(Self {
-            lookup_id,
-            expires_at_unix_seconds,
-            ciphertext,
-        })
-    }
-
-    /// Returns the opaque relay lookup identifier.
-    #[must_use]
-    pub const fn lookup_id(&self) -> &[u8; PAIRING_RENDEZVOUS_LOOKUP_BYTES] {
-        &self.lookup_id
-    }
-
-    /// Returns the capability authorization deadline.
-    #[must_use]
-    pub const fn expires_at_unix_seconds(&self) -> u64 {
-        self.expires_at_unix_seconds
-    }
-
-    /// Returns the authenticated-encryption nonce.
-    #[must_use]
-    pub const fn nonce(&self) -> &[u8; AUTHENTICATED_CIPHER_NONCE_BYTES] {
-        self.ciphertext.nonce()
-    }
-
-    /// Returns the opaque capability ciphertext and appended tag.
-    #[must_use]
-    pub fn ciphertext(&self) -> &[u8] {
-        self.ciphertext.as_bytes()
     }
 }
 
@@ -110,11 +45,14 @@ pub fn create_pairing_rendezvous(
     let capability_text = capability.encode()?;
     let expires_at_unix_seconds = capability.offer().expires_at_unix_seconds();
     let ciphertext = schedule.seal(expires_at_unix_seconds, capability_text.as_str().as_bytes())?;
-    let record = PairingRendezvousRecord {
-        lookup_id: *schedule.lookup_id(),
+    let record = PairingRendezvousRecord::new(
+        ProtocolVersion::application_v1(),
+        schedule.lookup_id(),
         expires_at_unix_seconds,
-        ciphertext,
-    };
+        PairingRendezvousNonce::from_bytes(*ciphertext.nonce()),
+        ciphertext.into_bytes(),
+    )
+    .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
     let mut token_bytes = Zeroizing::new(Vec::with_capacity(PAIRING_RENDEZVOUS_TOKEN_BYTES));
     secret.write_token_bytes(&mut token_bytes);
     let token = encode_token(
@@ -137,7 +75,7 @@ pub fn open_pairing_rendezvous(
     record: &PairingRendezvousRecord,
     now_unix_seconds: u64,
 ) -> Result<PairingCapability, KonclaveClientError> {
-    if record.expires_at_unix_seconds <= now_unix_seconds {
+    if record.expires_at_unix_seconds() <= now_unix_seconds {
         return Err(KonclaveClientError::InvalidPairingRendezvous);
     }
     let token_bytes = Zeroizing::new(decode_token(token)?);
@@ -146,17 +84,40 @@ pub fn open_pairing_rendezvous(
     if schedule.lookup_id() != record.lookup_id() {
         return Err(KonclaveClientError::InvalidPairingRendezvous);
     }
+    let ciphertext = AuthenticatedCiphertext::from_parts(
+        record.nonce().as_bytes(),
+        record.ciphertext().to_vec(),
+        MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES,
+    )
+    .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
     let plaintext = schedule
-        .open(record.expires_at_unix_seconds, &record.ciphertext)
+        .open(record.expires_at_unix_seconds(), &ciphertext)
         .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
     let capability_text = std::str::from_utf8(&plaintext)
         .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
     let capability = PairingCapability::decode(capability_text, now_unix_seconds)
         .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
-    if capability.offer().expires_at_unix_seconds() != record.expires_at_unix_seconds {
+    if capability.offer().expires_at_unix_seconds() != record.expires_at_unix_seconds() {
         return Err(KonclaveClientError::InvalidPairingRendezvous);
     }
     Ok(capability)
+}
+
+/// Derives the opaque relay take request for one compact token.
+///
+/// # Errors
+///
+/// Returns one opaque invalid-rendezvous error for malformed token text or key derivation.
+pub fn pairing_rendezvous_take_request(
+    token: &str,
+) -> Result<PairingRendezvousTakeRequest, KonclaveClientError> {
+    let token_bytes = Zeroizing::new(decode_token(token)?);
+    let secret = PairingRendezvousSecret::from_bytes(*token_bytes);
+    let schedule = PairingRendezvousKeySchedule::derive(&secret)?;
+    Ok(PairingRendezvousTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        schedule.lookup_id(),
+    ))
 }
 
 fn encode_token(bytes: &[u8; PAIRING_RENDEZVOUS_TOKEN_BYTES]) -> String {
@@ -251,6 +212,12 @@ mod tests {
                 .all(|byte| TOKEN_ALPHABET.contains(&byte))
         );
         let opened = open_pairing_rendezvous(token.as_str(), &record, NOW).unwrap();
+        assert_eq!(
+            pairing_rendezvous_take_request(token.as_str())
+                .unwrap()
+                .lookup_id(),
+            record.lookup_id()
+        );
         assert_eq!(opened.offer(), capability.offer());
         assert_eq!(
             opened.relay_endpoint().as_str(),
@@ -291,6 +258,7 @@ mod tests {
         let mut modified = record.ciphertext().to_vec();
         modified[0] ^= 1;
         let modified = PairingRendezvousRecord::new(
+            record.version(),
             record.lookup_id(),
             record.expires_at_unix_seconds(),
             record.nonce(),
