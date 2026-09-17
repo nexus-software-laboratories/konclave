@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use KonclaveClientLibrary::{
-    KonclaveClientError, PairingCapability, PairingCapabilityText, RelayEndpoint, RelayTransport,
+    KonclaveClientError, PairingCapability, PairingCapabilityText, PairingRendezvousTokenText,
+    PairingRendezvousTransport, RelayEndpoint, RelayTransport, create_pairing_rendezvous,
+    open_pairing_rendezvous, pairing_rendezvous_take_request,
 };
 use KonclaveCryptographicCore::{
     KonclaveCryptographicError, MlsWelcome, verify_device_credential_binding, verify_invitation,
@@ -39,6 +41,14 @@ const COMPENSATION_ENVELOPE_EXPIRY: u64 = i64::MAX as u64;
 pub(crate) struct CreatedPairing {
     pub(crate) pairing_id: PairingId,
     pub(crate) capability: PairingCapabilityText,
+}
+
+/// Compact secret returned for one explicit cross-device handoff.
+///
+/// This value implements neither `Clone` nor `Debug` and zeroizes its text on drop.
+pub(crate) struct CreatedPairingRendezvous {
+    pub(crate) pairing_id: PairingId,
+    pub(crate) token: PairingRendezvousTokenText,
 }
 
 /// Non-secret status for one durable pairing operation.
@@ -139,10 +149,27 @@ where
         expires_at_unix_seconds: u64,
         now_unix_seconds: u64,
     ) -> Result<CreatedPairing, PairingServiceError> {
+        let capability = self
+            .issue_capability(requested_role, expires_at_unix_seconds, now_unix_seconds)
+            .await?;
+        let capability_text = capability.encode()?;
+        let pairing_id = self.reserve_joiner_capability(capability).await?;
+        Ok(CreatedPairing {
+            pairing_id,
+            capability: capability_text,
+        })
+    }
+
+    async fn issue_capability(
+        &self,
+        requested_role: ConversationRole,
+        expires_at_unix_seconds: u64,
+        now_unix_seconds: u64,
+    ) -> Result<PairingCapability, PairingServiceError> {
         require_authorization_window(now_unix_seconds, expires_at_unix_seconds)?;
         let conversations = self.conversations.clone();
         let relay_endpoint = self.relay_endpoint.clone();
-        let capability = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             conversations.issue_pairing_capability(
                 relay_endpoint,
                 requested_role,
@@ -151,15 +178,18 @@ where
             )
         })
         .await
-        .map_err(|_| PairingServiceError::Task)??;
+        .map_err(|_| PairingServiceError::Task)?
+        .map_err(Into::into)
+    }
+
+    async fn reserve_joiner_capability(
+        &self,
+        capability: PairingCapability,
+    ) -> Result<PairingId, PairingServiceError> {
         let pairing_id = capability.offer().pairing_id();
-        let capability_text = capability.encode()?;
         let state = PairingOperationState::new(PairingRole::Joiner, capability);
         self.reserve_state(&state).await?;
-        Ok(CreatedPairing {
-            pairing_id,
-            capability: capability_text,
-        })
+        Ok(pairing_id)
     }
 
     /// Redeems one transferred capability into an inviter-side authorization request.
@@ -174,6 +204,15 @@ where
         now_unix_seconds: u64,
     ) -> Result<PairingStatus, PairingServiceError> {
         let capability = PairingCapability::decode(capability_text, now_unix_seconds)?;
+        self.redeem_decoded_capability(capability, now_unix_seconds)
+            .await
+    }
+
+    async fn redeem_decoded_capability(
+        &self,
+        capability: PairingCapability,
+        now_unix_seconds: u64,
+    ) -> Result<PairingStatus, PairingServiceError> {
         require_authorization_window(
             now_unix_seconds,
             capability.offer().expires_at_unix_seconds(),
@@ -185,6 +224,64 @@ where
         let state = PairingOperationState::new(PairingRole::Inviter, capability);
         self.reserve_state(&state).await?;
         self.status(pairing_id).await
+    }
+
+    /// Creates and publishes a compact encrypted handoff for the existing pairing flow.
+    ///
+    /// A failed publication cancels the initial local reservation so capacity is not
+    /// silently consumed by a token that was never returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a capability, cryptographic, relay, task, cleanup, or persistence error.
+    pub(crate) async fn create_rendezvous(
+        &self,
+        expires_at_unix_seconds: u64,
+        now_unix_seconds: u64,
+    ) -> Result<CreatedPairingRendezvous, PairingServiceError>
+    where
+        T: PairingRendezvousTransport,
+    {
+        let capability = self
+            .issue_capability(
+                ConversationRole::Member,
+                expires_at_unix_seconds,
+                now_unix_seconds,
+            )
+            .await?;
+        let (token, record) = create_pairing_rendezvous(&capability, now_unix_seconds)?;
+        let pairing_id = self.reserve_joiner_capability(capability).await?;
+        if let Err(error) = self.transport.publish_pairing_rendezvous(&record).await {
+            if self.cancel(pairing_id, now_unix_seconds).await.is_err() {
+                return Err(PairingServiceError::RendezvousCleanup);
+            }
+            return Err(error.into());
+        }
+        Ok(CreatedPairingRendezvous { pairing_id, token })
+    }
+
+    /// Redeems a compact token into the existing inviter-side capability flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns one opaque token, relay, capability, relay-mismatch, task, sealing, or
+    /// persistence error.
+    pub(crate) async fn redeem_rendezvous(
+        &self,
+        token: &str,
+        now_unix_seconds: u64,
+    ) -> Result<PairingStatus, PairingServiceError>
+    where
+        T: PairingRendezvousTransport,
+    {
+        let request = pairing_rendezvous_take_request(token)?;
+        let record = self.transport.take_pairing_rendezvous(request).await?;
+        let capability = open_pairing_rendezvous(token, &record, now_unix_seconds)?;
+        if capability.offer().requested_role() != ConversationRole::Member {
+            return Err(PairingServiceError::InvalidRendezvousRole);
+        }
+        self.redeem_decoded_capability(capability, now_unix_seconds)
+            .await
     }
 
     /// Returns authenticated non-secret state for one pairing.
@@ -1600,6 +1697,10 @@ pub(crate) enum PairingServiceError {
     Task,
     #[error("the profile is closing and admits no further operations")]
     ProfileClosing,
+    #[error("pairing rendezvous publication failed and local reservation cleanup failed")]
+    RendezvousCleanup,
+    #[error("compact pairing rendezvous supports only the member role")]
+    InvalidRendezvousRole,
     #[error(transparent)]
     Application(#[from] ApplicationServiceError),
     #[error(transparent)]
@@ -1622,10 +1723,14 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use KonclaveClientLibrary::{RelayTransport, RelayWatchSession};
+    use KonclaveClientLibrary::{
+        PairingRendezvousPublishResult, PairingRendezvousTransport, RelayTransport,
+        RelayWatchSession,
+    };
     use KonclaveDomainCore::{
-        AcknowledgeRequest, DeliveryClass, EnvelopeId, RelayEnvelope, ReplayPage, ReplayRequest,
-        RoutingId, StoredRelayEnvelope,
+        AcknowledgeRequest, DeliveryClass, EnvelopeId, PairingRendezvousId,
+        PairingRendezvousRecord, PairingRendezvousTakeRequest, RelayEnvelope, ReplayPage,
+        ReplayRequest, RoutingId, StoredRelayEnvelope,
     };
     use async_trait::async_trait;
     use tokio::sync::{Notify, oneshot};
@@ -1639,6 +1744,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemoryRelay {
         routes: Arc<Mutex<BTreeMap<RoutingId, Vec<StoredRelayEnvelope>>>>,
+        rendezvous: Arc<Mutex<BTreeMap<PairingRendezvousId, PairingRendezvousRecord>>>,
+        fail_next_rendezvous_publish: Arc<AtomicBool>,
         fail_next_pairing_submit: Arc<AtomicBool>,
         fail_next_group_commit_submit: Arc<AtomicBool>,
         fail_after_next_group_commit_acceptance: Arc<AtomicBool>,
@@ -1648,6 +1755,11 @@ mod tests {
     }
 
     impl MemoryRelay {
+        fn fail_next_rendezvous_publish(&self) {
+            self.fail_next_rendezvous_publish
+                .store(true, Ordering::SeqCst);
+        }
+
         fn fail_next_pairing_submit(&self) {
             self.fail_next_pairing_submit.store(true, Ordering::SeqCst);
         }
@@ -1741,6 +1853,7 @@ mod tests {
             {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
+
             if envelope.delivery_class() == DeliveryClass::GroupCommit
                 && self
                     .fail_next_group_commit_submit
@@ -1828,6 +1941,59 @@ mod tests {
             _: ReplayRequest,
         ) -> Result<RelayWatchSession, KonclaveClientError> {
             Err(KonclaveClientError::TransportUnavailable)
+        }
+    }
+
+    #[async_trait]
+    impl PairingRendezvousTransport for MemoryRelay {
+        async fn publish_pairing_rendezvous(
+            &self,
+            record: &PairingRendezvousRecord,
+        ) -> Result<PairingRendezvousPublishResult, KonclaveClientError> {
+            if self
+                .fail_next_rendezvous_publish
+                .swap(false, Ordering::SeqCst)
+            {
+                return Err(KonclaveClientError::TransportUnavailable);
+            }
+            let mut records = self
+                .rendezvous
+                .lock()
+                .map_err(|_| KonclaveClientError::TransportUnavailable)?;
+            if let Some(existing) = records.get(&record.lookup_id()) {
+                return if existing == record {
+                    Ok(PairingRendezvousPublishResult::AlreadyPublished)
+                } else {
+                    Err(KonclaveClientError::RelayRejected {
+                        status: 409,
+                        relay_code: "relay_pairing_rendezvous_conflict".to_string(),
+                    })
+                };
+            }
+            let stored = PairingRendezvousRecord::new(
+                record.version(),
+                record.lookup_id(),
+                record.expires_at_unix_seconds(),
+                record.nonce(),
+                record.ciphertext().to_vec(),
+            )
+            .map_err(|_| KonclaveClientError::InvalidResponse)?;
+            records.insert(record.lookup_id(), stored);
+            Ok(PairingRendezvousPublishResult::Published)
+        }
+
+        async fn take_pairing_rendezvous(
+            &self,
+            request: PairingRendezvousTakeRequest,
+        ) -> Result<PairingRendezvousRecord, KonclaveClientError> {
+            self.rendezvous
+                .lock()
+                .map_err(|_| KonclaveClientError::TransportUnavailable)?
+                .remove(&request.lookup_id())
+                .ok_or_else(|| KonclaveClientError::RelayRejected {
+                    status: 404,
+                    relay_code: "relay_pairing_rendezvous_unavailable".to_string(),
+                })
         }
     }
 
@@ -2118,6 +2284,151 @@ mod tests {
                 .member(joiner_device_id)
                 .map(KonclaveDomainCore::Member::role),
             Some(ConversationRole::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_rendezvous_completes_one_shared_conversation() {
+        let root = tempfile::tempdir().unwrap();
+        let inviter = open_coordinator(root.path(), "rendezvous-inviter");
+        let joiner = open_coordinator(root.path(), "rendezvous-joiner");
+        let conversation = inviter.create().unwrap();
+        let inviter_device_id = inviter.device_id().unwrap();
+        let joiner_device_id = joiner.device_id().unwrap();
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let inviter_service = service(inviter.clone(), Arc::clone(&relay), &endpoint);
+        let joiner_service = service(joiner.clone(), Arc::clone(&relay), &endpoint);
+
+        let created = joiner_service
+            .create_rendezvous(DEADLINE, NOW)
+            .await
+            .unwrap();
+        let pairing_id = created.pairing_id;
+        let redeemed = inviter_service
+            .redeem_rendezvous(created.token.as_str(), NOW)
+            .await
+            .unwrap();
+        assert_eq!(redeemed.pairing_id, pairing_id);
+        assert_eq!(redeemed.joiner_device_id, joiner_device_id);
+        assert_eq!(redeemed.phase, PairingPhase::InviterAwaitingAuthorization);
+
+        inviter_service
+            .authorize_joiner(
+                pairing_id,
+                conversation.conversation_id,
+                ConversationRole::Member,
+                NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            joiner_service.replay_once(pairing_id, NOW).await.unwrap(),
+            1
+        );
+        joiner_service
+            .authorize_inviter(
+                pairing_id,
+                inviter_device_id,
+                conversation.conversation_id,
+                ConversationRole::Member,
+                NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inviter_service.replay_once(pairing_id, NOW).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            joiner_service.replay_once(pairing_id, NOW).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            inviter_service.replay_once(pairing_id, NOW).await.unwrap(),
+            2
+        );
+
+        let inviter_status = inviter_service.status(pairing_id).await.unwrap();
+        let joiner_status = joiner_service.status(pairing_id).await.unwrap();
+        assert_eq!(inviter_status.phase, PairingPhase::Completed);
+        assert_eq!(joiner_status.phase, PairingPhase::Completed);
+        assert_eq!(
+            inviter_status.conversation_id,
+            Some(conversation.conversation_id)
+        );
+        assert_eq!(
+            joiner_status.conversation_id,
+            inviter_status.conversation_id
+        );
+        let inviter_conversation = inviter.open(conversation.conversation_id).unwrap();
+        let joiner_conversation = joiner.open(conversation.conversation_id).unwrap();
+        assert_eq!(inviter_conversation.group.epoch(), 1);
+        assert_eq!(joiner_conversation.group.epoch(), 1);
+        assert_eq!(
+            inviter_conversation
+                .group
+                .state()
+                .member(joiner_device_id)
+                .map(KonclaveDomainCore::Member::role),
+            Some(ConversationRole::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_rendezvous_publish_cancels_the_local_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let conversations = open_coordinator(root.path(), "rendezvous-publish-failure");
+        let relay = Arc::new(MemoryRelay::default());
+        relay.fail_next_rendezvous_publish();
+        let service = service(
+            conversations.clone(),
+            relay,
+            &RelayEndpoint::parse("https://relay.example.com").unwrap(),
+        );
+
+        assert!(matches!(
+            service.create_rendezvous(DEADLINE, NOW).await,
+            Err(PairingServiceError::Client(
+                KonclaveClientError::TransportUnavailable
+            ))
+        ));
+        assert!(
+            conversations
+                .store()
+                .active_pairing_ids(None, 1)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_rendezvous_rejects_administrator_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let inviter = open_coordinator(root.path(), "rendezvous-role-inviter");
+        let joiner = open_coordinator(root.path(), "rendezvous-role-joiner");
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let inviter_service = service(inviter.clone(), Arc::clone(&relay), &endpoint);
+        let joiner_service = service(joiner, Arc::clone(&relay), &endpoint);
+        let created = joiner_service
+            .create_capability(ConversationRole::Administrator, DEADLINE, NOW)
+            .await
+            .unwrap();
+        let capability = PairingCapability::decode(created.capability.as_str(), NOW).unwrap();
+        let (token, record) = create_pairing_rendezvous(&capability, NOW).unwrap();
+        relay.publish_pairing_rendezvous(&record).await.unwrap();
+
+        assert!(matches!(
+            inviter_service.redeem_rendezvous(token.as_str(), NOW).await,
+            Err(PairingServiceError::InvalidRendezvousRole)
+        ));
+        assert!(
+            inviter
+                .store()
+                .active_pairing_ids(None, 1)
+                .unwrap()
+                .is_empty()
         );
     }
 

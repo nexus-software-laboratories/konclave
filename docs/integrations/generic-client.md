@@ -146,6 +146,11 @@ complete instead of busy-polling.
 
 The Generic client uses the same durable pairing state machine as paved clients:
 
+For a member-only compact handoff, use `create_pairing_rendezvous` and transfer the
+returned 26-character token to `redeem_pairing_rendezvous`. The full-capability flow
+below remains the recovery interface and the path for explicit administrator
+requests.
+
 1. One side calls `create_pairing_capability` and transfers only the returned
    capability to the intended peer.
 2. The peer calls `redeem_pairing_capability`, `create_conversation`, and

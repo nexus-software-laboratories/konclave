@@ -6,13 +6,15 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use KonclaveClientLibrary::{
-    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError, RelayAccessCredential,
-    RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
-    RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayPrincipalId, RelayTransport,
+    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError,
+    PairingRendezvousTransport, RelayAccessCredential, RelayClient, RelayEndpoint,
+    RelayEnrollmentClient, RelayEnrollmentCredential, RelayEnrollmentOutcome,
+    RelayEnrollmentRequest, RelayPrincipalId, RelayTransport,
 };
 use KonclaveDomainCore::{
     DeliveryClass, EnvelopeId, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
-    ProtocolVersion, RelayEnvelope, RoutingId,
+    PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord, ProtocolVersion,
+    RelayEnvelope, RoutingId,
 };
 use KonclaveProtocolContracts::v1::{
     decode_relay_enrollment_request, encode_relay_enrollment_response,
@@ -84,6 +86,17 @@ fn envelope() -> RelayEnvelope {
     .unwrap()
 }
 
+fn pairing_rendezvous() -> PairingRendezvousRecord {
+    PairingRendezvousRecord::new(
+        ProtocolVersion::application_v1(),
+        PairingRendezvousId::from_bytes([10; 32]),
+        u64::MAX / 2,
+        PairingRendezvousNonce::from_bytes([11; 12]),
+        vec![12; 32],
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn clients_never_forward_bearer_credentials_across_redirects() {
     let target_hit = Arc::new(AtomicBool::new(false));
@@ -97,6 +110,7 @@ async fn clients_never_forward_bearer_credentials_across_redirects() {
     };
     let target = Router::new()
         .route("/v1/envelopes", post(target_handler.clone()))
+        .route("/v1/pairing-rendezvous", post(target_handler.clone()))
         .route("/v1/enrollment/principals", post(target_handler));
     let (target_address, target_shutdown, target_server) = serve(target).await;
     let location = format!("http://{target_address}/v1/envelopes");
@@ -111,6 +125,16 @@ async fn clients_never_forward_bearer_credentials_across_redirects() {
     };
     let redirect = Router::new()
         .route("/v1/envelopes", post(redirect_handler))
+        .route(
+            "/v1/pairing-rendezvous",
+            post({
+                let location = format!("http://{target_address}/v1/pairing-rendezvous");
+                move || {
+                    let location = location.clone();
+                    async move { Redirect::temporary(&location) }
+                }
+            }),
+        )
         .route("/v1/enrollment/principals", post(enrollment_redirect));
     let (address, shutdown, server) = serve(redirect).await;
 
@@ -125,6 +149,14 @@ async fn clients_never_forward_bearer_credentials_across_redirects() {
         .unwrap_err();
     assert!(matches!(
         enrollment_error,
+        KonclaveClientError::RelayRejected { status: 307, .. }
+    ));
+    let pairing_error = client(address)
+        .publish_pairing_rendezvous(&pairing_rendezvous())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        pairing_error,
         KonclaveClientError::RelayRejected { status: 307, .. }
     ));
     assert!(!target_hit.load(Ordering::SeqCst));

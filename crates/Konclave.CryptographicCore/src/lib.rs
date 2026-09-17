@@ -8,6 +8,7 @@ mod identity;
 mod local_service;
 mod mls;
 mod pairing;
+mod pairing_rendezvous;
 
 pub use collaboration_policy::{
     VerifiedCollaborationPolicyProposal, derive_collaboration_policy_digest,
@@ -31,6 +32,10 @@ pub use mls::{
     PreparedJoinedConversation,
 };
 pub use pairing::{PAIRING_SECRET_BYTES, PairingKeySchedule, PairingSecret};
+pub use pairing_rendezvous::{
+    MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_TOKEN_BYTES,
+    PairingRendezvousKeySchedule, PairingRendezvousSecret,
+};
 
 #[cfg(test)]
 mod tests;

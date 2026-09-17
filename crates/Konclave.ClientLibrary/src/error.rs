@@ -26,6 +26,10 @@ pub enum KonclaveClientError {
     #[error("pairing capability exceeds {maximum} bytes (actual: {actual})")]
     PairingCapabilityTooLarge { maximum: usize, actual: usize },
 
+    /// A compact pairing rendezvous token or encrypted record is invalid.
+    #[error("pairing rendezvous is invalid")]
+    InvalidPairingRendezvous,
+
     /// An outbound operation exceeded its deadline.
     #[error("relay operation timed out")]
     Timeout,
@@ -77,6 +81,7 @@ impl KonclaveClientError {
             Self::InvalidEnrollmentCredential => "client_invalid_enrollment_credential",
             Self::InvalidPairingCapability => "client_invalid_pairing_capability",
             Self::PairingCapabilityTooLarge { .. } => "client_pairing_capability_too_large",
+            Self::InvalidPairingRendezvous => "client_invalid_pairing_rendezvous",
             Self::Timeout => "client_timeout",
             Self::TransportUnavailable => "client_transport_unavailable",
             Self::ResponseTooLarge { .. } => "client_response_too_large",

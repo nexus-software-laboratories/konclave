@@ -58,6 +58,25 @@ impl ProtectedHttpClient {
         complete_response(response, maximum_response_bytes, true).await
     }
 
+    pub(crate) async fn post_empty(
+        &self,
+        relative: &str,
+        authorization: HeaderValue,
+        body: Vec<u8>,
+    ) -> Result<ProtectedHttpResponse, KonclaveClientError> {
+        let url = self.endpoint.http_url(relative)?;
+        let response = self
+            .client
+            .post(url)
+            .header(AUTHORIZATION, authorization)
+            .header(CONTENT_TYPE, PROTOBUF_MEDIA_TYPE)
+            .body(body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        complete_response(response, 0, false).await
+    }
+
     pub(crate) async fn get(
         &self,
         relative: &str,

@@ -1,6 +1,6 @@
 use KonclaveDomainCore::{
-    AcknowledgeRequest, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_SIZE, RelayEnvelope, ReplayPage,
-    ReplayRequest,
+    AcknowledgeRequest, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_SIZE, PairingRendezvousRecord,
+    PairingRendezvousTakeRequest, RelayEnvelope, ReplayPage, ReplayRequest,
 };
 use KonclaveProtocolContracts::v1::{decode_replay_page, encode_relay_envelope};
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
@@ -13,6 +13,15 @@ use crate::{RelayError, RelayPrincipalId};
 pub struct SubmitResult {
     cursor: u64,
     duplicate: bool,
+}
+
+/// Durable outcome of one authenticated pairing rendezvous publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingRendezvousPublishOutcome {
+    /// A new record was committed.
+    Published,
+    /// An identical active record from the same principal already existed.
+    AlreadyPublished,
 }
 
 impl SubmitResult {
@@ -149,6 +158,34 @@ pub trait RelayRepository: Send + Sync {
         principal: RelayPrincipalId,
         request: AcknowledgeRequest,
     ) -> Result<u64, RelayError>;
+}
+
+/// Durable storage for bounded encrypted pairing rendezvous records.
+#[async_trait]
+pub trait PairingRendezvousRepository: Send + Sync {
+    /// Atomically publishes a new record or accepts an identical same-owner retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed expiry, conflict, capacity, malformed-data, or storage error.
+    async fn publish_pairing_rendezvous(
+        &self,
+        principal: RelayPrincipalId,
+        record: PairingRendezvousRecord,
+        now_unix_seconds: u64,
+    ) -> Result<PairingRendezvousPublishOutcome, RelayError>;
+
+    /// Atomically returns and consumes one active record.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable outcome for absent, expired, or consumed records, or
+    /// a typed malformed-data or storage error.
+    async fn take_pairing_rendezvous(
+        &self,
+        request: PairingRendezvousTakeRequest,
+        now_unix_seconds: u64,
+    ) -> Result<PairingRendezvousRecord, RelayError>;
 }
 
 /// Durable registry for self-hosted dynamic relay principals.

@@ -190,6 +190,17 @@ impl Drop for RedeemPairingCapabilityRequest {
     }
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RedeemPairingRendezvousRequest {
+    token: String,
+}
+
+impl Drop for RedeemPairingRendezvousRequest {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PairingRequest {
     pairing_id: String,
@@ -418,6 +429,18 @@ struct PairingCapabilityResult {
     capability: String,
 }
 
+#[derive(Serialize, schemars::JsonSchema)]
+struct PairingRendezvousResult {
+    pairing: PairingStatusResult,
+    token: String,
+}
+
+impl Drop for PairingRendezvousResult {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
 impl Drop for PairingCapabilityResult {
     fn drop(&mut self) {
         self.capability.zeroize();
@@ -563,8 +586,16 @@ impl StdioServer {
                 self.create_pairing_capability(Self::parse_parameters(payload)?)
                     .await?,
             ),
+            "create_pairing_rendezvous" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.create_pairing_rendezvous().await?)
+            }
             "redeem_pairing_capability" => Self::encode_json(
                 self.redeem_pairing_capability(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "redeem_pairing_rendezvous" => Self::encode_json(
+                self.redeem_pairing_rendezvous(Self::parse_parameters(payload)?)
                     .await?,
             ),
             "get_pairing_status" => Self::encode_json(
@@ -750,6 +781,31 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "create_pairing_rendezvous",
+        description = "Create one compact encrypted member-pairing token another session can redeem through the relay."
+    )]
+    async fn create_pairing_rendezvous(&self) -> Result<Json<PairingRendezvousResult>, String> {
+        self.authorize("create_pairing_rendezvous")?;
+        let pairings = self.pairing_service()?;
+        let now = current_unix_seconds()?;
+        let expires_at = now
+            .checked_add(MAX_AUTHORIZATION_WINDOW_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let created = pairings
+            .create_rendezvous(expires_at, now)
+            .await
+            .map_err(tool_error)?;
+        let status = pairings
+            .status(created.pairing_id)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(PairingRendezvousResult {
+            pairing: pairing_status_result(status),
+            token: created.token.as_str().to_owned(),
+        }))
+    }
+
+    #[tool(
         name = "redeem_pairing_capability",
         description = "Open an authorization request from a capability received from another session."
     )]
@@ -761,6 +817,23 @@ impl StdioServer {
         let status = self
             .pairing_service()?
             .redeem_capability(&request.capability, current_unix_seconds()?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(status)))
+    }
+
+    #[tool(
+        name = "redeem_pairing_rendezvous",
+        description = "Take and decrypt one compact relay rendezvous into the existing pairing flow."
+    )]
+    async fn redeem_pairing_rendezvous(
+        &self,
+        Parameters(request): Parameters<RedeemPairingRendezvousRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("redeem_pairing_rendezvous")?;
+        let status = self
+            .pairing_service()?
+            .redeem_rendezvous(&request.token, current_unix_seconds()?)
             .await
             .map_err(tool_error)?;
         Ok(Json(pairing_status_result(status)))
@@ -1728,7 +1801,9 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "inspect_collaboration_policy_proposal" => Ok(()),
         "create_conversation"
         | "create_pairing_capability"
+        | "create_pairing_rendezvous"
         | "redeem_pairing_capability"
+        | "redeem_pairing_rendezvous"
         | "authorize_pairing_joiner"
         | "authorize_pairing_inviter"
         | "sync_pairing"
@@ -2280,6 +2355,12 @@ mod tests {
         );
         assert!(
             read_only(AuthorizationContext {
+                method: "create_pairing_rendezvous",
+            })
+            .is_err()
+        );
+        assert!(
+            read_only(AuthorizationContext {
                 method: "propose_collaboration_policy",
             })
             .is_err()
@@ -2302,7 +2383,15 @@ mod tests {
         })
         .unwrap();
         writable(AuthorizationContext {
+            method: "create_pairing_rendezvous",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
             method: "redeem_pairing_capability",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "redeem_pairing_rendezvous",
         })
         .unwrap();
         writable(AuthorizationContext {

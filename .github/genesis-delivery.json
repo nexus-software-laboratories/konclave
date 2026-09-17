@@ -18,6 +18,7 @@
     "Generic client conformance",
     "Installer lifecycle conformance",
     "Marketplace conformance",
+    "Pairing rendezvous conformance",
     "Relay migration conformance",
     "Relay migration Windows conformance",
     "User presence conformance",
@@ -76,6 +77,7 @@
         "marketplace-materialization",
         "marketplace-client-lifecycle",
         "managed-marketplace-policy",
+        "pairing-rendezvous-conformance",
         "relay-migration-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
@@ -194,6 +196,17 @@
       "requiredChecks": [
         "Relay migration conformance",
         "Relay migration Windows conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/pairing-rendezvous-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Pairing rendezvous conformance"
       ]
     },
     {

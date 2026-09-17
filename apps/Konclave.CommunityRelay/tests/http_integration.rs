@@ -2,17 +2,20 @@ mod support;
 
 use KonclaveCommunityRelay::http::{HttpState, router};
 use KonclaveDomainCore::{
-    AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_RELAY_ENVELOPE_BYTES, ProtocolVersion,
+    AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_RELAY_ENVELOPE_BYTES, PairingRendezvousId,
+    PairingRendezvousNonce, PairingRendezvousRecord, PairingRendezvousTakeRequest, ProtocolVersion,
     RelayEnvelope, ReplayRequest, RoutingId,
 };
 use KonclaveProtocolContracts::v1::{
-    decode_acknowledge_request, decode_relay_enrollment_response, decode_replay_page,
-    decode_stored_relay_envelope, encode_acknowledge_request, encode_relay_enrollment_request,
-    encode_relay_envelope, encode_replay_request,
+    decode_acknowledge_request, decode_pairing_rendezvous_record, decode_relay_enrollment_response,
+    decode_replay_page, decode_stored_relay_envelope, encode_acknowledge_request,
+    encode_pairing_rendezvous_record, encode_pairing_rendezvous_take_request,
+    encode_relay_enrollment_request, encode_relay_envelope, encode_replay_request,
 };
 use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayPrincipalId,
 };
+use KonclaveRelayCore::{PairingRendezvousRepository, SqliteRelayRepository};
 use axum::body::{Body, to_bytes};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderValue, Request, StatusCode};
@@ -34,6 +37,17 @@ fn envelope(route: RoutingId) -> RelayEnvelope {
         None,
         u64::MAX / 2,
         vec![1, 2, 3],
+    )
+    .unwrap()
+}
+
+fn pairing_rendezvous(id: u8, ciphertext: u8, expires_at: u64) -> PairingRendezvousRecord {
+    PairingRendezvousRecord::new(
+        ProtocolVersion::application_v1(),
+        PairingRendezvousId::from_bytes([id; 32]),
+        expires_at,
+        PairingRendezvousNonce::from_bytes([id.wrapping_add(1); 12]),
+        vec![ciphertext; 32],
     )
     .unwrap()
 }
@@ -186,6 +200,142 @@ async fn submit_retry_replay_and_acknowledge_use_bounded_protobuf_contracts() {
             .cursor(),
         1
     );
+}
+
+#[tokio::test]
+async fn pairing_rendezvous_publish_and_take_are_authenticated_one_time_operations() {
+    let relay = TestRelay::new(true).await;
+    let database_path = relay.database_path.clone();
+    let token = relay.token;
+    let principal = RelayPrincipalId::from_access_token(&token);
+    let app = router(
+        HttpState::new(env!("CARGO_PKG_NAME"), relay.application),
+        relay.access,
+        tokio::sync::watch::channel(false).1,
+    );
+    let record = pairing_rendezvous(31, 32, u64::MAX / 2);
+    let encoded = encode_pairing_rendezvous_record(&record).unwrap();
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous",
+            vec![0; KonclaveDomainCore::MAX_RELAY_CONTROL_MESSAGE_BYTES + 1],
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let published = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous",
+            encoded.clone(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::CREATED);
+    let duplicate = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous",
+            encoded,
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let conflict = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous",
+            encode_pairing_rendezvous_record(&pairing_rendezvous(31, 33, u64::MAX / 2)).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        conflict.headers().get("x-konclave-error-code").unwrap(),
+        "relay_pairing_rendezvous_conflict"
+    );
+
+    let take =
+        PairingRendezvousTakeRequest::new(ProtocolVersion::application_v1(), record.lookup_id());
+    let taken = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous/take",
+            encode_pairing_rendezvous_take_request(take).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(taken.status(), StatusCode::OK);
+    assert_eq!(
+        taken.headers().get(CONTENT_TYPE).unwrap(),
+        PROTOBUF_MEDIA_TYPE
+    );
+    let taken = decode_pairing_rendezvous_record(&response_bytes(taken).await).unwrap();
+    assert_eq!(taken.lookup_id(), record.lookup_id());
+    assert_eq!(taken.ciphertext(), record.ciphertext());
+
+    let consumed = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous/take",
+            encode_pairing_rendezvous_take_request(take).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(consumed.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        consumed.headers().get("x-konclave-error-code").unwrap(),
+        "relay_pairing_rendezvous_unavailable"
+    );
+
+    let repository = SqliteRelayRepository::connect(&database_path)
+        .await
+        .unwrap();
+    repository
+        .publish_pairing_rendezvous(principal, pairing_rendezvous(34, 35, 2), 1)
+        .await
+        .unwrap();
+    let expired_take = PairingRendezvousTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        PairingRendezvousId::from_bytes([34; 32]),
+    );
+    let expired = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous/take",
+            encode_pairing_rendezvous_take_request(expired_take).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    let unknown_take = PairingRendezvousTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        PairingRendezvousId::from_bytes([36; 32]),
+    );
+    let unknown = app
+        .oneshot(protobuf_request(
+            "/v1/pairing-rendezvous/take",
+            encode_pairing_rendezvous_take_request(unknown_take).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    for response in [expired, unknown] {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get("x-konclave-error-code").unwrap(),
+            "relay_pairing_rendezvous_unavailable"
+        );
+    }
 }
 
 #[tokio::test]

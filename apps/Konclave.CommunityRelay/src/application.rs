@@ -1,12 +1,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRequest, RoutingId};
+use KonclaveDomainCore::{
+    AcknowledgeRequest, PairingRendezvousRecord, PairingRendezvousTakeRequest, RelayEnvelope,
+    ReplayPage, ReplayRequest, RoutingId,
+};
 use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
 use KonclaveRelayCore::{
-    EncodedReplayPage, RelayError, RelayPrincipalId, RelayPrincipalRegistry, RelayService,
-    SqliteRelayRepository, SubmitResult,
+    EncodedReplayPage, PairingRendezvousPublishOutcome, PairingRendezvousRepository, RelayClock,
+    RelayError, RelayPrincipalId, RelayPrincipalRegistry, RelayService, SqliteRelayRepository,
+    SubmitResult, SystemRelayClock,
 };
 
 use crate::access::{RelayAccess, StaticRelayAccess};
@@ -114,6 +118,36 @@ impl RelayApplication {
         request: AcknowledgeRequest,
     ) -> Result<u64, RelayError> {
         self.service.acknowledge(principal, request).await
+    }
+
+    /// Publishes one bounded encrypted pairing rendezvous for an authenticated principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed expiry, conflict, capacity, clock, malformed-data, or storage error.
+    pub async fn publish_pairing_rendezvous(
+        &self,
+        principal: RelayPrincipalId,
+        record: PairingRendezvousRecord,
+    ) -> Result<PairingRendezvousPublishOutcome, RelayError> {
+        self.registry
+            .publish_pairing_rendezvous(principal, record, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Atomically returns and consumes one active encrypted pairing rendezvous.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable outcome for absent, expired, or consumed records, or
+    /// a typed clock, malformed-data, or storage error.
+    pub async fn take_pairing_rendezvous(
+        &self,
+        request: PairingRendezvousTakeRequest,
+    ) -> Result<PairingRendezvousRecord, RelayError> {
+        self.registry
+            .take_pairing_rendezvous(request, SystemRelayClock.now_unix_seconds()?)
+            .await
     }
 
     /// Registers one client-generated dynamic relay principal.

@@ -12,9 +12,15 @@ mod health;
 mod http;
 mod installation;
 mod pairing;
+mod pairing_rendezvous;
 mod protected_http;
 mod websocket;
 
+pub use KonclaveDomainCore::{
+    MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
+    PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
+    PairingRendezvousTakeRequest,
+};
 pub use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,
     RelayEnrollmentRequest, RelayEnrollmentResponse, RelayPrincipalId,
@@ -27,12 +33,18 @@ pub use enrollment::{
 pub use enrollment_credential::RelayEnrollmentCredential;
 pub use error::KonclaveClientError;
 pub use health::check_relay_health;
-pub use http::{RelayClient, RelayTransport};
+pub use http::{
+    PairingRendezvousPublishResult, PairingRendezvousTransport, RelayClient, RelayTransport,
+};
 pub use installation::{
     RELAY_INSTALLATION_CONFIG_FILE, RelayEnrollmentSourceConfig, RelayInstallationConfig,
     RelayInstallationConfigError, default_profile_root, relay_enrollment_installation_id,
 };
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
+pub use pairing_rendezvous::{
+    PAIRING_RENDEZVOUS_TOKEN_CHARACTERS, PairingRendezvousTokenText, create_pairing_rendezvous,
+    open_pairing_rendezvous, pairing_rendezvous_take_request,
+};
 pub use websocket::RelayWatchSession;
 
 #[cfg(test)]

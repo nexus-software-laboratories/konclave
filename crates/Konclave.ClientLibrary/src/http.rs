@@ -2,12 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use KonclaveDomainCore::{
-    AcknowledgeRequest, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
-    MAX_REPLAY_PAGE_BYTES, RelayEnvelope, ReplayPage, ReplayRequest, StoredRelayEnvelope,
+    AcknowledgeRequest, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES, MAX_RELAY_CONTROL_MESSAGE_BYTES,
+    MAX_RELAY_ENVELOPE_BYTES, MAX_REPLAY_PAGE_BYTES, PairingRendezvousRecord,
+    PairingRendezvousTakeRequest, RelayEnvelope, ReplayPage, ReplayRequest, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
-    decode_acknowledge_request, decode_replay_page, decode_stored_relay_envelope,
-    encode_acknowledge_request, encode_relay_envelope, encode_replay_request,
+    decode_acknowledge_request, decode_pairing_rendezvous_record, decode_replay_page,
+    decode_stored_relay_envelope, encode_acknowledge_request, encode_pairing_rendezvous_record,
+    encode_pairing_rendezvous_take_request, encode_relay_envelope, encode_replay_request,
 };
 use async_trait::async_trait;
 
@@ -41,6 +43,31 @@ pub trait RelayTransport: Send + Sync {
         &self,
         request: ReplayRequest,
     ) -> Result<RelayWatchSession, KonclaveClientError>;
+}
+
+/// Result of one authenticated pairing rendezvous publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingRendezvousPublishResult {
+    /// A new encrypted record was committed.
+    Published,
+    /// The same encrypted record was already present for this principal.
+    AlreadyPublished,
+}
+
+/// Outbound pairing rendezvous operations kept separate from routed relay envelopes.
+#[async_trait]
+pub trait PairingRendezvousTransport: Send + Sync {
+    /// Publishes one bounded opaque record.
+    async fn publish_pairing_rendezvous(
+        &self,
+        record: &PairingRendezvousRecord,
+    ) -> Result<PairingRendezvousPublishResult, KonclaveClientError>;
+
+    /// Atomically takes one bounded opaque record.
+    async fn take_pairing_rendezvous(
+        &self,
+        request: PairingRendezvousTakeRequest,
+    ) -> Result<PairingRendezvousRecord, KonclaveClientError>;
 }
 
 /// Cloneable outbound HTTP/WebSocket relay client sharing one protected credential.
@@ -134,5 +161,46 @@ impl RelayTransport for RelayClient {
             DEFAULT_WATCH_READ_TIMEOUT,
         )
         .await
+    }
+}
+
+#[async_trait]
+impl PairingRendezvousTransport for RelayClient {
+    async fn publish_pairing_rendezvous(
+        &self,
+        record: &PairingRendezvousRecord,
+    ) -> Result<PairingRendezvousPublishResult, KonclaveClientError> {
+        let request = encode_pairing_rendezvous_record(record)?;
+        let authorization = self.credential.authorization_header()?;
+        let response = self
+            .http
+            .post_empty("v1/pairing-rendezvous", authorization, request)
+            .await?;
+        match response.status {
+            201 => Ok(PairingRendezvousPublishResult::Published),
+            200 => Ok(PairingRendezvousPublishResult::AlreadyPublished),
+            _ => Err(KonclaveClientError::InvalidResponse),
+        }
+    }
+
+    async fn take_pairing_rendezvous(
+        &self,
+        request: PairingRendezvousTakeRequest,
+    ) -> Result<PairingRendezvousRecord, KonclaveClientError> {
+        let request = encode_pairing_rendezvous_take_request(request)?;
+        let authorization = self.credential.authorization_header()?;
+        let response = self
+            .http
+            .post(
+                "v1/pairing-rendezvous/take",
+                authorization,
+                request,
+                MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
+            )
+            .await?;
+        if response.status != 200 {
+            return Err(KonclaveClientError::InvalidResponse);
+        }
+        decode_pairing_rendezvous_record(&response.body).map_err(Into::into)
     }
 }

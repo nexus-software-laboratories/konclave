@@ -15,6 +15,11 @@ superseded_by: []
 
 # Automate two-command pairing only under AccountTrusted capability policy
 
+> **Current refinement:** ADR 0023 keeps this authorization and orchestration
+> decision but replaces the default full-capability handoff with a 26-character
+> encrypted relay rendezvous token. Full-capability `pair`/`join` remains the recovery
+> path.
+
 ## Context and scope
 
 ADR 0006 deliberately uses a joiner-issued capability and requires authorization at

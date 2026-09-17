@@ -681,6 +681,91 @@
     }
   },
   {
+    "name": "create_pairing_rendezvous",
+    "description": "Create one compact encrypted member-pairing token another session can redeem through the relay.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "PairingStatusResult": {
+          "properties": {
+            "authorization_deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "completion_deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "granted_role": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inviter_device_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "joiner_device_id": {
+              "type": "string"
+            },
+            "local_role": {
+              "type": "string"
+            },
+            "pairing_id": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "requested_role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pairing_id",
+            "local_role",
+            "phase",
+            "joiner_device_id",
+            "requested_role",
+            "authorization_deadline_unix_seconds"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "pairing": {
+          "$ref": "#/$defs/PairingStatusResult"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing",
+        "token"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "delivery_status",
     "description": "Report automatic delivery health, and one conversation's mute state when given.",
     "inputSchema": {
@@ -1514,6 +1599,82 @@
       },
       "required": [
         "capability"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authorization_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completion_deadline_unix_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granted_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inviter_device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joiner_device_id": {
+          "type": "string"
+        },
+        "local_role": {
+          "type": "string"
+        },
+        "pairing_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "requested_role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pairing_id",
+        "local_role",
+        "phase",
+        "joiner_device_id",
+        "requested_role",
+        "authorization_deadline_unix_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "redeem_pairing_rendezvous",
+    "description": "Take and decrypt one compact relay rendezvous into the existing pairing flow.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "token"
       ],
       "type": "object"
     },
