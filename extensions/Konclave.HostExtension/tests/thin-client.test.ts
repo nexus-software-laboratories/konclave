@@ -1008,6 +1008,107 @@ describe('deterministic commands', () => {
     expect(lines).toContain(`connected: ${conversationId}`);
   });
 
+  it('shows and cancels a short-code verification without confirmation', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'get_short_code_pairing_status') {
+        return shortCodeStatus();
+      }
+      if (operation === 'cancel_short_code_pairing') {
+        return shortCodeStatus({ phase: 'cancelled' });
+      }
+      throw new Error(`unexpected operation: ${operation}`);
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`verification ${shortCodeAttemptId}`));
+    await command?.handler(commandContext(`cancel-verification ${shortCodeAttemptId}`));
+
+    expect(lines).toContain(
+      `verification ${shortCodeAttemptId}: creator_awaiting_claim; no authority granted`,
+    );
+    expect(lines).toContain(`verification ${shortCodeAttemptId}: cancelled`);
+    expect(request).not.toHaveBeenCalledWith('confirm_short_code_pairing', expect.anything());
+  });
+
+  it('rejects malformed short-code command responses and confirmation mismatches', async () => {
+    const scenarios: ReadonlyArray<{
+      readonly args: string;
+      readonly request: (operation: string) => Promise<unknown>;
+      readonly expected: string;
+    }> = [
+      {
+        args: 'connect --short',
+        request: async (operation) =>
+          operation === 'service.status'
+            ? serviceStatus()
+            : { code: '12345', verification: shortCodeStatus() },
+        expected: 'pairing code must contain exactly six decimal digits',
+      },
+      {
+        args: 'connect 123456',
+        request: async (operation) =>
+          operation === 'service.status'
+            ? serviceStatus()
+            : shortCodeStatus({ local_confirmed: 'yes' }),
+        expected: 'short-code pairing response is malformed',
+      },
+      {
+        args: `verification ${shortCodeAttemptId}`,
+        request: async () => shortCodeStatus({ local_role: 'unknown' }),
+        expected: 'short-code state is malformed',
+      },
+      {
+        args: 'connect --short',
+        request: async (operation) => {
+          if (operation === 'service.status') {
+            return serviceStatus();
+          }
+          if (operation === 'create_short_code_pairing') {
+            return { code: '123456', verification: shortCodeStatus() };
+          }
+          return { verification: shortCodeStatus(), processed_stages: -1 };
+        },
+        expected: 'short-code sync response is malformed',
+      },
+      {
+        args: `verify ${shortCodeAttemptId} ${inviterDeviceId} ${shortCodeSas}`,
+        request: async (operation) =>
+          operation === 'service.status'
+            ? serviceStatus()
+            : shortCodeStatus({
+                peer_device_id: joinerDeviceId,
+                sas: shortCodeSas,
+                local_confirmed: true,
+              }),
+        expected: 'confirmed different short-code values',
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const lines: string[] = [];
+      const command = createKonclaveCommands({
+        client: stubClient(vi.fn(scenario.request)),
+        nowUnixMilliseconds: () => 1_787_805_000_000,
+        sleep: vi.fn().mockResolvedValue(undefined),
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
+        },
+      })[0];
+      await command?.handler(commandContext(scenario.args));
+      expect(lines.join('\n')).toContain(scenario.expected);
+    }
+  });
+
   it('completes the joiner side of an AccountTrusted connection', async () => {
     let syncCount = 0;
     const sleep = vi.fn().mockResolvedValue(undefined);
