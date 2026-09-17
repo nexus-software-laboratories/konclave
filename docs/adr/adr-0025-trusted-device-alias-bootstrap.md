@@ -170,6 +170,9 @@ Rejected.
 - Internal request/response content and a bounded repeat-operation journal are added.
 - One compromised current member can request member-only repeat pairing from another
   current peer; this is the explicit trust carried by the existing relationship.
+- Historical row replay is detected by the sealed complete-map digest. Coherent
+  rollback of the entire profile database across restarts remains outside the current
+  storage guarantee because no provider-owned monotonic anchor exists.
 
 ### Neutral
 
@@ -184,6 +187,7 @@ Continued compliance is demonstrated by:
 - pure alias parsing, collision, rename, stale-root, removal, and deterministic
   bootstrap-selection tests;
 - sealed profile-scoped address-book persistence and startup verification;
+- complete-map digest verification and historical-row replay rejection;
 - internal control messages that authenticate actual MLS sender and exact target;
 - root-signed capability negotiation across every recipient before internal control
   is sent;

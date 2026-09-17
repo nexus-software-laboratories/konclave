@@ -8,6 +8,7 @@ use KonclaveDomainCore::{
 };
 use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind};
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 
 use super::{ProfileStore, ProfileStoreError};
 
@@ -19,11 +20,18 @@ const TRUSTED_DEVICE_BINDING_STATE_VERSION: u8 = 1;
 const MAX_TRUSTED_DEVICE_BINDING_BYTES: usize =
     2 + MAX_TRUSTED_DEVICE_ALIAS_BYTES + DeviceId::LENGTH + Ed25519PublicKey::LENGTH;
 const MAX_SEALED_TRUSTED_DEVICE_BINDING_BYTES: usize = MAX_TRUSTED_DEVICE_BINDING_BYTES + 64;
-const TRUSTED_DEVICE_BINDING_STATE_BYTES: usize = 1 + 8;
+const TRUSTED_DEVICE_BINDING_DIGEST_BYTES: usize = 32;
+const TRUSTED_DEVICE_BINDING_STATE_BYTES: usize = 1 + 8 + TRUSTED_DEVICE_BINDING_DIGEST_BYTES;
 const MAX_SEALED_TRUSTED_DEVICE_BINDING_STATE_BYTES: usize =
     TRUSTED_DEVICE_BINDING_STATE_BYTES + 64;
 const TRUSTED_DEVICE_BINDING_CONTEXT_VERSION: &[u8] = b"trusted-device-binding-v1";
 const TRUSTED_DEVICE_BINDING_STATE_CONTEXT_VERSION: &[u8] = b"trusted-device-binding-state-v1";
+const TRUSTED_DEVICE_BINDING_DIGEST_DOMAIN: &[u8] = b"trusted-device-binding-map-v1\0";
+
+struct TrustedDeviceBindingState {
+    count: usize,
+    digest: [u8; TRUSTED_DEVICE_BINDING_DIGEST_BYTES],
+}
 
 impl ProfileStore {
     pub(super) fn initialize_trusted_device_schema(&self) -> Result<(), ProfileStoreError> {
@@ -77,7 +85,7 @@ impl ProfileStore {
             Some(_) => return Err(ProfileStoreError::CorruptData),
             None => None,
         };
-        let sealed_state = self.seal_trusted_device_binding_state(0)?;
+        let sealed_state = self.seal_trusted_device_binding_state(&[])?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
@@ -129,18 +137,14 @@ impl ProfileStore {
     pub(super) fn verify_trusted_device_bindings(&self) -> Result<(), ProfileStoreError> {
         let connection = self.lock()?;
         let bindings = self.load_trusted_device_bindings_from(&connection)?;
-        let committed_count = self.open_trusted_device_binding_state(&connection)?;
-        if committed_count != bindings.len() || bindings.len() > MAX_TRUSTED_DEVICE_BINDINGS {
-            return Err(ProfileStoreError::CorruptData);
-        }
-        let mut aliases = BTreeSet::new();
-        if bindings
-            .iter()
-            .any(|binding| !aliases.insert(binding.alias().as_str()))
+        let committed = self.open_trusted_device_binding_state(&connection)?;
+        if committed.count != bindings.len()
+            || committed.digest != trusted_device_binding_digest(&bindings)
+            || bindings.len() > MAX_TRUSTED_DEVICE_BINDINGS
         {
             return Err(ProfileStoreError::CorruptData);
         }
-        Ok(())
+        validate_trusted_device_binding_set(&bindings)
     }
 
     pub(crate) fn trusted_device_bindings(
@@ -179,8 +183,10 @@ impl ProfileStore {
         if decision == TrustedDeviceAliasDecision::Identical {
             return Ok(decision);
         }
-        let committed_count = self.open_trusted_device_binding_state(&connection)?;
-        if committed_count != bindings.len() {
+        let committed = self.open_trusted_device_binding_state(&connection)?;
+        if committed.count != bindings.len()
+            || committed.digest != trusted_device_binding_digest(&bindings)
+        {
             return Err(ProfileStoreError::CorruptData);
         }
         let transaction = connection
@@ -219,11 +225,12 @@ impl ProfileStore {
         {
             return Err(ProfileStoreError::Storage);
         }
-        let count = trusted_device_binding_count(&transaction)?;
-        if count > MAX_TRUSTED_DEVICE_BINDINGS {
+        let updated = self.load_trusted_device_bindings_from(&transaction)?;
+        if updated.len() > MAX_TRUSTED_DEVICE_BINDINGS {
             return Err(ProfileStoreError::TrustedDeviceCapacityExceeded);
         }
-        let sealed_state = self.seal_trusted_device_binding_state(count)?;
+        validate_trusted_device_binding_set(&updated)?;
+        let sealed_state = self.seal_trusted_device_binding_state(&updated)?;
         if transaction
             .execute(
                 "UPDATE daemon_trusted_device_binding_state
@@ -323,12 +330,14 @@ impl ProfileStore {
 
     fn seal_trusted_device_binding_state(
         &self,
-        count: usize,
+        bindings: &[TrustedDeviceBinding],
     ) -> Result<SealedBlob, ProfileStoreError> {
-        let count = u64::try_from(count).map_err(|_| ProfileStoreError::Storage)?;
+        let count = u64::try_from(bindings.len()).map_err(|_| ProfileStoreError::Storage)?;
+        let digest = trusted_device_binding_digest(bindings);
         let mut plaintext = [0; TRUSTED_DEVICE_BINDING_STATE_BYTES];
         plaintext[0] = TRUSTED_DEVICE_BINDING_STATE_VERSION;
-        plaintext[1..].copy_from_slice(&count.to_be_bytes());
+        plaintext[1..9].copy_from_slice(&count.to_be_bytes());
+        plaintext[9..].copy_from_slice(&digest);
         self.sealer
             .seal(
                 &trusted_device_binding_state_context(self.locked_profile.profile_id.as_bytes())?,
@@ -340,7 +349,7 @@ impl ProfileStore {
     fn open_trusted_device_binding_state(
         &self,
         connection: &Connection,
-    ) -> Result<usize, ProfileStoreError> {
+    ) -> Result<TrustedDeviceBindingState, ProfileStoreError> {
         let sealed_length: Option<i64> = connection
             .query_row(
                 "SELECT length(sealed_state)
@@ -380,24 +389,52 @@ impl ProfileStore {
         {
             return Err(ProfileStoreError::CorruptData);
         }
-        usize::try_from(u64::from_be_bytes(
-            plaintext[1..]
+        let count = usize::try_from(u64::from_be_bytes(
+            plaintext[1..9]
                 .try_into()
                 .map_err(|_| ProfileStoreError::CorruptData)?,
         ))
-        .map_err(|_| ProfileStoreError::CorruptData)
+        .map_err(|_| ProfileStoreError::CorruptData)?;
+        let digest = plaintext[9..]
+            .try_into()
+            .map_err(|_| ProfileStoreError::CorruptData)?;
+        Ok(TrustedDeviceBindingState { count, digest })
     }
 }
 
-fn trusted_device_binding_count(connection: &Connection) -> Result<usize, ProfileStoreError> {
-    let count: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM daemon_trusted_device_binding",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| ProfileStoreError::Storage)?;
-    usize::try_from(count).map_err(|_| ProfileStoreError::CorruptData)
+fn validate_trusted_device_binding_set(
+    bindings: &[TrustedDeviceBinding],
+) -> Result<(), ProfileStoreError> {
+    let mut aliases = BTreeSet::new();
+    if bindings
+        .iter()
+        .any(|binding| !aliases.insert(binding.alias().as_str()))
+    {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(())
+}
+
+fn trusted_device_binding_digest(
+    bindings: &[TrustedDeviceBinding],
+) -> [u8; TRUSTED_DEVICE_BINDING_DIGEST_BYTES] {
+    let mut digest = Sha256::new();
+    digest.update(TRUSTED_DEVICE_BINDING_DIGEST_DOMAIN);
+    digest.update(
+        u64::try_from(bindings.len())
+            .expect("trusted device binding count fits in u64")
+            .to_be_bytes(),
+    );
+    for binding in bindings {
+        let encoded = encode_trusted_device_binding(binding);
+        digest.update(
+            u16::try_from(encoded.len())
+                .expect("trusted device binding length fits in u16")
+                .to_be_bytes(),
+        );
+        digest.update(&encoded);
+    }
+    digest.finalize().into()
 }
 
 fn validate_sealed_length(length: i64, maximum: usize) -> Result<usize, ProfileStoreError> {
@@ -702,6 +739,55 @@ mod tests {
         drop(second);
         assert_eq!(
             LockedProfile::acquire(root.path(), second_profile)
+                .unwrap()
+                .open_store(
+                    SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32]))
+                        .unwrap(),
+                )
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn historical_alias_row_replay_fails_profile_startup() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = "trusted-device-replay";
+        let store = open_store(root.path(), profile);
+        store
+            .store_trusted_device_binding(&binding("alienware", 2, 3), &[evidence(1, 2, 3)])
+            .unwrap();
+        let historical: Vec<u8> = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sealed_binding FROM daemon_trusted_device_binding
+                 WHERE device_id = ?1",
+                params![DeviceId::from_bytes([2; 32]).as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store
+            .store_trusted_device_binding(&binding("workstation", 2, 3), &[evidence(1, 2, 3)])
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_trusted_device_binding
+                 SET sealed_binding = ?1
+                 WHERE device_id = ?2",
+                params![
+                    historical,
+                    DeviceId::from_bytes([2; 32]).as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        let profile_id = store.locked_profile.profile_id.clone();
+        drop(store);
+
+        assert_eq!(
+            LockedProfile::acquire(root.path(), profile_id)
                 .unwrap()
                 .open_store(
                     SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32]))

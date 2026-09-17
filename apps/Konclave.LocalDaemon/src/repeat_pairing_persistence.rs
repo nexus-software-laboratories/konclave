@@ -1341,4 +1341,42 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn transitional_pairing_identifier_is_bound_before_ordinary_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = open_store(root.path(), "repeat-pairing-binding");
+        let mut state = initiator(1);
+        let operation_id = state.operation_id;
+        let pairing_id = PairingId::from_bytes([9; PairingId::LENGTH]);
+        store.reserve_repeat_pairing(&state, 0).unwrap();
+        let mut generation = 1;
+        state.phase = RepeatPairingPhase::InitiatorAwaitingResponse;
+        generation = store
+            .checkpoint_repeat_pairing(operation_id, generation, &state)
+            .unwrap();
+        state.capability = Some(zeroize::Zeroizing::new("capability".to_owned()));
+        state.phase = RepeatPairingPhase::InitiatorRedeemingCapability;
+        generation = store
+            .checkpoint_repeat_pairing(operation_id, generation, &state)
+            .unwrap();
+        state.pairing_id = Some(pairing_id);
+        state.phase = RepeatPairingPhase::InitiatorCreatingConversation;
+        store
+            .checkpoint_repeat_pairing(operation_id, generation, &state)
+            .unwrap();
+
+        assert!(matches!(
+            store.repeat_pairing_peer_binding(pairing_id).unwrap(),
+            RepeatPairingPeerBinding::Verified {
+                peer_device_id,
+                conversation_id,
+            } if peer_device_id == state.peer_device_id
+                && conversation_id == state.new_conversation_id
+        ));
+        assert_eq!(
+            store.load_pairing(pairing_id).err(),
+            Some(ProfileStoreError::OperationNotFound)
+        );
+    }
 }

@@ -306,7 +306,7 @@ fn validate_state(state: &RepeatPairingOperationState) -> Result<(), RepeatPairi
         }
         (RepeatPairingRole::Responder, RepeatPairingPhase::ResponderReservingPairing) => {
             state.new_routing_id.is_none()
-                && state.pairing_id.is_none()
+                && state.pairing_id.is_some()
                 && state.capability.as_ref().is_some_and(|value| {
                     !value.is_empty() && value.len() <= MAX_REPEAT_PAIRING_CAPABILITY_BYTES
                 })

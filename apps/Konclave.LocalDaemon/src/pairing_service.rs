@@ -273,13 +273,18 @@ where
             }
             if checkpoint.state.phase == RepeatPairingPhase::Cancelling {
                 if let Some(pairing_id) = checkpoint.state.pairing_id {
-                    let pairing = self.status(pairing_id).await?;
-                    if pairing.phase == PairingPhase::Completed {
-                        checkpoint.state.phase = RepeatPairingPhase::Completed;
-                        self.checkpoint_repeat_pairing(checkpoint).await?;
-                        continue;
+                    match self.status(pairing_id).await {
+                        Ok(pairing) if pairing.phase == PairingPhase::Completed => {
+                            checkpoint.state.phase = RepeatPairingPhase::Completed;
+                            self.checkpoint_repeat_pairing(checkpoint).await?;
+                            continue;
+                        }
+                        Ok(_) => self.cancel(pairing_id, now_unix_seconds).await?,
+                        Err(PairingServiceError::Persistence(
+                            ProfileStoreError::OperationNotFound,
+                        )) => {}
+                        Err(error) => return Err(error),
                     }
-                    self.cancel(pairing_id, now_unix_seconds).await?;
                 }
                 checkpoint.state.phase = RepeatPairingPhase::Cancelled;
                 self.checkpoint_repeat_pairing(checkpoint).await?;
@@ -377,14 +382,25 @@ where
                         continue;
                     }
                     let pairing_id = capability.offer().pairing_id();
-                    self.redeem_decoded_capability(capability, now_unix_seconds)
-                        .await?;
                     checkpoint.state.pairing_id = Some(pairing_id);
                     checkpoint.state.phase = RepeatPairingPhase::InitiatorCreatingConversation;
                     self.checkpoint_repeat_pairing(checkpoint).await?;
                     continue;
                 }
                 RepeatPairingPhase::InitiatorCreatingConversation => {
+                    let capability = PairingCapability::decode(
+                        checkpoint
+                            .state
+                            .capability
+                            .as_ref()
+                            .ok_or(PairingServiceError::InvalidTransition)?,
+                        now_unix_seconds,
+                    )?;
+                    if Some(capability.offer().pairing_id()) != checkpoint.state.pairing_id {
+                        return Err(PairingServiceError::AuthorizationMismatch);
+                    }
+                    self.redeem_decoded_capability(capability, now_unix_seconds)
+                        .await?;
                     let conversations = self.conversations.clone();
                     let conversation_id = checkpoint.state.new_conversation_id;
                     let routing_id = checkpoint
@@ -432,6 +448,7 @@ where
                             now_unix_seconds,
                         )
                         .await?;
+                    checkpoint.state.pairing_id = Some(capability.offer().pairing_id());
                     checkpoint.state.capability = Some(zeroize::Zeroizing::new(
                         capability.encode()?.as_str().to_owned(),
                     ));
@@ -449,8 +466,10 @@ where
                         now_unix_seconds,
                     )?;
                     let pairing_id = capability.offer().pairing_id();
+                    if checkpoint.state.pairing_id != Some(pairing_id) {
+                        return Err(PairingServiceError::AuthorizationMismatch);
+                    }
                     self.reserve_joiner_capability(capability).await?;
-                    checkpoint.state.pairing_id = Some(pairing_id);
                     checkpoint.state.phase = RepeatPairingPhase::ResponderSendingResponse;
                     self.checkpoint_repeat_pairing(checkpoint).await?;
                     continue;
