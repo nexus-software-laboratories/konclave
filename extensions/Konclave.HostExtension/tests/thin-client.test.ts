@@ -1198,6 +1198,25 @@ describe('deterministic commands', () => {
       line: pairingToken,
       options: { ephemeral: true },
     });
+
+    const narrowEntries: string[] = [];
+    const narrow = createKonclaveCommands({
+      client: stubClient(request),
+      terminalColumns: () => 20,
+      terminalInteractive: () => true,
+      output: {
+        write: (line) => {
+          narrowEntries.push(line);
+        },
+      },
+    })[0];
+
+    await narrow?.handler(commandContext('connect --qr'));
+
+    expect(narrowEntries.join('\n')).toContain(
+      'QR unavailable for this terminal; use the raw token below',
+    );
+    expect(narrowEntries.some((line) => /[▀▄█]/u.test(line))).toBe(false);
   });
 
   it('resumes an interrupted joiner-side AccountTrusted connection', async () => {
