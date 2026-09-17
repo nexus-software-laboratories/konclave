@@ -179,7 +179,13 @@ async function runClipboardCommand(
     child.on('spawn', () => {
       spawned = true;
     });
-    child.on('error', () => finish(spawned ? 'indeterminate' : 'unavailable'));
+    child.on('error', () => {
+      if (spawned) {
+        forcedIndeterminate = true;
+      } else {
+        finish('unavailable');
+      }
+    });
     child.on('close', (code) => {
       finish(
         !forcedIndeterminate && code === 0 && outputBytes <= maximumProcessOutputBytes
