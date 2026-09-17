@@ -914,7 +914,7 @@ describe('deterministic commands', () => {
       options: { ephemeral: true },
     });
     expect(entries.map((entry) => entry.line).join('\n')).toContain(
-      'waiting for the other session to run /konclave connect <token>',
+      'waiting for the other session to run /konclave connect <token-or-uri>',
     );
     expect(entries.some((entry) => entry.line === `connected: ${conversationId}`)).toBe(true);
     expect(entries.map((entry) => entry.line).join('\n')).toContain(
@@ -985,7 +985,7 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext(`connect ${pairingToken.toLowerCase()}`));
+    await command?.handler(commandContext(`connect konclave://pair/${pairingToken.toLowerCase()}`));
 
     expect(request).toHaveBeenCalledWith('redeem_pairing_rendezvous', {
       token: pairingToken,
@@ -1006,6 +1006,146 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain(
       'connect: waiting for the other session to publish its join proof',
     );
+  });
+
+  it('copies a compact token without echo and clears it explicitly', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'create_pairing_rendezvous':
+          return {
+            pairing: pairingStatus({
+              phase: 'completed',
+              inviter_device_id: inviterDeviceId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+            }),
+            token: pairingToken,
+          };
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const clipboard = {
+      writeToken: vi.fn().mockResolvedValue(true),
+      clear: vi.fn().mockResolvedValue(true),
+    };
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      clipboard,
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect --copy'));
+    await command?.handler(commandContext('clipboard clear'));
+    await command?.handler(commandContext('clipboard clear'));
+
+    expect(clipboard.writeToken).toHaveBeenCalledWith(pairingToken);
+    expect(clipboard.clear).toHaveBeenCalledTimes(1);
+    expect(lines.join('\n')).toContain('pairing token copied (26 characters); token not echoed');
+    expect(lines.join('\n')).toContain('one-time bearer secret; expires at Unix second');
+    expect(lines.join('\n')).toContain(
+      'clipboard: cleared the pairing token copied by this session',
+    );
+    expect(lines.join('\n')).toContain('clipboard: no pairing token was copied by this session');
+    expect(lines).not.toContain(pairingToken);
+  });
+
+  it('renders an accessible QR handoff and degrades to raw output when non-interactive', async () => {
+    const completed = {
+      pairing: pairingStatus({
+        phase: 'completed',
+        inviter_device_id: inviterDeviceId,
+        conversation_id: conversationId,
+        granted_role: 'member',
+      }),
+      token: pairingToken,
+    };
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'service.status') {
+        return serviceStatus();
+      }
+      if (operation === 'create_pairing_rendezvous') {
+        return completed;
+      }
+      if (operation === 'list_conversations') {
+        return {
+          conversation_ids: [conversationId],
+          active_conversation_id: null,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const interactiveEntries: Array<{
+      line: string;
+      options: CommandOutputOptions | undefined;
+    }> = [];
+    const interactive = createKonclaveCommands({
+      client: stubClient(request),
+      terminalColumns: () => 100,
+      terminalInteractive: () => true,
+      output: {
+        write: (line, options) => {
+          interactiveEntries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await interactive?.handler(commandContext('connect --qr'));
+
+    expect(interactiveEntries.map(({ line }) => line).join('\n')).toContain(
+      'QR code: scan the Konclave pairing URI; accessible raw token follows',
+    );
+    expect(interactiveEntries.some(({ line }) => /[▀▄█]/u.test(line))).toBe(true);
+    expect(
+      interactiveEntries
+        .filter(({ line }) => /[▀▄█]/u.test(line))
+        .every(({ options }) => options?.ephemeral === true),
+    ).toBe(true);
+    expect(interactiveEntries).toContainEqual({
+      line: pairingToken,
+      options: { ephemeral: true },
+    });
+    expect(interactiveEntries.map(({ line }) => line).join('\n')).not.toContain(
+      `konclave://pair/${pairingToken}`,
+    );
+
+    const fallbackEntries: Array<{
+      line: string;
+      options: CommandOutputOptions | undefined;
+    }> = [];
+    const fallback = createKonclaveCommands({
+      client: stubClient(request),
+      terminalColumns: () => 100,
+      terminalInteractive: () => false,
+      output: {
+        write: (line, options) => {
+          fallbackEntries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await fallback?.handler(commandContext('connect --qr'));
+
+    expect(fallbackEntries.map(({ line }) => line).join('\n')).toContain(
+      'QR unavailable for this terminal; use the raw token below',
+    );
+    expect(fallbackEntries.some(({ line }) => /[▀▄█]/u.test(line))).toBe(false);
+    expect(fallbackEntries).toContainEqual({
+      line: pairingToken,
+      options: { ephemeral: true },
+    });
   });
 
   it('resumes an interrupted joiner-side AccountTrusted connection', async () => {
@@ -1343,7 +1483,7 @@ describe('deterministic commands', () => {
     expect(
       stalledRequest.mock.calls.filter(([operation]) => operation === 'sync_pairing'),
     ).toHaveLength(4);
-    expect(malformedLines.join('\n')).toContain('use /konclave join <capability>');
+    expect(malformedLines.join('\n')).toContain('use /konclave join');
   });
 
   it('redeems, creates, and approves an inviter-side pairing explicitly', async () => {

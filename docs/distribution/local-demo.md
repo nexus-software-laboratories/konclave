@@ -95,6 +95,12 @@ other session:
 /konclave connect <token>
 ```
 
+Use `/konclave connect --copy` to place only the compact token on the native
+clipboard, or `/konclave connect --qr` to render a terminal QR code containing a
+`konclave://pair/<token>` URI. The receiving command accepts either the URI or raw
+token through the same parser. Clipboard and QR failures degrade to the raw token;
+`/konclave clipboard clear` clears a token copied by the current extension session.
+
 Both sessions display the current durable phase, the action expected from the other
 device, and the remaining pairing time. If a Copilot process is interrupted before
 completion, restart it and continue the durable pairing with:

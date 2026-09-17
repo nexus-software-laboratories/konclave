@@ -6,10 +6,18 @@ import { TextDecoder } from 'node:util';
 
 import type { CommandContext, CommandDefinition } from '@github/copilot-sdk';
 
+import { createPairingClipboard, type PairingClipboard } from './clipboard.js';
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
 import { serviceOperations } from './operations.js';
+import {
+  PairingHandoffError,
+  pairingRendezvousTokenCharacters,
+  parsePairingHandoff,
+  renderPairingQr,
+  type PairingHandoff,
+} from './pairing-handoff.js';
 
 /**
  * Deterministic `/konclave` commands.
@@ -66,6 +74,9 @@ export interface CommandDependencies {
   readonly nowUnixMilliseconds?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly readPolicySource?: (path: string) => Promise<string>;
+  readonly clipboard?: PairingClipboard;
+  readonly terminalColumns?: () => number | undefined;
+  readonly terminalInteractive?: () => boolean;
 }
 
 export interface PolicySourceReadOptions {
@@ -94,8 +105,6 @@ const connectProgressIntervalMilliseconds = 30_000;
 const maxConnectIterations = 2_400;
 const maxConnectWaitMilliseconds = 20 * 60 * 1_000;
 const pairingIdCharacters = 32;
-const pairingRendezvousTokenCharacters = 26;
-const pairingRendezvousTokenPattern = /^[0-9A-HJKMNP-TV-Z]{26}$/u;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
@@ -259,9 +268,11 @@ const helpLines = [
   '  /konclave status                                    Show profile, delivery, and relay state.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
-  '  /konclave connect                                   Create a compact two-session connection token.',
+  '  /konclave connect [--copy|--qr]                     Create a compact two-session connection token.',
   '  /konclave connect <token>                           Join and complete an AccountTrusted connection.',
+  '  /konclave connect <konclave://pair/token>           Join from a pairing deep link.',
   '  /konclave connect resume <pairing>                  Resume one interrupted AccountTrusted connection.',
+  '  /konclave clipboard clear                           Clear a token copied by this session.',
   '  /konclave pair [member|administrator]               Create a full recovery capability.',
   '  /konclave join <capability>                         Redeem a full recovery capability.',
   '  /konclave new                                       Create a conversation for an approved peer.',
@@ -513,31 +524,52 @@ function parsePairingRendezvous(value: unknown): {
   readonly pairing: PairingStatus;
   readonly token: string;
 } {
-  if (
-    !isRecord(value) ||
-    typeof value.token !== 'string' ||
-    value.token.length !== pairingRendezvousTokenCharacters ||
-    !pairingRendezvousTokenPattern.test(value.token)
-  ) {
+  if (!isRecord(value) || typeof value.token !== 'string') {
+    throw new Error('the local service pairing rendezvous response is malformed');
+  }
+  let handoff: PairingHandoff;
+  try {
+    handoff = parsePairingHandoff(value.token);
+  } catch {
     throw new Error('the local service pairing rendezvous response is malformed');
   }
   return {
     pairing: parsePairingStatus(value.pairing),
-    token: value.token,
+    token: handoff.token,
   };
 }
 
-function requirePairingRendezvousToken(value: string): string {
-  const token = value.trim().toUpperCase();
-  if (
-    token.length !== pairingRendezvousTokenCharacters ||
-    !pairingRendezvousTokenPattern.test(token)
-  ) {
+function requirePairingHandoff(value: string): PairingHandoff {
+  try {
+    return parsePairingHandoff(value);
+  } catch (error: unknown) {
+    if (!(error instanceof PairingHandoffError)) {
+      throw error;
+    }
     throw new Error(
-      'connect requires a 26-character pairing token; use /konclave join <capability> for a full recovery capability',
+      'connect requires a 26-character pairing token or konclave://pair/<token> URI; use /konclave join <capability> for a full recovery capability',
+      { cause: error },
     );
   }
-  return token;
+}
+
+type PairingHandoffMode = 'raw' | 'copy' | 'qr';
+
+function pairingHandoffMode(argumentsText: string): PairingHandoffMode | undefined {
+  const value = argumentsText.trim().toLowerCase();
+  if (value.length === 0) {
+    return 'raw';
+  }
+  if (value === '--copy') {
+    return 'copy';
+  }
+  if (value === '--qr') {
+    return 'qr';
+  }
+  if (value.startsWith('--')) {
+    throw new Error('usage: /konclave connect [--copy|--qr]');
+  }
+  return undefined;
 }
 
 function requirePairingCapability(value: string): string {
@@ -1259,6 +1291,73 @@ async function renderConnectProgress(
   );
 }
 
+function defaultTerminalColumns(): number | undefined {
+  return process.stderr.columns;
+}
+
+function defaultTerminalInteractive(): boolean {
+  return process.stderr.isTTY === true;
+}
+
+async function renderPairingHandoff(
+  presentation: CommandPresentation,
+  handoff: PairingHandoff,
+  status: PairingStatus,
+  mode: PairingHandoffMode,
+  clipboard: PairingClipboard,
+  terminalColumns: () => number | undefined,
+  terminalInteractive: () => boolean,
+): Promise<boolean> {
+  await presentation.write(
+    `pairing token: one-time bearer secret; expires at Unix second ${status.authorizationDeadlineUnixSeconds}`,
+  );
+  if (mode === 'copy') {
+    const copied = await clipboard.writeToken(handoff.token).catch(() => false);
+    if (copied) {
+      await presentation.write(
+        `pairing token copied (${pairingRendezvousTokenCharacters} characters); token not echoed; clear with /konclave clipboard clear`,
+      );
+      return true;
+    }
+    await presentation.write('clipboard unavailable; use the raw token below');
+    await presentation.write(handoff.token, { ephemeral: true });
+    return false;
+  }
+  if (mode === 'qr') {
+    let qr;
+    try {
+      qr = renderPairingQr(handoff.uri);
+    } catch {
+      qr = undefined;
+    }
+    const columns = terminalColumns();
+    if (
+      qr === undefined ||
+      !terminalInteractive() ||
+      columns === undefined ||
+      columns < qr.columns
+    ) {
+      await presentation.write('QR unavailable for this terminal; use the raw token below');
+      await presentation.write(handoff.token, { ephemeral: true });
+      return false;
+    }
+    await presentation.write(
+      'QR code: scan the Konclave pairing URI; accessible raw token follows',
+    );
+    for (const line of qr.lines) {
+      await presentation.write(line, { ephemeral: true });
+    }
+    await presentation.write(
+      `accessible pairing token (${pairingRendezvousTokenCharacters} characters):`,
+    );
+    await presentation.write(handoff.token, { ephemeral: true });
+    return false;
+  }
+  await presentation.write('raw pairing token:');
+  await presentation.write(handoff.token, { ephemeral: true });
+  return false;
+}
+
 async function completeAccountTrustedPairing(
   client: LocalServiceClient,
   initialStatus: PairingStatus,
@@ -1703,7 +1802,11 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
   const nowUnixMilliseconds = dependencies.nowUnixMilliseconds ?? Date.now;
   const sleep = dependencies.sleep ?? defaultSleep;
   const readPolicySource = dependencies.readPolicySource ?? readBoundedPolicySource;
+  const clipboard = dependencies.clipboard ?? createPairingClipboard();
+  const terminalColumns = dependencies.terminalColumns ?? defaultTerminalColumns;
+  const terminalInteractive = dependencies.terminalInteractive ?? defaultTerminalInteractive;
   let activeConversationId: string | undefined;
+  let clipboardContainsPairingToken = false;
 
   const runPolicy = async (raw: string): Promise<void> => {
     const parsed = parseCommand(raw);
@@ -2032,14 +2135,34 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'clipboard': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave clipboard clear');
+        if (parts[0]?.toLowerCase() !== 'clear') {
+          throw new Error('usage: /konclave clipboard clear');
+        }
+        if (!clipboardContainsPairingToken) {
+          await presentation.write('clipboard: no pairing token was copied by this session');
+          return;
+        }
+        const cleared = await clipboard.clear().catch(() => false);
+        if (!cleared) {
+          throw new Error('the pairing token clipboard could not be cleared');
+        }
+        clipboardContainsPairingToken = false;
+        await presentation.write('clipboard: cleared the pairing token copied by this session');
+        return;
+      }
       case 'connect': {
         await requireAccountTrusted(client);
         const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
         let status: PairingStatus;
-        if (argumentsText.length === 0) {
+        const handoffMode = pairingHandoffMode(argumentsText);
+        if (handoffMode !== undefined) {
           const created = parsePairingRendezvous(
             await client.request('create_pairing_rendezvous', {}),
           );
+          const handoff = requirePairingHandoff(created.token);
           await presentation.detail(
             'approval policy: AccountTrusted capability possession; no independent identity verification',
           );
@@ -2048,12 +2171,24 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`cancel: /konclave cancel ${created.pairing.pairingId}`);
           await presentation.write(
             presentation.mode === 'normal'
-              ? `pairing ${created.pairing.pairingId} (same-account trust): share this token; the other session runs /konclave connect <token>`
-              : 'compact token (ephemeral; paste the next line in the other session):',
+              ? `pairing ${created.pairing.pairingId} (same-account trust): the other session runs /konclave connect <token-or-uri>`
+              : 'compact pairing handoff:',
           );
-          await presentation.write(created.token, { ephemeral: true });
+          if (
+            await renderPairingHandoff(
+              presentation,
+              handoff,
+              created.pairing,
+              handoffMode,
+              clipboard,
+              terminalColumns,
+              terminalInteractive,
+            )
+          ) {
+            clipboardContainsPairingToken = true;
+          }
           await presentation.detail(
-            'waiting for the other session to run /konclave connect <token>',
+            'waiting for the other session to run /konclave connect <token-or-uri>',
           );
           status = await completeAccountTrustedPairing(
             client,
@@ -2093,9 +2228,9 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             sleep,
           );
         } else {
-          const token = requirePairingRendezvousToken(argumentsText);
+          const handoff = requirePairingHandoff(argumentsText);
           const redeemed = parsePairingStatus(
-            await client.request('redeem_pairing_rendezvous', { token }),
+            await client.request('redeem_pairing_rendezvous', { token: handoff.token }),
           );
           if (redeemed.requestedRole !== 'member') {
             throw new Error('connect accepts only member pairing requests');
@@ -2106,6 +2241,9 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`pairing: ${redeemed.pairingId}`);
           await presentation.detail(`recovery: /konclave pairing ${redeemed.pairingId}`);
           await presentation.detail(`cancel: /konclave cancel ${redeemed.pairingId}`);
+          await presentation.write(
+            `pairing token accepted: one-time bearer secret; expires at Unix second ${redeemed.authorizationDeadlineUnixSeconds}`,
+          );
           if (presentation.mode === 'normal') {
             await presentation.write(
               `pairing ${redeemed.pairingId} (same-account trust): connecting`,
