@@ -21,6 +21,7 @@
     "Pairing rendezvous conformance",
     "Relay migration conformance",
     "Relay migration Windows conformance",
+    "Short-code pairing conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -79,6 +80,7 @@
         "managed-marketplace-policy",
         "pairing-rendezvous-conformance",
         "relay-migration-conformance",
+        "short-code-pairing-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -207,6 +209,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Pairing rendezvous conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/short-code-pairing-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Short-code pairing conformance"
       ]
     },
     {
