@@ -6,7 +6,8 @@ use crate::{
     CollaborationPolicyProposal, CollaborationPolicyResponse, CollaborationPolicyRevocation,
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
-    MessageId, PairingContextHash, PairingId, PairingMessageId, PairingNonce, RoutingId,
+    MessageId, PairingContextHash, PairingId, PairingMessageId, PairingNonce,
+    RepeatPairingOperationId, RoutingId,
 };
 
 /// Current Konclave application protocol major version.
@@ -21,6 +22,8 @@ pub const MAX_RELAY_PAYLOAD_BYTES: usize = MAX_RELAY_ENVELOPE_BYTES - 1024;
 pub const MAX_APPLICATION_MESSAGE_BYTES: usize = 256 * 1024;
 /// Maximum UTF-8 byte length for text content in protocol v1.
 pub const MAX_TEXT_BODY_BYTES: usize = MAX_APPLICATION_MESSAGE_BYTES - 1024;
+/// Maximum encoded short-lived capability carried by repeat-pairing control content.
+pub const MAX_REPEAT_PAIRING_CAPABILITY_BYTES: usize = 16 * 1024;
 /// Maximum active devices in one protocol v1 conversation.
 pub const MAX_MEMBERS: usize = 128;
 /// Maximum retained invitation identifiers in one membership snapshot.
@@ -103,6 +106,8 @@ pub enum SignatureScheme {
 
 /// Root-signed capability bit for receiving and interpreting `DirectedRequest`.
 pub const APPLICATION_CAPABILITY_DIRECTED_REQUEST: u64 = 1;
+/// Root-signed capability bit for receiving internal repeat-pairing control content.
+pub const APPLICATION_CAPABILITY_REPEAT_PAIRING: u64 = 1 << 1;
 
 /// Public binding between a device root and a conversation-scoped MLS signature key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +250,12 @@ impl DeviceCredentialBinding {
     #[must_use]
     pub const fn supports_directed_requests(&self) -> bool {
         self.application_capabilities & APPLICATION_CAPABILITY_DIRECTED_REQUEST != 0
+    }
+
+    /// Returns whether this device can receive repeat-pairing control content.
+    #[must_use]
+    pub const fn supports_repeat_pairing(&self) -> bool {
+        self.application_capabilities & APPLICATION_CAPABILITY_REPEAT_PAIRING != 0
     }
 
     /// Returns the optional device-root signature over the capability assertion.
@@ -1388,17 +1399,147 @@ impl DirectedRequest {
     }
 }
 
+/// Internal request for one current conversation member to issue a fresh capability.
+#[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct RepeatPairingRequest {
+    #[zeroize(skip)]
+    operation_id: RepeatPairingOperationId,
+    #[zeroize(skip)]
+    target_device_id: DeviceId,
+    #[zeroize(skip)]
+    new_conversation_id: ConversationId,
+    #[zeroize(skip)]
+    expires_at_unix_seconds: u64,
+}
+
+impl RepeatPairingRequest {
+    /// Creates one exact, finite repeat-pairing request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a zero-value error when the capability deadline is absent.
+    pub fn new(
+        operation_id: RepeatPairingOperationId,
+        target_device_id: DeviceId,
+        new_conversation_id: ConversationId,
+        expires_at_unix_seconds: u64,
+    ) -> Result<Self, KonclaveDomainError> {
+        require_positive(
+            expires_at_unix_seconds,
+            "repeat_pairing_expires_at_unix_seconds",
+        )?;
+        Ok(Self {
+            operation_id,
+            target_device_id,
+            new_conversation_id,
+            expires_at_unix_seconds,
+        })
+    }
+
+    #[must_use]
+    pub const fn operation_id(&self) -> RepeatPairingOperationId {
+        self.operation_id
+    }
+
+    #[must_use]
+    pub const fn target_device_id(&self) -> DeviceId {
+        self.target_device_id
+    }
+
+    #[must_use]
+    pub const fn new_conversation_id(&self) -> ConversationId {
+        self.new_conversation_id
+    }
+
+    #[must_use]
+    pub const fn expires_at_unix_seconds(&self) -> u64 {
+        self.expires_at_unix_seconds
+    }
+}
+
+/// Internal response returning one freshly issued short-lived member capability.
+#[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct RepeatPairingResponse {
+    #[zeroize(skip)]
+    operation_id: RepeatPairingOperationId,
+    #[zeroize(skip)]
+    requester_device_id: DeviceId,
+    #[zeroize(skip)]
+    new_conversation_id: ConversationId,
+    capability: String,
+}
+
+impl RepeatPairingResponse {
+    /// Creates one bounded repeat-pairing response.
+    ///
+    /// # Errors
+    ///
+    /// Returns a text length error when the capability is empty or oversized.
+    pub fn new(
+        operation_id: RepeatPairingOperationId,
+        requester_device_id: DeviceId,
+        new_conversation_id: ConversationId,
+        capability: impl Into<String>,
+    ) -> Result<Self, KonclaveDomainError> {
+        let capability = capability.into();
+        require_length_range(
+            capability.len(),
+            1,
+            MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
+            "repeat_pairing_capability",
+        )?;
+        Ok(Self {
+            operation_id,
+            requester_device_id,
+            new_conversation_id,
+            capability,
+        })
+    }
+
+    #[must_use]
+    pub const fn operation_id(&self) -> RepeatPairingOperationId {
+        self.operation_id
+    }
+
+    #[must_use]
+    pub const fn requester_device_id(&self) -> DeviceId {
+        self.requester_device_id
+    }
+
+    #[must_use]
+    pub const fn new_conversation_id(&self) -> ConversationId {
+        self.new_conversation_id
+    }
+
+    #[must_use]
+    pub fn capability(&self) -> &str {
+        &self.capability
+    }
+}
+
 /// Validated application content.
 #[derive(PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum ApplicationContent {
     Text(String),
     DirectedRequest(DirectedRequest),
+    RepeatPairingRequest(Box<RepeatPairingRequest>),
+    RepeatPairingResponse(Box<RepeatPairingResponse>),
     CollaborationPolicyProposal(Box<CollaborationPolicyProposal>),
     CollaborationPolicyResponse(CollaborationPolicyResponse),
     CollaborationPolicyRevocation(CollaborationPolicyRevocation),
 }
 
 impl ApplicationContent {
+    /// Returns whether this content is daemon-internal and must not reach model or
+    /// adapter delivery.
+    #[must_use]
+    pub const fn is_internal(&self) -> bool {
+        matches!(
+            self,
+            Self::RepeatPairingRequest(_) | Self::RepeatPairingResponse(_)
+        )
+    }
+
     /// Creates bounded, non-empty UTF-8 text content.
     ///
     /// # Errors
@@ -1422,6 +1563,18 @@ impl ApplicationContent {
     ) -> Result<Self, KonclaveDomainError> {
         let request = DirectedRequest::new(target_device_id, body)?;
         Ok(Self::DirectedRequest(request))
+    }
+
+    /// Wraps one validated internal repeat-pairing request.
+    #[must_use]
+    pub fn repeat_pairing_request(request: RepeatPairingRequest) -> Self {
+        Self::RepeatPairingRequest(Box::new(request))
+    }
+
+    /// Wraps one validated internal repeat-pairing response.
+    #[must_use]
+    pub fn repeat_pairing_response(response: RepeatPairingResponse) -> Self {
+        Self::RepeatPairingResponse(Box::new(response))
     }
 
     /// Wraps one validated collaboration-policy proposal without inflating every

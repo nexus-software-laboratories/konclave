@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use KonclaveClientLibrary::{PairingCapability, RelayEndpoint};
@@ -9,8 +10,12 @@ use KonclaveCryptographicCore::{
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
-    JoinProof, Member, MembershipOperationId, MessageId, NotificationId, PairingControl, PairingId,
-    PairingMessageId, PairingStage, ProtocolVersion, RelayEnvelope, RoutingId, StoredRelayEnvelope,
+    JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageId, NotificationId,
+    PairingControl, PairingId, PairingMessageId, PairingStage, ProtocolVersion, RelayEnvelope,
+    RepeatPairingOperationId, RoutingId, StoredRelayEnvelope, TrustedDeviceAlias,
+    TrustedDeviceAliasDecision, TrustedDeviceBinding, TrustedDeviceBindingStatus,
+    TrustedDeviceEvidence, TrustedDeviceResolution, resolve_trusted_device,
+    trusted_device_binding_status,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_membership_commit_bundle, decode_membership_control,
@@ -32,6 +37,22 @@ use crate::persistence::{
 };
 
 const MAX_RECOVERED_PAIRINGS: usize = 32;
+const MAX_TRUSTED_DEVICE_EVIDENCE: usize = 4_096;
+
+fn trusted_device_domain_error(error: KonclaveDomainError) -> ConversationCoordinatorError {
+    match error {
+        KonclaveDomainError::TrustedDeviceRootMismatch => {
+            ConversationCoordinatorError::TrustedDeviceRootMismatch
+        }
+        KonclaveDomainError::TrustedDeviceRemoved => {
+            ConversationCoordinatorError::TrustedDeviceRemoved
+        }
+        KonclaveDomainError::TrustedDeviceRepeatPairingUnsupported => {
+            ConversationCoordinatorError::TrustedDeviceRepeatPairingUnsupported
+        }
+        _ => ConversationCoordinatorError::StateMismatch,
+    }
+}
 
 /// Durable conversation composition over one locked daemon profile.
 #[derive(Clone)]
@@ -226,24 +247,84 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        let (conversation_id, routing_id, signing_material, device_id) = {
+        let (conversation_id, routing_id) = {
             let device = self
                 .device
                 .lock()
                 .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-            let conversation_id = device
-                .generate_conversation_id()
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let routing_id = device
-                .generate_routing_id()
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let signing_material = device
-                .create_conversation_signing_material(conversation_id)
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
             (
-                conversation_id,
-                routing_id,
-                signing_material,
+                device
+                    .generate_conversation_id()
+                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
+                device
+                    .generate_routing_id()
+                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
+            )
+        };
+        self.create_with_identifiers_unlocked(conversation_id, routing_id)
+    }
+
+    pub(crate) fn generate_repeat_pairing_identifiers(
+        &self,
+    ) -> Result<(RepeatPairingOperationId, ConversationId, RoutingId), ConversationCoordinatorError>
+    {
+        let device = self
+            .device
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let operation_id = RepeatPairingOperationId::from_bytes(
+            device
+                .generate_message_id()
+                .map_err(|_| ConversationCoordinatorError::Cryptographic)?
+                .into_bytes(),
+        );
+        Ok((
+            operation_id,
+            device
+                .generate_conversation_id()
+                .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
+            device
+                .generate_routing_id()
+                .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
+        ))
+    }
+
+    pub(crate) fn create_with_identifiers(
+        &self,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.create_with_identifiers_unlocked(conversation_id, routing_id)
+    }
+
+    fn create_with_identifiers_unlocked(
+        &self,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        match self.store.load_conversation(conversation_id) {
+            Ok(stored) => {
+                if stored.routing_id != routing_id {
+                    return Err(ConversationCoordinatorError::StateMismatch);
+                }
+                return Ok(self.open_unlocked(conversation_id)?.summary());
+            }
+            Err(ProfileStoreError::ConversationNotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let (signing_material, device_id) = {
+            let device = self
+                .device
+                .lock()
+                .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+            (
+                device
+                    .create_conversation_signing_material(conversation_id)
+                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
                 device.device_id(),
             )
         };
@@ -619,6 +700,178 @@ impl ConversationCoordinator {
         self.store
             .conversation_ids(after, limit)
             .map_err(Into::into)
+    }
+
+    /// Lists locally sealed aliases and their status against current authenticated membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile, evidence-bound, or conversation integrity error.
+    pub(crate) fn trusted_devices(
+        &self,
+    ) -> Result<Vec<TrustedDeviceSummary>, ConversationCoordinatorError> {
+        let bindings = self.store.trusted_device_bindings()?;
+        let targets = bindings
+            .iter()
+            .map(TrustedDeviceBinding::device_id)
+            .collect::<BTreeSet<_>>();
+        let evidence = self.trusted_device_evidence(&targets)?;
+        let mut devices = bindings
+            .into_iter()
+            .map(|binding| TrustedDeviceSummary {
+                alias: binding.alias().as_str().to_owned(),
+                device_id: binding.device_id(),
+                status: trusted_device_binding_status(&binding, &evidence),
+            })
+            .collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.alias.cmp(&right.alias));
+        Ok(devices)
+    }
+
+    /// Binds a canonical alias to one exact currently authenticated device root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a self-target, removed-device, root-mismatch, collision, profile, or
+    /// conversation integrity error.
+    pub(crate) fn set_trusted_device_alias(
+        &self,
+        device_id: DeviceId,
+        alias: TrustedDeviceAlias,
+    ) -> Result<TrustedDeviceAliasDecision, ConversationCoordinatorError> {
+        if device_id == self.device_id()? {
+            return Err(ConversationCoordinatorError::TrustedDeviceSelf);
+        }
+        let existing = self.store.trusted_device_bindings()?;
+        let mut targets = existing
+            .iter()
+            .map(TrustedDeviceBinding::device_id)
+            .collect::<BTreeSet<_>>();
+        targets.insert(device_id);
+        let evidence = self.trusted_device_evidence(&targets)?;
+        let mut current_root = None;
+        for candidate in evidence
+            .iter()
+            .filter(|candidate| candidate.device_id() == device_id)
+        {
+            match current_root {
+                None => current_root = Some(candidate.device_root_public_key()),
+                Some(root) if root == candidate.device_root_public_key() => {}
+                Some(_) => return Err(ConversationCoordinatorError::TrustedDeviceRootMismatch),
+            }
+        }
+        let current_root =
+            current_root.ok_or(ConversationCoordinatorError::TrustedDeviceRemoved)?;
+        let candidate = TrustedDeviceBinding::new(alias, device_id, current_root);
+        self.store
+            .store_trusted_device_binding(&candidate, &evidence)
+            .map_err(Into::into)
+    }
+
+    /// Resolves one alias to an exact device root and deterministic bootstrap conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, removed, root-mismatch, profile, or conversation integrity
+    /// error.
+    pub(crate) fn resolve_trusted_device_alias(
+        &self,
+        alias: &TrustedDeviceAlias,
+    ) -> Result<TrustedDeviceResolution, ConversationCoordinatorError> {
+        let binding = self.store.trusted_device_binding(alias)?;
+        let evidence = self.trusted_device_evidence(&BTreeSet::from([binding.device_id()]))?;
+        resolve_trusted_device(&binding, &evidence).map_err(trusted_device_domain_error)
+    }
+
+    pub(crate) fn verify_repeat_pairing_peer(
+        &self,
+        conversation_id: ConversationId,
+        peer_device_id: DeviceId,
+        peer_root_public_key: Ed25519PublicKey,
+    ) -> Result<(), ConversationCoordinatorError> {
+        let local_device = self.device_id()?;
+        let conversation = self.store.load_conversation(conversation_id)?;
+        if conversation.state.member(local_device).is_none()
+            || conversation.state.member(peer_device_id).is_none()
+        {
+            return Err(ConversationCoordinatorError::TrustedDeviceRemoved);
+        }
+        let binding = conversation
+            .bindings
+            .iter()
+            .find(|binding| binding.binding().device_id() == peer_device_id)
+            .ok_or(ConversationCoordinatorError::StateMismatch)?;
+        if !conversation.state.members().iter().all(|member| {
+            conversation.bindings.iter().any(|binding| {
+                binding.binding().device_id() == member.device_id()
+                    && binding.binding().supports_repeat_pairing()
+            })
+        }) {
+            return Err(ConversationCoordinatorError::TrustedDeviceRepeatPairingUnsupported);
+        }
+        if binding.binding().device_root_public_key() == peer_root_public_key {
+            Ok(())
+        } else {
+            Err(ConversationCoordinatorError::TrustedDeviceRootMismatch)
+        }
+    }
+
+    fn trusted_device_evidence(
+        &self,
+        targets: &BTreeSet<DeviceId>,
+    ) -> Result<Vec<TrustedDeviceEvidence>, ConversationCoordinatorError> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let local_device = self.device_id()?;
+        let mut evidence = Vec::new();
+        let mut after = None;
+        loop {
+            let conversations = self
+                .store
+                .conversation_ids(after, MAX_CONVERSATION_PAGE_SIZE)?;
+            if conversations.is_empty() {
+                return Ok(evidence);
+            }
+            let page_length = conversations.len();
+            for conversation_id in conversations {
+                after = Some(conversation_id);
+                let conversation = self.store.load_conversation(conversation_id)?;
+                if conversation.state.member(local_device).is_none() {
+                    continue;
+                }
+                let conversation_supports_repeat_pairing =
+                    conversation.state.members().iter().all(|member| {
+                        conversation.bindings.iter().any(|binding| {
+                            binding.binding().device_id() == member.device_id()
+                                && binding.binding().supports_repeat_pairing()
+                        })
+                    });
+                for member in conversation.state.members() {
+                    let device_id = member.device_id();
+                    if device_id == local_device || !targets.contains(&device_id) {
+                        continue;
+                    }
+                    let binding = conversation
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.binding().device_id() == device_id)
+                        .ok_or(ConversationCoordinatorError::StateMismatch)?;
+                    if evidence.len() == MAX_TRUSTED_DEVICE_EVIDENCE {
+                        return Err(ConversationCoordinatorError::TrustedDeviceEvidenceCapacity);
+                    }
+                    evidence.push(TrustedDeviceEvidence::new(
+                        conversation_id,
+                        device_id,
+                        binding.binding().device_root_public_key(),
+                        conversation_supports_repeat_pairing,
+                    ));
+                }
+            }
+            if page_length < MAX_CONVERSATION_PAGE_SIZE {
+                return Ok(evidence);
+            }
+        }
     }
 
     /// Issues one device-bound invitation package with all current public bindings.
@@ -1709,6 +1962,15 @@ impl ConversationCoordinator {
         conversation_id: ConversationId,
         stored: &StoredRelayEnvelope,
     ) -> Result<ProcessedApplication, ConversationCoordinatorError> {
+        self.process_inbound_application_at(conversation_id, stored, self.store.now_unix_seconds())
+    }
+
+    pub(crate) fn process_inbound_application_at(
+        &self,
+        conversation_id: ConversationId,
+        stored: &StoredRelayEnvelope,
+        now_unix_seconds: u64,
+    ) -> Result<ProcessedApplication, ConversationCoordinatorError> {
         let _operation = self
             .operations
             .lock()
@@ -1738,10 +2000,11 @@ impl ConversationCoordinator {
                         &outbound.message,
                     )?;
                     let notification_id = self.generate_notification_id()?;
-                    self.store.complete_inbox_with_notification(
+                    self.store.complete_inbox_with_notification_at(
                         conversation_id,
                         stored.cursor(),
                         notification_id,
+                        now_unix_seconds,
                     )?;
                     return Ok(ProcessedApplication {
                         conversation_id,
@@ -1769,10 +2032,11 @@ impl ConversationCoordinator {
                     .persist()
                     .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
                 let notification_id = self.generate_notification_id()?;
-                self.store.complete_inbox_with_notification(
+                self.store.complete_inbox_with_notification_at(
                     conversation_id,
                     stored.cursor(),
                     notification_id,
+                    now_unix_seconds,
                 )?;
                 Ok(ProcessedApplication {
                     conversation_id,
@@ -1797,10 +2061,11 @@ impl ConversationCoordinator {
                         return Err(ConversationCoordinatorError::StateMismatch);
                     }
                     let notification_id = self.generate_notification_id()?;
-                    self.store.complete_inbox_with_notification(
+                    self.store.complete_inbox_with_notification_at(
                         conversation_id,
                         stored.cursor(),
                         notification_id,
+                        now_unix_seconds,
                     )?;
                     return Ok(ProcessedApplication {
                         conversation_id,
@@ -1838,10 +2103,11 @@ impl ConversationCoordinator {
                     }
                 }
                 let notification_id = self.generate_notification_id()?;
-                self.store.complete_inbox_with_notification(
+                self.store.complete_inbox_with_notification_at(
                     conversation_id,
                     stored.cursor(),
                     notification_id,
+                    now_unix_seconds,
                 )?;
                 Ok(ProcessedApplication {
                     conversation_id,
@@ -2212,6 +2478,12 @@ pub(crate) struct ConversationSummary {
     pub(crate) epoch: u64,
 }
 
+pub(crate) struct TrustedDeviceSummary {
+    pub(crate) alias: String,
+    pub(crate) device_id: DeviceId,
+    pub(crate) status: TrustedDeviceBindingStatus,
+}
+
 /// Stable conversation composition failures.
 #[non_exhaustive]
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -2236,6 +2508,16 @@ pub(crate) enum ConversationCoordinatorError {
     DirectedRequestUnsupported,
     #[error("directed request target is required for this conversation")]
     DirectedRequestTargetRequired,
+    #[error("the local profile device cannot be assigned as a trusted remote device")]
+    TrustedDeviceSelf,
+    #[error("trusted-device identity has contradictory root evidence")]
+    TrustedDeviceRootMismatch,
+    #[error("trusted-device identity is no longer a current member")]
+    TrustedDeviceRemoved,
+    #[error("trusted device has no conversation with repeat-pairing capability")]
+    TrustedDeviceRepeatPairingUnsupported,
+    #[error("trusted-device evidence exceeded its bounded local limit")]
+    TrustedDeviceEvidenceCapacity,
     #[error("conversation operation is not authorized")]
     Unauthorized,
 }

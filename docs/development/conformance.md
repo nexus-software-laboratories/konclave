@@ -58,6 +58,15 @@ recovery, malicious-relay and wrong-code rejection, mutual-confirmation-to-MLS
 acceptance, deterministic local tool contracts, extension command acceptance, Rust
 and TypeScript formatting, strict lint, and the pinned security-dependency policy.
 
+`Trusted device alias conformance` is the focused draft-capable gate for local
+address-book binding and repeat-conversation bootstrap. It runs canonical alias and
+current-root decisions, sealed profile migrations and tamper checks, bounded internal
+request/response codecs, restart and accepted-response-loss recovery, exact
+pairing-authorization binding, a two-device second-conversation and real-message
+acceptance, user-history and adapter-delivery exclusion, deterministic command-only
+tool boundaries, generated TypeScript protocol checks, extension command acceptance,
+Rust and TypeScript formatting, and strict lint.
+
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, full extension formatting and lint,

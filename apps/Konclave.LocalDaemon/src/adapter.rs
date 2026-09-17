@@ -781,6 +781,10 @@ fn deliver(claimed: ClaimedRemoteEvent) -> DeliveredEvent {
                         "Konclave received a collaboration-policy revocation through a legacy adapter; no local authority changed.".to_string(),
                     )
                 }
+                ApplicationContent::RepeatPairingRequest(_)
+                | ApplicationContent::RepeatPairingResponse(_) => {
+                    unreachable!("internal application content cannot enter adapter delivery")
+                }
             },
             RemoteEventPayload::MemberAdded { device_id, role } => DeliveredPayload::MemberAdded {
                 device: *device_id.as_bytes(),

@@ -834,7 +834,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute_batch(
-                    "DROP TABLE daemon_short_code_pairing;
+                    "DROP TABLE daemon_repeat_pairing_state;
+                     DROP TABLE daemon_repeat_pairing;
+                     DROP TABLE daemon_internal_application_message;
+                     DROP TABLE daemon_trusted_device_binding_state;
+                     DROP TABLE daemon_trusted_device_binding;
+                     DROP TABLE daemon_short_code_pairing;
                      DROP TABLE daemon_directed_request_handling_state;
                      DROP TABLE daemon_directed_request_handling;
                      DROP TABLE daemon_collaboration_policy_operation_state;
@@ -867,7 +872,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;

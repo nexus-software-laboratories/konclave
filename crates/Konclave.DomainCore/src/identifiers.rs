@@ -134,6 +134,12 @@ define_fixed_bytes!(
     "short_code_capability_take_id"
 );
 define_fixed_bytes!(
+    /// Caller-stable identifier for one repeat-pairing bootstrap.
+    RepeatPairingOperationId,
+    16,
+    "repeat_pairing_operation_id"
+);
+define_fixed_bytes!(
     /// Code-derived non-secret relay locator for one short-code pairing attempt.
     ShortCodePairingLocator,
     32,

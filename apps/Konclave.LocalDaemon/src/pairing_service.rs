@@ -11,24 +11,30 @@ use KonclaveCryptographicCore::{
     verify_pairing_control,
 };
 use KonclaveDomainCore::{
-    AcknowledgeRequest, ConversationId, ConversationRole, DeviceId, JoinProof, PairingEnvelope,
-    PairingId, PairingInvitationPayload, PairingMessageId, PairingStage, PairingWelcomePayload,
-    ReplayRequest, StoredRelayEnvelope,
+    AcknowledgeRequest, ApplicationContent, ConversationId, ConversationRole, DeviceId, JoinProof,
+    MessageId, PairingEnvelope, PairingId, PairingInvitationPayload, PairingMessageId,
+    PairingStage, PairingWelcomePayload, RepeatPairingOperationId, RepeatPairingRequest,
+    RepeatPairingResponse, ReplayRequest, StoredRelayEnvelope, TrustedDeviceAlias,
 };
 use KonclaveProtocolContracts::{KonclaveProtocolError, v1};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::application::{
-    ApplicationService, ApplicationServiceError, validate_acknowledgment, validate_replay_page,
+    ApplicationService, ApplicationServiceError, SendApplicationRequest, validate_acknowledgment,
+    validate_replay_page,
 };
 use crate::conversation::{ConversationCoordinator, ConversationCoordinatorError};
 use crate::pairing::{
     PairingObservationResult, PairingOperationState, PairingStateError, generate_pairing_message_id,
 };
 use crate::persistence::pairing::{PairingCheckpoint, PairingPhase, PairingRole};
+use crate::persistence::repeat_pairing::{RepeatPairingCheckpoint, RepeatPairingPeerBinding};
 use crate::persistence::short_code_pairing::ShortCodePeerBinding;
 use crate::persistence::{ProfileStore, ProfileStoreError};
+use crate::repeat_pairing::{
+    RepeatPairingOperationState, RepeatPairingPhase, RepeatPairingRole, RepeatPairingStateError,
+};
 use crate::short_code_pairing::ShortCodeStateError;
 
 #[path = "short_code_pairing_service.rs"]
@@ -40,6 +46,7 @@ const ACTIVE_PAIRING_PAGE_SIZE: usize = 32;
 pub(crate) const MAX_AUTHORIZATION_WINDOW_SECONDS: u64 = 15 * 60;
 const COMPLETION_WINDOW_SECONDS: u64 = 300;
 const COMPENSATION_ENVELOPE_EXPIRY: u64 = i64::MAX as u64;
+const ACTIVE_REPEAT_PAIRING_PAGE_SIZE: usize = 16;
 
 /// Secret capability returned for the one explicit transfer operation.
 ///
@@ -72,6 +79,17 @@ pub(crate) struct PairingStatus {
     pub(crate) completion_deadline_unix_seconds: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RepeatPairingStatus {
+    pub(crate) operation_id: RepeatPairingOperationId,
+    pub(crate) role: RepeatPairingRole,
+    pub(crate) phase: RepeatPairingPhase,
+    pub(crate) peer_device_id: DeviceId,
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) pairing_id: Option<PairingId>,
+    pub(crate) deadline_unix_seconds: u64,
+}
+
 /// Harness-neutral pairing composition over durable daemon and relay services.
 pub(crate) struct PairingService<T> {
     conversations: ConversationCoordinator,
@@ -81,6 +99,7 @@ pub(crate) struct PairingService<T> {
     relay_endpoint: RelayEndpoint,
     mutation_locks: PairingMutationLocks,
     short_code_mutation_locks: short_code::ShortCodeMutationLocks,
+    repeat_pairing_mutation_locks: RepeatPairingMutationLocks,
 }
 
 impl<T> Clone for PairingService<T> {
@@ -93,6 +112,7 @@ impl<T> Clone for PairingService<T> {
             relay_endpoint: self.relay_endpoint.clone(),
             mutation_locks: self.mutation_locks.clone(),
             short_code_mutation_locks: self.short_code_mutation_locks.clone(),
+            repeat_pairing_mutation_locks: self.repeat_pairing_mutation_locks.clone(),
         }
     }
 }
@@ -100,6 +120,28 @@ impl<T> Clone for PairingService<T> {
 #[derive(Clone, Default)]
 struct PairingMutationLocks {
     gates: Arc<AsyncMutex<BTreeMap<PairingId, Weak<AsyncMutex<()>>>>>,
+}
+
+#[derive(Clone, Default)]
+struct RepeatPairingMutationLocks {
+    gates: Arc<AsyncMutex<BTreeMap<RepeatPairingOperationId, Weak<AsyncMutex<()>>>>>,
+}
+
+impl RepeatPairingMutationLocks {
+    async fn acquire(&self, operation_id: RepeatPairingOperationId) -> OwnedMutexGuard<()> {
+        let gate = {
+            let mut gates = self.gates.lock().await;
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            if let Some(gate) = gates.get(&operation_id).and_then(Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(AsyncMutex::new(()));
+                gates.insert(operation_id, Arc::downgrade(&gate));
+                gate
+            }
+        };
+        gate.lock_owned().await
+    }
 }
 
 impl PairingMutationLocks {
@@ -141,7 +183,360 @@ where
             relay_endpoint,
             mutation_locks: PairingMutationLocks::default(),
             short_code_mutation_locks: short_code::ShortCodeMutationLocks::default(),
+            repeat_pairing_mutation_locks: RepeatPairingMutationLocks::default(),
         }
+    }
+
+    pub(crate) async fn start_repeat_pairing(
+        &self,
+        alias: TrustedDeviceAlias,
+        expires_at_unix_seconds: u64,
+        now_unix_seconds: u64,
+    ) -> Result<RepeatPairingStatus, PairingServiceError> {
+        require_authorization_window(now_unix_seconds, expires_at_unix_seconds)?;
+        let conversations = self.conversations.clone();
+        let (resolution, identifiers) = tokio::task::spawn_blocking(move || {
+            let resolution = conversations.resolve_trusted_device_alias(&alias)?;
+            let identifiers = conversations.generate_repeat_pairing_identifiers()?;
+            Ok::<_, ConversationCoordinatorError>((resolution, identifiers))
+        })
+        .await
+        .map_err(|_| PairingServiceError::Task)??;
+        let (operation_id, conversation_id, routing_id) = identifiers;
+        let state = RepeatPairingOperationState::initiator(
+            operation_id,
+            resolution.bootstrap_conversation_id(),
+            conversation_id,
+            routing_id,
+            resolution.device_id(),
+            resolution.device_root_public_key(),
+            expires_at_unix_seconds,
+        );
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.reserve_repeat_pairing(&state, now_unix_seconds))
+            .await
+            .map_err(|_| PairingServiceError::Task)??;
+        self.sync_repeat_pairing(operation_id, now_unix_seconds)
+            .await
+    }
+
+    pub(crate) async fn repeat_pairing_status(
+        &self,
+        operation_id: RepeatPairingOperationId,
+    ) -> Result<RepeatPairingStatus, PairingServiceError> {
+        let checkpoint = self.load_repeat_pairing(operation_id).await?;
+        Ok(repeat_pairing_status(&checkpoint.state))
+    }
+
+    pub(crate) async fn sync_repeat_pairing(
+        &self,
+        operation_id: RepeatPairingOperationId,
+        now_unix_seconds: u64,
+    ) -> Result<RepeatPairingStatus, PairingServiceError> {
+        let _mutation = self
+            .repeat_pairing_mutation_locks
+            .acquire(operation_id)
+            .await;
+        self.sync_repeat_pairing_locked(operation_id, now_unix_seconds)
+            .await
+    }
+
+    pub(crate) async fn cancel_repeat_pairing(
+        &self,
+        operation_id: RepeatPairingOperationId,
+        now_unix_seconds: u64,
+    ) -> Result<RepeatPairingStatus, PairingServiceError> {
+        let _mutation = self
+            .repeat_pairing_mutation_locks
+            .acquire(operation_id)
+            .await;
+        let mut checkpoint = self.load_repeat_pairing(operation_id).await?;
+        if !checkpoint.state.phase.is_terminal()
+            && checkpoint.state.phase != RepeatPairingPhase::Cancelling
+        {
+            checkpoint.state.phase = RepeatPairingPhase::Cancelling;
+            self.checkpoint_repeat_pairing(checkpoint).await?;
+        }
+        self.sync_repeat_pairing_locked(operation_id, now_unix_seconds)
+            .await
+    }
+
+    async fn sync_repeat_pairing_locked(
+        &self,
+        operation_id: RepeatPairingOperationId,
+        now_unix_seconds: u64,
+    ) -> Result<RepeatPairingStatus, PairingServiceError> {
+        for _ in 0..8 {
+            let mut checkpoint = self.load_repeat_pairing(operation_id).await?;
+            if checkpoint.state.phase.is_terminal() {
+                return Ok(repeat_pairing_status(&checkpoint.state));
+            }
+            if checkpoint.state.phase == RepeatPairingPhase::Cancelling {
+                if let Some(pairing_id) = checkpoint.state.pairing_id {
+                    let pairing = self.status(pairing_id).await?;
+                    if pairing.phase == PairingPhase::Completed {
+                        checkpoint.state.phase = RepeatPairingPhase::Completed;
+                        self.checkpoint_repeat_pairing(checkpoint).await?;
+                        continue;
+                    }
+                    self.cancel(pairing_id, now_unix_seconds).await?;
+                }
+                checkpoint.state.phase = RepeatPairingPhase::Cancelled;
+                self.checkpoint_repeat_pairing(checkpoint).await?;
+                continue;
+            }
+            if now_unix_seconds >= checkpoint.state.deadline_unix_seconds {
+                checkpoint.state.phase = RepeatPairingPhase::Cancelling;
+                self.checkpoint_repeat_pairing(checkpoint).await?;
+                continue;
+            }
+            let conversations = self.conversations.clone();
+            let bootstrap_conversation_id = checkpoint.state.bootstrap_conversation_id;
+            let peer_device_id = checkpoint.state.peer_device_id;
+            let peer_root_public_key = checkpoint.state.peer_root_public_key;
+            let peer_evidence = tokio::task::spawn_blocking(move || {
+                conversations.verify_repeat_pairing_peer(
+                    bootstrap_conversation_id,
+                    peer_device_id,
+                    peer_root_public_key,
+                )
+            })
+            .await
+            .map_err(|_| PairingServiceError::Task)?;
+            match peer_evidence {
+                Ok(()) => {}
+                Err(
+                    ConversationCoordinatorError::TrustedDeviceRemoved
+                    | ConversationCoordinatorError::TrustedDeviceRootMismatch
+                    | ConversationCoordinatorError::TrustedDeviceRepeatPairingUnsupported,
+                ) => {
+                    checkpoint.state.phase = RepeatPairingPhase::Cancelling;
+                    self.checkpoint_repeat_pairing(checkpoint).await?;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            match checkpoint.state.phase {
+                RepeatPairingPhase::InitiatorSendingRequest => {
+                    let request = RepeatPairingRequest::new(
+                        operation_id,
+                        checkpoint.state.peer_device_id,
+                        checkpoint.state.new_conversation_id,
+                        checkpoint.state.deadline_unix_seconds,
+                    )
+                    .map_err(KonclaveProtocolError::from)?;
+                    self.applications
+                        .send(SendApplicationRequest {
+                            conversation_id: checkpoint.state.bootstrap_conversation_id,
+                            message_id: repeat_pairing_request_message_id(operation_id),
+                            content: ApplicationContent::repeat_pairing_request(request),
+                            reply_to: None,
+                            collaboration_action_authorization: None,
+                            sent_at_unix_milliseconds: unix_milliseconds(now_unix_seconds)?,
+                            now_unix_seconds,
+                            expires_at_unix_seconds: checkpoint.state.deadline_unix_seconds,
+                        })
+                        .await?;
+                    let current = self.load_repeat_pairing(operation_id).await?;
+                    if current.generation == checkpoint.generation
+                        && current.state.phase == RepeatPairingPhase::InitiatorSendingRequest
+                    {
+                        checkpoint.state.phase = RepeatPairingPhase::InitiatorAwaitingResponse;
+                        self.checkpoint_repeat_pairing(checkpoint).await?;
+                        continue;
+                    }
+                }
+                RepeatPairingPhase::InitiatorAwaitingResponse => {
+                    return Ok(repeat_pairing_status(&checkpoint.state));
+                }
+                RepeatPairingPhase::InitiatorRedeemingCapability => {
+                    let capability_text = checkpoint
+                        .state
+                        .capability
+                        .as_ref()
+                        .ok_or(PairingServiceError::InvalidTransition)?;
+                    let capability =
+                        match PairingCapability::decode(capability_text, now_unix_seconds) {
+                            Ok(capability) => capability,
+                            Err(_) => {
+                                checkpoint.state.phase = RepeatPairingPhase::Cancelling;
+                                self.checkpoint_repeat_pairing(checkpoint).await?;
+                                continue;
+                            }
+                        };
+                    if capability.offer().device_id() != checkpoint.state.peer_device_id
+                        || capability.offer().device_root_public_key()
+                            != checkpoint.state.peer_root_public_key
+                        || capability.offer().requested_role() != ConversationRole::Member
+                        || capability.offer().expires_at_unix_seconds()
+                            != checkpoint.state.deadline_unix_seconds
+                        || capability.relay_endpoint().as_str() != self.relay_endpoint.as_str()
+                    {
+                        checkpoint.state.phase = RepeatPairingPhase::Cancelling;
+                        self.checkpoint_repeat_pairing(checkpoint).await?;
+                        continue;
+                    }
+                    let pairing_id = capability.offer().pairing_id();
+                    self.redeem_decoded_capability(capability, now_unix_seconds)
+                        .await?;
+                    checkpoint.state.pairing_id = Some(pairing_id);
+                    checkpoint.state.phase = RepeatPairingPhase::InitiatorCreatingConversation;
+                    self.checkpoint_repeat_pairing(checkpoint).await?;
+                    continue;
+                }
+                RepeatPairingPhase::InitiatorCreatingConversation => {
+                    let conversations = self.conversations.clone();
+                    let conversation_id = checkpoint.state.new_conversation_id;
+                    let routing_id = checkpoint
+                        .state
+                        .new_routing_id
+                        .ok_or(PairingServiceError::InvalidTransition)?;
+                    tokio::task::spawn_blocking(move || {
+                        conversations.create_with_identifiers(conversation_id, routing_id)
+                    })
+                    .await
+                    .map_err(|_| PairingServiceError::Task)??;
+                    checkpoint.state.phase = RepeatPairingPhase::InitiatorPairing;
+                    self.checkpoint_repeat_pairing(checkpoint).await?;
+                    continue;
+                }
+                RepeatPairingPhase::InitiatorPairing => {
+                    let pairing_id = checkpoint
+                        .state
+                        .pairing_id
+                        .ok_or(PairingServiceError::InvalidTransition)?;
+                    let pairing = self.status(pairing_id).await?;
+                    if pairing.phase == PairingPhase::Completed {
+                        checkpoint.state.phase = RepeatPairingPhase::Completed;
+                        self.checkpoint_repeat_pairing(checkpoint).await?;
+                        continue;
+                    }
+                    if pairing.phase == PairingPhase::InviterAwaitingAuthorization {
+                        self.authorize_joiner(
+                            pairing_id,
+                            checkpoint.state.new_conversation_id,
+                            ConversationRole::Member,
+                            now_unix_seconds,
+                        )
+                        .await?;
+                    } else {
+                        self.replay_once(pairing_id, now_unix_seconds).await?;
+                    }
+                    return self.repeat_pairing_status(operation_id).await;
+                }
+                RepeatPairingPhase::ResponderIssuingCapability => {
+                    let capability = self
+                        .issue_capability(
+                            ConversationRole::Member,
+                            checkpoint.state.deadline_unix_seconds,
+                            now_unix_seconds,
+                        )
+                        .await?;
+                    checkpoint.state.capability = Some(zeroize::Zeroizing::new(
+                        capability.encode()?.as_str().to_owned(),
+                    ));
+                    checkpoint.state.phase = RepeatPairingPhase::ResponderReservingPairing;
+                    self.checkpoint_repeat_pairing(checkpoint).await?;
+                    continue;
+                }
+                RepeatPairingPhase::ResponderReservingPairing => {
+                    let capability = PairingCapability::decode(
+                        checkpoint
+                            .state
+                            .capability
+                            .as_ref()
+                            .ok_or(PairingServiceError::InvalidTransition)?,
+                        now_unix_seconds,
+                    )?;
+                    let pairing_id = capability.offer().pairing_id();
+                    self.reserve_joiner_capability(capability).await?;
+                    checkpoint.state.pairing_id = Some(pairing_id);
+                    checkpoint.state.phase = RepeatPairingPhase::ResponderSendingResponse;
+                    self.checkpoint_repeat_pairing(checkpoint).await?;
+                    continue;
+                }
+                RepeatPairingPhase::ResponderSendingResponse => {
+                    let response = RepeatPairingResponse::new(
+                        operation_id,
+                        checkpoint.state.peer_device_id,
+                        checkpoint.state.new_conversation_id,
+                        checkpoint
+                            .state
+                            .capability
+                            .as_ref()
+                            .ok_or(PairingServiceError::InvalidTransition)?
+                            .as_str(),
+                    )
+                    .map_err(KonclaveProtocolError::from)?;
+                    self.applications
+                        .send(SendApplicationRequest {
+                            conversation_id: checkpoint.state.bootstrap_conversation_id,
+                            message_id: repeat_pairing_response_message_id(operation_id),
+                            content: ApplicationContent::repeat_pairing_response(response),
+                            reply_to: Some(repeat_pairing_request_message_id(operation_id)),
+                            collaboration_action_authorization: None,
+                            sent_at_unix_milliseconds: unix_milliseconds(now_unix_seconds)?,
+                            now_unix_seconds,
+                            expires_at_unix_seconds: checkpoint.state.deadline_unix_seconds,
+                        })
+                        .await?;
+                    checkpoint.state.phase = RepeatPairingPhase::ResponderPairing;
+                    self.checkpoint_repeat_pairing(checkpoint).await?;
+                    continue;
+                }
+                RepeatPairingPhase::ResponderPairing => {
+                    let pairing_id = checkpoint
+                        .state
+                        .pairing_id
+                        .ok_or(PairingServiceError::InvalidTransition)?;
+                    let pairing = self.status(pairing_id).await?;
+                    if pairing.phase == PairingPhase::Completed {
+                        checkpoint.state.phase = RepeatPairingPhase::Completed;
+                        self.checkpoint_repeat_pairing(checkpoint).await?;
+                        continue;
+                    }
+                    if pairing.phase == PairingPhase::JoinerAwaitingInviterAuthorization {
+                        self.authorize_inviter(
+                            pairing_id,
+                            checkpoint.state.peer_device_id,
+                            checkpoint.state.new_conversation_id,
+                            ConversationRole::Member,
+                            now_unix_seconds,
+                        )
+                        .await?;
+                    } else {
+                        self.replay_once(pairing_id, now_unix_seconds).await?;
+                    }
+                    return self.repeat_pairing_status(operation_id).await;
+                }
+                RepeatPairingPhase::Completed
+                | RepeatPairingPhase::Cancelling
+                | RepeatPairingPhase::Cancelled => {}
+            }
+        }
+        Err(PairingServiceError::InvalidTransition)
+    }
+
+    pub(crate) async fn sync_active_repeat_pairings_once(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, PairingServiceError> {
+        let _admitted = self
+            .conversations
+            .activity()
+            .try_begin()
+            .map_err(|_| PairingServiceError::ProfileClosing)?;
+        let store = Arc::clone(&self.store);
+        let operation_ids = tokio::task::spawn_blocking(move || {
+            store.active_repeat_pairing_ids(None, ACTIVE_REPEAT_PAIRING_PAGE_SIZE)
+        })
+        .await
+        .map_err(|_| PairingServiceError::Task)??;
+        for operation_id in &operation_ids {
+            self.sync_repeat_pairing(*operation_id, now_unix_seconds)
+                .await?;
+        }
+        Ok(operation_ids.len())
     }
 
     /// Issues and durably reserves one joiner capability.
@@ -433,6 +828,11 @@ where
             tokio::task::spawn_blocking(move || store.short_code_peer_binding(pairing_id))
                 .await
                 .map_err(|_| PairingServiceError::Task)??;
+        let store = Arc::clone(&self.store);
+        let repeat_pairing_binding =
+            tokio::task::spawn_blocking(move || store.repeat_pairing_peer_binding(pairing_id))
+                .await
+                .map_err(|_| PairingServiceError::Task)??;
         let checkpoint = self.load_checkpoint(pairing_id).await?;
         if checkpoint.role != PairingRole::Inviter {
             return Err(PairingServiceError::InvalidTransition);
@@ -443,6 +843,18 @@ where
             ShortCodePeerBinding::Verified(peer)
                 if peer == state.capability().offer().device_id() => {}
             ShortCodePeerBinding::Verified(_) | ShortCodePeerBinding::Blocked => {
+                return Err(PairingServiceError::AuthorizationMismatch);
+            }
+        }
+        match repeat_pairing_binding {
+            RepeatPairingPeerBinding::Unlinked => {}
+            RepeatPairingPeerBinding::Verified {
+                peer_device_id,
+                conversation_id: expected_conversation_id,
+            } if peer_device_id == state.capability().offer().device_id()
+                && expected_conversation_id == conversation_id
+                && granted_role == ConversationRole::Member => {}
+            RepeatPairingPeerBinding::Verified { .. } | RepeatPairingPeerBinding::Blocked => {
                 return Err(PairingServiceError::AuthorizationMismatch);
             }
         }
@@ -531,10 +943,27 @@ where
             tokio::task::spawn_blocking(move || store.short_code_peer_binding(pairing_id))
                 .await
                 .map_err(|_| PairingServiceError::Task)??;
+        let store = Arc::clone(&self.store);
+        let repeat_pairing_binding =
+            tokio::task::spawn_blocking(move || store.repeat_pairing_peer_binding(pairing_id))
+                .await
+                .map_err(|_| PairingServiceError::Task)??;
         match short_code_binding {
             ShortCodePeerBinding::Unlinked => {}
             ShortCodePeerBinding::Verified(peer) if peer == expected_inviter_device_id => {}
             ShortCodePeerBinding::Verified(_) | ShortCodePeerBinding::Blocked => {
+                return Err(PairingServiceError::AuthorizationMismatch);
+            }
+        }
+        match repeat_pairing_binding {
+            RepeatPairingPeerBinding::Unlinked => {}
+            RepeatPairingPeerBinding::Verified {
+                peer_device_id,
+                conversation_id,
+            } if peer_device_id == expected_inviter_device_id
+                && conversation_id == expected_conversation_id
+                && expected_granted_role == ConversationRole::Member => {}
+            RepeatPairingPeerBinding::Verified { .. } | RepeatPairingPeerBinding::Blocked => {
                 return Err(PairingServiceError::AuthorizationMismatch);
             }
         }
@@ -1285,6 +1714,32 @@ where
         Ok(())
     }
 
+    async fn load_repeat_pairing(
+        &self,
+        operation_id: RepeatPairingOperationId,
+    ) -> Result<RepeatPairingCheckpoint, PairingServiceError> {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.load_repeat_pairing(operation_id))
+            .await
+            .map_err(|_| PairingServiceError::Task)?
+            .map_err(Into::into)
+    }
+
+    async fn checkpoint_repeat_pairing(
+        &self,
+        checkpoint: RepeatPairingCheckpoint,
+    ) -> Result<(), PairingServiceError> {
+        let store = Arc::clone(&self.store);
+        let operation_id = checkpoint.state.operation_id;
+        let generation = checkpoint.generation;
+        tokio::task::spawn_blocking(move || {
+            store.checkpoint_repeat_pairing(operation_id, generation, &checkpoint.state)
+        })
+        .await
+        .map_err(|_| PairingServiceError::Task)??;
+        Ok(())
+    }
+
     async fn load_checkpoint(
         &self,
         pairing_id: PairingId,
@@ -1711,6 +2166,34 @@ const fn is_cancellable_precommit_phase(phase: PairingPhase) -> bool {
     )
 }
 
+fn repeat_pairing_status(state: &RepeatPairingOperationState) -> RepeatPairingStatus {
+    RepeatPairingStatus {
+        operation_id: state.operation_id,
+        role: state.role,
+        phase: state.phase,
+        peer_device_id: state.peer_device_id,
+        conversation_id: state.new_conversation_id,
+        pairing_id: state.pairing_id,
+        deadline_unix_seconds: state.deadline_unix_seconds,
+    }
+}
+
+fn repeat_pairing_request_message_id(operation_id: RepeatPairingOperationId) -> MessageId {
+    MessageId::from_bytes(operation_id.into_bytes())
+}
+
+fn repeat_pairing_response_message_id(operation_id: RepeatPairingOperationId) -> MessageId {
+    let mut bytes = operation_id.into_bytes();
+    bytes[0] ^= 0x80;
+    MessageId::from_bytes(bytes)
+}
+
+fn unix_milliseconds(seconds: u64) -> Result<u64, PairingServiceError> {
+    seconds
+        .checked_mul(1_000)
+        .ok_or(PairingServiceError::InvalidTransition)
+}
+
 /// Stable failures from durable pairing orchestration.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -1753,6 +2236,8 @@ pub(crate) enum PairingServiceError {
     State(#[from] PairingStateError),
     #[error(transparent)]
     ShortCodeState(#[from] ShortCodeStateError),
+    #[error(transparent)]
+    RepeatPairingState(#[from] RepeatPairingStateError),
 }
 
 #[cfg(test)]
@@ -1774,7 +2259,7 @@ mod tests {
     use tokio::sync::{Notify, oneshot};
 
     use super::*;
-    use crate::conversation::tests::open_coordinator;
+    use crate::conversation::tests::{open_coordinator, paired_coordinators};
 
     const NOW: u64 = 1_700_000_000;
     const DEADLINE: u64 = NOW + 300;
@@ -1786,6 +2271,7 @@ mod tests {
         fail_next_rendezvous_publish: Arc<AtomicBool>,
         fail_next_pairing_submit: Arc<AtomicBool>,
         fail_next_group_commit_submit: Arc<AtomicBool>,
+        fail_after_next_group_application_acceptance: Arc<AtomicBool>,
         fail_after_next_group_commit_acceptance: Arc<AtomicBool>,
         pause_next_group_commit_submit: Arc<AtomicBool>,
         group_commit_accepted: Arc<Notify>,
@@ -1899,7 +2385,12 @@ mod tests {
             {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
-            let (stored, pause_after_acceptance, fail_after_acceptance) = {
+            let (
+                stored,
+                pause_after_acceptance,
+                fail_after_acceptance,
+                fail_group_application_after_acceptance,
+            ) = {
                 let mut routes = self
                     .routes
                     .lock()
@@ -1931,9 +2422,19 @@ mod tests {
                     && self
                         .fail_after_next_group_commit_acceptance
                         .swap(false, Ordering::SeqCst);
-                (stored, pause_after_acceptance, fail_after_acceptance)
+                let fail_group_application_after_acceptance = envelope.delivery_class()
+                    == DeliveryClass::GroupApplication
+                    && self
+                        .fail_after_next_group_application_acceptance
+                        .swap(false, Ordering::SeqCst);
+                (
+                    stored,
+                    pause_after_acceptance,
+                    fail_after_acceptance,
+                    fail_group_application_after_acceptance,
+                )
             };
-            if fail_after_acceptance {
+            if fail_after_acceptance || fail_group_application_after_acceptance {
                 return Err(KonclaveClientError::TransportUnavailable);
             }
             if pause_after_acceptance {
@@ -2043,6 +2544,246 @@ mod tests {
         let applications =
             ApplicationService::from_shared(conversations.clone(), Arc::clone(&relay));
         PairingService::new(conversations, applications, endpoint.clone())
+    }
+
+    #[tokio::test]
+    async fn trusted_alias_bootstrap_completes_a_second_conversation_without_user_handoff() {
+        let (root, alice, bob, bootstrap_conversation_id, alice_device_id) = paired_coordinators();
+        let bob_device_id = bob.device_id().unwrap();
+        alice
+            .set_trusted_device_alias(
+                bob_device_id,
+                TrustedDeviceAlias::parse("alienware").unwrap(),
+            )
+            .unwrap();
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let alice_service = service(alice.clone(), Arc::clone(&relay), &endpoint);
+        let bob_service = service(bob.clone(), Arc::clone(&relay), &endpoint);
+
+        let started = alice_service
+            .start_repeat_pairing(
+                TrustedDeviceAlias::parse("alienware").unwrap(),
+                DEADLINE,
+                NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.phase, RepeatPairingPhase::InitiatorAwaitingResponse);
+        drop(alice_service);
+        drop(alice);
+        let alice = open_coordinator(root.path(), "alice");
+        alice.recover().unwrap();
+        let alice_service = service(alice.clone(), Arc::clone(&relay), &endpoint);
+        assert!(
+            bob_service
+                .applications
+                .replay_once(bootstrap_conversation_id, 100, NOW)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        relay
+            .fail_after_next_group_application_acceptance
+            .store(true, Ordering::SeqCst);
+        assert!(matches!(
+            bob_service.sync_active_repeat_pairings_once(NOW).await,
+            Err(PairingServiceError::Application(
+                ApplicationServiceError::Relay(KonclaveClientError::TransportUnavailable)
+            ))
+        ));
+        bob_service
+            .sync_active_repeat_pairings_once(NOW)
+            .await
+            .unwrap();
+        assert_eq!(
+            bob_service
+                .repeat_pairing_status(started.operation_id)
+                .await
+                .unwrap()
+                .phase,
+            RepeatPairingPhase::ResponderPairing
+        );
+        assert!(
+            alice_service
+                .applications
+                .replay_once(bootstrap_conversation_id, 100, NOW)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert_eq!(
+            alice_service
+                .repeat_pairing_status(started.operation_id)
+                .await
+                .unwrap()
+                .phase,
+            RepeatPairingPhase::InitiatorRedeemingCapability
+        );
+        assert_eq!(alice.remote_event_counts().unwrap(), (0, 0));
+        assert_eq!(bob.remote_event_counts().unwrap(), (0, 0));
+
+        for _ in 0..12 {
+            alice_service.sync_active_once(NOW).await.unwrap();
+            alice_service
+                .sync_active_repeat_pairings_once(NOW)
+                .await
+                .unwrap();
+            bob_service.sync_active_once(NOW).await.unwrap();
+            bob_service
+                .sync_active_repeat_pairings_once(NOW)
+                .await
+                .unwrap();
+            let alice_status = alice_service
+                .repeat_pairing_status(started.operation_id)
+                .await
+                .unwrap();
+            if alice_status.phase == RepeatPairingPhase::Completed {
+                break;
+            }
+        }
+        let alice_status = alice_service
+            .repeat_pairing_status(started.operation_id)
+            .await
+            .unwrap();
+        assert_eq!(alice_status.phase, RepeatPairingPhase::Completed);
+        let new_conversation_id = alice_status.conversation_id;
+        let alice_conversation = alice.open(new_conversation_id).unwrap();
+        let bob_conversation = bob.open(new_conversation_id).unwrap();
+        assert_eq!(
+            alice_conversation.group.state(),
+            bob_conversation.group.state()
+        );
+        assert_eq!(
+            alice_conversation
+                .group
+                .state()
+                .member(bob_device_id)
+                .map(KonclaveDomainCore::Member::role),
+            Some(ConversationRole::Member)
+        );
+        assert_eq!(
+            bob_conversation
+                .group
+                .state()
+                .member(alice_device_id)
+                .map(KonclaveDomainCore::Member::role),
+            Some(ConversationRole::Administrator)
+        );
+        assert!(
+            alice_service
+                .applications
+                .read(bootstrap_conversation_id, 0, 100)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert!(
+            bob_service
+                .applications
+                .read(bootstrap_conversation_id, 0, 100)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+
+        alice_service
+            .applications
+            .send(SendApplicationRequest {
+                conversation_id: new_conversation_id,
+                message_id: MessageId::from_bytes([99; 16]),
+                content: ApplicationContent::text("repeat pairing works").unwrap(),
+                reply_to: None,
+                collaboration_action_authorization: None,
+                sent_at_unix_milliseconds: unix_milliseconds(NOW).unwrap(),
+                now_unix_seconds: NOW,
+                expires_at_unix_seconds: DEADLINE,
+            })
+            .await
+            .unwrap();
+        let received = bob_service
+            .applications
+            .replay_once(new_conversation_id, 100, NOW)
+            .await
+            .unwrap();
+        assert_eq!(received.messages.len(), 1);
+        assert!(matches!(
+            received.messages[0].message.content(),
+            ApplicationContent::Text(body) if body == "repeat pairing works"
+        ));
+        alice_service
+            .store
+            .delete_internal_application_markers_for_test(bootstrap_conversation_id)
+            .unwrap();
+        assert!(matches!(
+            alice_service
+                .applications
+                .read(bootstrap_conversation_id, 0, 100)
+                .await,
+            Err(ApplicationServiceError::Conversation(
+                ConversationCoordinatorError::Profile(ProfileStoreError::CorruptData)
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_repeat_pairing_capability_cancels_only_that_operation() {
+        let (_root, alice, bob, bootstrap_conversation_id, alice_device_id) = paired_coordinators();
+        let bob_device_id = bob.device_id().unwrap();
+        alice
+            .set_trusted_device_alias(
+                bob_device_id,
+                TrustedDeviceAlias::parse("alienware").unwrap(),
+            )
+            .unwrap();
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let alice_service = service(alice, Arc::clone(&relay), &endpoint);
+        let bob_service = service(bob, Arc::clone(&relay), &endpoint);
+        let started = alice_service
+            .start_repeat_pairing(
+                TrustedDeviceAlias::parse("alienware").unwrap(),
+                DEADLINE,
+                NOW,
+            )
+            .await
+            .unwrap();
+        bob_service
+            .applications
+            .send(SendApplicationRequest {
+                conversation_id: bootstrap_conversation_id,
+                message_id: repeat_pairing_response_message_id(started.operation_id),
+                content: ApplicationContent::repeat_pairing_response(
+                    RepeatPairingResponse::new(
+                        started.operation_id,
+                        alice_device_id,
+                        started.conversation_id,
+                        "not-a-capability",
+                    )
+                    .unwrap(),
+                ),
+                reply_to: Some(repeat_pairing_request_message_id(started.operation_id)),
+                collaboration_action_authorization: None,
+                sent_at_unix_milliseconds: unix_milliseconds(NOW).unwrap(),
+                now_unix_seconds: NOW,
+                expires_at_unix_seconds: DEADLINE,
+            })
+            .await
+            .unwrap();
+        alice_service
+            .applications
+            .replay_once(bootstrap_conversation_id, 100, NOW)
+            .await
+            .unwrap();
+        let cancelled = alice_service
+            .sync_repeat_pairing(started.operation_id, NOW)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.phase, RepeatPairingPhase::Cancelled);
     }
 
     struct PairingFixture {

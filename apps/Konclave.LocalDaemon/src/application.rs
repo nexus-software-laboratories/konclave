@@ -988,13 +988,18 @@ where
             let conversations = self.conversations.clone();
             match stored.envelope().delivery_class() {
                 KonclaveDomainCore::DeliveryClass::GroupApplication => {
-                    messages.push(
-                        tokio::task::spawn_blocking(move || {
-                            conversations.process_inbound_application(conversation_id, &stored)
-                        })
-                        .await
-                        .map_err(|_| ApplicationServiceError::Task)??,
-                    );
+                    let processed = tokio::task::spawn_blocking(move || {
+                        conversations.process_inbound_application_at(
+                            conversation_id,
+                            &stored,
+                            now_unix_seconds,
+                        )
+                    })
+                    .await
+                    .map_err(|_| ApplicationServiceError::Task)??;
+                    if !processed.message.content().is_internal() {
+                        messages.push(processed);
+                    }
                 }
                 KonclaveDomainCore::DeliveryClass::GroupCommit => {
                     tokio::task::spawn_blocking(move || {

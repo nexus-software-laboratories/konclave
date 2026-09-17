@@ -1,6 +1,7 @@
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, MAX_APPLICATION_MESSAGE_BYTES,
-    MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
+    RepeatPairingOperationId, RepeatPairingRequest, RepeatPairingResponse,
 };
 
 use crate::KonclaveProtocolError;
@@ -34,6 +35,32 @@ pub fn encode_application_message(
                 target_device_id: Some(device_id_to_wire(request.target_device_id())),
                 body: request.body().to_owned(),
             })
+        }
+        ApplicationContent::RepeatPairingRequest(request) => {
+            wire::application_message::Content::RepeatPairingRequest(
+                wire::RepeatPairingRequestContent {
+                    operation_id: Some(repeat_pairing_operation_id_to_wire(request.operation_id())),
+                    target_device_id: Some(device_id_to_wire(request.target_device_id())),
+                    new_conversation_id: Some(crate::v1::common::conversation_id_to_wire(
+                        request.new_conversation_id(),
+                    )),
+                    expires_at_unix_seconds: request.expires_at_unix_seconds(),
+                },
+            )
+        }
+        ApplicationContent::RepeatPairingResponse(response) => {
+            wire::application_message::Content::RepeatPairingResponse(
+                wire::RepeatPairingResponseContent {
+                    operation_id: Some(repeat_pairing_operation_id_to_wire(
+                        response.operation_id(),
+                    )),
+                    requester_device_id: Some(device_id_to_wire(response.requester_device_id())),
+                    new_conversation_id: Some(crate::v1::common::conversation_id_to_wire(
+                        response.new_conversation_id(),
+                    )),
+                    capability: response.capability().to_owned(),
+                },
+            )
         }
         ApplicationContent::CollaborationPolicyProposal(proposal) => {
             wire::application_message::Content::CollaborationPolicyProposal(proposal_to_wire(
@@ -80,6 +107,15 @@ pub fn decode_application_message(
         MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
         "collaboration_policy_bundle",
     )?;
+    require_nested_bytes_field_limit(
+        bytes,
+        MAX_APPLICATION_MESSAGE_BYTES,
+        CONTRACT,
+        16,
+        4,
+        MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
+        "repeat_pairing_capability",
+    )?;
     let wire: wire::ApplicationMessage =
         decode_bounded(bytes, MAX_APPLICATION_MESSAGE_BYTES, CONTRACT)?;
     let content = match wire.content {
@@ -91,6 +127,22 @@ pub fn decode_application_message(
                 device_id_from_wire(request.target_device_id)?,
                 request.body,
             )?
+        }
+        Some(wire::application_message::Content::RepeatPairingRequest(request)) => {
+            ApplicationContent::repeat_pairing_request(RepeatPairingRequest::new(
+                repeat_pairing_operation_id_from_wire(request.operation_id)?,
+                device_id_from_wire(request.target_device_id)?,
+                crate::v1::common::conversation_id_from_wire(request.new_conversation_id)?,
+                request.expires_at_unix_seconds,
+            )?)
+        }
+        Some(wire::application_message::Content::RepeatPairingResponse(response)) => {
+            ApplicationContent::repeat_pairing_response(RepeatPairingResponse::new(
+                repeat_pairing_operation_id_from_wire(response.operation_id)?,
+                device_id_from_wire(response.requester_device_id)?,
+                crate::v1::common::conversation_id_from_wire(response.new_conversation_id)?,
+                response.capability,
+            )?)
         }
         Some(wire::application_message::Content::CollaborationPolicyProposal(proposal)) => {
             ApplicationContent::collaboration_policy_proposal(proposal_from_wire(proposal)?)
@@ -117,4 +169,21 @@ pub fn decode_application_message(
             .transpose()?,
         content,
     )?)
+}
+
+fn repeat_pairing_operation_id_to_wire(
+    value: RepeatPairingOperationId,
+) -> wire::RepeatPairingOperationId {
+    wire::RepeatPairingOperationId {
+        value: prost::bytes::Bytes::copy_from_slice(value.as_bytes()),
+    }
+}
+
+fn repeat_pairing_operation_id_from_wire(
+    value: Option<wire::RepeatPairingOperationId>,
+) -> Result<RepeatPairingOperationId, KonclaveProtocolError> {
+    let value = value.ok_or(KonclaveProtocolError::MissingField {
+        field: "repeat_pairing_operation_id",
+    })?;
+    Ok(RepeatPairingOperationId::from_slice(&value.value)?)
 }

@@ -30,6 +30,7 @@ automatic administrator grants, or aliases on the wire.
 ## Verified facts
 
 - A current conversation stores root-verified credential bindings for each member.
+- Credential bindings carry root-signed application capability bits.
 - The existing pairing state machine already owns capability issuance, invitation,
   JoinProof, Commit, Welcome, completion, cancellation, replay, and compensation.
 - Application messages inside an existing conversation are MLS authenticated and
@@ -80,8 +81,9 @@ authenticated by current conversation state.
 
 Before an alias is used, the daemon scans current authenticated conversation bindings.
 Resolution succeeds only when at least one current conversation contains the exact
-stored `DeviceId` and root key. A missing device or any contradictory root for the
-same identifier fails closed.
+stored `DeviceId` and root key and every current member advertises the root-signed
+repeat-pairing application capability. A missing device, any contradictory root for
+the same identifier, or only legacy capability sets fails closed.
 
 When several conversations qualify, the lowest canonical `ConversationId` is selected
 deterministically as the bootstrap channel. The selected identifier is local
@@ -89,14 +91,17 @@ orchestration state, not new protocol authority.
 
 ### Request a fresh capability over the existing MLS conversation
 
-`/konclave new <alias>` creates a new local conversation, then sends one bounded,
-targeted repeat-pairing request through the selected existing MLS conversation. The
-target daemon authenticates the actual MLS sender and exact target before issuing a
-fresh, short-lived `member` capability. Its response is directed to the initiating
-device through that same authenticated conversation.
+`/konclave new <alias>` durably reserves an operation plus fresh conversation and
+routing identifiers, then sends one bounded, targeted repeat-pairing request through
+the selected existing MLS conversation. The empty conversation is not created yet,
+which avoids leaving one behind when the peer never responds. The target daemon
+authenticates the actual MLS sender and exact target before issuing a fresh,
+short-lived `member` capability. Its response is directed to the initiating device
+through that same authenticated conversation.
 
 The initiator verifies the capability's root-signed device offer against the alias,
-redeems it, and authorizes the target into the newly created conversation. The target
+redeems it, creates the preselected conversation idempotently, and authorizes the
+target into that conversation. The target
 authorizes the inviter only when the invitation identity matches the authenticated
 bootstrap request. The existing pairing state machine then remains authoritative for
 all invitation, proof, Commit, Welcome, completion, replay, cancellation, and
@@ -109,9 +114,15 @@ projected to agent/model delivery, and never interpreted as free-form text.
 
 Aliases cannot select a role. Repeat pairing always requests and grants `member`.
 Every operation has a caller-stable identifier, finite deadline, bounded active count,
-and exact retry state. Removing the peer from all shared conversations or observing a
-different root invalidates resolution before any capability or new conversation
-membership side effect.
+and exact retry state. The daemon retains at most 16 active and 64 total operations,
+pruning expired terminal records before reserving new work. Removing the peer from all
+shared conversations or observing a different root invalidates resolution before any
+capability is accepted or new conversation membership side effect occurs.
+
+The additive application control variants are sent only through a conversation where
+every current member advertises support. Existing conversations created before that
+capability was signed are ineligible; a fresh first-contact conversation after both
+devices upgrade establishes the required negotiation.
 
 ## Serious alternatives
 
@@ -174,6 +185,8 @@ Continued compliance is demonstrated by:
   bootstrap-selection tests;
 - sealed profile-scoped address-book persistence and startup verification;
 - internal control messages that authenticate actual MLS sender and exact target;
+- root-signed capability negotiation across every recipient before internal control
+  is sent;
 - tests proving aliases never enter protocol identity, relay metadata, logs, or model
   delivery;
 - response-loss, restart, duplicate, expiry, removal, and root-change tests;

@@ -128,6 +128,10 @@ pub enum KonclaveDomainError {
     /// No current authenticated conversation contains the stored device.
     #[error("trusted device is no longer a current conversation member")]
     TrustedDeviceRemoved,
+
+    /// Current membership exists but cannot safely decode repeat-pairing control.
+    #[error("trusted device has no conversation with repeat-pairing capability")]
+    TrustedDeviceRepeatPairingUnsupported,
 }
 
 impl KonclaveDomainError {
@@ -163,6 +167,9 @@ impl KonclaveDomainError {
             Self::TrustedDeviceAliasConflict => "trusted_device_alias_conflict",
             Self::TrustedDeviceRootMismatch => "trusted_device_root_mismatch",
             Self::TrustedDeviceRemoved => "trusted_device_removed",
+            Self::TrustedDeviceRepeatPairingUnsupported => {
+                "trusted_device_repeat_pairing_unsupported"
+            }
         }
     }
 }

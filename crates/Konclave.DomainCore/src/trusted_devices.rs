@@ -97,6 +97,7 @@ pub struct TrustedDeviceEvidence {
     conversation_id: ConversationId,
     device_id: DeviceId,
     device_root_public_key: Ed25519PublicKey,
+    conversation_supports_repeat_pairing: bool,
 }
 
 impl TrustedDeviceEvidence {
@@ -106,11 +107,13 @@ impl TrustedDeviceEvidence {
         conversation_id: ConversationId,
         device_id: DeviceId,
         device_root_public_key: Ed25519PublicKey,
+        conversation_supports_repeat_pairing: bool,
     ) -> Self {
         Self {
             conversation_id,
             device_id,
             device_root_public_key,
+            conversation_supports_repeat_pairing,
         }
     }
 
@@ -131,6 +134,12 @@ impl TrustedDeviceEvidence {
     pub const fn device_root_public_key(self) -> Ed25519PublicKey {
         self.device_root_public_key
     }
+
+    /// Returns whether every current member can decode repeat-pairing control.
+    #[must_use]
+    pub const fn conversation_supports_repeat_pairing(self) -> bool {
+        self.conversation_supports_repeat_pairing
+    }
 }
 
 /// Current trust status of one stored alias binding.
@@ -142,6 +151,8 @@ pub enum TrustedDeviceBindingStatus {
     Removed,
     /// Current evidence reuses the identifier with another root key.
     RootMismatch,
+    /// The root is current, but no shared conversation negotiated repeat pairing.
+    Unsupported,
 }
 
 /// Pure durable action for one explicit alias command.
@@ -193,6 +204,7 @@ pub fn trusted_device_binding_status(
 ) -> TrustedDeviceBindingStatus {
     let mut saw_device = false;
     let mut saw_matching_root = false;
+    let mut saw_compatible_root = false;
     let mut saw_conflicting_root = false;
     for candidate in evidence {
         if candidate.device_id() != binding.device_id() {
@@ -201,14 +213,17 @@ pub fn trusted_device_binding_status(
         saw_device = true;
         if candidate.device_root_public_key() == binding.device_root_public_key() {
             saw_matching_root = true;
+            saw_compatible_root |= candidate.conversation_supports_repeat_pairing();
         } else {
             saw_conflicting_root = true;
         }
     }
     if saw_conflicting_root {
         TrustedDeviceBindingStatus::RootMismatch
-    } else if saw_matching_root {
+    } else if saw_compatible_root {
         TrustedDeviceBindingStatus::Active
+    } else if saw_matching_root {
+        TrustedDeviceBindingStatus::Unsupported
     } else if saw_device {
         TrustedDeviceBindingStatus::RootMismatch
     } else {
@@ -242,7 +257,7 @@ pub fn decide_trusted_device_alias(
             };
         }
         return match trusted_device_binding_status(existing, evidence) {
-            TrustedDeviceBindingStatus::Active => {
+            TrustedDeviceBindingStatus::Active | TrustedDeviceBindingStatus::Unsupported => {
                 Err(KonclaveDomainError::TrustedDeviceAliasConflict)
             }
             TrustedDeviceBindingStatus::Removed | TrustedDeviceBindingStatus::RootMismatch => {
@@ -255,7 +270,7 @@ pub fn decide_trusted_device_alias(
             return Ok(TrustedDeviceAliasDecision::Rename);
         }
         return match trusted_device_binding_status(existing, evidence) {
-            TrustedDeviceBindingStatus::Active => {
+            TrustedDeviceBindingStatus::Active | TrustedDeviceBindingStatus::Unsupported => {
                 Err(KonclaveDomainError::TrustedDeviceRootMismatch)
             }
             TrustedDeviceBindingStatus::Removed | TrustedDeviceBindingStatus::RootMismatch => {
@@ -282,6 +297,9 @@ pub fn resolve_trusted_device(
         TrustedDeviceBindingStatus::RootMismatch => {
             return Err(KonclaveDomainError::TrustedDeviceRootMismatch);
         }
+        TrustedDeviceBindingStatus::Unsupported => {
+            return Err(KonclaveDomainError::TrustedDeviceRepeatPairingUnsupported);
+        }
         TrustedDeviceBindingStatus::Active => {}
     }
     let bootstrap_conversation_id = evidence
@@ -289,6 +307,7 @@ pub fn resolve_trusted_device(
         .filter(|candidate| {
             candidate.device_id() == binding.device_id()
                 && candidate.device_root_public_key() == binding.device_root_public_key()
+                && candidate.conversation_supports_repeat_pairing()
         })
         .map(|candidate| candidate.conversation_id())
         .min()
@@ -321,6 +340,7 @@ mod tests {
             ConversationId::from_bytes([conversation; ConversationId::LENGTH]),
             DeviceId::from_bytes([device; DeviceId::LENGTH]),
             Ed25519PublicKey::from_bytes([root; Ed25519PublicKey::LENGTH]),
+            true,
         )
     }
 
@@ -383,6 +403,19 @@ mod tests {
         assert_eq!(
             resolve_trusted_device(&stored, &[evidence(7, 1, 3)]).err(),
             Some(KonclaveDomainError::TrustedDeviceRootMismatch)
+        );
+        assert_eq!(
+            resolve_trusted_device(
+                &stored,
+                &[TrustedDeviceEvidence::new(
+                    ConversationId::from_bytes([6; ConversationId::LENGTH]),
+                    stored.device_id(),
+                    stored.device_root_public_key(),
+                    false,
+                )],
+            )
+            .err(),
+            Some(KonclaveDomainError::TrustedDeviceRepeatPairingUnsupported)
         );
         let resolved =
             resolve_trusted_device(&stored, &[evidence(9, 1, 2), evidence(7, 1, 2)]).unwrap();
