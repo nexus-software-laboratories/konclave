@@ -1,6 +1,8 @@
 use KonclaveDomainCore::{
     AcknowledgeRequest, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_SIZE, PairingRendezvousRecord,
     PairingRendezvousTakeRequest, RelayEnvelope, ReplayPage, ReplayRequest,
+    ShortCodeAttemptClaimRequest, ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest,
+    ShortCodeAttemptReadRequest, ShortCodeAttemptSnapshot,
 };
 use KonclaveProtocolContracts::v1::{decode_replay_page, encode_relay_envelope};
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
@@ -21,6 +23,24 @@ pub enum PairingRendezvousPublishOutcome {
     /// A new record was committed.
     Published,
     /// An identical active record from the same principal already existed.
+    AlreadyPublished,
+}
+
+/// Durable outcome of one authenticated short-code attempt publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortCodeAttemptPublishOutcome {
+    /// A new attempt was committed.
+    Published,
+    /// The exact creator attempt was already active.
+    AlreadyPublished,
+}
+
+/// Durable outcome of one authenticated short-code stage publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortCodeAttemptMessageOutcome {
+    /// A new opaque stage was committed.
+    Published,
+    /// The exact role-matching stage was already present.
     AlreadyPublished,
 }
 
@@ -186,6 +206,82 @@ pub trait PairingRendezvousRepository: Send + Sync {
         request: PairingRendezvousTakeRequest,
         now_unix_seconds: u64,
     ) -> Result<PairingRendezvousRecord, RelayError>;
+}
+
+/// Durable bounded storage for opaque short-code pairing attempts.
+#[async_trait]
+pub trait ShortCodePairingRepository: Send + Sync {
+    /// Publishes a new attempt or accepts an exact same-creator retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed deadline, conflict, capacity, malformed-data, or storage error.
+    async fn publish_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptPublishRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptPublishOutcome, RelayError>;
+
+    /// Atomically claims one locator with an opaque credential request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rate, unavailable, malformed-data, or storage error.
+    async fn claim_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptClaimRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptSnapshot, RelayError>;
+
+    /// Publishes one role- and order-checked opaque stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unavailable, conflict, invalid-stage, or storage error.
+    async fn publish_short_code_message(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptMessageRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptMessageOutcome, RelayError>;
+
+    /// Returns one capability-filtered participant snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable for absent, expired, cancelled, or unauthorized state.
+    async fn read_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptSnapshot, RelayError>;
+
+    /// Idempotently cancels one attempt as its creator or claimant.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable for absent or unauthorized state, or a storage error.
+    async fn cancel_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+        now_unix_seconds: u64,
+    ) -> Result<(), RelayError>;
+
+    /// Atomically returns and consumes one mutually confirmed opaque capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable unless the authenticated claimant may consume it.
+    async fn take_short_code_capability(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+        now_unix_seconds: u64,
+    ) -> Result<Vec<u8>, RelayError>;
 }
 
 /// Durable registry for self-hosted dynamic relay principals.

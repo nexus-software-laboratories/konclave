@@ -7,6 +7,7 @@ mod identifiers;
 mod model;
 mod pairing_rendezvous;
 mod short_code_pairing;
+mod short_code_relay;
 
 pub use collaboration_policy::{
     COLLABORATION_POLICY_BUNDLE_MAJOR, COLLABORATION_POLICY_BUNDLE_MINOR,
@@ -53,4 +54,10 @@ pub use pairing_rendezvous::{
 pub use short_code_pairing::{
     MAX_SHORT_CODE_PAIRING_SAS, ShortCodeConfirmationEvent, ShortCodeConfirmationState,
     ShortCodePairingSas, transition_short_code_confirmation,
+};
+pub use short_code_relay::{
+    MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+    MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, MAX_SHORT_CODE_RELAY_STAGES, ShortCodeAttemptClaimRequest,
+    ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
+    ShortCodeAttemptSnapshot, ShortCodeRelayMessage, ShortCodeRelayStage,
 };

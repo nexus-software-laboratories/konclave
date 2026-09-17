@@ -5,7 +5,10 @@ use KonclaveDomainCore::{
     AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_RELAY_ENVELOPE_BYTES,
     MAX_RELAY_PAYLOAD_BYTES, MAX_REPLAY_PAGE_BYTES, PairingRendezvousId, PairingRendezvousNonce,
     PairingRendezvousRecord, PairingRendezvousTakeRequest, ProtocolVersion, RelayEnvelope,
-    ReplayPage, ReplayRequest, RoutingId, StoredRelayEnvelope,
+    ReplayPage, ReplayRequest, RoutingId, ShortCodeAttemptClaimRequest,
+    ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
+    ShortCodeAttemptSnapshot, ShortCodePairingAttemptId, ShortCodePairingLocator,
+    ShortCodeRelayMessage, ShortCodeRelayStage, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
     decode_relay_envelope, encode_relay_envelope, encode_replay_page_preserving,
@@ -21,11 +24,15 @@ use sqlx::{Row, SqlitePool};
 use crate::{
     EncodedReplayPage, PairingRendezvousPublishDecision, PairingRendezvousPublishOutcome,
     PairingRendezvousRepository, RelayError, RelayPrincipalRegistry, RelayRepository,
-    StoredPairingRendezvous, SubmitResult, decide_pairing_rendezvous_publish,
-    decide_pairing_rendezvous_take,
+    ShortCodeAttemptMessageOutcome, ShortCodeAttemptPublishOutcome, ShortCodeClaimDecision,
+    ShortCodeMessageDecision, ShortCodePairingRepository, ShortCodePublishDecision,
+    StoredPairingRendezvous, StoredShortCodeAttempt, SubmitResult, authorize_short_code_cancel,
+    authorize_short_code_read, decide_pairing_rendezvous_publish, decide_pairing_rendezvous_take,
+    decide_short_code_capability_take, decide_short_code_claim, decide_short_code_message,
+    decide_short_code_publish,
 };
 
-const SQLITE_SCHEMA_VERSION: u32 = 5;
+const SQLITE_SCHEMA_VERSION: u32 = 6;
 const MAX_ACTIVE_DYNAMIC_PRINCIPALS: i64 = 1_024;
 const MAX_DYNAMIC_PRINCIPAL_RECORDS: i64 = 4_096;
 const REPLAY_PAGE_FIXED_WIRE_BUDGET: usize = 64;
@@ -300,6 +307,283 @@ impl PairingRendezvousRepository for SqliteRelayRepository {
             .await
             .map_err(|_| storage_failure("pairing rendezvous take commit"))?;
         Ok(existing.into_record())
+    }
+}
+
+#[async_trait]
+impl ShortCodePairingRepository for SqliteRelayRepository {
+    async fn publish_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptPublishRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptPublishOutcome, RelayError> {
+        if request.deadline_unix_seconds() <= now_unix_seconds {
+            return Err(RelayError::ExpiredShortCodeAttempt);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("short-code publish transaction begin"))?;
+        cleanup_short_code_state(&mut transaction, now_unix_seconds).await?;
+        let existing = load_short_code_attempt(
+            &mut transaction,
+            Some(request.locator()),
+            Some(request.attempt_id()),
+        )
+        .await?;
+        let counts =
+            active_short_code_counts(&mut transaction, principal, now_unix_seconds).await?;
+        match decide_short_code_publish(
+            principal,
+            request,
+            existing.as_ref(),
+            now_unix_seconds,
+            counts.0,
+            counts.1,
+        )? {
+            ShortCodePublishDecision::Identical => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| storage_failure("identical short-code publish commit"))?;
+                Ok(ShortCodeAttemptPublishOutcome::AlreadyPublished)
+            }
+            ShortCodePublishDecision::Insert => {
+                insert_short_code_attempt(&mut transaction, principal, request).await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| storage_failure("short-code publish commit"))?;
+                Ok(ShortCodeAttemptPublishOutcome::Published)
+            }
+        }
+    }
+
+    async fn claim_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptClaimRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptSnapshot, RelayError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("short-code claim transaction begin"))?;
+        cleanup_short_code_state(&mut transaction, now_unix_seconds).await?;
+        let existing =
+            load_short_code_attempt(&mut transaction, Some(request.locator()), None).await?;
+        let counts = short_code_claim_counts(
+            &mut transaction,
+            principal,
+            request.locator(),
+            now_unix_seconds,
+        )
+        .await?;
+        let decision = decide_short_code_claim(
+            principal,
+            &request,
+            existing.as_ref(),
+            now_unix_seconds,
+            counts.0,
+            counts.1,
+        );
+        match decision {
+            Ok(ShortCodeClaimDecision::Identical) => {}
+            Ok(ShortCodeClaimDecision::Claim) => {
+                record_short_code_claim(
+                    &mut transaction,
+                    principal,
+                    request.locator(),
+                    now_unix_seconds,
+                )
+                .await?;
+                let attempt = existing
+                    .as_ref()
+                    .ok_or(RelayError::ShortCodeAttemptUnavailable)?;
+                update_short_code_claim(
+                    &mut transaction,
+                    attempt.publish().attempt_id(),
+                    principal,
+                    request.payload(),
+                )
+                .await?;
+            }
+            Err(error) => {
+                if error == RelayError::ShortCodeAttemptUnavailable
+                    && counts.0 < crate::MAX_SHORT_CODE_CLAIMS_PER_PRINCIPAL_WINDOW
+                    && counts.1 < crate::MAX_SHORT_CODE_CLAIMS_PER_LOCATOR_WINDOW
+                {
+                    record_short_code_claim(
+                        &mut transaction,
+                        principal,
+                        request.locator(),
+                        now_unix_seconds,
+                    )
+                    .await?;
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(|_| storage_failure("unavailable short-code claim commit"))?;
+                }
+                return Err(error);
+            }
+        }
+        let attempt_id = existing
+            .as_ref()
+            .ok_or(RelayError::ShortCodeAttemptUnavailable)?
+            .publish()
+            .attempt_id();
+        let stored = load_short_code_attempt(&mut transaction, None, Some(attempt_id))
+            .await?
+            .ok_or(RelayError::InvalidStoredData)?;
+        let snapshot = short_code_snapshot(&stored)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| storage_failure("short-code claim commit"))?;
+        Ok(snapshot)
+    }
+
+    async fn publish_short_code_message(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptMessageRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptMessageOutcome, RelayError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("short-code message transaction begin"))?;
+        cleanup_short_code_state(&mut transaction, now_unix_seconds).await?;
+        let existing = load_short_code_attempt(&mut transaction, None, Some(request.attempt_id()))
+            .await?
+            .ok_or(RelayError::ShortCodeAttemptUnavailable)?;
+        match decide_short_code_message(principal, &request, &existing, now_unix_seconds)? {
+            ShortCodeMessageDecision::Identical => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| storage_failure("identical short-code message commit"))?;
+                Ok(ShortCodeAttemptMessageOutcome::AlreadyPublished)
+            }
+            ShortCodeMessageDecision::Insert => {
+                insert_short_code_message(&mut transaction, &request).await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| storage_failure("short-code message commit"))?;
+                Ok(ShortCodeAttemptMessageOutcome::Published)
+            }
+        }
+    }
+
+    async fn read_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+        now_unix_seconds: u64,
+    ) -> Result<ShortCodeAttemptSnapshot, RelayError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("short-code read transaction begin"))?;
+        cleanup_short_code_state(&mut transaction, now_unix_seconds).await?;
+        let stored = load_short_code_attempt(&mut transaction, None, Some(request.attempt_id()))
+            .await?
+            .ok_or(RelayError::ShortCodeAttemptUnavailable)?;
+        authorize_short_code_read(principal, request, &stored, now_unix_seconds)?;
+        let snapshot = short_code_snapshot(&stored)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| storage_failure("short-code read commit"))?;
+        Ok(snapshot)
+    }
+
+    async fn cancel_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+        now_unix_seconds: u64,
+    ) -> Result<(), RelayError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("short-code cancel transaction begin"))?;
+        cleanup_short_code_state(&mut transaction, now_unix_seconds).await?;
+        let stored = load_short_code_attempt(&mut transaction, None, Some(request.attempt_id()))
+            .await?
+            .ok_or(RelayError::ShortCodeAttemptUnavailable)?;
+        authorize_short_code_cancel(principal, request, &stored)?;
+        sqlx::query(
+            "UPDATE relay_short_code_attempt
+                 SET cancelled = 1
+                 WHERE attempt_id = ?1",
+        )
+        .bind(request.attempt_id().as_bytes().as_slice())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| storage_failure("short-code cancellation"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| storage_failure("short-code cancel commit"))
+    }
+
+    async fn take_short_code_capability(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+        now_unix_seconds: u64,
+    ) -> Result<Vec<u8>, RelayError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| storage_failure("short-code capability transaction begin"))?;
+        cleanup_short_code_state(&mut transaction, now_unix_seconds).await?;
+        let stored = load_short_code_attempt(&mut transaction, None, Some(request.attempt_id()))
+            .await?
+            .ok_or(RelayError::ShortCodeAttemptUnavailable)?;
+        decide_short_code_capability_take(principal, request, &stored, now_unix_seconds)?;
+        let payload = stored
+            .message(ShortCodeRelayStage::Capability)
+            .ok_or(RelayError::InvalidStoredData)?
+            .to_vec();
+        let deleted = sqlx::query(
+            "DELETE FROM relay_short_code_message
+                 WHERE attempt_id = ?1 AND stage = ?2",
+        )
+        .bind(request.attempt_id().as_bytes().as_slice())
+        .bind(short_code_stage_to_sql(ShortCodeRelayStage::Capability))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| storage_failure("short-code capability deletion"))?
+        .rows_affected();
+        let updated = sqlx::query(
+            "UPDATE relay_short_code_attempt
+                 SET capability_consumed = 1
+                 WHERE attempt_id = ?1 AND capability_consumed = 0",
+        )
+        .bind(request.attempt_id().as_bytes().as_slice())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| storage_failure("short-code capability consumption"))?
+        .rows_affected();
+        if deleted != 1 || updated != 1 {
+            return Err(storage_failure("short-code capability outcome"));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| storage_failure("short-code capability commit"))?;
+        Ok(payload)
     }
 }
 
@@ -937,6 +1221,334 @@ async fn insert_pairing_rendezvous(
     Ok(())
 }
 
+async fn cleanup_short_code_state(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    now_unix_seconds: u64,
+) -> Result<(), RelayError> {
+    sqlx::query("DELETE FROM relay_short_code_attempt WHERE deadline_unix_seconds <= ?1")
+        .bind(to_sql_integer(now_unix_seconds)?)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("expired short-code cleanup"))?;
+    let window = short_code_claim_window(now_unix_seconds)?;
+    sqlx::query("DELETE FROM relay_short_code_claim_rate WHERE window_start < ?1")
+        .bind(window)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("short-code rate cleanup"))?;
+    Ok(())
+}
+
+async fn active_short_code_counts(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    principal: RelayPrincipalId,
+    now_unix_seconds: u64,
+) -> Result<(usize, usize), RelayError> {
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*),
+            count(*) FILTER (WHERE owner_principal_id = ?2)
+         FROM relay_short_code_attempt
+         WHERE deadline_unix_seconds > ?1 AND cancelled = 0",
+    )
+    .bind(to_sql_integer(now_unix_seconds)?)
+    .bind(principal.as_bytes().as_slice())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code capacity query"))?;
+    Ok((
+        usize::try_from(counts.0).map_err(|_| RelayError::InvalidStoredData)?,
+        usize::try_from(counts.1).map_err(|_| RelayError::InvalidStoredData)?,
+    ))
+}
+
+async fn short_code_claim_counts(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    principal: RelayPrincipalId,
+    locator: ShortCodePairingLocator,
+    now_unix_seconds: u64,
+) -> Result<(usize, usize), RelayError> {
+    let window = short_code_claim_window(now_unix_seconds)?;
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+            COALESCE(sum(attempts) FILTER (WHERE principal_id = ?1), 0),
+            COALESCE(sum(attempts) FILTER (WHERE locator = ?2), 0)
+         FROM relay_short_code_claim_rate
+         WHERE window_start = ?3",
+    )
+    .bind(principal.as_bytes().as_slice())
+    .bind(locator.as_bytes().as_slice())
+    .bind(window)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code claim count"))?;
+    Ok((
+        usize::try_from(counts.0).map_err(|_| RelayError::InvalidStoredData)?,
+        usize::try_from(counts.1).map_err(|_| RelayError::InvalidStoredData)?,
+    ))
+}
+
+async fn record_short_code_claim(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    principal: RelayPrincipalId,
+    locator: ShortCodePairingLocator,
+    now_unix_seconds: u64,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "INSERT INTO relay_short_code_claim_rate (
+            locator,
+            principal_id,
+            window_start,
+            attempts
+         ) VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(locator, principal_id, window_start)
+         DO UPDATE SET attempts = attempts + 1",
+    )
+    .bind(locator.as_bytes().as_slice())
+    .bind(principal.as_bytes().as_slice())
+    .bind(short_code_claim_window(now_unix_seconds)?)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code claim rate update"))?;
+    Ok(())
+}
+
+async fn insert_short_code_attempt(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    principal: RelayPrincipalId,
+    request: ShortCodeAttemptPublishRequest,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "INSERT INTO relay_short_code_attempt (
+            locator,
+            attempt_id,
+            owner_principal_id,
+            claimant_principal_id,
+            version_major,
+            version_minor,
+            deadline_unix_seconds,
+            cancelled,
+            capability_consumed
+         ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, 0, 0)",
+    )
+    .bind(request.locator().as_bytes().as_slice())
+    .bind(request.attempt_id().as_bytes().as_slice())
+    .bind(principal.as_bytes().as_slice())
+    .bind(i64::from(request.version().major()))
+    .bind(i64::from(request.version().minor()))
+    .bind(to_sql_integer(request.deadline_unix_seconds())?)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code attempt insert"))?;
+    Ok(())
+}
+
+async fn update_short_code_claim(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    attempt_id: ShortCodePairingAttemptId,
+    claimant: RelayPrincipalId,
+    payload: &[u8],
+) -> Result<(), RelayError> {
+    let updated = sqlx::query(
+        "UPDATE relay_short_code_attempt
+         SET claimant_principal_id = ?2
+         WHERE attempt_id = ?1 AND claimant_principal_id IS NULL",
+    )
+    .bind(attempt_id.as_bytes().as_slice())
+    .bind(claimant.as_bytes().as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code claimant update"))?
+    .rows_affected();
+    if updated != 1 {
+        return Err(storage_failure("short-code claimant outcome"));
+    }
+    sqlx::query(
+        "INSERT INTO relay_short_code_message (attempt_id, stage, payload)
+         VALUES (?1, ?2, ?3)",
+    )
+    .bind(attempt_id.as_bytes().as_slice())
+    .bind(short_code_stage_to_sql(
+        ShortCodeRelayStage::CredentialRequest,
+    ))
+    .bind(payload)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code credential request insert"))?;
+    Ok(())
+}
+
+async fn insert_short_code_message(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request: &ShortCodeAttemptMessageRequest,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "INSERT INTO relay_short_code_message (attempt_id, stage, payload)
+         VALUES (?1, ?2, ?3)",
+    )
+    .bind(request.attempt_id().as_bytes().as_slice())
+    .bind(short_code_stage_to_sql(request.stage()))
+    .bind(request.payload())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code message insert"))?;
+    Ok(())
+}
+
+async fn load_short_code_attempt(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    locator: Option<ShortCodePairingLocator>,
+    attempt_id: Option<ShortCodePairingAttemptId>,
+) -> Result<Option<StoredShortCodeAttempt>, RelayError> {
+    let locator_bytes = locator.map(ShortCodePairingLocator::into_bytes);
+    let attempt_bytes = attempt_id.map(ShortCodePairingAttemptId::into_bytes);
+    let rows = sqlx::query(
+        "SELECT
+            CASE WHEN length(locator) = 32 THEN locator END AS locator,
+            CASE WHEN length(attempt_id) = 16 THEN attempt_id END AS attempt_id,
+            CASE WHEN length(owner_principal_id) = 32 THEN owner_principal_id END
+                AS owner_principal_id,
+            CASE
+                WHEN claimant_principal_id IS NULL THEN NULL
+                WHEN length(claimant_principal_id) = 32 THEN claimant_principal_id
+            END AS claimant_principal_id,
+            version_major,
+            version_minor,
+            deadline_unix_seconds,
+            cancelled,
+            capability_consumed
+         FROM relay_short_code_attempt
+         WHERE (?1 IS NOT NULL AND locator = ?1)
+            OR (?2 IS NOT NULL AND attempt_id = ?2)
+         LIMIT 2",
+    )
+    .bind(locator_bytes.as_ref().map(<[u8; 32]>::as_slice))
+    .bind(attempt_bytes.as_ref().map(<[u8; 16]>::as_slice))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code attempt query"))?;
+    if rows.len() > 1 {
+        return Err(RelayError::ShortCodeAttemptConflict);
+    }
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let publish = ShortCodeAttemptPublishRequest::new(
+        ProtocolVersion::new(
+            from_sql_u32(row.try_get("version_major").map_err(invalid_row)?)?,
+            from_sql_u32(row.try_get("version_minor").map_err(invalid_row)?)?,
+        )?,
+        ShortCodePairingLocator::from_slice(
+            &row.try_get::<Vec<u8>, _>("locator").map_err(invalid_row)?,
+        )?,
+        ShortCodePairingAttemptId::from_slice(
+            &row.try_get::<Vec<u8>, _>("attempt_id")
+                .map_err(invalid_row)?,
+        )?,
+        from_sql_integer(row.try_get("deadline_unix_seconds").map_err(invalid_row)?)?,
+    )?;
+    let owner = RelayPrincipalId::from_slice(
+        &row.try_get::<Vec<u8>, _>("owner_principal_id")
+            .map_err(invalid_row)?,
+    )
+    .map_err(|_| RelayError::InvalidStoredData)?;
+    let claimant = row
+        .try_get::<Option<Vec<u8>>, _>("claimant_principal_id")
+        .map_err(invalid_row)?
+        .map(|bytes| {
+            RelayPrincipalId::from_slice(&bytes).map_err(|_| RelayError::InvalidStoredData)
+        })
+        .transpose()?;
+    let cancelled = sql_bool(row.try_get("cancelled").map_err(invalid_row)?)?;
+    let capability_consumed = sql_bool(row.try_get("capability_consumed").map_err(invalid_row)?)?;
+    let message_rows = sqlx::query(
+        "SELECT stage, payload
+         FROM relay_short_code_message
+         WHERE attempt_id = ?1
+         ORDER BY stage",
+    )
+    .bind(publish.attempt_id().as_bytes().as_slice())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code messages query"))?;
+    let mut stored = StoredShortCodeAttempt::new(owner, publish);
+    for message in message_rows {
+        let stage = short_code_stage_from_sql(message.try_get("stage").map_err(invalid_row)?)?;
+        let payload = message
+            .try_get::<Vec<u8>, _>("payload")
+            .map_err(invalid_row)?;
+        ShortCodeRelayMessage::new(stage, payload.clone())
+            .map_err(|_| RelayError::InvalidStoredData)?;
+        if stage == ShortCodeRelayStage::CredentialRequest {
+            stored.set_claim(claimant.ok_or(RelayError::InvalidStoredData)?, payload)?;
+        } else {
+            stored.insert_message(stage, payload)?;
+        }
+    }
+    if claimant.is_some()
+        != stored
+            .message(ShortCodeRelayStage::CredentialRequest)
+            .is_some()
+    {
+        return Err(RelayError::InvalidStoredData);
+    }
+    if cancelled {
+        stored.cancel();
+    }
+    if capability_consumed {
+        stored.consume_capability();
+    }
+    Ok(Some(stored))
+}
+
+fn short_code_snapshot(
+    stored: &StoredShortCodeAttempt,
+) -> Result<ShortCodeAttemptSnapshot, RelayError> {
+    let messages = stored
+        .messages()
+        .iter()
+        .filter(|(stage, _)| **stage != ShortCodeRelayStage::Capability)
+        .map(|(stage, payload)| ShortCodeRelayMessage::new(*stage, payload.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ShortCodeAttemptSnapshot::new(
+        stored.publish().version(),
+        stored.publish().attempt_id(),
+        stored.publish().deadline_unix_seconds(),
+        stored.cancelled(),
+        stored.capability_consumed(),
+        messages,
+    )?)
+}
+
+fn short_code_claim_window(now_unix_seconds: u64) -> Result<i64, RelayError> {
+    to_sql_integer(now_unix_seconds - (now_unix_seconds % crate::SHORT_CODE_CLAIM_WINDOW_SECONDS))
+}
+
+const fn short_code_stage_to_sql(stage: ShortCodeRelayStage) -> i64 {
+    stage as i64
+}
+
+fn short_code_stage_from_sql(value: i64) -> Result<ShortCodeRelayStage, RelayError> {
+    match value {
+        1 => Ok(ShortCodeRelayStage::CredentialRequest),
+        2 => Ok(ShortCodeRelayStage::CredentialResponse),
+        3 => Ok(ShortCodeRelayStage::ClaimantFinalization),
+        4 => Ok(ShortCodeRelayStage::CreatorIdentity),
+        5 => Ok(ShortCodeRelayStage::CreatorConfirmation),
+        6 => Ok(ShortCodeRelayStage::ClaimantConfirmation),
+        7 => Ok(ShortCodeRelayStage::Capability),
+        _ => Err(RelayError::InvalidStoredData),
+    }
+}
+
+fn sql_bool(value: i64) -> Result<bool, RelayError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(RelayError::InvalidStoredData),
+    }
+}
+
 async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
     let mut transaction = pool
         .begin()
@@ -1007,7 +1619,8 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
         .map_err(|_| storage_failure("acknowledgment schema initialization"))?;
         initialize_dynamic_principal_schema(&mut transaction).await?;
         initialize_pairing_rendezvous_schema(&mut transaction).await?;
-        sqlx::query("PRAGMA user_version = 5")
+        initialize_short_code_schema(&mut transaction).await?;
+        sqlx::query("PRAGMA user_version = 6")
             .execute(&mut *transaction)
             .await
             .map_err(|_| storage_failure("schema version write"))?;
@@ -1016,15 +1629,21 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
         migrate_schema_v2_to_v3(&mut transaction).await?;
         migrate_schema_v3_to_v4(&mut transaction).await?;
         migrate_schema_v4_to_v5(&mut transaction).await?;
+        migrate_schema_v5_to_v6(&mut transaction).await?;
     } else if version == 2 {
         migrate_schema_v2_to_v3(&mut transaction).await?;
         migrate_schema_v3_to_v4(&mut transaction).await?;
         migrate_schema_v4_to_v5(&mut transaction).await?;
+        migrate_schema_v5_to_v6(&mut transaction).await?;
     } else if version == 3 {
         migrate_schema_v3_to_v4(&mut transaction).await?;
         migrate_schema_v4_to_v5(&mut transaction).await?;
+        migrate_schema_v5_to_v6(&mut transaction).await?;
     } else if version == 4 {
         migrate_schema_v4_to_v5(&mut transaction).await?;
+        migrate_schema_v5_to_v6(&mut transaction).await?;
+    } else if version == 5 {
+        migrate_schema_v5_to_v6(&mut transaction).await?;
     }
     validate_schema(&mut transaction).await?;
     transaction
@@ -1047,6 +1666,13 @@ async fn validate_schema(
         "SELECT lookup_id, owner_principal_id, version_major, version_minor,
                 expires_at_unix_seconds, nonce, ciphertext
          FROM relay_pairing_rendezvous LIMIT 0",
+        "SELECT locator, attempt_id, owner_principal_id, claimant_principal_id,
+                version_major, version_minor, deadline_unix_seconds, cancelled,
+                capability_consumed
+         FROM relay_short_code_attempt LIMIT 0",
+        "SELECT attempt_id, stage, payload FROM relay_short_code_message LIMIT 0",
+        "SELECT locator, principal_id, window_start, attempts
+         FROM relay_short_code_claim_rate LIMIT 0",
     ] {
         sqlx::query(query)
             .execute(&mut **transaction)
@@ -1351,6 +1977,87 @@ async fn initialize_pairing_rendezvous_schema(
     Ok(())
 }
 
+async fn migrate_schema_v5_to_v6(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    initialize_short_code_schema(transaction).await?;
+    sqlx::query("PRAGMA user_version = 6")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v6 version write"))?;
+    Ok(())
+}
+
+async fn initialize_short_code_schema(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    sqlx::query(
+        "CREATE TABLE relay_short_code_attempt (
+            locator BLOB PRIMARY KEY CHECK (length(locator) = 32),
+            attempt_id BLOB NOT NULL UNIQUE CHECK (length(attempt_id) = 16),
+            owner_principal_id BLOB NOT NULL CHECK (length(owner_principal_id) = 32),
+            claimant_principal_id BLOB CHECK (
+                claimant_principal_id IS NULL OR length(claimant_principal_id) = 32
+            ),
+            version_major INTEGER NOT NULL CHECK (version_major BETWEEN 1 AND 4294967295),
+            version_minor INTEGER NOT NULL CHECK (version_minor BETWEEN 0 AND 4294967295),
+            deadline_unix_seconds INTEGER NOT NULL CHECK (deadline_unix_seconds >= 1),
+            cancelled INTEGER NOT NULL CHECK (cancelled IN (0, 1)),
+            capability_consumed INTEGER NOT NULL CHECK (capability_consumed IN (0, 1))
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code attempt schema initialization"))?;
+    sqlx::query(
+        "CREATE INDEX relay_short_code_attempt_owner_deadline
+         ON relay_short_code_attempt(owner_principal_id, deadline_unix_seconds)",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code owner index initialization"))?;
+    sqlx::query(
+        "CREATE INDEX relay_short_code_attempt_claimant
+         ON relay_short_code_attempt(claimant_principal_id)",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code claimant index initialization"))?;
+    sqlx::query(
+        "CREATE TABLE relay_short_code_message (
+            attempt_id BLOB NOT NULL CHECK (length(attempt_id) = 16),
+            stage INTEGER NOT NULL CHECK (stage BETWEEN 1 AND 7),
+            payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 9216),
+            PRIMARY KEY (attempt_id, stage),
+            FOREIGN KEY (attempt_id) REFERENCES relay_short_code_attempt(attempt_id)
+                ON DELETE CASCADE
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code message schema initialization"))?;
+    sqlx::query(
+        "CREATE TABLE relay_short_code_claim_rate (
+            locator BLOB NOT NULL CHECK (length(locator) = 32),
+            principal_id BLOB NOT NULL CHECK (length(principal_id) = 32),
+            window_start INTEGER NOT NULL CHECK (window_start >= 0),
+            attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5),
+            PRIMARY KEY (locator, principal_id, window_start)
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code rate schema initialization"))?;
+    sqlx::query(
+        "CREATE INDEX relay_short_code_claim_rate_principal
+         ON relay_short_code_claim_rate(principal_id, window_start)",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code rate index initialization"))?;
+    Ok(())
+}
+
 fn envelope_from_v1_row(
     row: &sqlx::sqlite::SqliteRow,
     payload: Vec<u8>,
@@ -1496,6 +2203,323 @@ mod tests {
             ProtocolVersion::application_v1(),
             PairingRendezvousId::from_bytes(bytes(id)),
         )
+    }
+
+    fn short_publish(locator: u8, attempt: u8) -> ShortCodeAttemptPublishRequest {
+        ShortCodeAttemptPublishRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingLocator::from_bytes(bytes(locator)),
+            ShortCodePairingAttemptId::from_bytes(bytes(attempt)),
+            100,
+        )
+        .unwrap()
+    }
+
+    fn short_claim(locator: u8, payload: u8) -> ShortCodeAttemptClaimRequest {
+        ShortCodeAttemptClaimRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingLocator::from_bytes(bytes(locator)),
+            vec![payload],
+        )
+        .unwrap()
+    }
+
+    fn short_message(
+        attempt: u8,
+        stage: ShortCodeRelayStage,
+        payload: u8,
+    ) -> ShortCodeAttemptMessageRequest {
+        ShortCodeAttemptMessageRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingAttemptId::from_bytes(bytes(attempt)),
+            stage,
+            vec![payload],
+        )
+        .unwrap()
+    }
+
+    fn short_read(attempt: u8) -> ShortCodeAttemptReadRequest {
+        ShortCodeAttemptReadRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingAttemptId::from_bytes(bytes(attempt)),
+        )
+    }
+
+    #[tokio::test]
+    async fn short_code_attempt_is_participant_bound_sequential_and_one_time() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let owner = RelayPrincipalId::from_bytes(bytes(1));
+        let claimant = RelayPrincipalId::from_bytes(bytes(2));
+        let stranger = RelayPrincipalId::from_bytes(bytes(3));
+        let publish = short_publish(10, 11);
+        assert_eq!(
+            repository
+                .publish_short_code_attempt(owner, publish, 1)
+                .await
+                .unwrap(),
+            ShortCodeAttemptPublishOutcome::Published
+        );
+        assert_eq!(
+            repository
+                .publish_short_code_attempt(owner, publish, 1)
+                .await
+                .unwrap(),
+            ShortCodeAttemptPublishOutcome::AlreadyPublished
+        );
+        let claim = short_claim(10, 12);
+        let claimed = repository
+            .claim_short_code_attempt(claimant, claim, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            claimed.message(ShortCodeRelayStage::CredentialRequest),
+            Some(&[12][..])
+        );
+        assert_eq!(
+            repository
+                .claim_short_code_attempt(claimant, short_claim(10, 12), 1)
+                .await
+                .unwrap()
+                .attempt_id(),
+            publish.attempt_id()
+        );
+        assert_eq!(
+            repository
+                .claim_short_code_attempt(stranger, short_claim(10, 13), 1)
+                .await
+                .err(),
+            Some(RelayError::ShortCodeAttemptUnavailable)
+        );
+
+        for (stage, principal, payload) in [
+            (ShortCodeRelayStage::CredentialResponse, owner, 20),
+            (ShortCodeRelayStage::ClaimantFinalization, claimant, 21),
+            (ShortCodeRelayStage::CreatorIdentity, owner, 22),
+            (ShortCodeRelayStage::ClaimantConfirmation, claimant, 23),
+            (ShortCodeRelayStage::CreatorConfirmation, owner, 24),
+            (ShortCodeRelayStage::Capability, owner, 25),
+        ] {
+            assert_eq!(
+                repository
+                    .publish_short_code_message(principal, short_message(11, stage, payload), 1,)
+                    .await
+                    .unwrap(),
+                ShortCodeAttemptMessageOutcome::Published
+            );
+        }
+        let snapshot = repository
+            .read_short_code_attempt(owner, short_read(11), 1)
+            .await
+            .unwrap();
+        assert!(snapshot.message(ShortCodeRelayStage::Capability).is_none());
+        assert_eq!(
+            repository
+                .read_short_code_attempt(stranger, short_read(11), 1)
+                .await
+                .err(),
+            Some(RelayError::ShortCodeAttemptUnavailable)
+        );
+        assert_eq!(
+            repository
+                .take_short_code_capability(claimant, short_read(11), 1)
+                .await
+                .unwrap(),
+            vec![25]
+        );
+        assert_eq!(
+            repository
+                .take_short_code_capability(claimant, short_read(11), 1)
+                .await
+                .err(),
+            Some(RelayError::ShortCodeAttemptUnavailable)
+        );
+        assert!(
+            repository
+                .read_short_code_attempt(owner, short_read(11), 1)
+                .await
+                .unwrap()
+                .capability_consumed()
+        );
+    }
+
+    #[tokio::test]
+    async fn short_code_claims_enforce_principal_and_locator_windows() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let principal = RelayPrincipalId::from_bytes(bytes(1));
+        for locator in 0..u8::try_from(crate::MAX_SHORT_CODE_CLAIMS_PER_PRINCIPAL_WINDOW).unwrap() {
+            assert_eq!(
+                repository
+                    .claim_short_code_attempt(principal, short_claim(locator, 1), 1)
+                    .await
+                    .err(),
+                Some(RelayError::ShortCodeAttemptUnavailable)
+            );
+        }
+        assert_eq!(
+            repository
+                .claim_short_code_attempt(principal, short_claim(20, 1), 1)
+                .await
+                .err(),
+            Some(RelayError::ShortCodeClaimRateLimited)
+        );
+
+        let locator = ShortCodePairingLocator::from_bytes(bytes(30));
+        for value in 10..15 {
+            assert_eq!(
+                repository
+                    .claim_short_code_attempt(
+                        RelayPrincipalId::from_bytes(bytes(value)),
+                        ShortCodeAttemptClaimRequest::new(
+                            ProtocolVersion::application_v1(),
+                            locator,
+                            vec![1],
+                        )
+                        .unwrap(),
+                        1,
+                    )
+                    .await
+                    .err(),
+                Some(RelayError::ShortCodeAttemptUnavailable)
+            );
+        }
+        assert_eq!(
+            repository
+                .claim_short_code_attempt(
+                    RelayPrincipalId::from_bytes(bytes(16)),
+                    ShortCodeAttemptClaimRequest::new(
+                        ProtocolVersion::application_v1(),
+                        locator,
+                        vec![1],
+                    )
+                    .unwrap(),
+                    1,
+                )
+                .await
+                .err(),
+            Some(RelayError::ShortCodeAttemptUnavailable)
+        );
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(attempts), 0)
+             FROM relay_short_code_claim_rate
+             WHERE locator = ?1",
+        )
+        .bind(locator.as_bytes().as_slice())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 5);
+    }
+
+    #[tokio::test]
+    async fn short_code_claim_and_capability_take_are_atomic_under_concurrency() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = SqliteRelayRepository::connect(&directory.path().join("relay.sqlite"))
+            .await
+            .unwrap();
+        let owner = RelayPrincipalId::from_bytes(bytes(1));
+        let first_claimant = RelayPrincipalId::from_bytes(bytes(2));
+        let second_claimant = RelayPrincipalId::from_bytes(bytes(3));
+        repository
+            .publish_short_code_attempt(owner, short_publish(40, 41), 1)
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            repository.claim_short_code_attempt(first_claimant, short_claim(40, 50), 1),
+            repository.claim_short_code_attempt(second_claimant, short_claim(40, 51), 1)
+        );
+        let claimant = match (first, second) {
+            (Ok(_), Err(RelayError::ShortCodeAttemptUnavailable)) => first_claimant,
+            (Err(RelayError::ShortCodeAttemptUnavailable), Ok(_)) => second_claimant,
+            _ => panic!("exactly one concurrent short-code claimant must win"),
+        };
+        for (stage, principal, payload) in [
+            (ShortCodeRelayStage::CredentialResponse, owner, 60),
+            (ShortCodeRelayStage::ClaimantFinalization, claimant, 61),
+            (ShortCodeRelayStage::CreatorIdentity, owner, 62),
+            (ShortCodeRelayStage::CreatorConfirmation, owner, 63),
+            (ShortCodeRelayStage::ClaimantConfirmation, claimant, 64),
+            (ShortCodeRelayStage::Capability, owner, 65),
+        ] {
+            repository
+                .publish_short_code_message(principal, short_message(41, stage, payload), 1)
+                .await
+                .unwrap();
+        }
+
+        let (first, second) = tokio::join!(
+            repository.take_short_code_capability(claimant, short_read(41), 1),
+            repository.take_short_code_capability(claimant, short_read(41), 1)
+        );
+        match (first, second) {
+            (Ok(payload), Err(RelayError::ShortCodeAttemptUnavailable))
+            | (Err(RelayError::ShortCodeAttemptUnavailable), Ok(payload)) => {
+                assert_eq!(payload, vec![65]);
+            }
+            _ => panic!("exactly one concurrent short-code capability take must win"),
+        }
+    }
+
+    #[tokio::test]
+    async fn short_code_deadline_capacity_and_version_are_enforced_by_storage() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        let owner = RelayPrincipalId::from_bytes(bytes(1));
+        let excessive = ShortCodeAttemptPublishRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingLocator::from_bytes(bytes(70)),
+            ShortCodePairingAttemptId::from_bytes(bytes(71)),
+            1 + crate::SHORT_CODE_ATTEMPT_LIFETIME_SECONDS + 1,
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .publish_short_code_attempt(owner, excessive, 1)
+                .await
+                .err(),
+            Some(RelayError::InvalidShortCodeDeadline)
+        );
+        for value in 0..u8::try_from(crate::MAX_ACTIVE_SHORT_CODE_ATTEMPTS_PER_CREATOR).unwrap() {
+            repository
+                .publish_short_code_attempt(owner, short_publish(80 + value, 90 + value), 1)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            repository
+                .publish_short_code_attempt(owner, short_publish(100, 110), 1)
+                .await
+                .err(),
+            Some(RelayError::ShortCodeCreatorCapacityExceeded)
+        );
+        assert_eq!(
+            repository
+                .publish_short_code_attempt(
+                    RelayPrincipalId::from_bytes(bytes(2)),
+                    short_publish(101, 111),
+                    1,
+                )
+                .await
+                .unwrap(),
+            ShortCodeAttemptPublishOutcome::Published
+        );
+
+        let wrong_version_claim = ShortCodeAttemptClaimRequest::new(
+            ProtocolVersion::new(1, 1).unwrap(),
+            ShortCodePairingLocator::from_bytes(bytes(80)),
+            vec![1],
+        )
+        .unwrap();
+        assert_eq!(
+            repository
+                .claim_short_code_attempt(
+                    RelayPrincipalId::from_bytes(bytes(3)),
+                    wrong_version_claim,
+                    1,
+                )
+                .await
+                .err(),
+            Some(RelayError::ShortCodeAttemptUnavailable)
+        );
     }
 
     #[tokio::test]
@@ -1707,6 +2731,51 @@ mod tests {
             .map(str::to_string)
             .collect()
         );
+    }
+
+    #[tokio::test]
+    async fn short_code_schema_contains_only_allowlisted_metadata_and_opaque_payloads() {
+        let repository = SqliteRelayRepository::connect_memory().await.unwrap();
+        for (table, expected) in [
+            (
+                "relay_short_code_attempt",
+                &[
+                    "attempt_id",
+                    "cancelled",
+                    "capability_consumed",
+                    "claimant_principal_id",
+                    "deadline_unix_seconds",
+                    "locator",
+                    "owner_principal_id",
+                    "version_major",
+                    "version_minor",
+                ][..],
+            ),
+            (
+                "relay_short_code_message",
+                &["attempt_id", "payload", "stage"][..],
+            ),
+            (
+                "relay_short_code_claim_rate",
+                &["attempts", "locator", "principal_id", "window_start"][..],
+            ),
+        ] {
+            let columns = sqlx::query(&format!("PRAGMA table_info({table})"))
+                .fetch_all(&repository.pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.try_get::<String, _>("name").unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                columns,
+                expected
+                    .iter()
+                    .copied()
+                    .map(str::to_string)
+                    .collect::<BTreeSet<_>>()
+            );
+        }
     }
 
     #[tokio::test]
@@ -2343,7 +3412,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let replay = repository
             .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
             .await
@@ -2353,6 +3422,51 @@ mod tests {
             .publish_pairing_rendezvous(
                 RelayPrincipalId::from_bytes(bytes(47)),
                 rendezvous(48, 49, 100),
+                1,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema_v5_adds_short_code_pairing_without_rewriting_existing_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let existing = envelope(50, 51, DeliveryClass::GroupApplication, None, 52);
+        insert_v1_row(&pool, &existing, 1, existing.payload()).await;
+        let mut transaction = pool.begin().await.unwrap();
+        migrate_schema_v1_to_v2(&mut transaction).await.unwrap();
+        migrate_schema_v2_to_v3(&mut transaction).await.unwrap();
+        migrate_schema_v3_to_v4(&mut transaction).await.unwrap();
+        migrate_schema_v4_to_v5(&mut transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 5);
+        pool.close().await;
+
+        let repository = SqliteRelayRepository::connect(&path).await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 6);
+        assert!(
+            repository
+                .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
+                .await
+                .unwrap()
+                .envelopes()[0]
+                .envelope()
+                == &existing
+        );
+        repository
+            .publish_short_code_attempt(
+                RelayPrincipalId::from_bytes(bytes(53)),
+                short_publish(54, 55),
                 1,
             )
             .await
@@ -2373,7 +3487,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let replay = repository
             .replay_encoded(ReplayRequest::new(envelope.routing_id(), 0, 100).unwrap())
             .await
@@ -2412,7 +3526,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let replay = repository
             .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
             .await

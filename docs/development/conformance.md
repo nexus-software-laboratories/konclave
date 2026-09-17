@@ -51,8 +51,11 @@ command acceptance, Rust and TypeScript formatting, and component lint.
 non-bearer human-code authorization flow. It runs the pure confirmation transition
 table, six-digit code and locator validation, RFC 9807 OPAQUE registration/login and
 wrong-code cases, opaque state canonicalization, deterministic transcript/SAS
-vectors, role-separated encrypted-channel tests, Rust formatting, strict Clippy, and
-the pinned security-dependency policy before relay or daemon integration begins.
+vectors, role-separated encrypted-channel tests, bounded protocol codecs, relay
+policy and SQLite migration, authenticated HTTP and real client transport acceptance,
+generated TypeScript protocol checks, Rust formatting, strict Clippy, and the pinned
+security-dependency policy. Daemon and extension acceptance join this gate as those
+integration surfaces are added.
 
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared

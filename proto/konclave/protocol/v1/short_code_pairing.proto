@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+message ShortCodePairingAttemptId {
+  bytes value = 1;
+}
+
+message ShortCodePairingLocator {
+  bytes value = 1;
+}
+
+enum ShortCodeRelayStage {
+  SHORT_CODE_RELAY_STAGE_UNSPECIFIED = 0;
+  SHORT_CODE_RELAY_STAGE_CREDENTIAL_REQUEST = 1;
+  SHORT_CODE_RELAY_STAGE_CREDENTIAL_RESPONSE = 2;
+  SHORT_CODE_RELAY_STAGE_CLAIMANT_FINALIZATION = 3;
+  SHORT_CODE_RELAY_STAGE_CREATOR_IDENTITY = 4;
+  SHORT_CODE_RELAY_STAGE_CREATOR_CONFIRMATION = 5;
+  SHORT_CODE_RELAY_STAGE_CLAIMANT_CONFIRMATION = 6;
+  SHORT_CODE_RELAY_STAGE_CAPABILITY = 7;
+}
+
+message ShortCodeAttemptPublishRequest {
+  ProtocolVersion version = 1;
+  ShortCodePairingLocator locator = 2;
+  ShortCodePairingAttemptId attempt_id = 3;
+  uint64 deadline_unix_seconds = 4;
+}
+
+message ShortCodeAttemptClaimRequest {
+  ProtocolVersion version = 1;
+  ShortCodePairingLocator locator = 2;
+  bytes payload = 3;
+}
+
+message ShortCodeAttemptMessageRequest {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+  ShortCodeRelayStage stage = 3;
+  bytes payload = 4;
+}
+
+message ShortCodeAttemptReadRequest {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+}
+
+message ShortCodeRelayMessage {
+  ShortCodeRelayStage stage = 1;
+  bytes payload = 2;
+}
+
+message ShortCodeAttemptSnapshot {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+  uint64 deadline_unix_seconds = 3;
+  bool cancelled = 4;
+  bool capability_consumed = 5;
+  repeated ShortCodeRelayMessage messages = 6;
+}
+
+message ShortCodeCapabilityResponse {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+  bytes payload = 3;
+}

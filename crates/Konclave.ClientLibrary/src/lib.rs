@@ -19,7 +19,9 @@ mod websocket;
 pub use KonclaveDomainCore::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
-    PairingRendezvousTakeRequest,
+    PairingRendezvousTakeRequest, ShortCodeAttemptClaimRequest, ShortCodeAttemptMessageRequest,
+    ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest, ShortCodeAttemptSnapshot,
+    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodeRelayMessage, ShortCodeRelayStage,
 };
 pub use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,
@@ -35,6 +37,7 @@ pub use error::KonclaveClientError;
 pub use health::check_relay_health;
 pub use http::{
     PairingRendezvousPublishResult, PairingRendezvousTransport, RelayClient, RelayTransport,
+    ShortCodeAttemptMessageResult, ShortCodeAttemptPublishResult, ShortCodePairingTransport,
 };
 pub use installation::{
     RELAY_INSTALLATION_CONFIG_FILE, RelayEnrollmentSourceConfig, RelayInstallationConfig,

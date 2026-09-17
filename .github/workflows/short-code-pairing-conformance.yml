@@ -18,7 +18,7 @@ jobs:
   short-code-pairing-conformance:
     name: Short-code pairing conformance
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Resolve short-code pairing validation scope
         id: scope
@@ -50,10 +50,11 @@ jobs:
                 $_ -match '^\.github/workflows/short-code-pairing-conformance\.yml$' -or
                 $_ -match '^docs/adr/adr-0024-opaque-short-code-mutual-verification\.md$' -or
                 $_ -match '^docs/development/conformance\.md$' -or
+                $_ -match '^proto/konclave/protocol/v1/short_code_pairing\.proto$' -or
                 $_ -match '^scripts/ci/Validate-RustSecurityDependencies\.sh$' -or
-                $_ -match '^crates/Konclave\.DomainCore/(?:Cargo\.toml|src/(?:error|identifiers|lib|short_code_pairing)\.rs)$' -or
-                $_ -match '^crates/Konclave\.CryptographicCore/(?:Cargo\.toml|src/(?:error|lib|short_code_pairing)\.rs)$' -or
-                $_ -match '^crates/Konclave\.SecretStorage/(?:Cargo\.toml|src/authenticated_cipher\.rs)$'
+                $_ -match '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$' -or
+                $_ -match '^apps/Konclave\.CommunityRelay/(?:Cargo\.toml|src/.*|tests/.*)$' -or
+                $_ -match '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
               }
             ).Count -ne 0
           }
@@ -76,14 +77,25 @@ jobs:
           key: short-code-pairing-conformance
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Verify short-code pairing foundation
+      - name: Setup Node.js
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: 24
+          npm-cache-scope: short-code-pairing-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('packages/Konclave.ProtocolContracts.TypeScript/package-lock.json') }}
+      - name: Verify short-code pairing integration
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt \
+            --package KonclaveClientLibrary \
+            --package KonclaveCommunityRelay \
             --package KonclaveDomainCore \
             --package KonclaveCryptographicCore \
+            --package KonclaveProtocolContracts \
+            --package KonclaveRelayCore \
             -- \
             --check
           cargo test \
@@ -94,11 +106,45 @@ jobs:
             --locked \
             --package KonclaveCryptographicCore \
             short_code_pairing
+          cargo test \
+            --locked \
+            --package KonclaveProtocolContracts \
+            short_code_pairing
+          cargo test \
+            --locked \
+            --package KonclaveRelayCore
+          cargo test \
+            --locked \
+            --package KonclaveCommunityRelay \
+            --test http_integration \
+            short_code_pairing
+          cargo test \
+            --locked \
+            --package KonclaveClientLibrary \
+            --test relay_integration \
+            client_completes_one_short_code_relay_exchange
+          cargo test \
+            --locked \
+            --package KonclaveClientLibrary \
+            --test http_safety \
+            clients_never_forward_bearer_credentials_across_redirects
+          cargo test \
+            --locked \
+            --package KonclaveClientLibrary \
+            --test http_safety \
+            short_code_client_requires_exact_status_and_bounded_snapshot
           cargo clippy \
             --locked \
+            --package KonclaveClientLibrary \
+            --package KonclaveCommunityRelay \
             --package KonclaveDomainCore \
             --package KonclaveCryptographicCore \
+            --package KonclaveProtocolContracts \
+            --package KonclaveRelayCore \
             --all-targets \
             -- \
             -D warnings
           bash ./scripts/ci/Validate-RustSecurityDependencies.sh
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript ci --no-audit --no-fund
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript run build
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript test
