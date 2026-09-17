@@ -72,6 +72,7 @@ foreach ($workflow in $expectations.Keys) {
 $ci = Get-Content -LiteralPath (Join-Path $workflows 'ci.yml') -Raw
 foreach ($required in @(
     'dependabot-validation:',
+    "--jq '.[] | .filename, (.previous_filename // empty)'",
     'cargo test --workspace --locked',
     './scripts/Invoke-NodeWorkspaceChecks.ps1',
     './scripts/ci/Test-ActionsStoragePolicy.ps1',

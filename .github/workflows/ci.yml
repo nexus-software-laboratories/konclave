@@ -94,7 +94,7 @@ jobs:
           $files = @(
             gh api --paginate `
               "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
-              --jq '.[].filename, (.previous_filename // empty)'
+              --jq '.[] | .filename, (.previous_filename // empty)'
           )
           if ($LASTEXITCODE -ne 0) {
             throw 'Could not resolve Dependabot pull-request files.'
