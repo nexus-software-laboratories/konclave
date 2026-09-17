@@ -2989,18 +2989,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           nowUnixMilliseconds,
           sleep,
         );
-        if (completed.phase === 'completed') {
-          const selected = selectedConversation(
-            await client.request('set_active_conversation', {
-              conversation_id: completed.conversationId,
-            }),
-          );
-          if (selected !== completed.conversationId) {
-            throw new Error('the local service selected a different repeat-pairing conversation');
-          }
-          activeConversationId = completed.conversationId;
-          await presentation.write(`connected: ${completed.conversationId}`);
+        const selected = selectedConversation(
+          await client.request('set_active_conversation', {
+            conversation_id: completed.conversationId,
+          }),
+        );
+        if (selected !== completed.conversationId) {
+          throw new Error('the local service selected a different repeat-pairing conversation');
         }
+        activeConversationId = completed.conversationId;
+        await presentation.write(`connected: ${completed.conversationId}`);
         return;
       }
       case 'cancel-repeat': {
