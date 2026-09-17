@@ -12,6 +12,7 @@ mod health;
 mod http;
 mod installation;
 mod pairing;
+mod pairing_rendezvous;
 mod protected_http;
 mod websocket;
 
@@ -33,6 +34,11 @@ pub use installation::{
     RelayInstallationConfigError, default_profile_root, relay_enrollment_installation_id,
 };
 pub use pairing::{MAX_PAIRING_CAPABILITY_TEXT_BYTES, PairingCapability, PairingCapabilityText};
+pub use pairing_rendezvous::{
+    MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, PAIRING_RENDEZVOUS_TOKEN_CHARACTERS,
+    PairingRendezvousRecord, PairingRendezvousTokenText, create_pairing_rendezvous,
+    open_pairing_rendezvous,
+};
 pub use websocket::RelayWatchSession;
 
 #[cfg(test)]
