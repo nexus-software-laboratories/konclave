@@ -915,6 +915,9 @@ describe('deterministic commands', () => {
       line: pairingToken,
       options: { ephemeral: true },
     });
+    expect(entries.map((entry) => entry.line).join('\n')).toContain(
+      'waiting for the other session to run /konclave connect <token>',
+    );
     expect(entries.some((entry) => entry.line === `connected: ${conversationId}`)).toBe(true);
     expect(entries.map((entry) => entry.line).join('\n')).toContain(
       'no independent identity verification',
@@ -1342,7 +1345,7 @@ describe('deterministic commands', () => {
     expect(
       stalledRequest.mock.calls.filter(([operation]) => operation === 'sync_pairing'),
     ).toHaveLength(4);
-    expect(malformedLines.join('\n')).toContain('valid 26-character pairing token is required');
+    expect(malformedLines.join('\n')).toContain('use /konclave join <capability>');
   });
 
   it('redeems, creates, and approves an inviter-side pairing explicitly', async () => {

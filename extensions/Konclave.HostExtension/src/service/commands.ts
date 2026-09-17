@@ -533,7 +533,9 @@ function requirePairingRendezvousToken(value: string): string {
     token.length !== pairingRendezvousTokenCharacters ||
     !pairingRendezvousTokenPattern.test(token)
   ) {
-    throw new Error('a valid 26-character pairing token is required');
+    throw new Error(
+      'connect requires a 26-character pairing token; use /konclave join <capability> for a full recovery capability',
+    );
   }
   return token;
 }
@@ -2048,7 +2050,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`cancel: /konclave cancel ${created.pairing.pairingId}`);
           await presentation.write(
             presentation.mode === 'normal'
-              ? `pairing ${created.pairing.pairingId} (same-account trust): share this 26-character token`
+              ? `pairing ${created.pairing.pairingId} (same-account trust): share this token; the other session runs /konclave connect <token>`
               : 'compact token (ephemeral; paste the next line in the other session):',
           );
           await presentation.write(created.token, { ephemeral: true });
