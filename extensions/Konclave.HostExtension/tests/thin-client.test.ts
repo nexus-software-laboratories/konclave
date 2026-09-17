@@ -710,6 +710,105 @@ describe('deterministic commands', () => {
     expect(isKnownOperation('start_repeat_pairing')).toBe(true);
   });
 
+  it('renders empty and incompatible trusted-device states', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ devices: [] })
+      .mockResolvedValueOnce({
+        devices: [
+          {
+            alias: 'legacy-device',
+            device_id: joinerDeviceId,
+            status: 'unsupported',
+          },
+        ],
+      });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('devices'));
+    await command?.handler(commandContext('devices'));
+
+    expect(lines.join('\n')).toContain('trusted devices: none');
+    expect(lines.join('\n')).toContain(`legacy-device: unsupported; ${joinerDeviceId}`);
+  });
+
+  it('resumes and cancels repeat-pairing operations deterministically', async () => {
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      switch (operation) {
+        case 'get_repeat_pairing_status':
+          return repeatPairingStatus({
+            phase: 'completed',
+            pairing_id: pairingId,
+          });
+        case 'set_active_conversation':
+          return {
+            active_conversation_id:
+              typeof payload === 'object' && payload !== null && 'conversation_id' in payload
+                ? payload.conversation_id
+                : null,
+          };
+        case 'cancel_repeat_pairing':
+          return repeatPairingStatus({ phase: 'cancelled' });
+        default:
+          throw new Error(`unexpected operation ${operation}`);
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+      nowUnixMilliseconds: () => 1_900_000_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })[0];
+
+    await command?.handler(commandContext(`repeat ${repeatPairingOperationId}`));
+    await command?.handler(commandContext(`cancel-repeat ${repeatPairingOperationId}`));
+
+    expect(lines.join('\n')).toContain(`connected: ${conversationId}`);
+    expect(lines.join('\n')).toContain(`repeat connection ${repeatPairingOperationId}: cancelled`);
+  });
+
+  it('rejects noncanonical aliases and reports repeat-pairing expiry', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'start_repeat_pairing') {
+        return repeatPairingStatus({ deadline_unix_seconds: 1_900_000_000 });
+      }
+      throw new Error(`unexpected operation ${operation}`);
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+      nowUnixMilliseconds: () => 1_900_000_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })[0];
+
+    await command?.handler(commandContext(`device alias ${joinerDeviceId} Alienware`));
+    await command?.handler(commandContext('new Alienware'));
+    await command?.handler(commandContext('new alienware'));
+
+    expect(lines.join('\n')).toContain('device alias must contain 1-32 lowercase letters');
+    expect(lines.join('\n')).toContain('repeat connection');
+    expect(lines.join('\n')).toContain('timed out');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('manages collaboration policies through deterministic nested commands', async () => {
     const proposalId = '55'.repeat(16);
     const replacementProposalId = '56'.repeat(16);
