@@ -872,6 +872,11 @@ describe('deterministic commands', () => {
             granted_role: 'member',
             completion_deadline_unix_seconds: 1_787_806_000,
           });
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
         default:
           throw new Error('unexpected operation');
       }
@@ -913,6 +918,13 @@ describe('deterministic commands', () => {
     expect(entries.map((entry) => entry.line).join('\n')).toContain(
       'no independent identity verification',
     );
+    expect(entries).toContainEqual({
+      line: 'connect: waiting for the other session to redeem the capability; 6m 28s remaining',
+      options: { ephemeral: true },
+    });
+    expect(entries.map((entry) => entry.line).join('\n')).toContain(
+      'connect: waiting for the inviter to publish the encrypted Welcome',
+    );
     expect(sleep).toHaveBeenCalledWith(500);
   });
 
@@ -950,6 +962,11 @@ describe('deterministic commands', () => {
             }),
             processed_records: 1,
           };
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
         default:
           throw new Error('unexpected operation');
       }
@@ -984,6 +1001,131 @@ describe('deterministic commands', () => {
       },
     );
     expect(lines).toContain(`connected: ${conversationId}`);
+    expect(lines.join('\n')).toContain(
+      'connect: waiting for the other session to publish its join proof',
+    );
+  });
+
+  it('resumes an interrupted joiner-side AccountTrusted connection', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'get_pairing_status':
+          return pairingStatus({
+            phase: 'joiner_awaiting_inviter_authorization',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+          });
+        case 'authorize_pairing_inviter':
+          return pairingStatus({
+            phase: 'joiner_awaiting_welcome',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+            completion_deadline_unix_seconds: 1_787_806_000,
+          });
+        case 'sync_pairing':
+          return {
+            pairing: pairingStatus({
+              phase: 'completed',
+              inviter_device_id: inviterDeviceId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+              completion_deadline_unix_seconds: 1_787_806_000,
+            }),
+            processed_records: 1,
+          };
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`connect resume ${pairingId}`));
+
+    expect(request).toHaveBeenCalledWith('get_pairing_status', { pairing_id: pairingId });
+    expect(request).toHaveBeenCalledWith(
+      'authorize_pairing_inviter',
+      {
+        pairing_id: pairingId,
+        inviter_device_id: inviterDeviceId,
+        conversation_id: conversationId,
+        granted_role: 'member',
+      },
+      {
+        deadlineMs: expect.any(Number),
+      },
+    );
+    expect(request).not.toHaveBeenCalledWith('create_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('redeem_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_conversation', expect.anything());
+    expect(lines).toContain(`pairing ${pairingId} (same-account trust): resuming`);
+    expect(lines).toContain(`connected: ${conversationId}`);
+  });
+
+  it('does not report connected before the completed conversation exists locally', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'create_pairing_capability':
+          return {
+            pairing: pairingStatus(),
+            capability: 'pairing_capability-1',
+          };
+        case 'sync_pairing':
+          return {
+            pairing: pairingStatus({
+              phase: 'completed',
+              inviter_device_id: inviterDeviceId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+              completion_deadline_unix_seconds: 1_787_806_000,
+            }),
+            processed_records: 1,
+          };
+        case 'list_conversations':
+          return {
+            conversation_ids: [],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect'));
+
+    expect(lines.join('\n')).toContain('completed pairing conversation is unavailable locally');
+    expect(lines.some((line) => line.startsWith('connected: '))).toBe(false);
   });
 
   it('refuses connection automation outside AccountTrusted policy', async () => {
@@ -1102,6 +1244,12 @@ describe('deterministic commands', () => {
           capability: 'pairing_capability-1',
         };
       }
+      if (operation === 'cancel_pairing') {
+        return pairingStatus({
+          phase: 'cancelled',
+          authorization_deadline_unix_seconds: 1_787_805_000,
+        });
+      }
       throw new Error('unexpected operation');
     });
     const expiredLines: string[] = [];
@@ -1119,33 +1267,49 @@ describe('deterministic commands', () => {
 
     expect(cancelledLines.join('\n')).toContain('pairing was cancelled');
     expect(expiredLines.join('\n')).toContain('connect timed out');
+    expect(expiredLines.join('\n')).toContain('next: run /konclave connect');
+    expect(expiredRequest).toHaveBeenCalledWith(
+      'cancel_pairing',
+      { pairing_id: pairingId },
+      { deadlineMs: 30_000 },
+    );
     expect(expiredRequest).not.toHaveBeenCalledWith('sync_pairing', expect.anything());
   });
 
   it('bounds stalled and malformed AccountTrusted connection state', async () => {
+    let now = 1_787_805_000_000;
+    const sleep = vi.fn(async (milliseconds: number) => {
+      now += milliseconds;
+    });
     const stalledRequest = vi.fn(async (operation: string) => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
       if (operation === 'create_pairing_capability') {
         return {
-          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_806_000 }),
+          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_002 }),
           capability: 'pairing_capability-1',
         };
       }
       if (operation === 'sync_pairing') {
         return {
-          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_806_000 }),
+          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_002 }),
           processed_records: 1,
         };
+      }
+      if (operation === 'cancel_pairing') {
+        return pairingStatus({
+          phase: 'cancelled',
+          authorization_deadline_unix_seconds: 1_787_805_002,
+        });
       }
       throw new Error('unexpected operation');
     });
     const stalledLines: string[] = [];
     const stalledCommand = createKonclaveCommands({
       client: stubClient(stalledRequest),
-      nowUnixMilliseconds: () => 1_787_805_000_000,
-      sleep: vi.fn().mockResolvedValue(undefined),
+      nowUnixMilliseconds: () => now,
+      sleep,
       output: {
         write: (line) => {
           stalledLines.push(line);
@@ -1172,10 +1336,11 @@ describe('deterministic commands', () => {
     })[0];
     await malformedCommand?.handler(commandContext('connect pairing_capability-1'));
 
-    expect(stalledLines.join('\n')).toContain('connect exceeded its progress limit');
+    expect(stalledLines.join('\n')).toContain('connect timed out');
+    expect(stalledLines.join('\n')).toContain('next: run /konclave connect');
     expect(
       stalledRequest.mock.calls.filter(([operation]) => operation === 'sync_pairing'),
-    ).toHaveLength(640);
+    ).toHaveLength(4);
     expect(malformedLines.join('\n')).toContain('pairing role is malformed');
   });
 

@@ -94,6 +94,7 @@ continue safely.
 /konclave conversations
 /konclave connect
 /konclave connect <capability>
+/konclave connect resume <pairing>
 /konclave pair [member|administrator]
 /konclave join <capability>
 /konclave new
@@ -126,8 +127,13 @@ labels that policy as capability-possession trust and never claims independent
 identity verification. Stronger evidence policies and administrator grants retain the
 manual approval workflow. The command refuses before creating pairing or conversation
 state when no relay is configured. Every progress request receives the remaining
-pairing/command deadline, non-advancing phases back off, phase changes are rendered,
-and failures leave explicit pairing-status and cancellation commands.
+pairing/command deadline, non-advancing phases back off, and normal output identifies
+the next device action with a live countdown. The command remains active for the
+daemon's complete authorization and completion windows. Failures provide
+`/konclave connect resume <pairing>`, pairing-status, and cancellation commands so an
+interrupted extension process can continue the same durable pairing. A command
+deadline requests bounded cancellation before returning, and `connected` is emitted
+only after the completed conversation is present in the local profile.
 
 `/konclave approve` reads authenticated pairing state before selecting the
 role-specific authorization operation. Inviter-side approval defaults to `member`;

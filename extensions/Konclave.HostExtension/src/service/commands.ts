@@ -90,8 +90,9 @@ const maxPolicySourcePathBytes = 4_096;
 const commandMessageRequestDomain = 'konclave:command-message-request:1\0';
 const commandPolicyRequestDomain = 'konclave:command-policy-request:1\0';
 const connectPollMilliseconds = 500;
-const maxConnectIterations = 640;
-const maxConnectWaitMilliseconds = 5 * 60 * 1_000;
+const connectProgressIntervalMilliseconds = 30_000;
+const maxConnectIterations = 2_400;
+const maxConnectWaitMilliseconds = 20 * 60 * 1_000;
 const pairingIdCharacters = 32;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
@@ -115,6 +116,8 @@ const pairingPhases = [
   'cancelled',
 ] as const;
 type PairingPhase = (typeof pairingPhases)[number];
+
+class ConnectTimeoutError extends Error {}
 
 interface PairingStatus {
   readonly pairingId: string;
@@ -256,6 +259,7 @@ const helpLines = [
   '  /konclave conversations                             List local conversation identifiers.',
   '  /konclave connect                                   Create a two-session connection capability.',
   '  /konclave connect <capability>                      Join and complete an AccountTrusted connection.',
+  '  /konclave connect resume <pairing>                  Resume one interrupted AccountTrusted connection.',
   '  /konclave pair [member|administrator]               Create a one-time pairing capability.',
   '  /konclave join <capability>                         Redeem a pairing capability.',
   '  /konclave new                                       Create a conversation for an approved peer.',
@@ -1174,9 +1178,52 @@ function remainingPairingRequestMilliseconds(
   const remaining =
     Math.min(commandDeadline, pairingDeadlineMilliseconds(status)) - nowUnixMilliseconds();
   if (remaining <= 0) {
-    throw new Error(`connect timed out for pairing ${status.pairingId}`);
+    throw new ConnectTimeoutError(`connect timed out for pairing ${status.pairingId}`);
   }
   return Math.min(remaining, 30_000);
+}
+
+function formatRemainingPairingTime(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes === 0 ? `${seconds}s` : `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+}
+
+function connectPhaseMessage(status: PairingStatus): string {
+  switch (status.phase) {
+    case 'joiner_awaiting_invitation':
+      return 'waiting for the other session to redeem the capability';
+    case 'joiner_awaiting_inviter_authorization':
+      return 'authorizing the authenticated inviter';
+    case 'joiner_awaiting_welcome':
+      return 'waiting for the inviter to publish the encrypted Welcome';
+    case 'inviter_awaiting_authorization':
+      return 'authorizing the requesting device';
+    case 'inviter_awaiting_join_proof':
+      return 'waiting for the other session to publish its join proof';
+    case 'inviter_awaiting_completion':
+      return 'waiting for the other session to accept the encrypted Welcome';
+    case 'compensating':
+      return 'restoring membership after cancellation';
+    case 'completed':
+      return 'connected';
+    case 'cancelled':
+      return 'cancelled';
+  }
+}
+
+async function renderConnectProgress(
+  presentation: CommandPresentation,
+  status: PairingStatus,
+  nowUnixMilliseconds: () => number,
+): Promise<void> {
+  const remaining = pairingDeadlineMilliseconds(status) - nowUnixMilliseconds();
+  await presentation.detail(`connect phase: ${status.phase}`);
+  await presentation.write(
+    `connect: ${connectPhaseMessage(status)}; ${formatRemainingPairingTime(remaining)} remaining`,
+    { ephemeral: true },
+  );
 }
 
 async function completeAccountTrustedPairing(
@@ -1188,14 +1235,43 @@ async function completeAccountTrustedPairing(
   sleep: (milliseconds: number) => Promise<void>,
 ): Promise<PairingStatus> {
   let status = initialStatus;
+  let nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
 
   try {
+    await renderConnectProgress(presentation, status, nowUnixMilliseconds);
     for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
       if (status.phase === 'completed') {
         return status;
       }
       if (status.phase === 'cancelled') {
         throw new Error('pairing was cancelled before connection completed');
+      }
+      if (status.localRole === 'inviter' && status.phase === 'inviter_awaiting_authorization') {
+        if (status.requestedRole !== 'member') {
+          throw new Error('connect accepts only member pairing requests');
+        }
+        const deadlineMs = remainingPairingRequestMilliseconds(
+          status,
+          commandDeadline,
+          nowUnixMilliseconds,
+        );
+        const conversationId = parseConversation(await client.request('create_conversation', {}));
+        status = parsePairingStatus(
+          await client.request(
+            'authorize_pairing_joiner',
+            {
+              pairing_id: status.pairingId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+            },
+            {
+              deadlineMs,
+            },
+          ),
+        );
+        await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+        nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+        continue;
       }
       if (
         status.localRole === 'joiner' &&
@@ -1224,7 +1300,8 @@ async function completeAccountTrustedPairing(
           ),
         );
         if (status.phase !== previousPhase) {
-          await presentation.detail(`connect phase: ${status.phase}`);
+          await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+          nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
         }
         continue;
       }
@@ -1247,18 +1324,59 @@ async function completeAccountTrustedPairing(
       }
       status = synced.pairing;
       if (status.phase !== previousPhase) {
-        await presentation.detail(`connect phase: ${status.phase}`);
+        await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+        nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
       } else {
+        if (nowUnixMilliseconds() >= nextProgressAt) {
+          await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+          nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+        }
         await sleep(connectPollMilliseconds);
       }
     }
 
-    throw new Error(`connect exceeded its progress limit for pairing ${status.pairingId}`);
+    throw new ConnectTimeoutError(
+      `connect exceeded its progress limit for pairing ${status.pairingId}`,
+    );
   } catch (error) {
-    await presentation.write(`recovery: /konclave pairing ${status.pairingId}`);
+    if (
+      error instanceof ConnectTimeoutError &&
+      status.phase !== 'completed' &&
+      status.phase !== 'cancelled'
+    ) {
+      try {
+        const cancelled = parsePairingStatus(
+          await client.request(
+            'cancel_pairing',
+            { pairing_id: status.pairingId },
+            { deadlineMs: 30_000 },
+          ),
+        );
+        if (cancelled.pairingId !== status.pairingId) {
+          throw new Error('the local service pairing cancellation identity is malformed', {
+            cause: error,
+          });
+        }
+        status = cancelled;
+        await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+        if (status.phase === 'completed') {
+          return status;
+        }
+      } catch (cancellationError) {
+        await presentation.write(`status: /konclave pairing ${status.pairingId}`);
+        await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
+        throw new Error(`${error.message}; automatic pairing cancellation failed`, {
+          cause: cancellationError,
+        });
+      }
+    }
+    await presentation.write(`status: /konclave pairing ${status.pairingId}`);
     if (status.phase === 'cancelled') {
       await presentation.write('next: run /konclave connect to start a new pairing');
+    } else if (status.phase === 'compensating') {
+      await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
     } else {
+      await presentation.write(`resume: /konclave connect resume ${status.pairingId}`);
       await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
     }
     throw error;
@@ -1914,6 +2032,35 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             nowUnixMilliseconds,
             sleep,
           );
+        } else if (/^resume(?:\s|$)/iu.test(argumentsText)) {
+          const parts = parseCommandArguments(argumentsText);
+          requireArgumentCount(parts, 2, 2, '/konclave connect resume <pairing>');
+          if (parts[0]?.toLowerCase() !== 'resume') {
+            throw new Error('usage: /konclave connect resume <pairing>');
+          }
+          const pairingId = requireHexIdentifier(
+            parts[1],
+            pairingIdCharacters,
+            'pairing identifier',
+          );
+          status = parsePairingStatus(
+            await client.request('get_pairing_status', { pairing_id: pairingId }),
+          );
+          if (status.pairingId !== pairingId) {
+            throw new Error('the resumed pairing identity is malformed');
+          }
+          if (status.requestedRole !== 'member' || status.grantedRole === 'administrator') {
+            throw new Error('connect resumes only member pairing requests');
+          }
+          await presentation.write(`pairing ${pairingId} (same-account trust): resuming`);
+          status = await completeAccountTrustedPairing(
+            client,
+            status,
+            presentation,
+            commandDeadline,
+            nowUnixMilliseconds,
+            sleep,
+          );
         } else {
           const capability = requirePairingCapability(argumentsText);
           const redeemed = parsePairingStatus(
@@ -1933,28 +2080,9 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
               `pairing ${redeemed.pairingId} (same-account trust): connecting`,
             );
           }
-          const conversationId = parseConversation(await client.request('create_conversation', {}));
-          await presentation.detail(`conversation: ${conversationId}`);
-          const approved = parsePairingStatus(
-            await client.request(
-              'authorize_pairing_joiner',
-              {
-                pairing_id: redeemed.pairingId,
-                conversation_id: conversationId,
-                granted_role: 'member',
-              },
-              {
-                deadlineMs: remainingPairingRequestMilliseconds(
-                  redeemed,
-                  commandDeadline,
-                  nowUnixMilliseconds,
-                ),
-              },
-            ),
-          );
           status = await completeAccountTrustedPairing(
             client,
-            approved,
+            redeemed,
             presentation,
             commandDeadline,
             nowUnixMilliseconds,
@@ -1963,6 +2091,10 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         if (!status.conversationId) {
           throw new Error('completed pairing is missing its conversation');
+        }
+        const selection = conversations(await client.request('list_conversations', {}));
+        if (!selection.conversationIds.includes(status.conversationId)) {
+          throw new Error('completed pairing conversation is unavailable locally');
         }
         activeConversationId = status.conversationId;
         if (presentation.mode === 'verbose') {

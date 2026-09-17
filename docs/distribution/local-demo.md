@@ -95,6 +95,17 @@ session:
 /konclave connect <capability>
 ```
 
+Both sessions display the current durable phase, the action expected from the other
+device, and the remaining pairing time. If a Copilot process is interrupted before
+completion, restart it and continue the durable pairing with:
+
+```text
+/konclave connect resume <pairing-id>
+```
+
+An expired command requests cancellation before returning. Neither side reports
+`connected` until its completed conversation is durable in the local profile.
+
 Both commands complete with the same conversation identifier. Send from either side
 with:
 
