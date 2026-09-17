@@ -50,6 +50,7 @@ jobs:
                 $_ -match '^\.github/workflows/pairing-rendezvous-conformance\.yml$' -or
                 $_ -match '^crates/Konclave\.ClientLibrary/(?:Cargo\.toml|src/(?:error|lib|pairing|pairing_rendezvous)\.rs)$' -or
                 $_ -match '^crates/Konclave\.CryptographicCore/(?:Cargo\.toml|src/(?:lib|pairing_rendezvous)\.rs)$' -or
+                $_ -match '^crates/Konclave\.DomainCore/(?:Cargo\.toml|src/(?:identifiers|lib|pairing_rendezvous)\.rs)$' -or
                 $_ -match '^crates/Konclave\.SecretStorage/(?:Cargo\.toml|src/authenticated_cipher\.rs)$'
               }
             ).Count -ne 0
@@ -81,8 +82,13 @@ jobs:
           cargo fmt \
             --package KonclaveClientLibrary \
             --package KonclaveCryptographicCore \
+            --package KonclaveDomainCore \
             -- \
             --check
+          cargo test \
+            --locked \
+            --package KonclaveDomainCore \
+            pairing_rendezvous::tests
           cargo test \
             --locked \
             --package KonclaveCryptographicCore \
@@ -91,6 +97,12 @@ jobs:
             --locked \
             --package KonclaveClientLibrary \
             pairing_rendezvous::tests
+          cargo clippy \
+            --locked \
+            --package KonclaveDomainCore \
+            --all-targets \
+            -- \
+            -D warnings
           cargo clippy \
             --locked \
             --package KonclaveCryptographicCore \
