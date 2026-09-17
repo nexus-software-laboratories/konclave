@@ -17,8 +17,9 @@ concurrency:
 jobs:
   trusted-device-alias-conformance:
     name: Trusted device alias conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Resolve trusted device alias validation scope
         id: scope
@@ -50,8 +51,14 @@ jobs:
                 $_ -match '^\.github/workflows/trusted-device-alias-conformance\.yml$' -or
                 $_ -match '^docs/README\.md$' -or
                 $_ -match '^docs/architecture/decisions\.md$' -or
+                $_ -match '^docs/development/conformance\.md$' -or
+                $_ -match '^docs/security/threat-model\.md$' -or
                 $_ -match '^docs/adr/adr-0025-trusted-device-alias-bootstrap\.md$' -or
-                $_ -match '^crates/Konclave\.DomainCore/(?:Cargo\.toml|src/(?:error|lib|trusted_devices)\.rs)$'
+                $_ -match '^proto/konclave/protocol/v1/(?:application|common)\.proto$' -or
+                $_ -match '^crates/Konclave\.(?:CryptographicCore|DomainCore|ProtocolContracts|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$' -or
+                $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/.*|tests/.*)$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*|docs/.*)$' -or
+                $_ -match '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
               }
             ).Count -ne 0
           }
@@ -74,18 +81,64 @@ jobs:
           key: trusted-device-alias-conformance
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Verify trusted device alias foundation
+      - name: Setup Node.js
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: 24
+          npm-cache-scope: trusted-device-alias-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json', 'packages/Konclave.ProtocolContracts.TypeScript/package-lock.json') }}
+      - name: Verify trusted device aliases
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveDomainCore -- --check
+          cargo fmt \
+            --package KonclaveDomainCore \
+            --package KonclaveCryptographicCore \
+            --package KonclaveLocalDaemon \
+            --package KonclaveProtocolContracts \
+            --package KonclaveSecretStorage \
+            -- \
+            --check
           cargo test --locked --package KonclaveDomainCore trusted_device
+          cargo test \
+            --locked \
+            --package KonclaveCryptographicCore \
+            application_capabilities_are_root_signed
+          cargo test --locked --package KonclaveProtocolContracts repeat_pairing
+          cargo test --locked --package KonclaveLocalDaemon --lib trusted_device
+          cargo test --locked --package KonclaveLocalDaemon --lib repeat_pairing
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            trusted_alias_bootstrap_completes_a_second_conversation_without_user_handoff
+          cargo test --locked --package KonclaveLocalDaemon --lib schema_
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            trusted_device_operations_remain_deterministic_commands_only
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            copilot_tool_contract_fixture_matches_the_router
           cargo clippy \
             --locked \
             --package KonclaveDomainCore \
+            --package KonclaveCryptographicCore \
+            --package KonclaveLocalDaemon \
+            --package KonclaveProtocolContracts \
+            --package KonclaveSecretStorage \
             --all-targets \
             -- \
             -D warnings
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript ci --no-audit --no-fund
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript run build
+          npm --prefix packages/Konclave.ProtocolContracts.TypeScript test
+          npm --prefix extensions/Konclave.HostExtension ci --no-audit --no-fund
+          npm --prefix extensions/Konclave.HostExtension test
           pwsh -NoProfile -Command \
             "Get-Content -Raw .github/genesis-guidance.json | ConvertFrom-Json | Out-Null"
