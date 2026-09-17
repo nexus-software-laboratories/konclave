@@ -142,6 +142,11 @@ jobs:
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
+            pairing_service::tests::compact_rendezvous_rejects_administrator_capabilities
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
             mcp::tests::copilot_tool_contract_fixture_matches_the_router
           cargo clippy \
             --locked \

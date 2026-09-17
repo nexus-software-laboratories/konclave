@@ -682,17 +682,9 @@
   },
   {
     "name": "create_pairing_rendezvous",
-    "description": "Create one compact encrypted token another session can redeem through the relay.",
+    "description": "Create one compact encrypted member-pairing token another session can redeem through the relay.",
     "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "requested_role": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "requested_role"
-      ],
+      "properties": {},
       "type": "object"
     },
     "outputSchema": {

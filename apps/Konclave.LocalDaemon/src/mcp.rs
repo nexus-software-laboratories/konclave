@@ -586,10 +586,10 @@ impl StdioServer {
                 self.create_pairing_capability(Self::parse_parameters(payload)?)
                     .await?,
             ),
-            "create_pairing_rendezvous" => Self::encode_json(
-                self.create_pairing_rendezvous(Self::parse_parameters(payload)?)
-                    .await?,
-            ),
+            "create_pairing_rendezvous" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.create_pairing_rendezvous().await?)
+            }
             "redeem_pairing_capability" => Self::encode_json(
                 self.redeem_pairing_capability(Self::parse_parameters(payload)?)
                     .await?,
@@ -782,21 +782,17 @@ impl StdioServer {
 
     #[tool(
         name = "create_pairing_rendezvous",
-        description = "Create one compact encrypted token another session can redeem through the relay."
+        description = "Create one compact encrypted member-pairing token another session can redeem through the relay."
     )]
-    async fn create_pairing_rendezvous(
-        &self,
-        Parameters(request): Parameters<CreatePairingCapabilityRequest>,
-    ) -> Result<Json<PairingRendezvousResult>, String> {
+    async fn create_pairing_rendezvous(&self) -> Result<Json<PairingRendezvousResult>, String> {
         self.authorize("create_pairing_rendezvous")?;
         let pairings = self.pairing_service()?;
-        let requested_role = parse_role(&request.requested_role)?;
         let now = current_unix_seconds()?;
         let expires_at = now
             .checked_add(MAX_AUTHORIZATION_WINDOW_SECONDS)
             .ok_or_else(|| "system_time_unavailable".to_string())?;
         let created = pairings
-            .create_rendezvous(requested_role, expires_at, now)
+            .create_rendezvous(expires_at, now)
             .await
             .map_err(tool_error)?;
         let status = pairings

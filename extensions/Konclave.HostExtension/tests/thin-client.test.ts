@@ -896,9 +896,7 @@ describe('deterministic commands', () => {
 
     await command?.handler(commandContext('connect'));
 
-    expect(request).toHaveBeenCalledWith('create_pairing_rendezvous', {
-      requested_role: 'member',
-    });
+    expect(request).toHaveBeenCalledWith('create_pairing_rendezvous', {});
     expect(request).toHaveBeenCalledWith(
       'authorize_pairing_inviter',
       {

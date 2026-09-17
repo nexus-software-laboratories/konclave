@@ -2038,9 +2038,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         let status: PairingStatus;
         if (argumentsText.length === 0) {
           const created = parsePairingRendezvous(
-            await client.request('create_pairing_rendezvous', {
-              requested_role: 'member',
-            }),
+            await client.request('create_pairing_rendezvous', {}),
           );
           await presentation.detail(
             'approval policy: AccountTrusted capability possession; no independent identity verification',

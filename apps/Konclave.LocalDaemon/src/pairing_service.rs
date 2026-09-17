@@ -236,7 +236,6 @@ where
     /// Returns a capability, cryptographic, relay, task, cleanup, or persistence error.
     pub(crate) async fn create_rendezvous(
         &self,
-        requested_role: ConversationRole,
         expires_at_unix_seconds: u64,
         now_unix_seconds: u64,
     ) -> Result<CreatedPairingRendezvous, PairingServiceError>
@@ -244,7 +243,11 @@ where
         T: PairingRendezvousTransport,
     {
         let capability = self
-            .issue_capability(requested_role, expires_at_unix_seconds, now_unix_seconds)
+            .issue_capability(
+                ConversationRole::Member,
+                expires_at_unix_seconds,
+                now_unix_seconds,
+            )
             .await?;
         let (token, record) = create_pairing_rendezvous(&capability, now_unix_seconds)?;
         let pairing_id = self.reserve_joiner_capability(capability).await?;
@@ -274,6 +277,9 @@ where
         let request = pairing_rendezvous_take_request(token)?;
         let record = self.transport.take_pairing_rendezvous(request).await?;
         let capability = open_pairing_rendezvous(token, &record, now_unix_seconds)?;
+        if capability.offer().requested_role() != ConversationRole::Member {
+            return Err(PairingServiceError::InvalidRendezvousRole);
+        }
         self.redeem_decoded_capability(capability, now_unix_seconds)
             .await
     }
@@ -1693,6 +1699,8 @@ pub(crate) enum PairingServiceError {
     ProfileClosing,
     #[error("pairing rendezvous publication failed and local reservation cleanup failed")]
     RendezvousCleanup,
+    #[error("compact pairing rendezvous supports only the member role")]
+    InvalidRendezvousRole,
     #[error(transparent)]
     Application(#[from] ApplicationServiceError),
     #[error(transparent)]
@@ -2293,7 +2301,7 @@ mod tests {
         let joiner_service = service(joiner.clone(), Arc::clone(&relay), &endpoint);
 
         let created = joiner_service
-            .create_rendezvous(ConversationRole::Member, DEADLINE, NOW)
+            .create_rendezvous(DEADLINE, NOW)
             .await
             .unwrap();
         let pairing_id = created.pairing_id;
@@ -2380,15 +2388,43 @@ mod tests {
         );
 
         assert!(matches!(
-            service
-                .create_rendezvous(ConversationRole::Member, DEADLINE, NOW)
-                .await,
+            service.create_rendezvous(DEADLINE, NOW).await,
             Err(PairingServiceError::Client(
                 KonclaveClientError::TransportUnavailable
             ))
         ));
         assert!(
             conversations
+                .store()
+                .active_pairing_ids(None, 1)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_rendezvous_rejects_administrator_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let inviter = open_coordinator(root.path(), "rendezvous-role-inviter");
+        let joiner = open_coordinator(root.path(), "rendezvous-role-joiner");
+        let relay = Arc::new(MemoryRelay::default());
+        let endpoint = RelayEndpoint::parse("https://relay.example.com").unwrap();
+        let inviter_service = service(inviter.clone(), Arc::clone(&relay), &endpoint);
+        let joiner_service = service(joiner, Arc::clone(&relay), &endpoint);
+        let created = joiner_service
+            .create_capability(ConversationRole::Administrator, DEADLINE, NOW)
+            .await
+            .unwrap();
+        let capability = PairingCapability::decode(created.capability.as_str(), NOW).unwrap();
+        let (token, record) = create_pairing_rendezvous(&capability, NOW).unwrap();
+        relay.publish_pairing_rendezvous(&record).await.unwrap();
+
+        assert!(matches!(
+            inviter_service.redeem_rendezvous(token.as_str(), NOW).await,
+            Err(PairingServiceError::InvalidRendezvousRole)
+        ));
+        assert!(
+            inviter
                 .store()
                 .active_pairing_ids(None, 1)
                 .unwrap()
