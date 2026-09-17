@@ -30,6 +30,8 @@ const CODE_SPACE: u32 = 1_000_000;
 const CODE_REJECTION_LIMIT: u32 =
     ((u32::MAX as u64 + 1) - ((u32::MAX as u64 + 1) % CODE_SPACE as u64)) as u32;
 const STATE_VERSION: u8 = 1;
+const SESSION_KEY_BYTES: usize = 64;
+const SESSION_STATE_BYTES: usize = 1 + SESSION_KEY_BYTES;
 const MAX_OPAQUE_STATE_BYTES: usize = 16 * 1024;
 const MAX_OPAQUE_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_TRANSCRIPT_MESSAGES: usize = 8;
@@ -156,8 +158,9 @@ pub struct ShortCodeOpaqueServerLogin {
 }
 
 /// Session key established only by matching OPAQUE executions.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ShortCodeOpaqueSession {
-    key: Zeroizing<[u8; 64]>,
+    key: Zeroizing<[u8; SESSION_KEY_BYTES]>,
 }
 
 impl ShortCodeOpaqueServerRecord {
@@ -441,6 +444,30 @@ impl ShortCodeOpaqueSession {
         Ok(Self {
             key: Zeroizing::new(key),
         })
+    }
+
+    /// Writes the exact OPAQUE session state for sealing by the daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider failure when the destination rejects the write.
+    pub fn write_to(&self, mut writer: impl Write) -> Result<(), KonclaveCryptographicError> {
+        writer
+            .write_all(&[STATE_VERSION])
+            .and_then(|()| writer.write_all(self.key.as_slice()))
+            .map_err(|_| state_write_failed())
+    }
+
+    /// Restores one exact OPAQUE session state blob.
+    ///
+    /// # Errors
+    ///
+    /// Returns an opaque invalid-state error for the wrong version or length.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, KonclaveCryptographicError> {
+        if bytes.len() != SESSION_STATE_BYTES || bytes.first() != Some(&STATE_VERSION) {
+            return Err(state_invalid());
+        }
+        Self::from_slice(&bytes[1..])
     }
 
     /// Derives the six-digit SAS for one exact OPAQUE and identity transcript.
@@ -1108,5 +1135,50 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn session_state_round_trips_exactly_and_rejects_non_canonical_bytes() {
+        let (client, _, messages) = complete(
+            ShortCodePairingCode::parse("123456").unwrap(),
+            ShortCodePairingCode::parse("123456").unwrap(),
+        )
+        .unwrap();
+        let transcript = derive_short_code_pairing_transcript_hash(
+            attempt(),
+            &messages.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let state = write_state(|writer| client.write_to(writer));
+        assert_eq!(state.len(), SESSION_STATE_BYTES);
+        let restored = ShortCodeOpaqueSession::from_bytes(&state).unwrap();
+        assert_eq!(
+            restored
+                .derive_sas(
+                    attempt(),
+                    transcript,
+                    DeviceId::from_bytes([8; 32]),
+                    DeviceId::from_bytes([9; 32]),
+                )
+                .unwrap()
+                .value(),
+            client
+                .derive_sas(
+                    attempt(),
+                    transcript,
+                    DeviceId::from_bytes([8; 32]),
+                    DeviceId::from_bytes([9; 32]),
+                )
+                .unwrap()
+                .value()
+        );
+
+        let mut wrong_version = state.clone();
+        wrong_version[0] = STATE_VERSION + 1;
+        assert!(ShortCodeOpaqueSession::from_bytes(&wrong_version).is_err());
+        assert!(ShortCodeOpaqueSession::from_bytes(&state[..state.len() - 1]).is_err());
+        let mut trailing = state;
+        trailing.push(0);
+        assert!(ShortCodeOpaqueSession::from_bytes(&trailing).is_err());
     }
 }
