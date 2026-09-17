@@ -3,7 +3,7 @@ name: Actions storage conformance
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
     paths:
       - '.github/actions/setup-node/action.yml'
       - '.github/genesis-delivery.json'

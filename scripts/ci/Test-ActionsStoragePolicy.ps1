@@ -93,6 +93,7 @@ $cleanup = Get-Content -LiteralPath (
 ) -Raw
 foreach ($required in @(
     'name: Actions storage cleanup',
+    'cancel-in-progress: true',
     'authorize-storage-cleanup:',
     'Manual storage cleanup requires the current default-branch head.',
     '- Agent plugin conformance',

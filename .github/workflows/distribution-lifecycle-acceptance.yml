@@ -3,7 +3,7 @@ name: Distribution lifecycle acceptance
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       baseline_tag:
