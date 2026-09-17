@@ -2,7 +2,7 @@ name: konclave-community-relay
 
 services:
   relay:
-    image: konclave-community-relay:0.1.10
+    image: konclave-community-relay:0.1.11
     pull_policy: never
     restart: unless-stopped
     read_only: true

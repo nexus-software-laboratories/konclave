@@ -267,7 +267,7 @@ jobs:
           bash ./scripts/ci/Test-ContainerImageContract.sh
           if [ '${{ matrix.name }}' = 'a2a-gateway' ]; then
             bash ./scripts/ci/Test-A2AGatewayContainerContract.sh \
-              'konclave-a2a-gateway:0.1.10'
+              'konclave-a2a-gateway:0.1.11'
           fi
           bash ./scripts/ci/Test-ContainerValidationCleanup.sh
       - name: Capture Docker baseline
