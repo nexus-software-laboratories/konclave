@@ -48,6 +48,13 @@ management through the installed shared service.
   Transfer only the capability to the intended peer, preserve the returned pairing
   and conversation identifiers, and stop after a finite deadline with the last
   observed phase.
+- When manual transfer requires six digits, use `create_short_code_pairing` and
+  `claim_short_code_pairing`, then show the exact attempt, both device identifiers,
+  SAS, and deadline from `get_short_code_pairing_status`. Call
+  `confirm_short_code_pairing` only after the user explicitly verifies every displayed
+  value; never infer confirmation from the code, elapsed time, or model output.
+  `sync_short_code_pairing` may resume bounded progress and
+  `cancel_short_code_pairing` stops the attempt.
 - Use `send_directed_request` only for an explicit request to one exact device. Omit
   `target_device_id` only for a two-member conversation; groups require it. A target
   whose root-signed binding does not advertise support is rejected, and ordinary

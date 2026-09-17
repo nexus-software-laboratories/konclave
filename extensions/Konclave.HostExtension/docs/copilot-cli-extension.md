@@ -93,6 +93,8 @@ to continue safely.
 /konclave identity
 /konclave conversations
 /konclave connect [--copy|--qr]
+/konclave connect --short
+/konclave connect <six-digit-code>
 /konclave connect <token-or-konclave-uri>
 /konclave connect resume <pairing>
 /konclave clipboard clear
@@ -100,10 +102,13 @@ to continue safely.
 /konclave join <capability>
 /konclave new
 /konclave pairing <pairing>
+/konclave verification <attempt>
+/konclave verify <attempt> <peer> <sas>
 /konclave approve <pairing> <conversation> [role]
 /konclave approve <pairing> <inviter> <conversation> <role>
 /konclave sync <pairing>
 /konclave cancel <pairing>
+/konclave cancel-verification <attempt>
 /konclave send [conversation] [message-id] -- <text>
 /konclave reply <conversation> <reply-to> [message-id] -- <text>
 /konclave messages <conversation> [after-cursor]
@@ -129,14 +134,27 @@ clipboards, narrow terminals, and non-interactive output degrade to the raw toke
 After a successful copy, `/konclave clipboard clear` explicitly replaces the current
 clipboard content with empty text.
 
+`/konclave connect --short` instead creates a six-digit OPAQUE code that grants no
+authority. The other computer enters it with `/konclave connect <six-digit-code>`.
+Both commands wait for the encrypted identity exchange, then display the exact attempt,
+local and peer device identifiers, common deadline, and six-digit SAS. Each operator
+must compare those values through an independent channel and run the displayed
+`/konclave verify <attempt> <peer> <sas>` command. The extension never infers or
+automates that confirmation, and the confirmation operation is deliberately absent
+from the registered agent-tool table. Only after both exact confirmations authenticate
+does the daemon create an ordinary member-only capability and continue the existing
+durable pairing flow. `/konclave verification <attempt>` resumes inspection and
+`/konclave cancel-verification <attempt>` cancels the attempt.
+
 Arguments and rendered output are bounded. High-level commands orchestrate only the
 existing closed operations; they do not implement a second pairing or messaging
 domain. Under `AccountTrusted`, `/konclave connect` treats the explicit transfer and
 redemption of one short-lived capability as the configured approval evidence, grants
 only `member`, and drives both durable pairing state machines to completion. It
 labels that policy as capability-possession trust and never claims independent
-identity verification. Stronger evidence policies and administrator grants retain the
-manual approval workflow. The command refuses before creating pairing or conversation
+identity verification. The short-code variant labels its independent mutual
+verification and remains member-only. Stronger evidence policies and administrator
+grants retain the manual approval workflow. The command refuses before creating pairing or conversation
 state when no relay is configured. Every progress request receives the remaining
 pairing/command deadline, non-advancing phases back off, and normal output identifies
 the next device action with a live countdown. The command remains active for the

@@ -14,7 +14,7 @@ import {
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
-import { serviceOperations } from './operations.js';
+import { serviceOperations, verificationOperations } from './operations.js';
 import {
   PairingHandoffError,
   pairingRendezvousTokenCharacters,
@@ -109,6 +109,7 @@ const connectProgressIntervalMilliseconds = 30_000;
 const maxConnectIterations = 2_400;
 const maxConnectWaitMilliseconds = 20 * 60 * 1_000;
 const pairingIdCharacters = 32;
+const shortCodeAttemptIdCharacters = 32;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
@@ -145,6 +146,38 @@ interface PairingStatus {
   readonly conversationId: string | undefined;
   readonly authorizationDeadlineUnixSeconds: number;
   readonly completionDeadlineUnixSeconds: number | undefined;
+}
+
+type ShortCodeRole = 'creator' | 'claimant';
+
+const shortCodePhases = [
+  'creator_awaiting_claim',
+  'creator_awaiting_finalization',
+  'creator_awaiting_confirmation',
+  'creator_publishing_capability',
+  'creator_completed',
+  'claimant_claiming',
+  'claimant_awaiting_response',
+  'claimant_awaiting_creator_identity',
+  'claimant_awaiting_confirmation',
+  'claimant_taking_capability',
+  'claimant_completed',
+  'cancelling',
+  'cancelled',
+] as const;
+type ShortCodePhase = (typeof shortCodePhases)[number];
+
+interface ShortCodePairingStatus {
+  readonly attemptId: string;
+  readonly localRole: ShortCodeRole;
+  readonly phase: ShortCodePhase;
+  readonly localDeviceId: string;
+  readonly peerDeviceId: string | undefined;
+  readonly sas: string | undefined;
+  readonly deadlineUnixSeconds: number;
+  readonly localConfirmed: boolean;
+  readonly peerConfirmed: boolean;
+  readonly pairingId: string | undefined;
 }
 
 interface MessageSummary {
@@ -273,6 +306,8 @@ const helpLines = [
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
   '  /konclave connect [--copy|--qr]                     Create a compact two-session connection token.',
+  '  /konclave connect --short                           Create a six-digit mutually verified connection code.',
+  '  /konclave connect <six-digit-code>                  Join a short-code verification attempt.',
   '  /konclave connect <token>                           Join and complete an AccountTrusted connection.',
   '  /konclave connect <konclave://pair/token>           Join from a pairing deep link.',
   '  /konclave connect resume <pairing>                  Resume one interrupted AccountTrusted connection.',
@@ -281,11 +316,14 @@ const helpLines = [
   '  /konclave join <capability>                         Redeem a full recovery capability.',
   '  /konclave new                                       Create a conversation for an approved peer.',
   '  /konclave pairing <pairing>                         Show authenticated pairing state.',
+  '  /konclave verification <attempt>                    Show short-code verification state.',
+  '  /konclave verify <attempt> <peer> <sas>             Explicitly confirm displayed short-code values.',
   '  /konclave approve <pairing> <conversation> [role]   Approve a displayed joiner.',
   '  /konclave approve <pairing> <inviter> <conversation> <role>',
   '                                                       Approve displayed inviter fields.',
   '  /konclave sync <pairing>                            Process one pairing progress page.',
   '  /konclave cancel <pairing>                          Cancel an active pairing.',
+  '  /konclave cancel-verification <attempt>             Cancel a short-code verification attempt.',
   '  /konclave send [conversation] [message-id] -- <text>',
   '                                                       Send or retry a message.',
   '  /konclave request <conversation> [target-device] [message-id] -- <text>',
@@ -382,6 +420,14 @@ function isPairingLocalRole(value: string): value is PairingLocalRole {
 
 function isPairingPhase(value: string): value is PairingPhase {
   return pairingPhases.some((phase) => phase === value);
+}
+
+function isShortCodeRole(value: string): value is ShortCodeRole {
+  return value === 'creator' || value === 'claimant';
+}
+
+function isShortCodePhase(value: string): value is ShortCodePhase {
+  return shortCodePhases.some((phase) => phase === value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -543,6 +589,104 @@ function parsePairingRendezvous(value: unknown): {
   };
 }
 
+function parseShortCodePairingStatus(value: unknown): ShortCodePairingStatus {
+  if (
+    !isRecord(value) ||
+    typeof value.local_confirmed !== 'boolean' ||
+    typeof value.peer_confirmed !== 'boolean'
+  ) {
+    throw new Error('the local service short-code pairing response is malformed');
+  }
+  const localRole = requiredString(
+    value,
+    'local_role',
+    'the local service short-code role is malformed',
+  );
+  const phase = requiredString(value, 'phase', 'the local service short-code phase is malformed');
+  if (!isShortCodeRole(localRole) || !isShortCodePhase(phase)) {
+    throw new Error('the local service short-code state is malformed');
+  }
+  const sas =
+    value.sas === null || value.sas === undefined
+      ? undefined
+      : requiredShortCode(value.sas, 'short authentication string');
+  return {
+    attemptId: requireHexIdentifier(
+      requiredString(
+        value,
+        'attempt_id',
+        'the local service short-code attempt identifier is malformed',
+      ),
+      shortCodeAttemptIdCharacters,
+      'short-code attempt identifier',
+    ),
+    localRole,
+    phase,
+    localDeviceId: requireHexIdentifier(
+      requiredString(
+        value,
+        'local_device_id',
+        'the local service short-code local identity is malformed',
+      ),
+      deviceIdCharacters,
+      'local device identifier',
+    ),
+    peerDeviceId: optionalIdentifier(
+      value,
+      'peer_device_id',
+      deviceIdCharacters,
+      'peer device identifier',
+    ),
+    sas,
+    deadlineUnixSeconds: requiredNonnegativeSafeInteger(
+      value,
+      'deadline_unix_seconds',
+      'the local service short-code deadline is malformed',
+    ),
+    localConfirmed: value.local_confirmed,
+    peerConfirmed: value.peer_confirmed,
+    pairingId: optionalIdentifier(value, 'pairing_id', pairingIdCharacters, 'pairing identifier'),
+  };
+}
+
+function parseCreatedShortCodePairing(value: unknown): {
+  readonly code: string;
+  readonly verification: ShortCodePairingStatus;
+} {
+  if (!isRecord(value)) {
+    throw new Error('the local service short-code creation response is malformed');
+  }
+  return {
+    code: requiredShortCode(value.code, 'pairing code'),
+    verification: parseShortCodePairingStatus(value.verification),
+  };
+}
+
+function parseShortCodePairingSync(value: unknown): {
+  readonly verification: ShortCodePairingStatus;
+  readonly processedStages: number;
+} {
+  if (
+    !isRecord(value) ||
+    typeof value.processed_stages !== 'number' ||
+    !Number.isSafeInteger(value.processed_stages) ||
+    value.processed_stages < 0
+  ) {
+    throw new Error('the local service short-code sync response is malformed');
+  }
+  return {
+    verification: parseShortCodePairingStatus(value.verification),
+    processedStages: value.processed_stages,
+  };
+}
+
+function requiredShortCode(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[0-9]{6}$/u.test(value)) {
+    throw new Error(`the ${label} must contain exactly six decimal digits`);
+  }
+  return value;
+}
+
 function requirePairingHandoff(value: string): PairingHandoff {
   try {
     return parsePairingHandoff(value);
@@ -557,7 +701,7 @@ function requirePairingHandoff(value: string): PairingHandoff {
   }
 }
 
-type PairingHandoffMode = 'raw' | 'copy' | 'qr';
+type PairingHandoffMode = 'raw' | 'copy' | 'qr' | 'short';
 
 function pairingHandoffMode(argumentsText: string): PairingHandoffMode | undefined {
   const value = argumentsText.trim().toLowerCase();
@@ -570,8 +714,11 @@ function pairingHandoffMode(argumentsText: string): PairingHandoffMode | undefin
   if (value === '--qr') {
     return 'qr';
   }
+  if (value === '--short') {
+    return 'short';
+  }
   if (value.startsWith('--')) {
-    throw new Error('usage: /konclave connect [--copy|--qr]');
+    throw new Error('usage: /konclave connect [--copy|--qr|--short]');
   }
   return undefined;
 }
@@ -1646,6 +1793,106 @@ async function renderPairing(
   }
 }
 
+async function renderShortCodeVerification(
+  presentation: CommandPresentation,
+  status: ShortCodePairingStatus,
+): Promise<void> {
+  if (status.sas === undefined || status.peerDeviceId === undefined) {
+    await presentation.write(
+      `verification ${status.attemptId}: ${status.phase}; no authority granted`,
+    );
+    return;
+  }
+  await presentation.write(`verification attempt: ${status.attemptId}`);
+  await presentation.write(`local device: ${status.localDeviceId}`);
+  await presentation.write(`peer device: ${status.peerDeviceId}`);
+  await presentation.write(`short authentication string: ${status.sas}`);
+  await presentation.write(
+    'compare the SAS and both device identifiers on the other computer before confirming',
+  );
+  await presentation.write(
+    `confirm only if every value matches: /konclave verify ${status.attemptId} ${status.peerDeviceId} ${status.sas}`,
+  );
+}
+
+async function waitForShortCodeSas(
+  client: LocalServiceClient,
+  initialStatus: ShortCodePairingStatus,
+  presentation: CommandPresentation,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<ShortCodePairingStatus> {
+  let status = initialStatus;
+  for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+    if (status.phase === 'cancelled') {
+      throw new Error('short-code verification was cancelled');
+    }
+    if (status.sas !== undefined && status.peerDeviceId !== undefined) {
+      return status;
+    }
+    const deadline = Math.min(commandDeadline, status.deadlineUnixSeconds * 1_000);
+    if (nowUnixMilliseconds() >= deadline) {
+      throw new ConnectTimeoutError(`short-code verification ${status.attemptId} expired`);
+    }
+    const synced = parseShortCodePairingSync(
+      await client.request('sync_short_code_pairing', { attempt_id: status.attemptId }),
+    );
+    if (synced.verification.attemptId !== status.attemptId) {
+      throw new Error('the short-code synchronization identity is malformed');
+    }
+    const previousPhase = status.phase;
+    status = synced.verification;
+    if (status.phase !== previousPhase) {
+      await presentation.detail(`verification phase: ${status.phase}`);
+    } else {
+      await sleep(connectPollMilliseconds);
+    }
+  }
+  throw new ConnectTimeoutError(
+    `short-code verification exceeded its progress limit for ${status.attemptId}`,
+  );
+}
+
+async function waitForShortCodePairing(
+  client: LocalServiceClient,
+  initialStatus: ShortCodePairingStatus,
+  presentation: CommandPresentation,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<ShortCodePairingStatus> {
+  let status = initialStatus;
+  for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+    if (status.phase === 'cancelled') {
+      throw new Error('short-code verification was cancelled');
+    }
+    if (status.pairingId !== undefined) {
+      return status;
+    }
+    const deadline = Math.min(commandDeadline, status.deadlineUnixSeconds * 1_000);
+    if (nowUnixMilliseconds() >= deadline) {
+      throw new ConnectTimeoutError(`short-code verification ${status.attemptId} expired`);
+    }
+    const synced = parseShortCodePairingSync(
+      await client.request('sync_short_code_pairing', { attempt_id: status.attemptId }),
+    );
+    if (synced.verification.attemptId !== status.attemptId) {
+      throw new Error('the short-code synchronization identity is malformed');
+    }
+    const previousPhase = status.phase;
+    status = synced.verification;
+    if (status.phase !== previousPhase) {
+      await presentation.detail(`verification phase: ${status.phase}`);
+    } else {
+      await sleep(connectPollMilliseconds);
+    }
+  }
+  throw new ConnectTimeoutError(
+    `short-code verification exceeded its progress limit for ${status.attemptId}`,
+  );
+}
+
 async function renderCollaborationPolicyOperation(
   presentation: CommandPresentation,
   operation: CollaborationPolicyOperationSummary,
@@ -2179,6 +2426,35 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
         let status: PairingStatus;
         const handoffMode = pairingHandoffMode(argumentsText);
+        if (handoffMode === 'short') {
+          const created = parseCreatedShortCodePairing(
+            await client.request('create_short_code_pairing', {}),
+          );
+          await presentation.write(
+            `six-digit pairing code: ${created.code}; expires ${formatPairingExpiry(created.verification.deadlineUnixSeconds)}`,
+            { ephemeral: true },
+          );
+          await presentation.write(`the other computer runs: /konclave connect ${created.code}`, {
+            ephemeral: true,
+          });
+          await presentation.detail('the code locates an OPAQUE attempt and grants no authority');
+          await presentation.detail(
+            `status: /konclave verification ${created.verification.attemptId}`,
+          );
+          await presentation.detail(
+            `cancel: /konclave cancel-verification ${created.verification.attemptId}`,
+          );
+          const verification = await waitForShortCodeSas(
+            client,
+            created.verification,
+            presentation,
+            commandDeadline,
+            nowUnixMilliseconds,
+            sleep,
+          );
+          await renderShortCodeVerification(presentation, verification);
+          return;
+        }
         if (handoffMode !== undefined) {
           const created = parsePairingRendezvous(
             await client.request('create_pairing_rendezvous', {}),
@@ -2253,7 +2529,28 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             sleep,
           );
         } else {
-          const handoff = requirePairingHandoff(argumentsText);
+          const shortCode = argumentsText.trim();
+          if (/^[0-9]{6}$/u.test(shortCode)) {
+            const claimed = parseShortCodePairingStatus(
+              await client.request('claim_short_code_pairing', { code: shortCode }),
+            );
+            await presentation.write(
+              `short-code verification ${claimed.attemptId}: code accepted for OPAQUE; no authority granted`,
+            );
+            await presentation.detail(`status: /konclave verification ${claimed.attemptId}`);
+            await presentation.detail(`cancel: /konclave cancel-verification ${claimed.attemptId}`);
+            const verification = await waitForShortCodeSas(
+              client,
+              claimed,
+              presentation,
+              commandDeadline,
+              nowUnixMilliseconds,
+              sleep,
+            );
+            await renderShortCodeVerification(presentation, verification);
+            return;
+          }
+          const handoff = requirePairingHandoff(shortCode);
           const redeemed = parsePairingStatus(
             await client.request('redeem_pairing_rendezvous', { token: handoff.token }),
           );
@@ -2349,6 +2646,94 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           presentation,
           parsePairingStatus(await client.request('get_pairing_status', { pairing_id: pairingId })),
         );
+        return;
+      }
+      case 'verification': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave verification <attempt>');
+        const attemptId = requireHexIdentifier(
+          parts[0],
+          shortCodeAttemptIdCharacters,
+          'short-code attempt identifier',
+        );
+        await renderShortCodeVerification(
+          presentation,
+          parseShortCodePairingStatus(
+            await client.request('get_short_code_pairing_status', { attempt_id: attemptId }),
+          ),
+        );
+        return;
+      }
+      case 'verify': {
+        await requireAccountTrusted(client);
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 3, 3, '/konclave verify <attempt> <peer> <sas>');
+        const attemptId = requireHexIdentifier(
+          parts[0],
+          shortCodeAttemptIdCharacters,
+          'short-code attempt identifier',
+        );
+        const peerDeviceId = requireHexIdentifier(
+          parts[1],
+          deviceIdCharacters,
+          'peer device identifier',
+        );
+        const sas = requiredShortCode(parts[2], 'short authentication string');
+        let verification = parseShortCodePairingStatus(
+          await client.request(verificationOperations.confirmShortCodePairing, {
+            attempt_id: attemptId,
+            peer_device_id: peerDeviceId,
+            sas,
+          }),
+        );
+        if (
+          verification.attemptId !== attemptId ||
+          verification.peerDeviceId !== peerDeviceId ||
+          verification.sas !== sas ||
+          !verification.localConfirmed
+        ) {
+          throw new Error('the local service confirmed different short-code values');
+        }
+        await presentation.write(
+          `verification ${attemptId}: confirmed locally; waiting for the peer's exact confirmation`,
+        );
+        const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
+        verification = await waitForShortCodePairing(
+          client,
+          verification,
+          presentation,
+          commandDeadline,
+          nowUnixMilliseconds,
+          sleep,
+        );
+        const pairingId = verification.pairingId;
+        if (pairingId === undefined) {
+          throw new Error('confirmed short-code verification is missing its pairing');
+        }
+        let connected = parsePairingStatus(
+          await client.request('get_pairing_status', { pairing_id: pairingId }),
+        );
+        connected = await completeAccountTrustedPairing(
+          client,
+          connected,
+          presentation,
+          commandDeadline,
+          nowUnixMilliseconds,
+          sleep,
+        );
+        if (!connected.conversationId) {
+          throw new Error('completed pairing is missing its conversation');
+        }
+        const selection = conversations(await client.request('list_conversations', {}));
+        if (!selection.conversationIds.includes(connected.conversationId)) {
+          throw new Error('completed pairing conversation is unavailable locally');
+        }
+        activeConversationId = connected.conversationId;
+        if (presentation.mode === 'verbose') {
+          await renderPairing(presentation, connected);
+        }
+        await presentation.write(`connected: ${connected.conversationId}`);
+        await presentation.detail('next: /konclave send -- <message>');
         return;
       }
       case 'approve': {
@@ -2453,6 +2838,23 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           presentation,
           parsePairingStatus(await client.request('cancel_pairing', { pairing_id: pairingId })),
         );
+        return;
+      }
+      case 'cancel-verification': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave cancel-verification <attempt>');
+        const attemptId = requireHexIdentifier(
+          parts[0],
+          shortCodeAttemptIdCharacters,
+          'short-code attempt identifier',
+        );
+        const status = parseShortCodePairingStatus(
+          await client.request('cancel_short_code_pairing', { attempt_id: attemptId }),
+        );
+        if (status.attemptId !== attemptId || status.phase !== 'cancelled') {
+          throw new Error('the local service short-code cancellation is malformed');
+        }
+        await presentation.write(`verification ${attemptId}: cancelled`);
         return;
       }
       case 'send':

@@ -50,6 +50,7 @@ pub enum SecretRecordKind {
     CollaborationPolicyOperationState = 23,
     DirectedRequestHandling = 24,
     DirectedRequestHandlingState = 25,
+    ShortCodePairingOperation = 26,
 }
 
 /// Bounded non-secret context authenticated with one sealed record.

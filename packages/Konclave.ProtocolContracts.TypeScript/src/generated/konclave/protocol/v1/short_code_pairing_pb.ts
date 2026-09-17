@@ -4,7 +4,7 @@
 
 import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
 import { enumDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
-import type { ProtocolVersion } from "./common_pb.js";
+import type { DeviceId, ProtocolVersion } from "./common_pb.js";
 import { file_konclave_protocol_v1_common } from "./common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/short_code_pairing.proto.
  */
 export const file_konclave_protocol_v1_short_code_pairing: GenFile = /*@__PURE__*/
-  fileDesc("Ci1rb25jbGF2ZS9wcm90b2NvbC92MS9zaG9ydF9jb2RlX3BhaXJpbmcucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIioKGVNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSDQoFdmFsdWUYASABKAwiKAoXU2hvcnRDb2RlUGFpcmluZ0xvY2F0b3ISDQoFdmFsdWUYASABKAwiKgoZU2hvcnRDb2RlQ2FwYWJpbGl0eVRha2VJZBINCgV2YWx1ZRgBIAEoDCL8AQoeU2hvcnRDb2RlQXR0ZW1wdFB1Ymxpc2hSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SPgoHbG9jYXRvchgCIAEoCzItLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdMb2NhdG9yEkMKCmF0dGVtcHRfaWQYAyABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEh0KFWRlYWRsaW5lX3VuaXhfc2Vjb25kcxgEIAEoBCKnAQocU2hvcnRDb2RlQXR0ZW1wdENsYWltUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEj4KB2xvY2F0b3IYAiABKAsyLS5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nTG9jYXRvchIPCgdwYXlsb2FkGAMgASgMIugBCh5TaG9ydENvZGVBdHRlbXB0TWVzc2FnZVJlcXVlc3QSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBI4CgVzdGFnZRgDIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgEIAEoDCKaAQobU2hvcnRDb2RlQXR0ZW1wdFJlYWRSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQi3wEKHlNob3J0Q29kZUNhcGFiaWxpdHlUYWtlUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEkMKCmF0dGVtcHRfaWQYAiABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEkAKB3Rha2VfaWQYAyABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVDYXBhYmlsaXR5VGFrZUlkImIKFVNob3J0Q29kZVJlbGF5TWVzc2FnZRI4CgVzdGFnZRgBIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgCIAEoDCKlAgoYU2hvcnRDb2RlQXR0ZW1wdFNuYXBzaG90EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSHQoVZGVhZGxpbmVfdW5peF9zZWNvbmRzGAMgASgEEhEKCWNhbmNlbGxlZBgEIAEoCBIbChNjYXBhYmlsaXR5X2NvbnN1bWVkGAUgASgIEj0KCG1lc3NhZ2VzGAYgAygLMisua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUmVsYXlNZXNzYWdlIqsBChtTaG9ydENvZGVDYXBhYmlsaXR5UmVzcG9uc2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBIPCgdwYXlsb2FkGAMgASgMKoUDChNTaG9ydENvZGVSZWxheVN0YWdlEiYKIlNIT1JUX0NPREVfUkVMQVlfU1RBR0VfVU5TUEVDSUZJRUQQABItCilTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX0NSRURFTlRJQUxfUkVRVUVTVBABEi4KKlNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ1JFREVOVElBTF9SRVNQT05TRRACEjAKLFNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0xBSU1BTlRfRklOQUxJWkFUSU9OEAMSKwonU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVBVE9SX0lERU5USVRZEAQSLworU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVBVE9SX0NPTkZJUk1BVElPThAFEjAKLFNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0xBSU1BTlRfQ09ORklSTUFUSU9OEAYSJQohU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DQVBBQklMSVRZEAdiBnByb3RvMw", [file_konclave_protocol_v1_common]);
+  fileDesc("Ci1rb25jbGF2ZS9wcm90b2NvbC92MS9zaG9ydF9jb2RlX3BhaXJpbmcucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIioKGVNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSDQoFdmFsdWUYASABKAwiKAoXU2hvcnRDb2RlUGFpcmluZ0xvY2F0b3ISDQoFdmFsdWUYASABKAwiKgoZU2hvcnRDb2RlQ2FwYWJpbGl0eVRha2VJZBINCgV2YWx1ZRgBIAEoDCL8AQoeU2hvcnRDb2RlQXR0ZW1wdFB1Ymxpc2hSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SPgoHbG9jYXRvchgCIAEoCzItLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdMb2NhdG9yEkMKCmF0dGVtcHRfaWQYAyABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEh0KFWRlYWRsaW5lX3VuaXhfc2Vjb25kcxgEIAEoBCKnAQocU2hvcnRDb2RlQXR0ZW1wdENsYWltUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEj4KB2xvY2F0b3IYAiABKAsyLS5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nTG9jYXRvchIPCgdwYXlsb2FkGAMgASgMIugBCh5TaG9ydENvZGVBdHRlbXB0TWVzc2FnZVJlcXVlc3QSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBI4CgVzdGFnZRgDIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgEIAEoDCKaAQobU2hvcnRDb2RlQXR0ZW1wdFJlYWRSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQi3wEKHlNob3J0Q29kZUNhcGFiaWxpdHlUYWtlUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEkMKCmF0dGVtcHRfaWQYAiABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEkAKB3Rha2VfaWQYAyABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVDYXBhYmlsaXR5VGFrZUlkImIKFVNob3J0Q29kZVJlbGF5TWVzc2FnZRI4CgVzdGFnZRgBIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgCIAEoDCKlAgoYU2hvcnRDb2RlQXR0ZW1wdFNuYXBzaG90EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSHQoVZGVhZGxpbmVfdW5peF9zZWNvbmRzGAMgASgEEhEKCWNhbmNlbGxlZBgEIAEoCBIbChNjYXBhYmlsaXR5X2NvbnN1bWVkGAUgASgIEj0KCG1lc3NhZ2VzGAYgAygLMisua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUmVsYXlNZXNzYWdlIqsBChtTaG9ydENvZGVDYXBhYmlsaXR5UmVzcG9uc2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBIPCgdwYXlsb2FkGAMgASgMIj0KGFNob3J0Q29kZVByb3RlY3RlZFJlY29yZBINCgVub25jZRgBIAEoDBISCgpjaXBoZXJ0ZXh0GAIgASgMIlcKI1Nob3J0Q29kZUNsYWltYW50RmluYWxpemF0aW9uUmVjb3JkEhQKDGZpbmFsaXphdGlvbhgBIAEoDBIaChJwcm90ZWN0ZWRfaWRlbnRpdHkYAiABKAwiyQEKF1Nob3J0Q29kZUlkZW50aXR5UmVjb3JkEjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSMQoJZGV2aWNlX2lkGAMgASgLMh4ua29uY2xhdmUucHJvdG9jb2wudjEuRGV2aWNlSWQitwIKG1Nob3J0Q29kZUNvbmZpcm1hdGlvblJlY29yZBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEkMKCmF0dGVtcHRfaWQYAiABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEjkKEWNyZWF0b3JfZGV2aWNlX2lkGAMgASgLMh4ua29uY2xhdmUucHJvdG9jb2wudjEuRGV2aWNlSWQSOgoSY2xhaW1hbnRfZGV2aWNlX2lkGAQgASgLMh4ua29uY2xhdmUucHJvdG9jb2wudjEuRGV2aWNlSWQSFwoPdHJhbnNjcmlwdF9oYXNoGAUgASgMEgsKA3NhcxgGIAEoDSqFAwoTU2hvcnRDb2RlUmVsYXlTdGFnZRImCiJTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX1VOU1BFQ0lGSUVEEAASLQopU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVERU5USUFMX1JFUVVFU1QQARIuCipTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX0NSRURFTlRJQUxfUkVTUE9OU0UQAhIwCixTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX0NMQUlNQU5UX0ZJTkFMSVpBVElPThADEisKJ1NIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ1JFQVRPUl9JREVOVElUWRAEEi8KK1NIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ1JFQVRPUl9DT05GSVJNQVRJT04QBRIwCixTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX0NMQUlNQU5UX0NPTkZJUk1BVElPThAGEiUKIVNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0FQQUJJTElUWRAHYgZwcm90bzM", [file_konclave_protocol_v1_common]);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodePairingAttemptId
@@ -295,6 +295,119 @@ export type ShortCodeCapabilityResponse = Message<"konclave.protocol.v1.ShortCod
  */
 export const ShortCodeCapabilityResponseSchema: GenMessage<ShortCodeCapabilityResponse> = /*@__PURE__*/
   messageDesc(file_konclave_protocol_v1_short_code_pairing, 10);
+
+/**
+ * @generated from message konclave.protocol.v1.ShortCodeProtectedRecord
+ */
+export type ShortCodeProtectedRecord = Message<"konclave.protocol.v1.ShortCodeProtectedRecord"> & {
+  /**
+   * @generated from field: bytes nonce = 1;
+   */
+  nonce: Uint8Array;
+
+  /**
+   * @generated from field: bytes ciphertext = 2;
+   */
+  ciphertext: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.ShortCodeProtectedRecord.
+ * Use `create(ShortCodeProtectedRecordSchema)` to create a new message.
+ */
+export const ShortCodeProtectedRecordSchema: GenMessage<ShortCodeProtectedRecord> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 11);
+
+/**
+ * @generated from message konclave.protocol.v1.ShortCodeClaimantFinalizationRecord
+ */
+export type ShortCodeClaimantFinalizationRecord = Message<"konclave.protocol.v1.ShortCodeClaimantFinalizationRecord"> & {
+  /**
+   * @generated from field: bytes finalization = 1;
+   */
+  finalization: Uint8Array;
+
+  /**
+   * @generated from field: bytes protected_identity = 2;
+   */
+  protectedIdentity: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.ShortCodeClaimantFinalizationRecord.
+ * Use `create(ShortCodeClaimantFinalizationRecordSchema)` to create a new message.
+ */
+export const ShortCodeClaimantFinalizationRecordSchema: GenMessage<ShortCodeClaimantFinalizationRecord> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 12);
+
+/**
+ * @generated from message konclave.protocol.v1.ShortCodeIdentityRecord
+ */
+export type ShortCodeIdentityRecord = Message<"konclave.protocol.v1.ShortCodeIdentityRecord"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.ProtocolVersion version = 1;
+   */
+  version?: ProtocolVersion | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.ShortCodePairingAttemptId attempt_id = 2;
+   */
+  attemptId?: ShortCodePairingAttemptId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.DeviceId device_id = 3;
+   */
+  deviceId?: DeviceId | undefined;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.ShortCodeIdentityRecord.
+ * Use `create(ShortCodeIdentityRecordSchema)` to create a new message.
+ */
+export const ShortCodeIdentityRecordSchema: GenMessage<ShortCodeIdentityRecord> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 13);
+
+/**
+ * @generated from message konclave.protocol.v1.ShortCodeConfirmationRecord
+ */
+export type ShortCodeConfirmationRecord = Message<"konclave.protocol.v1.ShortCodeConfirmationRecord"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.ProtocolVersion version = 1;
+   */
+  version?: ProtocolVersion | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.ShortCodePairingAttemptId attempt_id = 2;
+   */
+  attemptId?: ShortCodePairingAttemptId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.DeviceId creator_device_id = 3;
+   */
+  creatorDeviceId?: DeviceId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.DeviceId claimant_device_id = 4;
+   */
+  claimantDeviceId?: DeviceId | undefined;
+
+  /**
+   * @generated from field: bytes transcript_hash = 5;
+   */
+  transcriptHash: Uint8Array;
+
+  /**
+   * @generated from field: uint32 sas = 6;
+   */
+  sas: number;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.ShortCodeConfirmationRecord.
+ * Use `create(ShortCodeConfirmationRecordSchema)` to create a new message.
+ */
+export const ShortCodeConfirmationRecordSchema: GenMessage<ShortCodeConfirmationRecord> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 14);
 
 /**
  * @generated from enum konclave.protocol.v1.ShortCodeRelayStage

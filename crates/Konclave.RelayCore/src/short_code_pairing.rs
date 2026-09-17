@@ -271,7 +271,6 @@ pub fn decide_short_code_message(
     if existing.publish().version() != request.version()
         || existing.publish().deadline_unix_seconds() <= now_unix_seconds
         || existing.cancelled()
-        || existing.capability_consumed()
     {
         return Err(RelayError::ShortCodeAttemptUnavailable);
     }
@@ -283,6 +282,9 @@ pub fn decide_short_code_message(
         } else {
             Err(RelayError::ShortCodeAttemptConflict)
         };
+    }
+    if existing.capability_consumed() {
+        return Err(RelayError::ShortCodeAttemptUnavailable);
     }
     if stage_owner(existing, request.stage()) != principal
         || !stage_dependencies_satisfied(existing, request.stage())
@@ -573,6 +575,10 @@ mod tests {
             Ok(ShortCodeCapabilityDecision::Consume)
         );
         attempt.consume_capability(take(1).take_id());
+        assert_eq!(
+            decide_short_code_message(owner, &capability, &attempt, NOW),
+            Ok(ShortCodeMessageDecision::Identical)
+        );
         assert_eq!(
             decide_short_code_capability_take(claimant, take(1), &attempt, NOW),
             Ok(ShortCodeCapabilityDecision::Identical)

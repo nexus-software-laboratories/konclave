@@ -1,4 +1,7 @@
-use crate::KonclaveDomainError;
+use crate::{
+    DeviceId, KonclaveDomainError, ProtocolVersion, ShortCodePairingAttemptId,
+    ShortCodePairingTranscriptHash,
+};
 
 /// Maximum numeric value represented by a six-digit short authentication string.
 pub const MAX_SHORT_CODE_PAIRING_SAS: u32 = 999_999;
@@ -37,6 +40,117 @@ impl ShortCodePairingSas {
     #[must_use]
     pub const fn value(self) -> u32 {
         self.0
+    }
+}
+
+/// Canonical decrypted identity descriptor for one short-code attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ShortCodeIdentityRecord {
+    version: ProtocolVersion,
+    attempt_id: ShortCodePairingAttemptId,
+    device_id: DeviceId,
+}
+
+impl ShortCodeIdentityRecord {
+    /// Creates one exact identity descriptor.
+    #[must_use]
+    pub const fn new(
+        version: ProtocolVersion,
+        attempt_id: ShortCodePairingAttemptId,
+        device_id: DeviceId,
+    ) -> Self {
+        Self {
+            version,
+            attempt_id,
+            device_id,
+        }
+    }
+
+    /// Returns the application protocol version.
+    #[must_use]
+    pub const fn version(self) -> ProtocolVersion {
+        self.version
+    }
+
+    /// Returns the bound attempt identifier.
+    #[must_use]
+    pub const fn attempt_id(self) -> ShortCodePairingAttemptId {
+        self.attempt_id
+    }
+
+    /// Returns the claimed public device identifier.
+    #[must_use]
+    pub const fn device_id(self) -> DeviceId {
+        self.device_id
+    }
+}
+
+/// Canonical decrypted explicit confirmation for one displayed transcript.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ShortCodeConfirmationRecord {
+    version: ProtocolVersion,
+    attempt_id: ShortCodePairingAttemptId,
+    creator_device_id: DeviceId,
+    claimant_device_id: DeviceId,
+    transcript_hash: ShortCodePairingTranscriptHash,
+    sas: ShortCodePairingSas,
+}
+
+impl ShortCodeConfirmationRecord {
+    /// Creates one exact transcript confirmation.
+    #[must_use]
+    pub const fn new(
+        version: ProtocolVersion,
+        attempt_id: ShortCodePairingAttemptId,
+        creator_device_id: DeviceId,
+        claimant_device_id: DeviceId,
+        transcript_hash: ShortCodePairingTranscriptHash,
+        sas: ShortCodePairingSas,
+    ) -> Self {
+        Self {
+            version,
+            attempt_id,
+            creator_device_id,
+            claimant_device_id,
+            transcript_hash,
+            sas,
+        }
+    }
+
+    /// Returns the application protocol version.
+    #[must_use]
+    pub const fn version(self) -> ProtocolVersion {
+        self.version
+    }
+
+    /// Returns the bound attempt identifier.
+    #[must_use]
+    pub const fn attempt_id(self) -> ShortCodePairingAttemptId {
+        self.attempt_id
+    }
+
+    /// Returns the creator identity shown to both operators.
+    #[must_use]
+    pub const fn creator_device_id(self) -> DeviceId {
+        self.creator_device_id
+    }
+
+    /// Returns the claimant identity shown to both operators.
+    #[must_use]
+    pub const fn claimant_device_id(self) -> DeviceId {
+        self.claimant_device_id
+    }
+
+    /// Returns the exact encrypted-identity transcript hash.
+    #[must_use]
+    pub const fn transcript_hash(self) -> ShortCodePairingTranscriptHash {
+        self.transcript_hash
+    }
+
+    /// Returns the six-digit SAS shown to both operators.
+    #[must_use]
+    pub const fn sas(self) -> ShortCodePairingSas {
+        self.sas
     }
 }
 

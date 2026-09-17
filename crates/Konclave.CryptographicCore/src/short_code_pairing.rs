@@ -296,14 +296,12 @@ impl ShortCodeOpaqueClientLogin {
     /// Returns an opaque code, randomness, or OPAQUE protocol failure.
     pub fn start(
         code: ShortCodePairingCode,
-        attempt_id: ShortCodePairingAttemptId,
     ) -> Result<(Self, Vec<u8>), KonclaveCryptographicError> {
-        Self::start_with_rng(code, attempt_id, &mut OsRng)
+        Self::start_with_rng(code, &mut OsRng)
     }
 
     fn start_with_rng<R: CryptoRng + RngCore>(
         code: ShortCodePairingCode,
-        _: ShortCodePairingAttemptId,
         rng: &mut R,
     ) -> Result<(Self, Vec<u8>), KonclaveCryptographicError> {
         let login = ClientLogin::<ShortCodeOpaqueCipherSuite>::start(rng, code.as_str().as_bytes())
@@ -954,11 +952,8 @@ mod tests {
         )?;
         let server_bytes = write_state(|writer| server.write_to(writer));
         let server = ShortCodeOpaqueServerRecord::from_bytes(&server_bytes)?;
-        let (client, request) = ShortCodeOpaqueClientLogin::start_with_rng(
-            client_code,
-            attempt,
-            &mut StdRng::seed_from_u64(2),
-        )?;
+        let (client, request) =
+            ShortCodeOpaqueClientLogin::start_with_rng(client_code, &mut StdRng::seed_from_u64(2))?;
         let client_bytes = write_state(|writer| client.write_to(writer));
         let client = ShortCodeOpaqueClientLogin::from_bytes(&client_bytes)?;
         let (server_login, response) =
@@ -1042,11 +1037,9 @@ mod tests {
         state.push(0);
         assert!(ShortCodeOpaqueServerRecord::from_bytes(&state).is_err());
 
-        let (client, mut request) = ShortCodeOpaqueClientLogin::start(
-            ShortCodePairingCode::parse("123456").unwrap(),
-            attempt(),
-        )
-        .unwrap();
+        let (client, mut request) =
+            ShortCodeOpaqueClientLogin::start(ShortCodePairingCode::parse("123456").unwrap())
+                .unwrap();
         request.push(0);
         assert!(server.start_login(attempt(), &request).is_err());
         let mut client_state = write_state(|writer| client.write_to(writer));

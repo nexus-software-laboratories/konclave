@@ -52,8 +52,10 @@ jobs:
                 $_ -match '^docs/development/conformance\.md$' -or
                 $_ -match '^proto/konclave/protocol/v1/short_code_pairing\.proto$' -or
                 $_ -match '^scripts/ci/Validate-RustSecurityDependencies\.sh$' -or
+                $_ -match '^fixtures/local-service/v1/copilot-tools\.json$' -or
                 $_ -match '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$' -or
-                $_ -match '^apps/Konclave\.CommunityRelay/(?:Cargo\.toml|src/.*|tests/.*)$' -or
+                $_ -match '^apps/Konclave\.(?:CommunityRelay|LocalDaemon)/(?:Cargo\.toml|src/.*|tests/.*)$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*|docs/.*)$' -or
                 $_ -match '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
               }
             ).Count -ne 0
@@ -83,7 +85,7 @@ jobs:
         with:
           node-version: 24
           npm-cache-scope: short-code-pairing-conformance
-          npm-cache-dependency-hash: ${{ hashFiles('packages/Konclave.ProtocolContracts.TypeScript/package-lock.json') }}
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json', 'packages/Konclave.ProtocolContracts.TypeScript/package-lock.json') }}
       - name: Verify short-code pairing integration
         if: steps.scope.outputs.run == 'true'
         shell: bash
@@ -94,6 +96,7 @@ jobs:
             --package KonclaveCommunityRelay \
             --package KonclaveDomainCore \
             --package KonclaveCryptographicCore \
+            --package KonclaveLocalDaemon \
             --package KonclaveProtocolContracts \
             --package KonclaveRelayCore \
             -- \
@@ -101,7 +104,7 @@ jobs:
           cargo test \
             --locked \
             --package KonclaveDomainCore \
-            short_code_pairing
+            short_code
           cargo test \
             --locked \
             --package KonclaveCryptographicCore \
@@ -133,11 +136,27 @@ jobs:
             --package KonclaveClientLibrary \
             --test http_safety \
             short_code_client_requires_exact_status_and_bounded_snapshot
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            short_code
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            profile_schema_migrates
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            copilot_tool_contract_fixture_matches_the_router
           cargo clippy \
             --locked \
             --package KonclaveClientLibrary \
             --package KonclaveCommunityRelay \
             --package KonclaveDomainCore \
+            --package KonclaveLocalDaemon \
             --package KonclaveCryptographicCore \
             --package KonclaveProtocolContracts \
             --package KonclaveRelayCore \
@@ -148,3 +167,5 @@ jobs:
           npm --prefix packages/Konclave.ProtocolContracts.TypeScript ci --no-audit --no-fund
           npm --prefix packages/Konclave.ProtocolContracts.TypeScript run build
           npm --prefix packages/Konclave.ProtocolContracts.TypeScript test
+          npm --prefix extensions/Konclave.HostExtension ci --no-audit --no-fund
+          npm --prefix extensions/Konclave.HostExtension test

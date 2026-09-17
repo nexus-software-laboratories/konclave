@@ -262,6 +262,9 @@ impl ProfileStore {
             }
             return Ok(());
         }
+        if current_version > DIRECTED_REQUEST_HANDLING_SCHEMA_VERSION {
+            return Ok(());
+        }
         if current_version != 17 {
             return Err(ProfileStoreError::UnsupportedSchema);
         }

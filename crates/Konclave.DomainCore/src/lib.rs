@@ -52,8 +52,9 @@ pub use pairing_rendezvous::{
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
 };
 pub use short_code_pairing::{
-    MAX_SHORT_CODE_PAIRING_SAS, ShortCodeConfirmationEvent, ShortCodeConfirmationState,
-    ShortCodePairingSas, transition_short_code_confirmation,
+    MAX_SHORT_CODE_PAIRING_SAS, ShortCodeConfirmationEvent, ShortCodeConfirmationRecord,
+    ShortCodeConfirmationState, ShortCodeIdentityRecord, ShortCodePairingSas,
+    transition_short_code_confirmation,
 };
 pub use short_code_relay::{
     MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,

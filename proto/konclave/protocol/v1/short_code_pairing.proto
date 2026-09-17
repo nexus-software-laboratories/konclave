@@ -77,3 +77,28 @@ message ShortCodeCapabilityResponse {
   ShortCodePairingAttemptId attempt_id = 2;
   bytes payload = 3;
 }
+
+message ShortCodeProtectedRecord {
+  bytes nonce = 1;
+  bytes ciphertext = 2;
+}
+
+message ShortCodeClaimantFinalizationRecord {
+  bytes finalization = 1;
+  bytes protected_identity = 2;
+}
+
+message ShortCodeIdentityRecord {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+  DeviceId device_id = 3;
+}
+
+message ShortCodeConfirmationRecord {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+  DeviceId creator_device_id = 3;
+  DeviceId claimant_device_id = 4;
+  bytes transcript_hash = 5;
+  uint32 sas = 6;
+}

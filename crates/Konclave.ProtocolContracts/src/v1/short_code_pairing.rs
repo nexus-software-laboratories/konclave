@@ -1,9 +1,11 @@
 use KonclaveDomainCore::{
-    MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+    DeviceId, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
     MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, MAX_SHORT_CODE_RELAY_STAGES, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
     ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest,
-    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodeRelayMessage, ShortCodeRelayStage,
+    ShortCodeConfirmationRecord, ShortCodeIdentityRecord, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingSas, ShortCodePairingTranscriptHash,
+    ShortCodeRelayMessage, ShortCodeRelayStage,
 };
 
 use super::common::{
@@ -20,6 +22,16 @@ const READ_CONTRACT: &str = "ShortCodeAttemptReadRequest";
 const TAKE_CONTRACT: &str = "ShortCodeCapabilityTakeRequest";
 const SNAPSHOT_CONTRACT: &str = "ShortCodeAttemptSnapshot";
 const CAPABILITY_CONTRACT: &str = "ShortCodeCapabilityResponse";
+const PROTECTED_CONTRACT: &str = "ShortCodeProtectedRecord";
+const FINALIZATION_CONTRACT: &str = "ShortCodeClaimantFinalizationRecord";
+const IDENTITY_CONTRACT: &str = "ShortCodeIdentityRecord";
+const CONFIRMATION_CONTRACT: &str = "ShortCodeConfirmationRecord";
+const SHORT_CODE_NONCE_BYTES: usize = 12;
+const SHORT_CODE_TAG_BYTES: usize = 16;
+const MAX_SHORT_CODE_PROTECTED_PLAINTEXT_BYTES: usize = 8 * 1024;
+const MAX_SHORT_CODE_PROTECTED_CIPHERTEXT_BYTES: usize =
+    MAX_SHORT_CODE_PROTECTED_PLAINTEXT_BYTES + SHORT_CODE_TAG_BYTES;
+const MAX_OPAQUE_FINALIZATION_BYTES: usize = 4 * 1024;
 
 /// Encodes one bounded short-code attempt publish request.
 ///
@@ -319,6 +331,201 @@ pub fn decode_short_code_capability_response(
     ))
 }
 
+/// Encodes one bounded nonce-bearing encrypted short-code record.
+///
+/// # Errors
+///
+/// Returns a nonce, ciphertext, or encoded-size validation error.
+pub fn encode_short_code_protected_record(
+    nonce: &[u8; SHORT_CODE_NONCE_BYTES],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    validate_protected_ciphertext(ciphertext)?;
+    encode_bounded(
+        &wire::ShortCodeProtectedRecord {
+            nonce: nonce.to_vec().into(),
+            ciphertext: ciphertext.to_vec().into(),
+        },
+        MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+        PROTECTED_CONTRACT,
+    )
+}
+
+/// Decodes and validates one untrusted encrypted short-code record.
+///
+/// # Errors
+///
+/// Returns a nonce, ciphertext, or encoded-size validation error.
+pub fn decode_short_code_protected_record(
+    bytes: &[u8],
+) -> Result<([u8; SHORT_CODE_NONCE_BYTES], Vec<u8>), KonclaveProtocolError> {
+    let value: wire::ShortCodeProtectedRecord = decode_bounded(
+        bytes,
+        MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+        PROTECTED_CONTRACT,
+    )?;
+    let nonce = value.nonce.as_ref().try_into().map_err(|_| {
+        KonclaveDomainCore::KonclaveDomainError::InvalidLength {
+            field: "short_code_protected_nonce",
+            expected: SHORT_CODE_NONCE_BYTES,
+            actual: value.nonce.len(),
+        }
+    })?;
+    let ciphertext = value.ciphertext.to_vec();
+    validate_protected_ciphertext(&ciphertext)?;
+    Ok((nonce, ciphertext))
+}
+
+/// Encodes the claimant's OPAQUE finalization and protected identity as one stage.
+///
+/// # Errors
+///
+/// Returns a finalization, protected-record, or encoded-size validation error.
+pub fn encode_short_code_claimant_finalization_record(
+    finalization: &[u8],
+    protected_identity: &[u8],
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    validate_finalization(finalization)?;
+    decode_short_code_protected_record(protected_identity)?;
+    encode_bounded(
+        &wire::ShortCodeClaimantFinalizationRecord {
+            finalization: finalization.to_vec().into(),
+            protected_identity: protected_identity.to_vec().into(),
+        },
+        MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+        FINALIZATION_CONTRACT,
+    )
+}
+
+/// Decodes and validates the claimant's combined finalization stage.
+///
+/// # Errors
+///
+/// Returns a finalization, protected-record, or encoded-size validation error.
+pub fn decode_short_code_claimant_finalization_record(
+    bytes: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), KonclaveProtocolError> {
+    let value: wire::ShortCodeClaimantFinalizationRecord = decode_bounded(
+        bytes,
+        MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
+        FINALIZATION_CONTRACT,
+    )?;
+    let finalization = value.finalization.to_vec();
+    let protected_identity = value.protected_identity.to_vec();
+    validate_finalization(&finalization)?;
+    decode_short_code_protected_record(&protected_identity)?;
+    Ok((finalization, protected_identity))
+}
+
+/// Encodes one decrypted short-code identity descriptor.
+///
+/// # Errors
+///
+/// Returns an encoded-size validation error.
+pub fn encode_short_code_identity_record(
+    value: ShortCodeIdentityRecord,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &wire::ShortCodeIdentityRecord {
+            version: Some(version_to_wire(value.version())),
+            attempt_id: Some(attempt_id_to_wire(value.attempt_id())),
+            device_id: Some(device_id_to_wire(value.device_id())),
+        },
+        MAX_SHORT_CODE_RELAY_MESSAGE_BYTES,
+        IDENTITY_CONTRACT,
+    )
+}
+
+/// Decodes and validates one decrypted short-code identity descriptor.
+///
+/// # Errors
+///
+/// Returns a protocol, version, attempt, or device-identifier validation error.
+pub fn decode_short_code_identity_record(
+    bytes: &[u8],
+) -> Result<ShortCodeIdentityRecord, KonclaveProtocolError> {
+    let value: wire::ShortCodeIdentityRecord =
+        decode_bounded(bytes, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, IDENTITY_CONTRACT)?;
+    Ok(ShortCodeIdentityRecord::new(
+        version_from_wire(value.version, IDENTITY_CONTRACT)?,
+        attempt_id_from_wire(value.attempt_id)?,
+        device_id_from_wire(value.device_id)?,
+    ))
+}
+
+/// Encodes one decrypted explicit short-code transcript confirmation.
+///
+/// # Errors
+///
+/// Returns an encoded-size validation error.
+pub fn encode_short_code_confirmation_record(
+    value: ShortCodeConfirmationRecord,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &wire::ShortCodeConfirmationRecord {
+            version: Some(version_to_wire(value.version())),
+            attempt_id: Some(attempt_id_to_wire(value.attempt_id())),
+            creator_device_id: Some(device_id_to_wire(value.creator_device_id())),
+            claimant_device_id: Some(device_id_to_wire(value.claimant_device_id())),
+            transcript_hash: value.transcript_hash().as_bytes().to_vec().into(),
+            sas: value.sas().value(),
+        },
+        MAX_SHORT_CODE_RELAY_MESSAGE_BYTES,
+        CONFIRMATION_CONTRACT,
+    )
+}
+
+/// Decodes and validates one decrypted explicit short-code transcript confirmation.
+///
+/// # Errors
+///
+/// Returns a protocol, identity, transcript, or SAS validation error.
+pub fn decode_short_code_confirmation_record(
+    bytes: &[u8],
+) -> Result<ShortCodeConfirmationRecord, KonclaveProtocolError> {
+    let value: wire::ShortCodeConfirmationRecord = decode_bounded(
+        bytes,
+        MAX_SHORT_CODE_RELAY_MESSAGE_BYTES,
+        CONFIRMATION_CONTRACT,
+    )?;
+    Ok(ShortCodeConfirmationRecord::new(
+        version_from_wire(value.version, CONFIRMATION_CONTRACT)?,
+        attempt_id_from_wire(value.attempt_id)?,
+        device_id_from_wire(value.creator_device_id)?,
+        device_id_from_wire(value.claimant_device_id)?,
+        ShortCodePairingTranscriptHash::from_slice(&value.transcript_hash)?,
+        ShortCodePairingSas::new(value.sas)?,
+    ))
+}
+
+fn validate_protected_ciphertext(ciphertext: &[u8]) -> Result<(), KonclaveProtocolError> {
+    if !(SHORT_CODE_TAG_BYTES..=MAX_SHORT_CODE_PROTECTED_CIPHERTEXT_BYTES)
+        .contains(&ciphertext.len())
+    {
+        return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+            field: "short_code_protected_ciphertext",
+            minimum: SHORT_CODE_TAG_BYTES,
+            maximum: MAX_SHORT_CODE_PROTECTED_CIPHERTEXT_BYTES,
+            actual: ciphertext.len(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_finalization(finalization: &[u8]) -> Result<(), KonclaveProtocolError> {
+    if !(1..=MAX_OPAQUE_FINALIZATION_BYTES).contains(&finalization.len()) {
+        return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
+            field: "short_code_opaque_finalization",
+            minimum: 1,
+            maximum: MAX_OPAQUE_FINALIZATION_BYTES,
+            actual: finalization.len(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn bounded_payload(payload: Vec<u8>) -> Result<Vec<u8>, KonclaveProtocolError> {
     if !(1..=MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES).contains(&payload.len()) {
         return Err(KonclaveDomainCore::KonclaveDomainError::OutOfRange {
@@ -357,6 +564,18 @@ fn locator_from_wire(
 ) -> Result<ShortCodePairingLocator, KonclaveProtocolError> {
     Ok(ShortCodePairingLocator::from_slice(
         &required(value, "short_code_pairing_locator")?.value,
+    )?)
+}
+
+fn device_id_to_wire(value: DeviceId) -> wire::DeviceId {
+    wire::DeviceId {
+        value: value.as_bytes().to_vec().into(),
+    }
+}
+
+fn device_id_from_wire(value: Option<wire::DeviceId>) -> Result<DeviceId, KonclaveProtocolError> {
+    Ok(DeviceId::from_slice(
+        &required(value, "short_code_device_id")?.value,
     )?)
 }
 
@@ -493,6 +712,44 @@ mod tests {
             .unwrap(),
             take
         );
+        let protected = encode_short_code_protected_record(&[6; 12], &[7; 16]).unwrap();
+        assert_eq!(
+            decode_short_code_protected_record(&protected).unwrap(),
+            ([6; 12], vec![7; 16])
+        );
+        let finalization =
+            encode_short_code_claimant_finalization_record(&[8; 32], &protected).unwrap();
+        assert_eq!(
+            decode_short_code_claimant_finalization_record(&finalization).unwrap(),
+            (vec![8; 32], protected)
+        );
+        let identity = ShortCodeIdentityRecord::new(
+            version,
+            attempt(),
+            DeviceId::from_bytes([9; DeviceId::LENGTH]),
+        );
+        assert!(
+            decode_short_code_identity_record(
+                &encode_short_code_identity_record(identity).unwrap()
+            )
+            .unwrap()
+                == identity
+        );
+        let confirmation = ShortCodeConfirmationRecord::new(
+            version,
+            attempt(),
+            DeviceId::from_bytes([9; DeviceId::LENGTH]),
+            DeviceId::from_bytes([10; DeviceId::LENGTH]),
+            ShortCodePairingTranscriptHash::from_bytes(
+                [11; ShortCodePairingTranscriptHash::LENGTH],
+            ),
+            ShortCodePairingSas::new(12).unwrap(),
+        );
+        let decoded = decode_short_code_confirmation_record(
+            &encode_short_code_confirmation_record(confirmation).unwrap(),
+        )
+        .unwrap();
+        assert!(decoded == confirmation);
     }
 
     #[test]
@@ -517,5 +774,8 @@ mod tests {
         assert!(
             decode_short_code_attempt_claim_request(&prost::Message::encode_to_vec(&wire)).is_err()
         );
+        assert!(decode_short_code_protected_record(&[]).is_err());
+        assert!(encode_short_code_protected_record(&[0; 12], &[0; 15]).is_err());
+        assert!(encode_short_code_claimant_finalization_record(&[], &[0]).is_err());
     }
 }
