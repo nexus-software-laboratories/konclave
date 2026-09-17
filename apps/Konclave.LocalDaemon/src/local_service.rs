@@ -2599,6 +2599,8 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "invalid_peer_binding"
         | "invalid_issuer_public_key"
         | "invalid_routing_id"
+        | "invalid_trusted_device_alias"
+        | "invalid_repeat_pairing_operation_id"
         | "directed_request_unsupported"
         | "directed_request_target_required" => LocalServiceErrorCode::InvalidRequest,
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
@@ -2613,10 +2615,20 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         "busy" => LocalServiceErrorCode::Busy,
         "deadline_exceeded" => LocalServiceErrorCode::DeadlineExceeded,
         "short_code_pairing_expired" => LocalServiceErrorCode::DeadlineExceeded,
+        "repeat_pairing_expired" => LocalServiceErrorCode::DeadlineExceeded,
         "collaboration_policy_conflict"
         | "short_code_pairing_invalid_transition"
         | "short_code_pairing_confirmation_mismatch"
-        | "short_code_pairing_rejected" => LocalServiceErrorCode::Conflict,
+        | "short_code_pairing_rejected"
+        | "trusted_device_not_found"
+        | "trusted_device_alias_conflict"
+        | "trusted_device_root_mismatch"
+        | "trusted_device_removed"
+        | "trusted_device_repeat_pairing_unsupported"
+        | "trusted_device_self"
+        | "repeat_pairing_not_found"
+        | "repeat_pairing_invalid_transition"
+        | "repeat_pairing_authorization_mismatch" => LocalServiceErrorCode::Conflict,
         _ => LocalServiceErrorCode::Internal,
     }
 }
@@ -2667,7 +2679,16 @@ fn is_tool_operation(operation: &str) -> bool {
 }
 
 fn is_command_operation(operation: &str) -> bool {
-    operation == "confirm_short_code_pairing"
+    matches!(
+        operation,
+        "confirm_short_code_pairing"
+            | "list_trusted_devices"
+            | "set_trusted_device_alias"
+            | "start_repeat_pairing"
+            | "get_repeat_pairing_status"
+            | "sync_repeat_pairing"
+            | "cancel_repeat_pairing"
+    )
 }
 
 #[derive(Serialize)]
@@ -3038,6 +3059,10 @@ fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
                             revocation.policy_digest().as_bytes(),
                         ),
                     }
+                }
+                ApplicationContent::RepeatPairingRequest(_)
+                | ApplicationContent::RepeatPairingResponse(_) => {
+                    unreachable!("internal application content cannot enter client delivery")
                 }
             },
             RemoteEventPayload::MemberAdded { device_id, role } => {
@@ -3700,6 +3725,7 @@ mod collaboration_policy_tests {
                 Some(SessionCapabilities::PROFILE_OPERATIONS)
             );
         }
+
         assert!(!is_tool_operation("confirm_short_code_pairing"));
         assert!(is_command_operation("confirm_short_code_pairing"));
         assert_eq!(
@@ -3716,6 +3742,37 @@ mod collaboration_policy_tests {
         );
         assert_eq!(
             operation_error_code("short_code_pairing_expired"),
+            LocalServiceErrorCode::DeadlineExceeded
+        );
+    }
+
+    #[test]
+    fn trusted_device_operations_remain_deterministic_commands_only() {
+        for operation in [
+            "list_trusted_devices",
+            "set_trusted_device_alias",
+            "start_repeat_pairing",
+            "get_repeat_pairing_status",
+            "sync_repeat_pairing",
+            "cancel_repeat_pairing",
+        ] {
+            assert!(!is_tool_operation(operation));
+            assert!(is_command_operation(operation));
+            assert_eq!(
+                required_capability(operation),
+                Some(SessionCapabilities::PROFILE_OPERATIONS)
+            );
+        }
+        assert_eq!(
+            operation_error_code("invalid_trusted_device_alias"),
+            LocalServiceErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            operation_error_code("trusted_device_root_mismatch"),
+            LocalServiceErrorCode::Conflict
+        );
+        assert_eq!(
+            operation_error_code("repeat_pairing_expired"),
             LocalServiceErrorCode::DeadlineExceeded
         );
     }

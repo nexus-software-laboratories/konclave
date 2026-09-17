@@ -48,6 +48,11 @@ message PairingMessageId {
   bytes value = 1;
 }
 
+message RepeatPairingOperationId {
+  // Exactly 16 bytes in protocol v1.
+  bytes value = 1;
+}
+
 message PairingContextHash {
   // Exactly 32 SHA-256 bytes in protocol v1.
   bytes value = 1;

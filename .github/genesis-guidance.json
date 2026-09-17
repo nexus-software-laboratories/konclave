@@ -180,6 +180,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0025-trusted-device-alias-bootstrap.md",
+        "title": "ADR 0025: Trusted device alias bootstrap",
+        "section": "Architecture",
+        "order": 250,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

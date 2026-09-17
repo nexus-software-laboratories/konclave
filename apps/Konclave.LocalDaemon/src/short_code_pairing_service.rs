@@ -307,8 +307,12 @@ where
     ) -> Result<usize, PairingServiceError> {
         let pairings = self.sync_active_once(now_unix_seconds).await?;
         let short_codes = self.sync_active_short_codes_once(now_unix_seconds).await?;
+        let repeat_pairings = self
+            .sync_active_repeat_pairings_once(now_unix_seconds)
+            .await?;
         pairings
             .checked_add(short_codes)
+            .and_then(|count| count.checked_add(repeat_pairings))
             .ok_or(PairingServiceError::InvalidTransition)
     }
 

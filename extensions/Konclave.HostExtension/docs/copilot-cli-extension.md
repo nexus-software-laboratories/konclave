@@ -92,6 +92,8 @@ to continue safely.
 /konclave status
 /konclave identity
 /konclave conversations
+/konclave devices
+/konclave device alias <device> <alias>
 /konclave connect [--copy|--qr]
 /konclave connect --short
 /konclave connect <six-digit-code>
@@ -101,6 +103,9 @@ to continue safely.
 /konclave pair [member|administrator]
 /konclave join <capability>
 /konclave new
+/konclave new <alias>
+/konclave repeat <operation>
+/konclave cancel-repeat <operation>
 /konclave pairing <pairing>
 /konclave verification <attempt>
 /konclave verify <attempt> <peer> <sas>
@@ -145,6 +150,16 @@ from the registered agent-tool table. Only after both exact confirmations authen
 does the daemon create an ordinary member-only capability and continue the existing
 durable pairing flow. `/konclave verification <attempt>` resumes inspection and
 `/konclave cancel-verification <attempt>` cancels the attempt.
+
+Trusted-device aliases are local sealed address-book entries, not protocol
+identities. `/konclave device alias <device> <alias>` accepts only a device currently
+authenticated in local conversation membership and binds the alias to that exact
+device root. `/konclave new <alias>` requests a fresh member capability over the
+lowest qualifying existing MLS conversation and reuses the durable pairing flow to
+create a separate conversation. The alias never appears on the wire, and the internal
+request and response are excluded from message history and adapter delivery.
+`/konclave repeat <operation>` resumes an interrupted attempt;
+`/konclave cancel-repeat <operation>` cancels it.
 
 Arguments and rendered output are bounded. High-level commands orchestrate only the
 existing closed operations; they do not implement a second pairing or messaging

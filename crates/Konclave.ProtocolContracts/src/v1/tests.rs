@@ -3,10 +3,12 @@ use prost::Message;
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, CollaborationPolicyDigest, CollaborationPolicyProposal,
     CollaborationPolicyProposalId, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
-    CollaborationPolicyRevocation, DeviceId, KonclaveDomainError, MAX_APPLICATION_MESSAGE_BYTES,
-    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_COLLABORATION_POLICY_STATEMENTS, MAX_MEMBERS,
-    MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES,
-    MAX_REPLAY_PAGE_SIZE, MessageId, ProtocolVersion,
+    CollaborationPolicyRevocation, ConversationId, DeviceId, KonclaveDomainError,
+    MAX_APPLICATION_MESSAGE_BYTES, MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
+    MAX_COLLABORATION_POLICY_STATEMENTS, MAX_MEMBERS, MAX_PROTOBUF_TOP_LEVEL_FIELDS,
+    MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
+    MAX_REPLAY_PAGE_SIZE, MessageId, ProtocolVersion, RepeatPairingOperationId,
+    RepeatPairingRequest, RepeatPairingResponse,
 };
 use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayEnrollmentResponse,
@@ -508,6 +510,92 @@ fn directed_request_application_content_round_trips() {
     assert_eq!(request.target_device_id(), DeviceId::from_bytes([62; 32]));
     assert_eq!(request.body(), "review this contract");
     assert_eq!(encode_application_message(&decoded).unwrap(), encoded);
+}
+
+#[test]
+fn repeat_pairing_application_content_round_trips_without_aliases() {
+    let operation_id = RepeatPairingOperationId::from_bytes([70; 16]);
+    let target = DeviceId::from_bytes([71; 32]);
+    let requester = DeviceId::from_bytes([72; 32]);
+    let conversation = ConversationId::from_bytes([73; 32]);
+    let request = ApplicationMessage::new(
+        ProtocolVersion::application_v1(),
+        MessageId::from_bytes([74; 16]),
+        1,
+        1_700_000_000_000,
+        None,
+        ApplicationContent::repeat_pairing_request(
+            RepeatPairingRequest::new(operation_id, target, conversation, 1_700_000_600).unwrap(),
+        ),
+    )
+    .unwrap();
+    let response = ApplicationMessage::new(
+        ProtocolVersion::application_v1(),
+        MessageId::from_bytes([75; 16]),
+        2,
+        1_700_000_001_000,
+        Some(request.message_id()),
+        ApplicationContent::repeat_pairing_response(
+            RepeatPairingResponse::new(
+                operation_id,
+                requester,
+                conversation,
+                "fresh-member-capability",
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+
+    for message in [request, response] {
+        let encoded = encode_application_message(&message).unwrap();
+        let decoded = decode_application_message(&encoded).unwrap();
+        assert_eq!(encode_application_message(&decoded).unwrap(), encoded);
+        assert!(!encoded.windows(5).any(|window| window == b"alias"));
+    }
+}
+
+#[test]
+fn repeat_pairing_contract_rejects_missing_identity_and_oversized_capability() {
+    let mut application =
+        wire::ApplicationMessage::decode(APPLICATION_FIXTURE).expect("fixture wire should decode");
+    application.content = Some(wire::application_message::Content::RepeatPairingRequest(
+        wire::RepeatPairingRequestContent {
+            operation_id: None,
+            target_device_id: Some(wire::DeviceId {
+                value: vec![1; DeviceId::LENGTH].into(),
+            }),
+            new_conversation_id: Some(wire::ConversationId {
+                value: vec![2; ConversationId::LENGTH].into(),
+            }),
+            expires_at_unix_seconds: 1,
+        },
+    ));
+    assert!(decode_application_message(&application.encode_to_vec()).is_err());
+    assert!(
+        RepeatPairingResponse::new(
+            RepeatPairingOperationId::from_bytes([1; 16]),
+            DeviceId::from_bytes([2; 32]),
+            ConversationId::from_bytes([3; 32]),
+            "x".repeat(MAX_REPEAT_PAIRING_CAPABILITY_BYTES + 1),
+        )
+        .is_err()
+    );
+    application.content = Some(wire::application_message::Content::RepeatPairingResponse(
+        wire::RepeatPairingResponseContent {
+            operation_id: Some(wire::RepeatPairingOperationId {
+                value: vec![1; RepeatPairingOperationId::LENGTH].into(),
+            }),
+            requester_device_id: Some(wire::DeviceId {
+                value: vec![2; DeviceId::LENGTH].into(),
+            }),
+            new_conversation_id: Some(wire::ConversationId {
+                value: vec![3; ConversationId::LENGTH].into(),
+            }),
+            capability: "x".repeat(MAX_REPEAT_PAIRING_CAPABILITY_BYTES + 1),
+        },
+    ));
+    assert!(decode_application_message(&application.encode_to_vec()).is_err());
 }
 
 #[test]

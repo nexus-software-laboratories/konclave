@@ -354,6 +354,9 @@ internal route authority.
 | Enrollment authority theft or abuse | Separate enrollment/data-plane derivation domains, authenticate before body processing, fixed server grants, rate/concurrency/principal caps, verifier-only configuration, rotation, and revocation |
 | Relay endpoint substitution during migration | System-trusted TLS, exact source/destination journal binding, deterministic principal-registration identity, all-profile locking, endpoint-bound credential resealing only after authenticated destination acceptance, partial-state admission denial, health-before-finalize, and local journaled abort |
 | Credential or capability substitution | Device-root binding validation covers identity and the conversation key; a separate root signature authenticates nonzero capability bits, while a missing assertion means no capability; optional out-of-band fingerprint comparison authenticates the intended device |
+| Trusted-device alias substitution or rollback | Seal alias, canonical device identifier, and exact root together under profile-and-device associated data; enforce one alias per active root, authenticate the count and digest of the complete ordered alias map, reject deletion, historical row replay, or cross-profile substitution, and resolve only against current root-verified membership |
+| Repeat-pairing control reaches an incompatible or unintended member | Require every current member of the selected bootstrap conversation to advertise the root-signed repeat-pairing capability, authenticate the actual MLS sender and exact target, keep aliases off the wire, and leave unknown legacy conversations ineligible |
+| Repeat-pairing capability or authorization substitution | Pin the operation to the alias root, peer `DeviceId`, bootstrap conversation, preselected new conversation, member role, deadline, and pairing identifier; bind both ordinary authorization calls back to that sealed operation and cancel malformed capability input without stopping the profile |
 | Device root-key extraction | Remove the compromised `DeviceId`, advance the epoch, and enroll a new independently verified `DeviceId`; do not claim recovery through MLS update alone |
 | Protocol downgrade | Signed capability negotiation across every remote recipient of a group application message and fail-closed version selection |
 | Protected A2A downgrade or false visibility claim | Exact versioned Agent Card extension, code-owned MLS/application-opaque/fail-closed semantics, explicit caller trust requirement, standard-client and gateway refusal when protection is required, and no opaque A2A payload tunnel |
@@ -413,6 +416,9 @@ internal route authority.
 - AccountTrusted storage detects rollback only against the current process high-water
   mark. Stronger cross-process or cross-restart rollback resistance requires a
   provider-owned monotonic anchor.
+- Trusted-device storage rejects inconsistent row or state rollback, but does not
+  claim detection when an attacker restores one complete internally consistent
+  profile-database snapshot. That requires the same provider-owned monotonic anchor.
 - Konclave cannot guarantee availability against a malicious relay or network.
 - The initial protocol cannot guarantee consistent membership against a relay that
   equivocates between isolated clients.

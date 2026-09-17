@@ -1,11 +1,11 @@
 use std::mem::size_of;
 
 use KonclaveDomainCore::{
-    APPLICATION_CAPABILITY_DIRECTED_REQUEST, ConversationId, ConversationRole,
-    CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Ed25519Signature,
-    EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId, NotificationId,
-    PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer, PairingStage,
-    ProtocolVersion, RoutingId, SignatureScheme,
+    APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING, ConversationId,
+    ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
+    Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId,
+    NotificationId, PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer,
+    PairingStage, ProtocolVersion, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -318,8 +318,10 @@ impl DeviceIdentity {
         let signature = cipher_suite
             .sign(&self.secret_key, &canonical)
             .map_err(|_| provider_failure("device credential binding signature"))?;
+        let application_capabilities =
+            APPLICATION_CAPABILITY_DIRECTED_REQUEST | APPLICATION_CAPABILITY_REPEAT_PAIRING;
         let capability_canonical =
-            canonical_credential_capabilities(&canonical, APPLICATION_CAPABILITY_DIRECTED_REQUEST);
+            canonical_credential_capabilities(&canonical, application_capabilities);
         let capability_signature = cipher_suite
             .sign(&self.secret_key, &capability_canonical)
             .map_err(|_| provider_failure("device credential capability signature"))?;
@@ -331,7 +333,7 @@ impl DeviceIdentity {
             self.public_key,
             public_key,
             Ed25519Signature::from_slice(&signature)?,
-            APPLICATION_CAPABILITY_DIRECTED_REQUEST,
+            application_capabilities,
             Some(Ed25519Signature::from_slice(&capability_signature)?),
         )?;
         Ok(ConversationSigningMaterial {
@@ -1138,13 +1140,14 @@ mod tests {
     }
 
     #[test]
-    fn directed_request_capability_is_root_signed() {
+    fn application_capabilities_are_root_signed() {
         let identity = DeviceIdentity::generate().unwrap();
         let material = identity
             .create_conversation_signing_material(ConversationId::from_bytes([0x73; 32]))
             .unwrap();
         let binding = material.binding();
         assert!(binding.supports_directed_requests());
+        assert!(binding.supports_repeat_pairing());
         verify_device_credential_binding(binding).unwrap();
 
         let stripped = DeviceCredentialBinding::new(
@@ -1157,6 +1160,7 @@ mod tests {
             binding.device_binding_signature(),
         );
         assert!(!stripped.supports_directed_requests());
+        assert!(!stripped.supports_repeat_pairing());
         verify_device_credential_binding(&stripped).unwrap();
 
         let altered = DeviceCredentialBinding::new_with_capabilities(
@@ -1167,7 +1171,7 @@ mod tests {
             binding.device_root_public_key(),
             binding.conversation_signature_public_key(),
             binding.device_binding_signature(),
-            binding.application_capabilities() | 2,
+            binding.application_capabilities() | 4,
             binding.application_capabilities_signature(),
         )
         .unwrap();

@@ -29,6 +29,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0022: Default-branch Copilot marketplace](adr/adr-0022-default-branch-copilot-marketplace.md)
 - [ADR 0023: Encrypted pairing rendezvous](adr/adr-0023-encrypted-pairing-rendezvous.md)
 - [ADR 0024: OPAQUE short-code mutual verification](adr/adr-0024-opaque-short-code-mutual-verification.md)
+- [ADR 0025: Trusted device alias bootstrap](adr/adr-0025-trusted-device-alias-bootstrap.md)
 
 ## Protocol
 

@@ -3,9 +3,7 @@ use KonclaveDomainCore::{DeviceId, PairingId, ShortCodePairingAttemptId, ShortCo
 use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind};
 use rusqlite::{OptionalExtension, params};
 
-use super::{
-    PROFILE_SCHEMA_VERSION, ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer,
-};
+use super::{ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer};
 use crate::short_code_pairing::{
     MAX_SHORT_CODE_STATE_BYTES, ShortCodeOperationState, ShortCodePhase, ShortCodeRole,
     ShortCodeStateError,
@@ -15,6 +13,7 @@ const MAX_ACTIVE_SHORT_CODE_OPERATIONS: usize = 16;
 const MAX_SHORT_CODE_OPERATION_RECORDS: usize = 64;
 const MAX_SEALED_SHORT_CODE_STATE_BYTES: usize = MAX_SHORT_CODE_STATE_BYTES + 64;
 const SHORT_CODE_RECORD_CONTEXT_VERSION: &[u8] = b"short-code-operation-v1";
+const SHORT_CODE_PAIRING_SCHEMA_VERSION: u32 = 19;
 
 /// One authenticated durable short-code operation checkpoint.
 pub(crate) struct ShortCodeCheckpoint {
@@ -59,12 +58,15 @@ impl ProfileStore {
                 .map_err(|_| ProfileStoreError::CorruptData)
             })
             .transpose()?;
-        if current_version == PROFILE_SCHEMA_VERSION {
+        if current_version == SHORT_CODE_PAIRING_SCHEMA_VERSION {
             if let Some((_, floor)) = opened_identity
-                && floor != PROFILE_SCHEMA_VERSION
+                && floor != SHORT_CODE_PAIRING_SCHEMA_VERSION
             {
                 return Err(ProfileStoreError::CorruptData);
             }
+            return Ok(());
+        }
+        if current_version > SHORT_CODE_PAIRING_SCHEMA_VERSION {
             return Ok(());
         }
         if current_version != 18 {
@@ -76,7 +78,7 @@ impl ProfileStore {
                     .seal_with_profile_schema_floor(
                         &self.sealer,
                         self.locked_profile.profile_id.as_bytes(),
-                        PROFILE_SCHEMA_VERSION,
+                        SHORT_CODE_PAIRING_SCHEMA_VERSION,
                     )
                     .map_err(|_| ProfileStoreError::Cryptographic)?,
             ),
@@ -145,7 +147,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         transaction
-            .pragma_update(None, "user_version", PROFILE_SCHEMA_VERSION)
+            .pragma_update(None, "user_version", SHORT_CODE_PAIRING_SCHEMA_VERSION)
             .map_err(|_| ProfileStoreError::Storage)?;
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
@@ -835,7 +837,7 @@ mod tests {
     use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SecretSealer};
 
     use super::*;
-    use crate::persistence::{LockedProfile, ProfileId};
+    use crate::persistence::{LockedProfile, PROFILE_SCHEMA_VERSION, ProfileId};
 
     fn open_store(root: &std::path::Path, profile: &str) -> ProfileStore {
         LockedProfile::acquire(root, ProfileId::parse(profile).unwrap())
@@ -921,7 +923,12 @@ mod tests {
                 .unwrap();
             connection
                 .execute_batch(
-                    "DROP TABLE daemon_short_code_pairing;
+                    "DROP TABLE daemon_repeat_pairing_state;
+                     DROP TABLE daemon_repeat_pairing;
+                     DROP TABLE daemon_internal_application_message;
+                     DROP TABLE daemon_trusted_device_binding_state;
+                     DROP TABLE daemon_trusted_device_binding;
+                     DROP TABLE daemon_short_code_pairing;
                      PRAGMA user_version = 18;",
                 )
                 .unwrap();
@@ -970,7 +977,12 @@ mod tests {
                 .unwrap();
             connection
                 .execute_batch(
-                    "DROP TABLE daemon_short_code_pairing;
+                    "DROP TABLE daemon_repeat_pairing_state;
+                     DROP TABLE daemon_repeat_pairing;
+                     DROP TABLE daemon_internal_application_message;
+                     DROP TABLE daemon_trusted_device_binding_state;
+                     DROP TABLE daemon_trusted_device_binding;
+                     DROP TABLE daemon_short_code_pairing;
                      CREATE TABLE daemon_short_code_pairing (sentinel INTEGER NOT NULL);
                      INSERT INTO daemon_short_code_pairing (sentinel) VALUES (7);
                      PRAGMA user_version = 18;",

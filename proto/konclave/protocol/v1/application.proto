@@ -20,6 +20,22 @@ message DirectedRequestContent {
   string body = 2;
 }
 
+// Requests a fresh member capability over an existing authenticated conversation.
+message RepeatPairingRequestContent {
+  RepeatPairingOperationId operation_id = 1;
+  DeviceId target_device_id = 2;
+  ConversationId new_conversation_id = 3;
+  uint64 expires_at_unix_seconds = 4;
+}
+
+// Returns a fresh short-lived capability to the authenticated requester.
+message RepeatPairingResponseContent {
+  RepeatPairingOperationId operation_id = 1;
+  DeviceId requester_device_id = 2;
+  ConversationId new_conversation_id = 3;
+  string capability = 4;
+}
+
 // Carries one application operation encrypted and authenticated by MLS.
 // The complete encoded message is bounded to 256 KiB in protocol v1.
 message ApplicationMessage {
@@ -35,5 +51,7 @@ message ApplicationMessage {
     CollaborationPolicyResponse collaboration_policy_response = 12;
     CollaborationPolicyRevocation collaboration_policy_revocation = 13;
     DirectedRequestContent directed_request = 14;
+    RepeatPairingRequestContent repeat_pairing_request = 15;
+    RepeatPairingResponseContent repeat_pairing_response = 16;
   }
 }

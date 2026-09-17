@@ -22,6 +22,7 @@
     "Relay migration conformance",
     "Relay migration Windows conformance",
     "Short-code pairing conformance",
+    "Trusted device alias conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
@@ -82,6 +83,7 @@
         "pairing-rendezvous-conformance",
         "relay-migration-conformance",
         "short-code-pairing-conformance",
+        "trusted-device-alias-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
@@ -221,6 +223,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Short-code pairing conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/trusted-device-alias-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Trusted device alias conformance"
       ]
     },
     {

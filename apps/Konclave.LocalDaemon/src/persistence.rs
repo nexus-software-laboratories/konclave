@@ -54,10 +54,14 @@ pub(crate) use directed_request_handling::{
 pub(crate) mod enrollment;
 #[path = "pairing_persistence.rs"]
 pub(crate) mod pairing;
+#[path = "repeat_pairing_persistence.rs"]
+pub(crate) mod repeat_pairing;
 #[path = "short_code_pairing_persistence.rs"]
 pub(crate) mod short_code_pairing;
+#[path = "trusted_device_persistence.rs"]
+mod trusted_device;
 
-const PROFILE_SCHEMA_VERSION: u32 = 19;
+const PROFILE_SCHEMA_VERSION: u32 = 21;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -425,7 +429,11 @@ impl LockedProfile {
         store.initialize_collaboration_policy_operation_schema(source_version)?;
         store.initialize_directed_request_handling_schema()?;
         store.initialize_short_code_pairing_schema()?;
+        store.initialize_trusted_device_schema()?;
+        store.initialize_repeat_pairing_schema()?;
         store.verify_short_code_pairings()?;
+        store.verify_trusted_device_bindings()?;
+        store.verify_repeat_pairings()?;
         store.active_conversation_id()?;
         store.verify_collaboration_policies()?;
         store.backfill_collaboration_policy_exchange_records()?;
@@ -449,6 +457,10 @@ pub(crate) struct ProfileStore {
 }
 
 impl ProfileStore {
+    pub(crate) fn now_unix_seconds(&self) -> u64 {
+        self.clock.now_unix_milliseconds() / 1_000
+    }
+
     /// Returns the path owned by the sealed MLS storage adapter.
     #[must_use]
     pub(crate) fn mls_database_path(&self) -> PathBuf {
@@ -2249,7 +2261,10 @@ impl ProfileStore {
                 let message_id = MessageId::from_slice(&source_identifier)
                     .map_err(|_| ProfileStoreError::CorruptData)?;
                 let message = self.load_message_at(conversation_id, relay_cursor)?;
-                if message.sender != sender || message.message.message_id() != message_id {
+                if message.sender != sender
+                    || message.message.message_id() != message_id
+                    || message.message.content().is_internal()
+                {
                     return Err(ProfileStoreError::CorruptData);
                 }
                 RemoteEventPayload::ApplicationMessage(message.message)
@@ -6567,6 +6582,21 @@ impl ProfileStore {
         cursor: u64,
         notification_id: NotificationId,
     ) -> Result<u64, ProfileStoreError> {
+        self.complete_inbox_with_notification_at(
+            conversation_id,
+            cursor,
+            notification_id,
+            self.clock.now_unix_milliseconds() / 1_000,
+        )
+    }
+
+    pub(crate) fn complete_inbox_with_notification_at(
+        &self,
+        conversation_id: ConversationId,
+        cursor: u64,
+        notification_id: NotificationId,
+        now_unix_seconds: u64,
+    ) -> Result<u64, ProfileStoreError> {
         let conversation = self.load_conversation(conversation_id)?;
         let message = self.load_message_at(conversation_id, cursor)?;
         let envelope = self.load_inbox_envelope(message.envelope_id)?;
@@ -6668,17 +6698,39 @@ impl ProfileStore {
             cursor,
             &message.message,
         )?;
-        self.insert_remote_event_in(
-            &transaction,
-            conversation_id,
-            conversation.routing_id,
-            cursor,
-            notification_id,
-            RemoteEventKind::ApplicationMessage,
-            message.sender,
-            conversation.signing_material.binding().device_id(),
-            message.message.message_id().into_bytes(),
-        )?;
+        let internal = if message.message.content().is_internal() {
+            let sender_root = conversation
+                .bindings
+                .iter()
+                .find(|binding| binding.binding().device_id() == message.sender)
+                .ok_or(ProfileStoreError::ConversationMismatch)?
+                .binding()
+                .device_root_public_key();
+            self.record_repeat_pairing_content_in(
+                &transaction,
+                conversation_id,
+                message.sender,
+                sender_root,
+                conversation.signing_material.binding().device_id(),
+                message.message.content(),
+                now_unix_seconds,
+            )?
+        } else {
+            false
+        };
+        if !internal {
+            self.insert_remote_event_in(
+                &transaction,
+                conversation_id,
+                conversation.routing_id,
+                cursor,
+                notification_id,
+                RemoteEventKind::ApplicationMessage,
+                message.sender,
+                conversation.signing_material.binding().device_id(),
+                message.message.message_id().into_bytes(),
+            )?;
+        }
         let changed = transaction
             .execute(
                 "UPDATE daemon_inbox SET status = 3
@@ -6780,6 +6832,14 @@ impl ProfileStore {
                      FROM daemon_message_history
                      WHERE conversation_id = ?1
                        AND status = 2
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM daemon_internal_application_message AS internal
+                           WHERE internal.conversation_id =
+                               daemon_message_history.conversation_id
+                             AND internal.message_id =
+                               daemon_message_history.message_id
+                       )
                        AND cursor > ?2
                        AND cursor <= ?3
                      ORDER BY cursor
@@ -7314,7 +7374,10 @@ impl ProfileStore {
             ],
         );
         match insert {
-            Ok(1) => return Ok(()),
+            Ok(1) => {
+                self.store_internal_application_marker(connection, conversation_id, message)?;
+                return Ok(());
+            }
             Ok(_) => return Err(ProfileStoreError::Storage),
             Err(rusqlite::Error::SqliteFailure(ref details, _))
                 if details.code == rusqlite::ErrorCode::ConstraintViolation => {}
@@ -7335,6 +7398,7 @@ impl ProfileStore {
         {
             return Err(ProfileStoreError::DuplicateOperation);
         }
+        self.store_internal_application_marker(connection, conversation_id, message)?;
         match (existing.cursor, cursor) {
             (Some(existing), Some(candidate)) if existing != candidate => {
                 return Err(ProfileStoreError::CursorConflict);
@@ -7450,6 +7514,23 @@ impl ProfileStore {
         {
             return Err(ProfileStoreError::CorruptData);
         }
+        let internal_marker: i64 = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM daemon_internal_application_message
+                    WHERE conversation_id = ?1 AND message_id = ?2
+                 )",
+                params![
+                    conversation_id.as_bytes().as_slice(),
+                    message_id.as_bytes().as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if (internal_marker == 1) != message.content().is_internal() {
+            return Err(ProfileStoreError::CorruptData);
+        }
         let direction = match direction {
             1 => MessageDirection::Outbound,
             2 => MessageDirection::Inbound,
@@ -7472,6 +7553,55 @@ impl ProfileStore {
             message,
             complete,
         }))
+    }
+
+    fn store_internal_application_marker(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        message: &ApplicationMessage,
+    ) -> Result<(), ProfileStoreError> {
+        if message.content().is_internal() {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO daemon_internal_application_message (
+                        conversation_id,
+                        message_id
+                     ) VALUES (?1, ?2)",
+                    params![
+                        conversation_id.as_bytes().as_slice(),
+                        message.message_id().as_bytes().as_slice()
+                    ],
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM daemon_internal_application_message
+                     WHERE conversation_id = ?1 AND message_id = ?2",
+                    params![
+                        conversation_id.as_bytes().as_slice(),
+                        message.message_id().as_bytes().as_slice()
+                    ],
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete_internal_application_markers_for_test(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ProfileStoreError> {
+        self.lock()?
+            .execute(
+                "DELETE FROM daemon_internal_application_message
+                 WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(())
     }
 
     fn assign_history_cursor(
@@ -9198,6 +9328,22 @@ pub(crate) enum ProfileStoreError {
     CollaborationPolicyCapacityExceeded,
     #[error("local directed-request handling storage reached its limit")]
     DirectedRequestHandlingCapacityExceeded,
+    #[error("local trusted-device storage reached its limit")]
+    TrustedDeviceCapacityExceeded,
+    #[error("trusted-device alias does not exist")]
+    TrustedDeviceNotFound,
+    #[error("trusted-device alias belongs to another active device")]
+    TrustedDeviceAliasConflict,
+    #[error("trusted-device identity has contradictory root evidence")]
+    TrustedDeviceRootMismatch,
+    #[error("trusted-device identity is no longer a current member")]
+    TrustedDeviceRemoved,
+    #[error("trusted device has no conversation with repeat-pairing capability")]
+    TrustedDeviceRepeatPairingUnsupported,
+    #[error("local repeat-pairing journal reached its active-operation limit")]
+    RepeatPairingCapacityExceeded,
+    #[error("repeat-pairing operation does not exist")]
+    RepeatPairingNotFound,
     #[error("collaboration-policy proposal is unavailable")]
     CollaborationPolicyProposalNotFound,
     #[error("collaboration-policy proposal identity is conflicted")]
@@ -9239,7 +9385,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION | 18 | 17 | 16 => return Ok(()),
+        PROFILE_SCHEMA_VERSION | 20 | 19 | 18 | 17 | 16 => return Ok(()),
         15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
@@ -12369,7 +12515,12 @@ mod tests {
         downgrade_device_identity_to_legacy(connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -14652,7 +14803,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -14687,7 +14843,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -14739,7 +14900,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -14770,7 +14936,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -14822,7 +14993,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -14853,7 +15029,12 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -16324,7 +16505,12 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -17931,7 +18117,12 @@ mod tests {
         downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -18012,7 +18203,12 @@ mod tests {
         downgrade_device_identity_to_legacy(&connection);
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  DROP TABLE daemon_collaboration_policy_operation_state;
@@ -18072,7 +18268,12 @@ mod tests {
         set_device_identity_schema_floor(&connection, 17);
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  PRAGMA user_version = 17;",
@@ -18129,7 +18330,12 @@ mod tests {
         set_device_identity_schema_floor(&connection, 17);
         connection
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  CREATE TABLE daemon_directed_request_handling (
@@ -18183,7 +18389,12 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TABLE daemon_short_code_pairing;
+                "DROP TABLE daemon_repeat_pairing_state;
+                 DROP TABLE daemon_repeat_pairing;
+                 DROP TABLE daemon_internal_application_message;
+                 DROP TABLE daemon_trusted_device_binding_state;
+                 DROP TABLE daemon_trusted_device_binding;
+                 DROP TABLE daemon_short_code_pairing;
                  DROP TABLE daemon_directed_request_handling_state;
                  DROP TABLE daemon_directed_request_handling;
                  PRAGMA user_version = 17;",

@@ -46,6 +46,7 @@ $expectations = [ordered]@{
     )
     'release-publication-conformance.yml' = @('release-publication-conformance')
     'short-code-pairing-conformance.yml' = @('short-code-pairing-conformance')
+    'trusted-device-alias-conformance.yml' = @('trusted-device-alias-conformance')
     'user-presence-conformance.yml' = @('user-presence-conformance')
 }
 
