@@ -6,7 +6,11 @@ import { TextDecoder } from 'node:util';
 
 import type { CommandContext, CommandDefinition } from '@github/copilot-sdk';
 
-import { createPairingClipboard, type PairingClipboard } from './clipboard.js';
+import {
+  createPairingClipboard,
+  type ClipboardWriteReceipt,
+  type PairingClipboard,
+} from './clipboard.js';
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
@@ -1318,27 +1322,27 @@ async function renderPairingHandoff(
   clipboard: PairingClipboard,
   terminalColumns: () => number | undefined,
   terminalInteractive: () => boolean,
-): Promise<boolean> {
+): Promise<ClipboardWriteReceipt | undefined> {
   await presentation.write(
     `pairing token: one-time bearer secret; expires ${formatPairingExpiry(status.authorizationDeadlineUnixSeconds)}`,
   );
   if (mode === 'copy') {
     const outcome = await clipboard
       .writeToken(handoff.token)
-      .catch(() => ({ copied: false, mayContainToken: true }));
+      .catch(() => ({ copied: false, providers: [] }));
     if (outcome.copied) {
       await presentation.write(
         `pairing token copied (${pairingRendezvousTokenCharacters} characters); token not echoed; clear with /konclave clipboard clear`,
       );
-      return true;
+      return outcome;
     }
     await presentation.write(
-      outcome.mayContainToken
+      outcome.providers.length > 0
         ? 'clipboard copy could not be confirmed; use the raw token below and clear with /konclave clipboard clear'
         : 'clipboard unavailable; use the raw token below',
     );
     await presentation.write(handoff.token, { ephemeral: true });
-    return outcome.mayContainToken;
+    return outcome.providers.length > 0 ? outcome : undefined;
   }
   if (mode === 'qr') {
     let qr;
@@ -1356,7 +1360,7 @@ async function renderPairingHandoff(
     ) {
       await presentation.write('QR unavailable for this terminal; use the raw token below');
       await presentation.write(handoff.token, { ephemeral: true });
-      return false;
+      return undefined;
     }
     await presentation.write(
       'QR code: scan the Konclave pairing URI; accessible raw token follows',
@@ -1368,11 +1372,11 @@ async function renderPairingHandoff(
       `accessible pairing token (${pairingRendezvousTokenCharacters} characters):`,
     );
     await presentation.write(handoff.token, { ephemeral: true });
-    return false;
+    return undefined;
   }
   await presentation.write('raw pairing token:');
   await presentation.write(handoff.token, { ephemeral: true });
-  return false;
+  return undefined;
 }
 
 async function completeAccountTrustedPairing(
@@ -1823,7 +1827,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
   const terminalColumns = dependencies.terminalColumns ?? defaultTerminalColumns;
   const terminalInteractive = dependencies.terminalInteractive ?? defaultTerminalInteractive;
   let activeConversationId: string | undefined;
-  let clipboardContainsPairingToken = false;
+  let clipboardReceipt: ClipboardWriteReceipt | undefined;
 
   const runPolicy = async (raw: string): Promise<void> => {
     const parsed = parseCommand(raw);
@@ -2158,15 +2162,15 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (parts[0]?.toLowerCase() !== 'clear') {
           throw new Error('usage: /konclave clipboard clear');
         }
-        if (!clipboardContainsPairingToken) {
+        if (clipboardReceipt === undefined) {
           await presentation.write('clipboard: no pairing token was copied by this session');
           return;
         }
-        const cleared = await clipboard.clear().catch(() => false);
+        const cleared = await clipboard.clear(clipboardReceipt).catch(() => false);
         if (!cleared) {
           throw new Error('the pairing token clipboard could not be cleared');
         }
-        clipboardContainsPairingToken = false;
+        clipboardReceipt = undefined;
         await presentation.write('clipboard: cleared the pairing token copied by this session');
         return;
       }
@@ -2191,18 +2195,22 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
               ? `pairing ${created.pairing.pairingId} (same-account trust): the other session runs /konclave connect <token-or-uri>`
               : 'compact pairing handoff:',
           );
-          if (
-            await renderPairingHandoff(
-              presentation,
-              handoff,
-              created.pairing,
-              handoffMode,
-              clipboard,
-              terminalColumns,
-              terminalInteractive,
-            )
-          ) {
-            clipboardContainsPairingToken = true;
+          const receipt = await renderPairingHandoff(
+            presentation,
+            handoff,
+            created.pairing,
+            handoffMode,
+            clipboard,
+            terminalColumns,
+            terminalInteractive,
+          );
+          if (receipt !== undefined) {
+            clipboardReceipt = {
+              copied: receipt.copied,
+              providers: [
+                ...new Set([...(clipboardReceipt?.providers ?? []), ...receipt.providers]),
+              ],
+            };
           }
           await presentation.detail(
             'waiting for the other session to run /konclave connect <token-or-uri>',

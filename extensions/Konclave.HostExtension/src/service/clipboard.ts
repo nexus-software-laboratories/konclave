@@ -4,39 +4,53 @@ const clipboardTimeoutMilliseconds = 5_000;
 const maximumClipboardBytes = 512;
 const maximumProcessOutputBytes = 4 * 1024;
 
-type ClipboardCommandRunner = (
+export type ClipboardCommandOutcome = 'success' | 'unavailable' | 'indeterminate';
+export type ClipboardProviderId = 'windows' | 'macos' | 'wayland' | 'x11';
+
+export type ClipboardCommandRunner = (
   file: string,
   args: readonly string[],
   input: string,
-) => Promise<boolean>;
+) => Promise<ClipboardCommandOutcome>;
 
 export interface PairingClipboard {
-  writeToken(token: string): Promise<ClipboardWriteResult>;
-  clear(): Promise<boolean>;
+  writeToken(token: string): Promise<ClipboardWriteReceipt>;
+  clear(receipt: ClipboardWriteReceipt): Promise<boolean>;
 }
 
-export interface ClipboardWriteResult {
+export interface ClipboardWriteReceipt {
   readonly copied: boolean;
-  readonly mayContainToken: boolean;
+  readonly providers: readonly ClipboardProviderId[];
 }
 
 interface ClipboardCommand {
+  readonly provider: ClipboardProviderId;
   readonly file: string;
   readonly args: readonly string[];
 }
 
-function windowsClipboardCommand(): ClipboardCommand {
-  return {
-    file: 'powershell.exe',
-    args: [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      '$value = [Console]::In.ReadToEnd(); Set-Clipboard -Value $value',
-    ],
-  };
-}
+const providerCommands: Readonly<Record<ClipboardProviderId, ClipboardCommand>> = {
+  windows: {
+    provider: 'windows',
+    file: String.raw`C:\Windows\System32\clip.exe`,
+    args: [],
+  },
+  macos: {
+    provider: 'macos',
+    file: '/usr/bin/pbcopy',
+    args: [],
+  },
+  wayland: {
+    provider: 'wayland',
+    file: '/usr/bin/wl-copy',
+    args: ['--type', 'text/plain'],
+  },
+  x11: {
+    provider: 'x11',
+    file: '/usr/bin/xclip',
+    args: ['-selection', 'clipboard', '-in'],
+  },
+};
 
 function writeCommands(
   platform: NodeJS.Platform,
@@ -44,16 +58,16 @@ function writeCommands(
 ): ClipboardCommand[] {
   switch (platform) {
     case 'win32':
-      return [windowsClipboardCommand()];
+      return [providerCommands.windows];
     case 'darwin':
-      return [{ file: 'pbcopy', args: [] }];
+      return [providerCommands.macos];
     case 'linux': {
       const commands: ClipboardCommand[] = [];
       if (environment.WAYLAND_DISPLAY) {
-        commands.push({ file: 'wl-copy', args: ['--type', 'text/plain'] });
+        commands.push(providerCommands.wayland);
       }
       if (environment.DISPLAY) {
-        commands.push({ file: 'xclip', args: ['-selection', 'clipboard', '-in'] });
+        commands.push(providerCommands.x11);
       }
       return commands;
     }
@@ -62,43 +76,63 @@ function writeCommands(
   }
 }
 
-function clearCommands(
-  platform: NodeJS.Platform,
-  environment: NodeJS.ProcessEnv,
-): ClipboardCommand[] {
-  if (platform === 'linux' && environment.WAYLAND_DISPLAY) {
-    return [{ file: 'wl-copy', args: ['--clear'] }, ...writeCommands(platform, environment)];
+function clearCommand(provider: ClipboardProviderId): ClipboardCommand {
+  if (provider === 'wayland') {
+    return {
+      provider,
+      file: providerCommands.wayland.file,
+      args: ['--clear'],
+    };
   }
-  return writeCommands(platform, environment);
+  return providerCommands[provider];
 }
 
-async function tryCommands(
+async function writeWithProviders(
   commands: readonly ClipboardCommand[],
   input: string,
   run: ClipboardCommandRunner,
-): Promise<ClipboardWriteResult> {
-  if (commands.length === 0) {
-    return { copied: false, mayContainToken: false };
-  }
+): Promise<ClipboardWriteReceipt> {
+  const providers: ClipboardProviderId[] = [];
   for (const command of commands) {
-    if (await run(command.file, command.args, input)) {
-      return { copied: true, mayContainToken: true };
+    const outcome = await run(command.file, command.args, input);
+    if (outcome !== 'unavailable') {
+      providers.push(command.provider);
+    }
+    if (outcome === 'success') {
+      return { copied: true, providers };
     }
   }
-  return { copied: false, mayContainToken: true };
+  return { copied: false, providers };
+}
+
+async function clearProviders(
+  providers: readonly ClipboardProviderId[],
+  run: ClipboardCommandRunner,
+): Promise<boolean> {
+  if (providers.length === 0) {
+    return false;
+  }
+  let cleared = true;
+  for (const provider of new Set(providers)) {
+    const command = clearCommand(provider);
+    if ((await run(command.file, command.args, '')) !== 'success') {
+      cleared = false;
+    }
+  }
+  return cleared;
 }
 
 async function runClipboardCommand(
   file: string,
   args: readonly string[],
   input: string,
-): Promise<boolean> {
+): Promise<ClipboardCommandOutcome> {
   const inputBytes = Buffer.from(input, 'utf8');
   if (inputBytes.length > maximumClipboardBytes) {
     inputBytes.fill(0);
-    return false;
+    return 'unavailable';
   }
-  return new Promise<boolean>((resolve) => {
+  return new Promise<ClipboardCommandOutcome>((resolve) => {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(file, args, {
@@ -108,43 +142,57 @@ async function runClipboardCommand(
       });
     } catch {
       inputBytes.fill(0);
-      resolve(false);
+      resolve('unavailable');
       return;
     }
 
     let settled = false;
+    let spawned = false;
+    let forcedIndeterminate = false;
     let outputBytes = 0;
-    const finish = (success: boolean) => {
+    const finish = (outcome: ClipboardCommandOutcome) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
       inputBytes.fill(0);
-      resolve(success);
+      resolve(outcome);
+    };
+    const terminate = () => {
+      if (forcedIndeterminate) {
+        return;
+      }
+      forcedIndeterminate = true;
+      child.kill('SIGKILL');
     };
     const observeOutput = (chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes > maximumProcessOutputBytes) {
-        child.kill();
-        finish(false);
+        terminate();
       }
     };
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(false);
-    }, clipboardTimeoutMilliseconds);
+    const timer = setTimeout(terminate, clipboardTimeoutMilliseconds);
 
     child.stdout.on('data', observeOutput);
     child.stderr.on('data', observeOutput);
-    child.on('error', () => finish(false));
-    child.on('close', (code) => finish(code === 0 && outputBytes <= maximumProcessOutputBytes));
-    child.stdin.on('error', () => finish(false));
+    child.on('spawn', () => {
+      spawned = true;
+    });
+    child.on('error', () => finish(spawned ? 'indeterminate' : 'unavailable'));
+    child.on('close', (code) => {
+      finish(
+        !forcedIndeterminate && code === 0 && outputBytes <= maximumProcessOutputBytes
+          ? 'success'
+          : 'indeterminate',
+      );
+    });
+    child.stdin.on('error', terminate);
     child.stdin.end(inputBytes);
   });
 }
 
-/** Creates a bounded native clipboard adapter with no shell interpolation. */
+/** Creates a bounded native clipboard adapter with fixed system executable paths. */
 export function createPairingClipboard(
   platform: NodeJS.Platform = process.platform,
   environment: NodeJS.ProcessEnv = process.env,
@@ -152,10 +200,10 @@ export function createPairingClipboard(
 ): PairingClipboard {
   return {
     writeToken(token) {
-      return tryCommands(writeCommands(platform, environment), token, run);
+      return writeWithProviders(writeCommands(platform, environment), token, run);
     },
-    async clear() {
-      return (await tryCommands(clearCommands(platform, environment), '', run)).copied;
+    clear(receipt) {
+      return clearProviders(receipt.providers, run);
     },
   };
 }

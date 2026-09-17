@@ -1033,7 +1033,7 @@ describe('deterministic commands', () => {
       }
     });
     const clipboard = {
-      writeToken: vi.fn().mockResolvedValue({ copied: true, mayContainToken: true }),
+      writeToken: vi.fn().mockResolvedValue({ copied: true, providers: ['windows'] as const }),
       clear: vi.fn().mockResolvedValue(true),
     };
     const lines: string[] = [];
@@ -1053,6 +1053,10 @@ describe('deterministic commands', () => {
 
     expect(clipboard.writeToken).toHaveBeenCalledWith(pairingToken);
     expect(clipboard.clear).toHaveBeenCalledTimes(1);
+    expect(clipboard.clear).toHaveBeenCalledWith({
+      copied: true,
+      providers: ['windows'],
+    });
     expect(lines.join('\n')).toContain('pairing token copied (26 characters); token not echoed');
     expect(lines.join('\n')).toContain('one-time bearer secret; expires 2026-');
     expect(lines.join('\n')).toContain(
@@ -1087,7 +1091,7 @@ describe('deterministic commands', () => {
       throw new Error('unexpected operation');
     });
     const clipboard = {
-      writeToken: vi.fn().mockResolvedValue({ copied: false, mayContainToken: true }),
+      writeToken: vi.fn().mockResolvedValue({ copied: false, providers: ['wayland'] as const }),
       clear: vi.fn().mockResolvedValue(true),
     };
     const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
