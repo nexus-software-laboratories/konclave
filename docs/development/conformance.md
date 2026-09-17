@@ -41,8 +41,11 @@ orchestration scope.
 
 `Pairing rendezvous conformance` is the focused draft-capable gate for compact
 pairing handoff. It runs the fixed Crockford Base32 and HKDF vectors, authenticated
-capability round trips, token/lookup/expiry/ciphertext negative cases, Rust
-formatting, and component Clippy before relay storage or plugin integration begins.
+capability round trips, token/lookup/expiry/ciphertext negative cases, protocol
+compatibility, relay publish/take policy and SQLite migration, authenticated HTTP and
+client redirect safety, a complete two-client daemon pairing, generated local-service
+tool contracts, extension command acceptance, Rust and TypeScript formatting, and
+component lint.
 
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared

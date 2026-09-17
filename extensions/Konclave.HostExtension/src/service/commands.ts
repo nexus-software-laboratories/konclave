@@ -94,6 +94,8 @@ const connectProgressIntervalMilliseconds = 30_000;
 const maxConnectIterations = 2_400;
 const maxConnectWaitMilliseconds = 20 * 60 * 1_000;
 const pairingIdCharacters = 32;
+const pairingRendezvousTokenCharacters = 26;
+const pairingRendezvousTokenPattern = /^[0-9A-HJKMNP-TV-Z]{26}$/u;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
@@ -257,11 +259,11 @@ const helpLines = [
   '  /konclave status                                    Show profile, delivery, and relay state.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
-  '  /konclave connect                                   Create a two-session connection capability.',
-  '  /konclave connect <capability>                      Join and complete an AccountTrusted connection.',
+  '  /konclave connect                                   Create a compact two-session connection token.',
+  '  /konclave connect <token>                           Join and complete an AccountTrusted connection.',
   '  /konclave connect resume <pairing>                  Resume one interrupted AccountTrusted connection.',
-  '  /konclave pair [member|administrator]               Create a one-time pairing capability.',
-  '  /konclave join <capability>                         Redeem a pairing capability.',
+  '  /konclave pair [member|administrator]               Create a full recovery capability.',
+  '  /konclave join <capability>                         Redeem a full recovery capability.',
   '  /konclave new                                       Create a conversation for an approved peer.',
   '  /konclave pairing <pairing>                         Show authenticated pairing state.',
   '  /konclave approve <pairing> <conversation> [role]   Approve a displayed joiner.',
@@ -505,6 +507,35 @@ function parsePairingCapability(value: unknown): {
     pairing: parsePairingStatus(value.pairing),
     capability: value.capability,
   };
+}
+
+function parsePairingRendezvous(value: unknown): {
+  readonly pairing: PairingStatus;
+  readonly token: string;
+} {
+  if (
+    !isRecord(value) ||
+    typeof value.token !== 'string' ||
+    value.token.length !== pairingRendezvousTokenCharacters ||
+    !pairingRendezvousTokenPattern.test(value.token)
+  ) {
+    throw new Error('the local service pairing rendezvous response is malformed');
+  }
+  return {
+    pairing: parsePairingStatus(value.pairing),
+    token: value.token,
+  };
+}
+
+function requirePairingRendezvousToken(value: string): string {
+  const token = value.trim().toUpperCase();
+  if (
+    token.length !== pairingRendezvousTokenCharacters ||
+    !pairingRendezvousTokenPattern.test(token)
+  ) {
+    throw new Error('a valid 26-character pairing token is required');
+  }
+  return token;
 }
 
 function requirePairingCapability(value: string): string {
@@ -1193,7 +1224,7 @@ function formatRemainingPairingTime(milliseconds: number): string {
 function connectPhaseMessage(status: PairingStatus): string {
   switch (status.phase) {
     case 'joiner_awaiting_invitation':
-      return 'waiting for the other session to redeem the capability';
+      return 'waiting for the other session to redeem the token';
     case 'joiner_awaiting_inviter_authorization':
       return 'authorizing the authenticated inviter';
     case 'joiner_awaiting_welcome':
@@ -2004,8 +2035,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
         let status: PairingStatus;
         if (argumentsText.length === 0) {
-          const created = parsePairingCapability(
-            await client.request('create_pairing_capability', {
+          const created = parsePairingRendezvous(
+            await client.request('create_pairing_rendezvous', {
               requested_role: 'member',
             }),
           );
@@ -2017,12 +2048,12 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`cancel: /konclave cancel ${created.pairing.pairingId}`);
           await presentation.write(
             presentation.mode === 'normal'
-              ? `pairing ${created.pairing.pairingId} (same-account trust): paste this capability in the other session`
-              : 'capability (ephemeral; paste the next line in the other session):',
+              ? `pairing ${created.pairing.pairingId} (same-account trust): share this 26-character token`
+              : 'compact token (ephemeral; paste the next line in the other session):',
           );
-          await presentation.write(created.capability, { ephemeral: true });
+          await presentation.write(created.token, { ephemeral: true });
           await presentation.detail(
-            'waiting for the other session to run /konclave connect <capability>',
+            'waiting for the other session to run /konclave connect <token>',
           );
           status = await completeAccountTrustedPairing(
             client,
@@ -2062,9 +2093,9 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             sleep,
           );
         } else {
-          const capability = requirePairingCapability(argumentsText);
+          const token = requirePairingRendezvousToken(argumentsText);
           const redeemed = parsePairingStatus(
-            await client.request('redeem_pairing_capability', { capability }),
+            await client.request('redeem_pairing_rendezvous', { token }),
           );
           if (redeemed.requestedRole !== 'member') {
             throw new Error('connect accepts only member pairing requests');

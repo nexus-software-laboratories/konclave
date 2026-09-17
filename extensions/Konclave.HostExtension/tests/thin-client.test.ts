@@ -75,6 +75,7 @@ function serviceStatus(overrides: Partial<ServiceStatusResult> = {}): ServiceSta
 }
 
 const pairingId = '11'.repeat(16);
+const pairingToken = '000G40R40M30E209185GR38E1W';
 const conversationId = '22'.repeat(32);
 const joinerDeviceId = '33'.repeat(32);
 const inviterDeviceId = '44'.repeat(32);
@@ -832,10 +833,10 @@ describe('deterministic commands', () => {
       switch (operation) {
         case 'service.status':
           return serviceStatus();
-        case 'create_pairing_capability':
+        case 'create_pairing_rendezvous':
           return {
             pairing: pairingStatus(),
-            capability: 'pairing_capability-1',
+            token: pairingToken,
           };
         case 'sync_pairing':
           syncCount += 1;
@@ -895,7 +896,7 @@ describe('deterministic commands', () => {
 
     await command?.handler(commandContext('connect'));
 
-    expect(request).toHaveBeenCalledWith('create_pairing_capability', {
+    expect(request).toHaveBeenCalledWith('create_pairing_rendezvous', {
       requested_role: 'member',
     });
     expect(request).toHaveBeenCalledWith(
@@ -911,7 +912,7 @@ describe('deterministic commands', () => {
       },
     );
     expect(entries).toContainEqual({
-      line: 'pairing_capability-1',
+      line: pairingToken,
       options: { ephemeral: true },
     });
     expect(entries.some((entry) => entry.line === `connected: ${conversationId}`)).toBe(true);
@@ -919,7 +920,7 @@ describe('deterministic commands', () => {
       'no independent identity verification',
     );
     expect(entries).toContainEqual({
-      line: 'connect: waiting for the other session to redeem the capability; 6m 28s remaining',
+      line: 'connect: waiting for the other session to redeem the token; 6m 28s remaining',
       options: { ephemeral: true },
     });
     expect(entries.map((entry) => entry.line).join('\n')).toContain(
@@ -934,7 +935,7 @@ describe('deterministic commands', () => {
       switch (operation) {
         case 'service.status':
           return serviceStatus();
-        case 'redeem_pairing_capability':
+        case 'redeem_pairing_rendezvous':
           return pairingStatus({
             local_role: 'inviter',
             phase: 'inviter_awaiting_authorization',
@@ -983,10 +984,10 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext('connect pairing_capability-1'));
+    await command?.handler(commandContext(`connect ${pairingToken.toLowerCase()}`));
 
-    expect(request).toHaveBeenCalledWith('redeem_pairing_capability', {
-      capability: 'pairing_capability-1',
+    expect(request).toHaveBeenCalledWith('redeem_pairing_rendezvous', {
+      token: pairingToken,
     });
     expect(request).toHaveBeenCalledWith('create_conversation', {});
     expect(request).toHaveBeenCalledWith(
@@ -1073,8 +1074,8 @@ describe('deterministic commands', () => {
         deadlineMs: expect.any(Number),
       },
     );
-    expect(request).not.toHaveBeenCalledWith('create_pairing_capability', expect.anything());
-    expect(request).not.toHaveBeenCalledWith('redeem_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_pairing_rendezvous', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('redeem_pairing_rendezvous', expect.anything());
     expect(request).not.toHaveBeenCalledWith('create_conversation', expect.anything());
     expect(lines).toContain(`pairing ${pairingId} (same-account trust): resuming`);
     expect(lines).toContain(`connected: ${conversationId}`);
@@ -1085,10 +1086,10 @@ describe('deterministic commands', () => {
       switch (operation) {
         case 'service.status':
           return serviceStatus();
-        case 'create_pairing_capability':
+        case 'create_pairing_rendezvous':
           return {
             pairing: pairingStatus(),
-            capability: 'pairing_capability-1',
+            token: pairingToken,
           };
         case 'sync_pairing':
           return {
@@ -1149,7 +1150,7 @@ describe('deterministic commands', () => {
 
     expect(lines.join('\n')).toContain('connect requires the AccountTrusted');
     expect(request).toHaveBeenCalledTimes(1);
-    expect(request).not.toHaveBeenCalledWith('create_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_pairing_rendezvous', expect.anything());
   });
 
   it('refuses connection setup before side effects when the relay is unavailable', async () => {
@@ -1168,7 +1169,7 @@ describe('deterministic commands', () => {
 
     expect(lines.join('\n')).toContain('connect requires a configured relay');
     expect(request).toHaveBeenCalledTimes(1);
-    expect(request).not.toHaveBeenCalledWith('create_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_pairing_rendezvous', expect.anything());
   });
 
   it('refuses administrator capabilities in the AccountTrusted connection flow', async () => {
@@ -1176,7 +1177,7 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'redeem_pairing_capability') {
+      if (operation === 'redeem_pairing_rendezvous') {
         return pairingStatus({
           local_role: 'inviter',
           phase: 'inviter_awaiting_authorization',
@@ -1195,7 +1196,7 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext('connect pairing_capability-1'));
+    await command?.handler(commandContext(`connect ${pairingToken}`));
 
     expect(lines.join('\n')).toContain('accepts only member pairing requests');
     expect(request).not.toHaveBeenCalledWith('create_conversation', expect.anything());
@@ -1207,10 +1208,10 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'create_pairing_capability') {
+      if (operation === 'create_pairing_rendezvous') {
         return {
           pairing: pairingStatus(),
-          capability: 'pairing_capability-1',
+          token: pairingToken,
         };
       }
       if (operation === 'sync_pairing') {
@@ -1238,10 +1239,10 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'create_pairing_capability') {
+      if (operation === 'create_pairing_rendezvous') {
         return {
           pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_000 }),
-          capability: 'pairing_capability-1',
+          token: pairingToken,
         };
       }
       if (operation === 'cancel_pairing') {
@@ -1285,10 +1286,10 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'create_pairing_capability') {
+      if (operation === 'create_pairing_rendezvous') {
         return {
           pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_002 }),
-          capability: 'pairing_capability-1',
+          token: pairingToken,
         };
       }
       if (operation === 'sync_pairing') {
@@ -1341,7 +1342,7 @@ describe('deterministic commands', () => {
     expect(
       stalledRequest.mock.calls.filter(([operation]) => operation === 'sync_pairing'),
     ).toHaveLength(4);
-    expect(malformedLines.join('\n')).toContain('pairing role is malformed');
+    expect(malformedLines.join('\n')).toContain('valid 26-character pairing token is required');
   });
 
   it('redeems, creates, and approves an inviter-side pairing explicitly', async () => {

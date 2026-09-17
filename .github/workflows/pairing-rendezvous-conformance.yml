@@ -18,7 +18,7 @@ jobs:
   pairing-rendezvous-conformance:
     name: Pairing rendezvous conformance
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Resolve pairing rendezvous validation scope
         id: scope
@@ -48,10 +48,13 @@ jobs:
                 $_ -match '^Cargo\.(lock|toml)$' -or
                 $_ -match '^\.github/genesis-delivery\.json$' -or
                 $_ -match '^\.github/workflows/pairing-rendezvous-conformance\.yml$' -or
-                $_ -match '^crates/Konclave\.ClientLibrary/(?:Cargo\.toml|src/(?:error|lib|pairing|pairing_rendezvous)\.rs)$' -or
-                $_ -match '^crates/Konclave\.CryptographicCore/(?:Cargo\.toml|src/(?:lib|pairing_rendezvous)\.rs)$' -or
-                $_ -match '^crates/Konclave\.DomainCore/(?:Cargo\.toml|src/(?:identifiers|lib|pairing_rendezvous)\.rs)$' -or
-                $_ -match '^crates/Konclave\.SecretStorage/(?:Cargo\.toml|src/authenticated_cipher\.rs)$'
+                $_ -match '^docs/adr/adr-0023-encrypted-pairing-rendezvous\.md$' -or
+                $_ -match '^docs/development/conformance\.md$' -or
+                $_ -match '^proto/konclave/protocol/v1/pairing_rendezvous\.proto$' -or
+                $_ -match '^fixtures/local-service/v1/copilot-tools\.json$' -or
+                $_ -match '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$' -or
+                $_ -match '^apps/Konclave\.(?:CommunityRelay|LocalDaemon)/(?:Cargo\.toml|src/.*|tests/.*)$' -or
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*)$'
               }
             ).Count -ne 0
           }
@@ -74,44 +77,83 @@ jobs:
           key: pairing-rendezvous-conformance
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Verify pairing rendezvous foundation
+      - name: Setup Node.js
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: 24
+          npm-cache-scope: pairing-rendezvous-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify pairing rendezvous integration
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt \
             --package KonclaveClientLibrary \
+            --package KonclaveCommunityRelay \
             --package KonclaveCryptographicCore \
             --package KonclaveDomainCore \
+            --package KonclaveLocalDaemon \
+            --package KonclaveProtocolContracts \
+            --package KonclaveRelayCore \
             -- \
             --check
           cargo test \
             --locked \
             --package KonclaveDomainCore \
-            pairing_rendezvous::tests
+            pairing_rendezvous
           cargo test \
             --locked \
             --package KonclaveCryptographicCore \
-            pairing_rendezvous::tests
+            pairing_rendezvous
+          cargo test \
+            --locked \
+            --package KonclaveProtocolContracts \
+            pairing_rendezvous
+          cargo test \
+            --locked \
+            --package KonclaveRelayCore
+          cargo test \
+            --locked \
+            --package KonclaveCommunityRelay \
+            --test http_integration \
+            pairing_rendezvous
           cargo test \
             --locked \
             --package KonclaveClientLibrary \
-            pairing_rendezvous::tests
+            pairing_rendezvous
+          cargo test \
+            --locked \
+            --package KonclaveClientLibrary \
+            --test http_safety \
+            clients_never_forward_bearer_credentials_across_redirects
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            pairing_service::tests::compact_rendezvous_completes_one_shared_conversation
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            pairing_service::tests::failed_rendezvous_publish_cancels_the_local_reservation
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            mcp::tests::copilot_tool_contract_fixture_matches_the_router
           cargo clippy \
             --locked \
+            --package KonclaveCommunityRelay \
+            --package KonclaveCryptographicCore \
             --package KonclaveDomainCore \
-            --all-targets \
-            -- \
-            -D warnings
-          cargo clippy \
-            --locked \
-            --package KonclaveCryptographicCore \
-            --all-targets \
-            -- \
-            -D warnings
-          cargo clippy \
-            --locked \
             --package KonclaveClientLibrary \
+            --package KonclaveLocalDaemon \
+            --package KonclaveProtocolContracts \
+            --package KonclaveRelayCore \
             --all-targets \
             -- \
             -D warnings
+          npm --prefix extensions/Konclave.HostExtension ci --no-audit --no-fund
+          npm --prefix extensions/Konclave.HostExtension test
