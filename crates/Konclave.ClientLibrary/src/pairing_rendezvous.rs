@@ -43,10 +43,15 @@ pub fn create_pairing_rendezvous(
     let secret = PairingRendezvousSecret::generate()?;
     let schedule = PairingRendezvousKeySchedule::derive(&secret)?;
     let capability_text = capability.encode()?;
+    let version = ProtocolVersion::application_v1();
     let expires_at_unix_seconds = capability.offer().expires_at_unix_seconds();
-    let ciphertext = schedule.seal(expires_at_unix_seconds, capability_text.as_str().as_bytes())?;
+    let ciphertext = schedule.seal(
+        version,
+        expires_at_unix_seconds,
+        capability_text.as_str().as_bytes(),
+    )?;
     let record = PairingRendezvousRecord::new(
-        ProtocolVersion::application_v1(),
+        version,
         schedule.lookup_id(),
         expires_at_unix_seconds,
         PairingRendezvousNonce::from_bytes(*ciphertext.nonce()),
@@ -91,7 +96,11 @@ pub fn open_pairing_rendezvous(
     )
     .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
     let plaintext = schedule
-        .open(record.expires_at_unix_seconds(), &ciphertext)
+        .open(
+            record.version(),
+            record.expires_at_unix_seconds(),
+            &ciphertext,
+        )
         .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
     let capability_text = std::str::from_utf8(&plaintext)
         .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?;
@@ -254,6 +263,15 @@ mod tests {
         assert!(open_pairing_rendezvous(other_token.as_str(), &record, NOW).is_err());
         assert!(open_pairing_rendezvous(token.as_str(), &record, EXPIRY).is_err());
         assert!(create_pairing_rendezvous(&capability, EXPIRY).is_err());
+        let relabeled = PairingRendezvousRecord::new(
+            ProtocolVersion::new(1, 1).unwrap(),
+            record.lookup_id(),
+            record.expires_at_unix_seconds(),
+            record.nonce(),
+            record.ciphertext().to_vec(),
+        )
+        .unwrap();
+        assert!(open_pairing_rendezvous(token.as_str(), &relabeled, NOW).is_err());
 
         let mut modified = record.ciphertext().to_vec();
         modified[0] ^= 1;

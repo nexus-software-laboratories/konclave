@@ -90,12 +90,13 @@ impl PairingRendezvousKeySchedule {
     /// Returns a provider or size error when encryption cannot complete.
     pub fn seal(
         &self,
+        version: ProtocolVersion,
         expires_at_unix_seconds: u64,
         plaintext: &[u8],
     ) -> Result<AuthenticatedCiphertext, KonclaveCryptographicError> {
         self.cipher
             .seal_with_associated_data(plaintext, MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, |nonce| {
-                canonical_header(self.lookup_id, expires_at_unix_seconds, nonce)
+                canonical_header(version, self.lookup_id, expires_at_unix_seconds, nonce)
             })
             .map_err(rendezvous_cipher_error)
     }
@@ -104,14 +105,20 @@ impl PairingRendezvousKeySchedule {
     ///
     /// # Errors
     ///
-    /// Returns an authentication error for a wrong token, lookup, expiry, nonce, or
-    /// modified ciphertext.
+    /// Returns an authentication error for a wrong token, version, lookup, expiry,
+    /// nonce, or modified ciphertext.
     pub fn open(
         &self,
+        version: ProtocolVersion,
         expires_at_unix_seconds: u64,
         ciphertext: &AuthenticatedCiphertext,
     ) -> Result<Zeroizing<Vec<u8>>, KonclaveCryptographicError> {
-        let header = canonical_header(self.lookup_id, expires_at_unix_seconds, ciphertext.nonce());
+        let header = canonical_header(
+            version,
+            self.lookup_id,
+            expires_at_unix_seconds,
+            ciphertext.nonce(),
+        );
         self.cipher
             .open(&header, ciphertext, MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES)
             .map_err(rendezvous_cipher_error)
@@ -146,11 +153,11 @@ impl KeyType for FixedLength {
 }
 
 fn canonical_header(
+    version: ProtocolVersion,
     lookup_id: PairingRendezvousId,
     expires_at_unix_seconds: u64,
     nonce: &[u8; 12],
 ) -> Vec<u8> {
-    let version = ProtocolVersion::application_v1();
     let mut output = Vec::with_capacity(RECORD_AAD_DOMAIN.len() + 4 + 32 + 8 + 12);
     output.extend_from_slice(RECORD_AAD_DOMAIN);
     output.extend_from_slice(&version.major().to_be_bytes());
@@ -192,13 +199,19 @@ mod tests {
         assert_eq!(first.lookup_id(), second.lookup_id());
         assert_ne!(first.lookup_id(), other.lookup_id());
 
-        let ciphertext = first.seal(2_000, b"capability").unwrap();
+        let version = ProtocolVersion::application_v1();
+        let ciphertext = first.seal(version, 2_000, b"capability").unwrap();
         assert_eq!(
-            first.open(2_000, &ciphertext).unwrap().as_slice(),
+            first.open(version, 2_000, &ciphertext).unwrap().as_slice(),
             b"capability"
         );
-        assert!(first.open(2_001, &ciphertext).is_err());
-        assert!(other.open(2_000, &ciphertext).is_err());
+        assert!(
+            first
+                .open(ProtocolVersion::new(1, 1).unwrap(), 2_000, &ciphertext)
+                .is_err()
+        );
+        assert!(first.open(version, 2_001, &ciphertext).is_err());
+        assert!(other.open(version, 2_000, &ciphertext).is_err());
     }
 
     #[test]
@@ -222,8 +235,9 @@ mod tests {
         let schedule =
             PairingRendezvousKeySchedule::derive(&PairingRendezvousSecret::from_bytes([9; 16]))
                 .unwrap();
-        let first = schedule.seal(2_000, b"same").unwrap();
-        let second = schedule.seal(2_000, b"same").unwrap();
+        let version = ProtocolVersion::application_v1();
+        let first = schedule.seal(version, 2_000, b"same").unwrap();
+        let second = schedule.seal(version, 2_000, b"same").unwrap();
         assert_ne!(first.nonce(), second.nonce());
         assert_ne!(first.as_bytes(), second.as_bytes());
     }
