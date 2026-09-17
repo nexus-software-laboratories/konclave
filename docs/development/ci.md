@@ -18,7 +18,18 @@ commits therefore cannot consume runner capacity or report after the current hea
 
 Routine Dependabot minor and patch updates are grouped once per Cargo and GitHub
 Actions ecosystem. Major updates remain separate so compatibility changes stay
-independently reviewable without recreating the weekly routine-update fan-out.
+independently reviewable. Cargo is capped at three open update pull requests and
+GitHub Actions at two, bounding the weekly burst.
+
+Dependabot pull requests do not schedule the ordinary component, package, container,
+installer, or cross-platform matrices. Required jobs report `skipped`, which GitHub
+treats as successful for branch protection, while the primary `CI` workflow runs one
+fail-closed dependency lane. Cargo-only updates run the complete workspace tests,
+all-target compilation, fuzz-target compilation, and the Rust security-dependency
+policy in one job. Node-only updates run the Node workspace checks; GitHub Actions
+updates run the workflow, storage, and security-sensitive delivery contracts.
+Unexpected changed paths fail instead of silently receiving reduced validation.
+Human-authored dependency changes continue through the ordinary full matrix.
 
 ## Reuse validation on ready promotion
 

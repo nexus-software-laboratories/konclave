@@ -17,6 +17,7 @@ concurrency:
 jobs:
   release-publication-conformance:
     name: Release publication conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

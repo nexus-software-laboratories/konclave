@@ -24,6 +24,7 @@ concurrency:
 jobs:
   marketplace-materialization:
     name: Marketplace materialization contract
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -161,6 +162,7 @@ jobs:
 
   marketplace-client-lifecycle:
     name: Marketplace lifecycle ${{ matrix.label }}
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     needs: marketplace-materialization
     strategy:
       fail-fast: false
@@ -211,6 +213,7 @@ jobs:
 
   managed-marketplace-policy:
     name: Managed marketplace policy
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     needs: marketplace-materialization
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -279,7 +282,7 @@ jobs:
 
   marketplace-conformance:
     name: Marketplace conformance
-    if: always()
+    if: ${{ always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
     needs:
       - marketplace-materialization
       - marketplace-client-lifecycle

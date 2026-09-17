@@ -17,6 +17,7 @@ concurrency:
 jobs:
   generic-client-conformance:
     name: Generic client conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

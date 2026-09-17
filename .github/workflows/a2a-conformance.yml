@@ -17,6 +17,7 @@ concurrency:
 jobs:
   a2a-conformance:
     name: A2A conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:

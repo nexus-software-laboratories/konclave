@@ -17,6 +17,7 @@ concurrency:
 jobs:
   short-code-pairing-conformance:
     name: Short-code pairing conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
