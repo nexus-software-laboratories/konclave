@@ -89,9 +89,10 @@ fresh AES-GCM nonce. Associated data binds:
 - the nonce.
 
 The relay-facing record contains only the lookup identifier, deadline, nonce, and
-bounded ciphertext. Opening first checks the token-derived lookup and deadline, then
-authenticates and decrypts, decodes the existing capability, and requires its signed
-deadline to match the record.
+bounded ciphertext. Plaintext is limited to 8 KiB, ciphertext to 8 KiB plus the
+16-byte authentication tag, and the complete protobuf record to 9 KiB. Opening first
+checks the token-derived lookup and deadline, then authenticates and decrypts, decodes
+the existing capability, and requires its signed deadline to match the record.
 
 ### Store one bounded opaque record at the relay
 
@@ -101,10 +102,11 @@ same lookup. Conflicting content fails. Taking an unexpired record returns and
 consumes it atomically. Unknown, expired, and consumed lookups share one unavailable
 outcome so the relay does not become a token oracle.
 
-Storage is globally and per-principal bounded. Expired records may be removed during
-publish/take operations or scheduled maintenance. Confidentiality and authorization
-do not depend on physical deletion because the relay never has the token-derived key
-and the embedded capability enforces its signed deadline.
+Storage is bounded to 10,000 active records globally and 32 per authenticated
+principal. Expired records may be removed during publish/take operations or scheduled
+maintenance. Confidentiality and authorization do not depend on physical deletion
+because the relay never has the token-derived key and the embedded capability
+enforces its signed deadline.
 
 ### Keep authorization semantics unchanged
 

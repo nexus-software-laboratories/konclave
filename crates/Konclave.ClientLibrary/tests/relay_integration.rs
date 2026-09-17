@@ -2,16 +2,18 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use KonclaveClientLibrary::{
-    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError, RelayAccessCredential,
-    RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
-    RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayTransport, check_relay_health,
+    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError,
+    PairingRendezvousPublishResult, PairingRendezvousTransport, RelayAccessCredential, RelayClient,
+    RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential, RelayEnrollmentOutcome,
+    RelayEnrollmentRequest, RelayTransport, check_relay_health,
 };
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
 use KonclaveCommunityRelay::http::{HttpState, router};
 use KonclaveDomainCore::{
-    AcknowledgeRequest, DeliveryClass, EnvelopeId, ProtocolVersion, RelayEnvelope, ReplayRequest,
-    RoutingId,
+    AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES,
+    PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
+    PairingRendezvousTakeRequest, ProtocolVersion, RelayEnvelope, ReplayRequest, RoutingId,
 };
 use KonclaveRelayCore::RelayPrincipalId;
 use base64::Engine as _;
@@ -159,6 +161,17 @@ fn envelope(route: RoutingId, id: u8, payload: u8) -> RelayEnvelope {
     .unwrap()
 }
 
+fn pairing_rendezvous(id: u8, ciphertext: u8) -> PairingRendezvousRecord {
+    PairingRendezvousRecord::new(
+        ProtocolVersion::application_v1(),
+        PairingRendezvousId::from_bytes([id; 32]),
+        u64::MAX / 2,
+        PairingRendezvousNonce::from_bytes([id.wrapping_add(1); 12]),
+        vec![ciphertext; MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES],
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn client_submits_replays_and_acknowledges_idempotently() {
     let server = TestServer::start(true).await;
@@ -184,6 +197,38 @@ async fn client_submits_replays_and_acknowledges_idempotently() {
             .cursor(),
         1
     );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn client_publishes_and_takes_one_pairing_rendezvous() {
+    let server = TestServer::start(true).await;
+    let client = server.client();
+    let record = pairing_rendezvous(20, 21);
+    assert_eq!(
+        client.publish_pairing_rendezvous(&record).await.unwrap(),
+        PairingRendezvousPublishResult::Published
+    );
+    assert_eq!(
+        client
+            .publish_pairing_rendezvous(&pairing_rendezvous(20, 21))
+            .await
+            .unwrap(),
+        PairingRendezvousPublishResult::AlreadyPublished
+    );
+    let request =
+        PairingRendezvousTakeRequest::new(ProtocolVersion::application_v1(), record.lookup_id());
+    let taken = client.take_pairing_rendezvous(request).await.unwrap();
+    assert_eq!(taken.lookup_id(), record.lookup_id());
+    assert_eq!(taken.ciphertext(), record.ciphertext());
+    let error = client.take_pairing_rendezvous(request).await.err().unwrap();
+    assert!(matches!(
+        error,
+        KonclaveClientError::RelayRejected {
+            status: 404,
+            ref relay_code
+        } if relay_code == "relay_pairing_rendezvous_unavailable"
+    ));
     server.stop().await;
 }
 

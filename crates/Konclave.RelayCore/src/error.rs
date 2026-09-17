@@ -42,6 +42,26 @@ pub enum RelayError {
     #[error("relay dynamic principal capacity is exhausted")]
     PrincipalCapacityExceeded,
 
+    /// A pairing rendezvous candidate or stored record is expired.
+    #[error("pairing rendezvous record is expired")]
+    ExpiredPairingRendezvous,
+
+    /// A rendezvous lookup identifier was reused by another owner or with different content.
+    #[error("pairing rendezvous identifier conflicts with an existing record")]
+    PairingRendezvousConflict,
+
+    /// A rendezvous record is absent or was already consumed.
+    #[error("pairing rendezvous record is unavailable")]
+    PairingRendezvousUnavailable,
+
+    /// The relay-wide active rendezvous bound is exhausted.
+    #[error("relay pairing rendezvous capacity is exhausted")]
+    PairingRendezvousGlobalCapacityExceeded,
+
+    /// One principal's active rendezvous bound is exhausted.
+    #[error("relay principal pairing rendezvous capacity is exhausted")]
+    PairingRendezvousPrincipalCapacityExceeded,
+
     /// A previously registered principal has been revoked.
     #[error("relay principal is revoked")]
     PrincipalRevoked,
@@ -89,6 +109,15 @@ impl RelayError {
             Self::InvalidAcknowledgment => "relay_invalid_acknowledgment",
             Self::EnrollmentConflict => "relay_enrollment_conflict",
             Self::PrincipalCapacityExceeded => "relay_principal_capacity",
+            Self::ExpiredPairingRendezvous => "relay_pairing_rendezvous_expired",
+            Self::PairingRendezvousConflict => "relay_pairing_rendezvous_conflict",
+            Self::PairingRendezvousUnavailable => "relay_pairing_rendezvous_unavailable",
+            Self::PairingRendezvousGlobalCapacityExceeded => {
+                "relay_pairing_rendezvous_global_capacity"
+            }
+            Self::PairingRendezvousPrincipalCapacityExceeded => {
+                "relay_pairing_rendezvous_principal_capacity"
+            }
             Self::PrincipalRevoked => "relay_principal_revoked",
             Self::UnsupportedEnrollmentVersion => "relay_enrollment_version_unsupported",
             Self::ClockUnavailable => "relay_clock_unavailable",

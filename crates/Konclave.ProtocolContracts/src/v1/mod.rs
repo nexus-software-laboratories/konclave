@@ -7,6 +7,7 @@ mod enrollment;
 mod identity;
 mod membership;
 mod pairing;
+mod pairing_rendezvous;
 mod relay;
 
 #[cfg(test)]
@@ -33,6 +34,10 @@ pub use pairing::{
     decode_pairing_control, decode_pairing_envelope, decode_pairing_invitation,
     decode_pairing_welcome, encode_pairing_control, encode_pairing_envelope,
     encode_pairing_invitation, encode_pairing_welcome,
+};
+pub use pairing_rendezvous::{
+    decode_pairing_rendezvous_record, decode_pairing_rendezvous_take_request,
+    encode_pairing_rendezvous_record, encode_pairing_rendezvous_take_request,
 };
 pub use relay::{
     decode_acknowledge_request, decode_relay_envelope, decode_replay_page, decode_replay_request,

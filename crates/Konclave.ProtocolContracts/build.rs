@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         protocol_root.join("common.proto"),
         protocol_root.join("identity.proto"),
         protocol_root.join("pairing.proto"),
+        protocol_root.join("pairing_rendezvous.proto"),
         protocol_root.join("membership.proto"),
         protocol_root.join("application.proto"),
         protocol_root.join("collaboration_policy.proto"),
