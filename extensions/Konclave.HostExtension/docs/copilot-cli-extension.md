@@ -92,9 +92,10 @@ to continue safely.
 /konclave status
 /konclave identity
 /konclave conversations
-/konclave connect
-/konclave connect <token>
+/konclave connect [--copy|--qr]
+/konclave connect <token-or-konclave-uri>
 /konclave connect resume <pairing>
+/konclave clipboard clear
 /konclave pair [member|administrator]
 /konclave join <capability>
 /konclave new
@@ -117,6 +118,16 @@ to continue safely.
 /konclave policy reject <proposal-id> <digest>
 /konclave policy revoke <digest> [message-id]
 ```
+
+`/konclave connect` prints the raw 26-character token ephemerally. `--copy` writes
+only that token to the native clipboard without placing it in process arguments and
+does not echo it again. `--qr` renders a bounded terminal QR code containing
+`konclave://pair/<token>` plus an accessible raw-token fallback. Pasting either the
+URI or raw token into `connect` follows the same validation path. Every handoff names
+the expiry and warns that the token is a one-time bearer secret. Unsupported
+clipboards, narrow terminals, and non-interactive output degrade to the raw token.
+After a successful copy, `/konclave clipboard clear` explicitly replaces the current
+clipboard content with empty text.
 
 Arguments and rendered output are bounded. High-level commands orchestrate only the
 existing closed operations; they do not implement a second pairing or messaging
