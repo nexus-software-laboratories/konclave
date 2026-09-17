@@ -28,6 +28,7 @@ concurrency:
 jobs:
   resolve-scope:
     name: Resolve distribution lifecycle scope
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -220,7 +221,7 @@ jobs:
 
   distribution-lifecycle-acceptance:
     name: Distribution lifecycle acceptance
-    if: always()
+    if: ${{ always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
     needs:
       - resolve-scope
       - copilot-plugin-lifecycle

@@ -71,7 +71,7 @@ concurrency:
 jobs:
   package-native:
     name: Package ${{ matrix.target }}
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) }}
     strategy:
       fail-fast: false
       matrix:
@@ -222,7 +222,7 @@ jobs:
 
   package-plugin:
     name: Package Agent Plugin
-    if: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -298,7 +298,7 @@ jobs:
 
   package-container:
     name: Package ${{ matrix.name }} linux/amd64 container
-    if: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -471,7 +471,7 @@ jobs:
 
   release-integrity:
     name: Release integrity
-    if: ${{ !inputs.demo_windows_only }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && !inputs.demo_windows_only }}
     needs:
       - package-native
       - package-plugin
@@ -643,7 +643,7 @@ jobs:
           compression-level: 0
   packaged-acceptance:
     name: Packaged clean-install acceptance
-    if: ${{ !inputs.demo_windows_only }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && !inputs.demo_windows_only }}
     needs:
       - package-native
       - package-plugin
@@ -736,7 +736,7 @@ jobs:
 
   package-validation:
     name: Package validation
-    if: always()
+    if: ${{ always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
     needs:
       - package-native
       - package-plugin

@@ -17,6 +17,7 @@ concurrency:
 jobs:
   relay-migration-conformance:
     name: Relay migration conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -140,6 +141,7 @@ jobs:
 
   relay-migration-windows-conformance:
     name: Relay migration Windows conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

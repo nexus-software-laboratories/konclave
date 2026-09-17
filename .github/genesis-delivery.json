@@ -51,6 +51,7 @@
         "source-policy",
         "validation-plan",
         "guidance-policy",
+        "dependabot-validation",
         "ci",
         "pr-base/base",
         "pr-title/title",

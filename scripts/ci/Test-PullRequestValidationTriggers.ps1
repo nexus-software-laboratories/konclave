@@ -78,6 +78,12 @@ if (
 ) {
     throw 'Dependabot routine-update grouping is incomplete.'
 }
+if (
+    [regex]::Matches($dependabot, '(?m)^    open-pull-requests-limit: 3$').Count -ne 1 -or
+    [regex]::Matches($dependabot, '(?m)^    open-pull-requests-limit: 2$').Count -ne 1
+) {
+    throw 'Dependabot burst limits must remain bounded by ecosystem.'
+}
 
 $ciLines = @(Get-Content -LiteralPath (Join-Path $workflowRoot 'ci.yml'))
 $aggregateIndex = [Array]::IndexOf($ciLines, '  ci:')
