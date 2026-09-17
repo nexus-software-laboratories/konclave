@@ -27,6 +27,8 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0020: Native WebAuthn user presence](adr/adr-0020-native-webauthn-user-presence.md)
 - [ADR 0021: Generated marketplace branch](adr/adr-0021-generated-marketplace-branch.md)
 - [ADR 0022: Default-branch Copilot marketplace](adr/adr-0022-default-branch-copilot-marketplace.md)
+- [ADR 0023: Encrypted pairing rendezvous](adr/adr-0023-encrypted-pairing-rendezvous.md)
+- [ADR 0024: OPAQUE short-code mutual verification](adr/adr-0024-opaque-short-code-mutual-verification.md)
 
 ## Protocol
 
