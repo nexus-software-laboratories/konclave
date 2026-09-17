@@ -39,6 +39,11 @@ argument contracts, Rust formatting, and component lint. The Windows gate additi
 proves exact owner-restricted file replacement and the packaged PowerShell
 orchestration scope.
 
+`Pairing rendezvous conformance` is the focused draft-capable gate for compact
+pairing handoff. It runs the fixed Crockford Base32 and HKDF vectors, authenticated
+capability round trips, token/lookup/expiry/ciphertext negative cases, Rust
+formatting, and component Clippy before relay storage or plugin integration begins.
+
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, full extension formatting and lint,

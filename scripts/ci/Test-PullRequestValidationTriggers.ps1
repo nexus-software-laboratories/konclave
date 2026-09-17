@@ -20,6 +20,7 @@ $contracts = [ordered]@{
     'generic-client-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'installer-lifecycle-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'marketplace-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'pairing-rendezvous-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'relay-migration-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'release-publication-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'user-presence-conformance.yml' = '    types: [opened, synchronize, reopened]'
