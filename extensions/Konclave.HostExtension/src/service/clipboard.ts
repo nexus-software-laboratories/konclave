@@ -11,8 +11,13 @@ type ClipboardCommandRunner = (
 ) => Promise<boolean>;
 
 export interface PairingClipboard {
-  writeToken(token: string): Promise<boolean>;
+  writeToken(token: string): Promise<ClipboardWriteResult>;
   clear(): Promise<boolean>;
+}
+
+export interface ClipboardWriteResult {
+  readonly copied: boolean;
+  readonly mayContainToken: boolean;
 }
 
 interface ClipboardCommand {
@@ -71,13 +76,16 @@ async function tryCommands(
   commands: readonly ClipboardCommand[],
   input: string,
   run: ClipboardCommandRunner,
-): Promise<boolean> {
+): Promise<ClipboardWriteResult> {
+  if (commands.length === 0) {
+    return { copied: false, mayContainToken: false };
+  }
   for (const command of commands) {
     if (await run(command.file, command.args, input)) {
-      return true;
+      return { copied: true, mayContainToken: true };
     }
   }
-  return false;
+  return { copied: false, mayContainToken: true };
 }
 
 async function runClipboardCommand(
@@ -146,8 +154,8 @@ export function createPairingClipboard(
     writeToken(token) {
       return tryCommands(writeCommands(platform, environment), token, run);
     },
-    clear() {
-      return tryCommands(clearCommands(platform, environment), '', run);
+    async clear() {
+      return (await tryCommands(clearCommands(platform, environment), '', run)).copied;
     },
   };
 }

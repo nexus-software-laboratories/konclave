@@ -1323,16 +1323,22 @@ async function renderPairingHandoff(
     `pairing token: one-time bearer secret; expires ${formatPairingExpiry(status.authorizationDeadlineUnixSeconds)}`,
   );
   if (mode === 'copy') {
-    const copied = await clipboard.writeToken(handoff.token).catch(() => false);
-    if (copied) {
+    const outcome = await clipboard
+      .writeToken(handoff.token)
+      .catch(() => ({ copied: false, mayContainToken: true }));
+    if (outcome.copied) {
       await presentation.write(
         `pairing token copied (${pairingRendezvousTokenCharacters} characters); token not echoed; clear with /konclave clipboard clear`,
       );
       return true;
     }
-    await presentation.write('clipboard unavailable; use the raw token below');
+    await presentation.write(
+      outcome.mayContainToken
+        ? 'clipboard copy could not be confirmed; use the raw token below and clear with /konclave clipboard clear'
+        : 'clipboard unavailable; use the raw token below',
+    );
     await presentation.write(handoff.token, { ephemeral: true });
-    return false;
+    return outcome.mayContainToken;
   }
   if (mode === 'qr') {
     let qr;

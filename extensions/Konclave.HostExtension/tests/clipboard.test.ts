@@ -9,7 +9,10 @@ describe('pairing clipboard', () => {
     const run = vi.fn().mockResolvedValue(true);
     const clipboard = createPairingClipboard('win32', {}, run);
 
-    await expect(clipboard.writeToken(token)).resolves.toBe(true);
+    await expect(clipboard.writeToken(token)).resolves.toEqual({
+      copied: true,
+      mayContainToken: true,
+    });
     expect(run).toHaveBeenCalledWith(
       'powershell.exe',
       expect.arrayContaining(['-NoProfile', '-NonInteractive']),
@@ -32,7 +35,10 @@ describe('pairing clipboard', () => {
       run,
     );
 
-    await expect(clipboard.writeToken(token)).resolves.toBe(true);
+    await expect(clipboard.writeToken(token)).resolves.toEqual({
+      copied: true,
+      mayContainToken: true,
+    });
     expect(run.mock.calls.slice(0, 2).map(([file]) => file)).toEqual(['wl-copy', 'xclip']);
     await expect(clipboard.clear()).resolves.toBe(true);
     expect(run.mock.calls[2]?.slice(0, 2)).toEqual(['wl-copy', ['--clear']]);
@@ -42,8 +48,20 @@ describe('pairing clipboard', () => {
     const run = vi.fn().mockResolvedValue(true);
     const clipboard = createPairingClipboard('linux', {}, run);
 
-    await expect(clipboard.writeToken(token)).resolves.toBe(false);
+    await expect(clipboard.writeToken(token)).resolves.toEqual({
+      copied: false,
+      mayContainToken: false,
+    });
     await expect(clipboard.clear()).resolves.toBe(false);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('retains clear eligibility after an indeterminate provider failure', async () => {
+    const clipboard = createPairingClipboard('darwin', {}, vi.fn().mockResolvedValue(false));
+
+    await expect(clipboard.writeToken(token)).resolves.toEqual({
+      copied: false,
+      mayContainToken: true,
+    });
   });
 });

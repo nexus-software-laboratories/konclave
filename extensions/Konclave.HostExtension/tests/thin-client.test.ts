@@ -1033,7 +1033,7 @@ describe('deterministic commands', () => {
       }
     });
     const clipboard = {
-      writeToken: vi.fn().mockResolvedValue(true),
+      writeToken: vi.fn().mockResolvedValue({ copied: true, mayContainToken: true }),
       clear: vi.fn().mockResolvedValue(true),
     };
     const lines: string[] = [];
@@ -1060,6 +1060,58 @@ describe('deterministic commands', () => {
     );
     expect(lines.join('\n')).toContain('clipboard: no pairing token was copied by this session');
     expect(lines).not.toContain(pairingToken);
+  });
+
+  it('keeps clear available when clipboard copy completion is indeterminate', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'service.status') {
+        return serviceStatus();
+      }
+      if (operation === 'create_pairing_rendezvous') {
+        return {
+          pairing: pairingStatus({
+            phase: 'completed',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+          }),
+          token: pairingToken,
+        };
+      }
+      if (operation === 'list_conversations') {
+        return {
+          conversation_ids: [conversationId],
+          active_conversation_id: null,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const clipboard = {
+      writeToken: vi.fn().mockResolvedValue({ copied: false, mayContainToken: true }),
+      clear: vi.fn().mockResolvedValue(true),
+    };
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      clipboard,
+      output: {
+        write: (line, options) => {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect --copy'));
+    await command?.handler(commandContext('clipboard clear'));
+
+    expect(entries.map(({ line }) => line).join('\n')).toContain(
+      'clipboard copy could not be confirmed',
+    );
+    expect(entries).toContainEqual({
+      line: pairingToken,
+      options: { ephemeral: true },
+    });
+    expect(clipboard.clear).toHaveBeenCalledTimes(1);
   });
 
   it('renders an accessible QR handoff and degrades to raw output when non-interactive', async () => {
