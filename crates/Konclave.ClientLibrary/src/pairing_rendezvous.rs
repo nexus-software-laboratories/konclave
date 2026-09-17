@@ -4,9 +4,7 @@ use KonclaveCryptographicCore::{
     MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_LOOKUP_BYTES,
     PAIRING_RENDEZVOUS_TOKEN_BYTES, PairingRendezvousKeySchedule, PairingRendezvousSecret,
 };
-use KonclaveSecretStorage::{
-    AUTHENTICATED_CIPHER_NONCE_BYTES, AuthenticatedCiphertext,
-};
+use KonclaveSecretStorage::{AUTHENTICATED_CIPHER_NONCE_BYTES, AuthenticatedCiphertext};
 
 use crate::{KonclaveClientError, PairingCapability};
 
@@ -111,10 +109,7 @@ pub fn create_pairing_rendezvous(
     let schedule = PairingRendezvousKeySchedule::derive(&secret)?;
     let capability_text = capability.encode()?;
     let expires_at_unix_seconds = capability.offer().expires_at_unix_seconds();
-    let ciphertext = schedule.seal(
-        expires_at_unix_seconds,
-        capability_text.as_str().as_bytes(),
-    )?;
+    let ciphertext = schedule.seal(expires_at_unix_seconds, capability_text.as_str().as_bytes())?;
     let record = PairingRendezvousRecord {
         lookup_id: *schedule.lookup_id(),
         expires_at_unix_seconds,
@@ -128,10 +123,7 @@ pub fn create_pairing_rendezvous(
             .try_into()
             .map_err(|_| KonclaveClientError::InvalidPairingRendezvous)?,
     );
-    Ok((
-        PairingRendezvousTokenText(Zeroizing::new(token)),
-        record,
-    ))
+    Ok((PairingRendezvousTokenText(Zeroizing::new(token)), record))
 }
 
 /// Decrypts and authenticates one relay-returned capability with a compact token.
@@ -181,15 +173,15 @@ fn encode_token(bytes: &[u8; PAIRING_RENDEZVOUS_TOKEN_BYTES]) -> String {
         }
     }
     if bits > 0 {
-        output.push(char::from(TOKEN_ALPHABET[((buffer << (5 - bits)) & 31) as usize]));
+        output.push(char::from(
+            TOKEN_ALPHABET[((buffer << (5 - bits)) & 31) as usize],
+        ));
     }
     debug_assert_eq!(output.len(), PAIRING_RENDEZVOUS_TOKEN_CHARACTERS);
     output
 }
 
-fn decode_token(
-    value: &str,
-) -> Result<[u8; PAIRING_RENDEZVOUS_TOKEN_BYTES], KonclaveClientError> {
+fn decode_token(value: &str) -> Result<[u8; PAIRING_RENDEZVOUS_TOKEN_BYTES], KonclaveClientError> {
     if value.len() != PAIRING_RENDEZVOUS_TOKEN_CHARACTERS || !value.is_ascii() {
         return Err(KonclaveClientError::InvalidPairingRendezvous);
     }
@@ -228,9 +220,9 @@ fn decode_character(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RelayEndpoint;
     use KonclaveCryptographicCore::DeviceIdentity;
     use KonclaveDomainCore::ConversationRole;
-    use crate::RelayEndpoint;
 
     const NOW: u64 = 1_700_000_000;
     const EXPIRY: u64 = NOW + 300;
@@ -276,10 +268,7 @@ mod tests {
     fn token_is_case_insensitive_and_canonical() {
         let vector = std::array::from_fn(|index| u8::try_from(index).unwrap());
         assert_eq!(encode_token(&vector), "000G40R40M30E209185GR38E1W");
-        assert_eq!(
-            decode_token("000g40r40m30e209185gr38e1w").unwrap(),
-            vector
-        );
+        assert_eq!(decode_token("000g40r40m30e209185gr38e1w").unwrap(), vector);
 
         let bytes = [0xabu8; PAIRING_RENDEZVOUS_TOKEN_BYTES];
         let encoded = encode_token(&bytes);

@@ -68,9 +68,7 @@ impl PairingRendezvousKeySchedule {
     /// # Errors
     ///
     /// Returns a provider error when HKDF expansion fails.
-    pub fn derive(
-        secret: &PairingRendezvousSecret,
-    ) -> Result<Self, KonclaveCryptographicError> {
+    pub fn derive(secret: &PairingRendezvousSecret) -> Result<Self, KonclaveCryptographicError> {
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, KEY_SCHEDULE_SALT);
         let prk = salt.extract(secret.as_bytes());
         let lookup_id = derive(&prk, LOOKUP_INFO)?;
@@ -98,11 +96,9 @@ impl PairingRendezvousKeySchedule {
         plaintext: &[u8],
     ) -> Result<AuthenticatedCiphertext, KonclaveCryptographicError> {
         self.cipher
-            .seal_with_associated_data(
-                plaintext,
-                MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES,
-                |nonce| canonical_header(&self.lookup_id, expires_at_unix_seconds, nonce),
-            )
+            .seal_with_associated_data(plaintext, MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, |nonce| {
+                canonical_header(&self.lookup_id, expires_at_unix_seconds, nonce)
+            })
             .map_err(rendezvous_cipher_error)
     }
 
@@ -117,17 +113,9 @@ impl PairingRendezvousKeySchedule {
         expires_at_unix_seconds: u64,
         ciphertext: &AuthenticatedCiphertext,
     ) -> Result<Zeroizing<Vec<u8>>, KonclaveCryptographicError> {
-        let header = canonical_header(
-            &self.lookup_id,
-            expires_at_unix_seconds,
-            ciphertext.nonce(),
-        );
+        let header = canonical_header(&self.lookup_id, expires_at_unix_seconds, ciphertext.nonce());
         self.cipher
-            .open(
-                &header,
-                ciphertext,
-                MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES,
-            )
+            .open(&header, ciphertext, MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES)
             .map_err(rendezvous_cipher_error)
     }
 }
