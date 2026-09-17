@@ -11809,6 +11809,24 @@ mod tests {
         device_id: DeviceId,
     }
 
+    struct ClosedConversationFixture {
+        root: tempfile::TempDir,
+        profile_id: ProfileId,
+    }
+
+    impl ConversationFixture {
+        fn close(self) -> ClosedConversationFixture {
+            let Self {
+                root,
+                profile_id,
+                store,
+                ..
+            } = self;
+            drop(store);
+            ClosedConversationFixture { root, profile_id }
+        }
+    }
+
     fn conversation_fixture(name: &str) -> ConversationFixture {
         conversation_fixture_with_clock(name, Arc::new(SystemUnixClock))
     }
@@ -16432,16 +16450,25 @@ mod tests {
             .execute("DELETE FROM daemon_collaboration_policy_operation", [])
             .unwrap();
 
-        let profile_id = fixture.profile_id.clone();
-        let root = fixture.root;
-        drop(fixture.store);
+        let fixture = fixture.close();
         assert_eq!(
-            LockedProfile::acquire(root.path(), profile_id)
+            LockedProfile::acquire(fixture.root.path(), fixture.profile_id)
                 .unwrap()
                 .open_store(sealer())
                 .err(),
             Some(ProfileStoreError::CorruptData)
         );
+    }
+
+    #[test]
+    fn closed_conversation_fixture_releases_profile_lock_before_reopen() {
+        let fixture = conversation_fixture("closed-fixture-reopen");
+        let fixture = fixture.close();
+        let reopened = LockedProfile::acquire(fixture.root.path(), fixture.profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        drop(reopened);
     }
 
     #[test]
@@ -16559,11 +16586,9 @@ mod tests {
             )
             .unwrap();
 
-        let profile_id = fixture.profile_id.clone();
-        let root = fixture.root;
-        drop(fixture.store);
+        let fixture = fixture.close();
         assert_eq!(
-            LockedProfile::acquire(root.path(), profile_id)
+            LockedProfile::acquire(fixture.root.path(), fixture.profile_id)
                 .unwrap()
                 .open_store(sealer())
                 .err(),
