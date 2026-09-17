@@ -6,6 +6,7 @@ mod error;
 mod identifiers;
 mod model;
 mod pairing_rendezvous;
+mod short_code_pairing;
 
 pub use collaboration_policy::{
     COLLABORATION_POLICY_BUNDLE_MAJOR, COLLABORATION_POLICY_BUNDLE_MINOR,
@@ -28,7 +29,8 @@ pub use identifiers::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, MembershipOperationId, MessageId, NotificationId,
     PairingContextHash, PairingId, PairingMessageId, PairingNonce, PairingRendezvousId,
-    PairingRendezvousNonce, RoutingId,
+    PairingRendezvousNonce, RoutingId, ShortCodePairingAttemptId, ShortCodePairingLocator,
+    ShortCodePairingTranscriptHash,
 };
 pub use model::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_PROTOCOL_MAJOR,
@@ -47,4 +49,8 @@ pub use model::{
 pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
+};
+pub use short_code_pairing::{
+    MAX_SHORT_CODE_PAIRING_SAS, ShortCodeConfirmationEvent, ShortCodeConfirmationState,
+    ShortCodePairingSas, transition_short_code_confirmation,
 };

@@ -108,6 +108,14 @@ pub enum KonclaveDomainError {
     /// A pairing envelope field contradicts its finite stage.
     #[error("pairing envelope {field} contradicts its stage")]
     InvalidPairingEnvelope { field: &'static str },
+
+    /// A short-code pairing transition was attempted at or after its deadline.
+    #[error("short-code pairing attempt is expired")]
+    ShortCodePairingExpired,
+
+    /// A short-code pairing confirmation event contradicts its durable state.
+    #[error("short-code pairing confirmation transition is invalid")]
+    InvalidShortCodePairingTransition,
 }
 
 impl KonclaveDomainError {
@@ -138,6 +146,8 @@ impl KonclaveDomainError {
             Self::InvalidExpectedParentEpoch { .. } => "invalid_expected_parent_epoch",
             Self::InvalidReplayOrder => "invalid_replay_order",
             Self::InvalidPairingEnvelope { .. } => "invalid_pairing_envelope",
+            Self::ShortCodePairingExpired => "short_code_pairing_expired",
+            Self::InvalidShortCodePairingTransition => "invalid_short_code_pairing_transition",
         }
     }
 }

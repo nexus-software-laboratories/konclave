@@ -9,6 +9,7 @@ mod local_service;
 mod mls;
 mod pairing;
 mod pairing_rendezvous;
+mod short_code_pairing;
 
 pub use collaboration_policy::{
     VerifiedCollaborationPolicyProposal, derive_collaboration_policy_digest,
@@ -35,6 +36,12 @@ pub use pairing::{PAIRING_SECRET_BYTES, PairingKeySchedule, PairingSecret};
 pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_PLAINTEXT_BYTES, PAIRING_RENDEZVOUS_TOKEN_BYTES,
     PairingRendezvousKeySchedule, PairingRendezvousSecret,
+};
+pub use short_code_pairing::{
+    MAX_SHORT_CODE_PAIRING_PLAINTEXT_BYTES, ShortCodeOpaqueClientLogin, ShortCodeOpaqueServerLogin,
+    ShortCodeOpaqueServerRecord, ShortCodeOpaqueSession, ShortCodePairingChannel,
+    ShortCodePairingCode, derive_short_code_pairing_transcript_hash,
+    generate_short_code_pairing_attempt_id,
 };
 
 #[cfg(test)]
