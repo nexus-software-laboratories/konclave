@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 const clipboardTimeoutMilliseconds = 5_000;
 const maximumClipboardBytes = 512;
@@ -12,6 +12,24 @@ export type ClipboardCommandRunner = (
   args: readonly string[],
   input: string,
 ) => Promise<ClipboardCommandOutcome>;
+
+export interface ClipboardProcess {
+  readonly stdin: {
+    on(event: 'error', listener: () => void): unknown;
+    end(input: Uint8Array): unknown;
+  };
+  readonly stdout: {
+    on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+  };
+  readonly stderr: {
+    on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+  };
+  on(event: 'spawn' | 'error', listener: () => void): unknown;
+  on(event: 'close', listener: (code: number | null) => void): unknown;
+  kill(signal: 'SIGKILL'): boolean;
+}
+
+export type ClipboardProcessSpawner = (file: string, args: readonly string[]) => ClipboardProcess;
 
 export interface PairingClipboard {
   writeToken(token: string): Promise<ClipboardWriteReceipt>;
@@ -122,10 +140,20 @@ async function clearProviders(
   return cleared;
 }
 
-async function runClipboardCommand(
+function spawnClipboardProcess(file: string, args: readonly string[]): ClipboardProcess {
+  return spawn(file, args, {
+    shell: false,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+}
+
+/** @internal Executes one fixed clipboard provider under hard I/O bounds. */
+export async function runClipboardCommand(
   file: string,
   args: readonly string[],
   input: string,
+  spawnProcess: ClipboardProcessSpawner = spawnClipboardProcess,
 ): Promise<ClipboardCommandOutcome> {
   const inputBytes = Buffer.from(input, 'utf8');
   if (inputBytes.length > maximumClipboardBytes) {
@@ -133,13 +161,9 @@ async function runClipboardCommand(
     return 'unavailable';
   }
   return new Promise<ClipboardCommandOutcome>((resolve) => {
-    let child: ChildProcessWithoutNullStreams;
+    let child: ClipboardProcess;
     try {
-      child = spawn(file, args, {
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
+      child = spawnProcess(file, args);
     } catch {
       inputBytes.fill(0);
       resolve('unavailable');
