@@ -14,7 +14,8 @@ use KonclaveProtocolContracts::v1::{
     decode_pairing_rendezvous_take_request, decode_relay_enrollment_request, decode_replay_request,
     decode_short_code_attempt_claim_request, decode_short_code_attempt_message_request,
     decode_short_code_attempt_publish_request, decode_short_code_attempt_read_request,
-    encode_acknowledge_request, encode_pairing_rendezvous_record, encode_relay_enrollment_response,
+    decode_short_code_capability_take_request, encode_acknowledge_request,
+    encode_pairing_rendezvous_record, encode_relay_enrollment_response,
     encode_short_code_attempt_snapshot, encode_short_code_capability_response,
     encode_stored_relay_envelope_preserving,
 };
@@ -658,7 +659,7 @@ async fn take_short_code_capability(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match decode_short_code_attempt_read_request(&bytes) {
+    let request = match decode_short_code_capability_take_request(&bytes) {
         Ok(request) => request,
         Err(error) => return protocol_error_response(&error),
     };

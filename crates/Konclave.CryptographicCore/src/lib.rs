@@ -41,7 +41,7 @@ pub use short_code_pairing::{
     MAX_SHORT_CODE_PAIRING_PLAINTEXT_BYTES, ShortCodeOpaqueClientLogin, ShortCodeOpaqueServerLogin,
     ShortCodeOpaqueServerRecord, ShortCodeOpaqueSession, ShortCodePairingChannel,
     ShortCodePairingCode, derive_short_code_pairing_transcript_hash,
-    generate_short_code_pairing_attempt_id,
+    generate_short_code_capability_take_id, generate_short_code_pairing_attempt_id,
 };
 
 #[cfg(test)]

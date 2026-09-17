@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/short_code_pairing.proto.
  */
 export const file_konclave_protocol_v1_short_code_pairing: GenFile = /*@__PURE__*/
-  fileDesc("Ci1rb25jbGF2ZS9wcm90b2NvbC92MS9zaG9ydF9jb2RlX3BhaXJpbmcucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIioKGVNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSDQoFdmFsdWUYASABKAwiKAoXU2hvcnRDb2RlUGFpcmluZ0xvY2F0b3ISDQoFdmFsdWUYASABKAwi/AEKHlNob3J0Q29kZUF0dGVtcHRQdWJsaXNoUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEj4KB2xvY2F0b3IYAiABKAsyLS5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nTG9jYXRvchJDCgphdHRlbXB0X2lkGAMgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBIdChVkZWFkbGluZV91bml4X3NlY29uZHMYBCABKAQipwEKHFNob3J0Q29kZUF0dGVtcHRDbGFpbVJlcXVlc3QSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhI+Cgdsb2NhdG9yGAIgASgLMi0ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0xvY2F0b3ISDwoHcGF5bG9hZBgDIAEoDCLoAQoeU2hvcnRDb2RlQXR0ZW1wdE1lc3NhZ2VSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSOAoFc3RhZ2UYAyABKA4yKS5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVSZWxheVN0YWdlEg8KB3BheWxvYWQYBCABKAwimgEKG1Nob3J0Q29kZUF0dGVtcHRSZWFkUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEkMKCmF0dGVtcHRfaWQYAiABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkImIKFVNob3J0Q29kZVJlbGF5TWVzc2FnZRI4CgVzdGFnZRgBIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgCIAEoDCKlAgoYU2hvcnRDb2RlQXR0ZW1wdFNuYXBzaG90EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSHQoVZGVhZGxpbmVfdW5peF9zZWNvbmRzGAMgASgEEhEKCWNhbmNlbGxlZBgEIAEoCBIbChNjYXBhYmlsaXR5X2NvbnN1bWVkGAUgASgIEj0KCG1lc3NhZ2VzGAYgAygLMisua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUmVsYXlNZXNzYWdlIqsBChtTaG9ydENvZGVDYXBhYmlsaXR5UmVzcG9uc2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBIPCgdwYXlsb2FkGAMgASgMKoUDChNTaG9ydENvZGVSZWxheVN0YWdlEiYKIlNIT1JUX0NPREVfUkVMQVlfU1RBR0VfVU5TUEVDSUZJRUQQABItCilTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX0NSRURFTlRJQUxfUkVRVUVTVBABEi4KKlNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ1JFREVOVElBTF9SRVNQT05TRRACEjAKLFNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0xBSU1BTlRfRklOQUxJWkFUSU9OEAMSKwonU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVBVE9SX0lERU5USVRZEAQSLworU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVBVE9SX0NPTkZJUk1BVElPThAFEjAKLFNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0xBSU1BTlRfQ09ORklSTUFUSU9OEAYSJQohU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DQVBBQklMSVRZEAdiBnByb3RvMw", [file_konclave_protocol_v1_common]);
+  fileDesc("Ci1rb25jbGF2ZS9wcm90b2NvbC92MS9zaG9ydF9jb2RlX3BhaXJpbmcucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIioKGVNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSDQoFdmFsdWUYASABKAwiKAoXU2hvcnRDb2RlUGFpcmluZ0xvY2F0b3ISDQoFdmFsdWUYASABKAwiKgoZU2hvcnRDb2RlQ2FwYWJpbGl0eVRha2VJZBINCgV2YWx1ZRgBIAEoDCL8AQoeU2hvcnRDb2RlQXR0ZW1wdFB1Ymxpc2hSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SPgoHbG9jYXRvchgCIAEoCzItLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdMb2NhdG9yEkMKCmF0dGVtcHRfaWQYAyABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEh0KFWRlYWRsaW5lX3VuaXhfc2Vjb25kcxgEIAEoBCKnAQocU2hvcnRDb2RlQXR0ZW1wdENsYWltUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEj4KB2xvY2F0b3IYAiABKAsyLS5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nTG9jYXRvchIPCgdwYXlsb2FkGAMgASgMIugBCh5TaG9ydENvZGVBdHRlbXB0TWVzc2FnZVJlcXVlc3QSNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBI4CgVzdGFnZRgDIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgEIAEoDCKaAQobU2hvcnRDb2RlQXR0ZW1wdFJlYWRSZXF1ZXN0EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQi3wEKHlNob3J0Q29kZUNhcGFiaWxpdHlUYWtlUmVxdWVzdBI2Cgd2ZXJzaW9uGAEgASgLMiUua29uY2xhdmUucHJvdG9jb2wudjEuUHJvdG9jb2xWZXJzaW9uEkMKCmF0dGVtcHRfaWQYAiABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVQYWlyaW5nQXR0ZW1wdElkEkAKB3Rha2VfaWQYAyABKAsyLy5rb25jbGF2ZS5wcm90b2NvbC52MS5TaG9ydENvZGVDYXBhYmlsaXR5VGFrZUlkImIKFVNob3J0Q29kZVJlbGF5TWVzc2FnZRI4CgVzdGFnZRgBIAEoDjIpLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVJlbGF5U3RhZ2USDwoHcGF5bG9hZBgCIAEoDCKlAgoYU2hvcnRDb2RlQXR0ZW1wdFNuYXBzaG90EjYKB3ZlcnNpb24YASABKAsyJS5rb25jbGF2ZS5wcm90b2NvbC52MS5Qcm90b2NvbFZlcnNpb24SQwoKYXR0ZW1wdF9pZBgCIAEoCzIvLmtvbmNsYXZlLnByb3RvY29sLnYxLlNob3J0Q29kZVBhaXJpbmdBdHRlbXB0SWQSHQoVZGVhZGxpbmVfdW5peF9zZWNvbmRzGAMgASgEEhEKCWNhbmNlbGxlZBgEIAEoCBIbChNjYXBhYmlsaXR5X2NvbnN1bWVkGAUgASgIEj0KCG1lc3NhZ2VzGAYgAygLMisua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUmVsYXlNZXNzYWdlIqsBChtTaG9ydENvZGVDYXBhYmlsaXR5UmVzcG9uc2USNgoHdmVyc2lvbhgBIAEoCzIlLmtvbmNsYXZlLnByb3RvY29sLnYxLlByb3RvY29sVmVyc2lvbhJDCgphdHRlbXB0X2lkGAIgASgLMi8ua29uY2xhdmUucHJvdG9jb2wudjEuU2hvcnRDb2RlUGFpcmluZ0F0dGVtcHRJZBIPCgdwYXlsb2FkGAMgASgMKoUDChNTaG9ydENvZGVSZWxheVN0YWdlEiYKIlNIT1JUX0NPREVfUkVMQVlfU1RBR0VfVU5TUEVDSUZJRUQQABItCilTSE9SVF9DT0RFX1JFTEFZX1NUQUdFX0NSRURFTlRJQUxfUkVRVUVTVBABEi4KKlNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ1JFREVOVElBTF9SRVNQT05TRRACEjAKLFNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0xBSU1BTlRfRklOQUxJWkFUSU9OEAMSKwonU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVBVE9SX0lERU5USVRZEAQSLworU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DUkVBVE9SX0NPTkZJUk1BVElPThAFEjAKLFNIT1JUX0NPREVfUkVMQVlfU1RBR0VfQ0xBSU1BTlRfQ09ORklSTUFUSU9OEAYSJQohU0hPUlRfQ09ERV9SRUxBWV9TVEFHRV9DQVBBQklMSVRZEAdiBnByb3RvMw", [file_konclave_protocol_v1_common]);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodePairingAttemptId
@@ -49,6 +49,23 @@ export const ShortCodePairingLocatorSchema: GenMessage<ShortCodePairingLocator> 
   messageDesc(file_konclave_protocol_v1_short_code_pairing, 1);
 
 /**
+ * @generated from message konclave.protocol.v1.ShortCodeCapabilityTakeId
+ */
+export type ShortCodeCapabilityTakeId = Message<"konclave.protocol.v1.ShortCodeCapabilityTakeId"> & {
+  /**
+   * @generated from field: bytes value = 1;
+   */
+  value: Uint8Array;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.ShortCodeCapabilityTakeId.
+ * Use `create(ShortCodeCapabilityTakeIdSchema)` to create a new message.
+ */
+export const ShortCodeCapabilityTakeIdSchema: GenMessage<ShortCodeCapabilityTakeId> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 2);
+
+/**
  * @generated from message konclave.protocol.v1.ShortCodeAttemptPublishRequest
  */
 export type ShortCodeAttemptPublishRequest = Message<"konclave.protocol.v1.ShortCodeAttemptPublishRequest"> & {
@@ -78,7 +95,7 @@ export type ShortCodeAttemptPublishRequest = Message<"konclave.protocol.v1.Short
  * Use `create(ShortCodeAttemptPublishRequestSchema)` to create a new message.
  */
 export const ShortCodeAttemptPublishRequestSchema: GenMessage<ShortCodeAttemptPublishRequest> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 2);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 3);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodeAttemptClaimRequest
@@ -105,7 +122,7 @@ export type ShortCodeAttemptClaimRequest = Message<"konclave.protocol.v1.ShortCo
  * Use `create(ShortCodeAttemptClaimRequestSchema)` to create a new message.
  */
 export const ShortCodeAttemptClaimRequestSchema: GenMessage<ShortCodeAttemptClaimRequest> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 3);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 4);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodeAttemptMessageRequest
@@ -137,7 +154,7 @@ export type ShortCodeAttemptMessageRequest = Message<"konclave.protocol.v1.Short
  * Use `create(ShortCodeAttemptMessageRequestSchema)` to create a new message.
  */
 export const ShortCodeAttemptMessageRequestSchema: GenMessage<ShortCodeAttemptMessageRequest> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 4);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 5);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodeAttemptReadRequest
@@ -159,7 +176,34 @@ export type ShortCodeAttemptReadRequest = Message<"konclave.protocol.v1.ShortCod
  * Use `create(ShortCodeAttemptReadRequestSchema)` to create a new message.
  */
 export const ShortCodeAttemptReadRequestSchema: GenMessage<ShortCodeAttemptReadRequest> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 5);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 6);
+
+/**
+ * @generated from message konclave.protocol.v1.ShortCodeCapabilityTakeRequest
+ */
+export type ShortCodeCapabilityTakeRequest = Message<"konclave.protocol.v1.ShortCodeCapabilityTakeRequest"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.ProtocolVersion version = 1;
+   */
+  version?: ProtocolVersion | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.ShortCodePairingAttemptId attempt_id = 2;
+   */
+  attemptId?: ShortCodePairingAttemptId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.ShortCodeCapabilityTakeId take_id = 3;
+   */
+  takeId?: ShortCodeCapabilityTakeId | undefined;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.ShortCodeCapabilityTakeRequest.
+ * Use `create(ShortCodeCapabilityTakeRequestSchema)` to create a new message.
+ */
+export const ShortCodeCapabilityTakeRequestSchema: GenMessage<ShortCodeCapabilityTakeRequest> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 7);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodeRelayMessage
@@ -181,7 +225,7 @@ export type ShortCodeRelayMessage = Message<"konclave.protocol.v1.ShortCodeRelay
  * Use `create(ShortCodeRelayMessageSchema)` to create a new message.
  */
 export const ShortCodeRelayMessageSchema: GenMessage<ShortCodeRelayMessage> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 6);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 8);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodeAttemptSnapshot
@@ -223,7 +267,7 @@ export type ShortCodeAttemptSnapshot = Message<"konclave.protocol.v1.ShortCodeAt
  * Use `create(ShortCodeAttemptSnapshotSchema)` to create a new message.
  */
 export const ShortCodeAttemptSnapshotSchema: GenMessage<ShortCodeAttemptSnapshot> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 7);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 9);
 
 /**
  * @generated from message konclave.protocol.v1.ShortCodeCapabilityResponse
@@ -250,7 +294,7 @@ export type ShortCodeCapabilityResponse = Message<"konclave.protocol.v1.ShortCod
  * Use `create(ShortCodeCapabilityResponseSchema)` to create a new message.
  */
 export const ShortCodeCapabilityResponseSchema: GenMessage<ShortCodeCapabilityResponse> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_short_code_pairing, 8);
+  messageDesc(file_konclave_protocol_v1_short_code_pairing, 10);
 
 /**
  * @generated from enum konclave.protocol.v1.ShortCodeRelayStage

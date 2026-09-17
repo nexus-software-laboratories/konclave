@@ -113,11 +113,17 @@ The operator confirms the exact displayed attempt, peer identity, and SAS. The d
 then publishes one role-separated authenticated confirmation. Local confirmation
 alone grants nothing. Only after both confirmation records authenticate under the
 session key does the creator issue a standard capability requesting `member`, encrypt
-it under the capability-transfer key, and publish it for one-time retrieval.
+it under the capability-transfer key, and publish it for one logical retrieval.
 
 The claimant decrypts and redeems that capability into the existing pairing flow.
 Existing invitation, JoinProof, Commit, Welcome, completion, replay, cancellation,
 and compensation behavior remains authoritative.
+
+Capability retrieval uses a caller-stable random take identifier persisted before the
+request. The relay commits one logical take and returns the same encrypted capability
+only for an exact retry of that identifier, so response loss cannot consume authority
+before the claimant durably receives it. A different take identifier remains
+unavailable.
 
 ### Bound online guesses and conflicting claimants
 
@@ -129,7 +135,7 @@ The Community Relay enforces:
   window;
 - at most 1,000 active short-code attempts globally and eight per creator principal;
   and
-- atomic expiry, cancellation, and one-time capability retrieval.
+- atomic expiry, cancellation, and idempotent one-logical-take capability retrieval.
 
 Unknown, expired, cancelled, consumed, and guess-exhausted attempts share one
 unavailable response where practical. A conflicting claimant may be reported to the

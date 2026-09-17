@@ -6,7 +6,8 @@ use KonclaveDomainCore::{
     PairingRendezvousNonce, PairingRendezvousRecord, PairingRendezvousTakeRequest, ProtocolVersion,
     RelayEnvelope, ReplayRequest, RoutingId, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
-    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodeRelayStage,
+    ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodeRelayStage,
 };
 use KonclaveProtocolContracts::v1::{
     decode_acknowledge_request, decode_pairing_rendezvous_record, decode_relay_enrollment_response,
@@ -15,7 +16,7 @@ use KonclaveProtocolContracts::v1::{
     encode_pairing_rendezvous_take_request, encode_relay_enrollment_request, encode_relay_envelope,
     encode_replay_request, encode_short_code_attempt_claim_request,
     encode_short_code_attempt_message_request, encode_short_code_attempt_publish_request,
-    encode_short_code_attempt_read_request,
+    encode_short_code_attempt_read_request, encode_short_code_capability_take_request,
 };
 use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayPrincipalId,
@@ -394,7 +395,7 @@ async fn pairing_rendezvous_publish_and_take_are_authenticated_one_time_operatio
 }
 
 #[tokio::test]
-async fn short_code_pairing_enforces_roles_order_isolation_rates_and_one_time_capability() {
+async fn short_code_pairing_enforces_roles_order_isolation_rates_and_idempotent_take() {
     let relay = TestRelay::with_enrollment(true).await;
     let creator_token = relay.token;
     let enrollment_token = relay.enrollment_token.unwrap();
@@ -636,13 +637,16 @@ async fn short_code_pairing_enforces_roles_order_isolation_rates_and_one_time_ca
         assert!(snapshot.message(ShortCodeRelayStage::Capability).is_none());
     }
 
-    let take_request =
-        ShortCodeAttemptReadRequest::new(ProtocolVersion::application_v1(), publish.attempt_id());
+    let take_request = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        publish.attempt_id(),
+        ShortCodeCapabilityTakeId::from_bytes([81; ShortCodeCapabilityTakeId::LENGTH]),
+    );
     let creator_take = app
         .clone()
         .oneshot(protobuf_request(
             "/v1/short-code-attempts/capability/take",
-            encode_short_code_attempt_read_request(take_request).unwrap(),
+            encode_short_code_capability_take_request(take_request).unwrap(),
             Some(&creator_token),
         ))
         .await
@@ -652,7 +656,7 @@ async fn short_code_pairing_enforces_roles_order_isolation_rates_and_one_time_ca
         .clone()
         .oneshot(protobuf_request(
             "/v1/short-code-attempts/capability/take",
-            encode_short_code_attempt_read_request(take_request).unwrap(),
+            encode_short_code_capability_take_request(take_request).unwrap(),
             Some(&claimant_token),
         ))
         .await
@@ -663,16 +667,31 @@ async fn short_code_pairing_enforces_roles_order_isolation_rates_and_one_time_ca
     assert_eq!(version, ProtocolVersion::application_v1());
     assert_eq!(attempt_id, publish.attempt_id());
     assert_eq!(payload, capability_payload);
-    let consumed = app
+    let retry = app
         .clone()
         .oneshot(protobuf_request(
             "/v1/short-code-attempts/capability/take",
-            encode_short_code_attempt_read_request(take_request).unwrap(),
+            encode_short_code_capability_take_request(take_request).unwrap(),
             Some(&claimant_token),
         ))
         .await
         .unwrap();
-    assert_eq!(consumed.status(), StatusCode::NOT_FOUND);
+    assert_eq!(retry.status(), StatusCode::OK);
+    let conflicting_take = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        publish.attempt_id(),
+        ShortCodeCapabilityTakeId::from_bytes([82; ShortCodeCapabilityTakeId::LENGTH]),
+    );
+    let conflicting_take = app
+        .clone()
+        .oneshot(protobuf_request(
+            "/v1/short-code-attempts/capability/take",
+            encode_short_code_capability_take_request(conflicting_take).unwrap(),
+            Some(&claimant_token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflicting_take.status(), StatusCode::NOT_FOUND);
 
     let cancellable = short_code_attempt(53, 63, deadline);
     let publish_cancellable = app

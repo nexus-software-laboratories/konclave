@@ -50,7 +50,8 @@ pub use short_code_pairing::{
     decode_short_code_attempt_claim_request, decode_short_code_attempt_message_request,
     decode_short_code_attempt_publish_request, decode_short_code_attempt_read_request,
     decode_short_code_attempt_snapshot, decode_short_code_capability_response,
-    encode_short_code_attempt_claim_request, encode_short_code_attempt_message_request,
-    encode_short_code_attempt_publish_request, encode_short_code_attempt_read_request,
-    encode_short_code_attempt_snapshot, encode_short_code_capability_response,
+    decode_short_code_capability_take_request, encode_short_code_attempt_claim_request,
+    encode_short_code_attempt_message_request, encode_short_code_attempt_publish_request,
+    encode_short_code_attempt_read_request, encode_short_code_attempt_snapshot,
+    encode_short_code_capability_response, encode_short_code_capability_take_request,
 };

@@ -7,7 +7,7 @@ use KonclaveDomainCore::{
     MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, PairingRendezvousRecord, PairingRendezvousTakeRequest,
     RelayEnvelope, ReplayPage, ReplayRequest, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
-    ShortCodeAttemptSnapshot, StoredRelayEnvelope,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
     decode_acknowledge_request, decode_pairing_rendezvous_record, decode_replay_page,
@@ -16,6 +16,7 @@ use KonclaveProtocolContracts::v1::{
     encode_pairing_rendezvous_take_request, encode_relay_envelope, encode_replay_request,
     encode_short_code_attempt_claim_request, encode_short_code_attempt_message_request,
     encode_short_code_attempt_publish_request, encode_short_code_attempt_read_request,
+    encode_short_code_capability_take_request,
 };
 use async_trait::async_trait;
 
@@ -130,7 +131,7 @@ pub trait ShortCodePairingTransport: Send + Sync {
     /// Atomically consumes the mutually confirmed encrypted capability as claimant.
     async fn take_short_code_capability(
         &self,
-        request: ShortCodeAttemptReadRequest,
+        request: ShortCodeCapabilityTakeRequest,
     ) -> Result<Vec<u8>, KonclaveClientError>;
 }
 
@@ -366,9 +367,9 @@ impl ShortCodePairingTransport for RelayClient {
 
     async fn take_short_code_capability(
         &self,
-        request: ShortCodeAttemptReadRequest,
+        request: ShortCodeCapabilityTakeRequest,
     ) -> Result<Vec<u8>, KonclaveClientError> {
-        let body = encode_short_code_attempt_read_request(request)?;
+        let body = encode_short_code_capability_take_request(request)?;
         let authorization = self.credential.authorization_header()?;
         let response = self
             .http

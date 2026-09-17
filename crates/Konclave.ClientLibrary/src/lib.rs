@@ -21,7 +21,8 @@ pub use KonclaveDomainCore::{
     PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
     PairingRendezvousTakeRequest, ShortCodeAttemptClaimRequest, ShortCodeAttemptMessageRequest,
     ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest, ShortCodeAttemptSnapshot,
-    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodeRelayMessage, ShortCodeRelayStage,
+    ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodeRelayMessage, ShortCodeRelayStage,
 };
 pub use KonclaveRelayAuthentication::{
     EnrollmentRequestId, RelayEnrollmentAuthorityId, RelayEnrollmentOutcome,

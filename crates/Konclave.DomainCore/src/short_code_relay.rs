@@ -1,5 +1,6 @@
 use crate::{
-    KonclaveDomainError, ProtocolVersion, ShortCodePairingAttemptId, ShortCodePairingLocator,
+    KonclaveDomainError, ProtocolVersion, ShortCodeCapabilityTakeId, ShortCodePairingAttemptId,
+    ShortCodePairingLocator,
 };
 
 /// Maximum opaque bytes in one short-code relay stage.
@@ -216,6 +217,48 @@ impl ShortCodeAttemptReadRequest {
     #[must_use]
     pub const fn attempt_id(self) -> ShortCodePairingAttemptId {
         self.attempt_id
+    }
+}
+
+/// Atomically retrieves one mutually confirmed capability under a stable retry identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortCodeCapabilityTakeRequest {
+    version: ProtocolVersion,
+    attempt_id: ShortCodePairingAttemptId,
+    take_id: ShortCodeCapabilityTakeId,
+}
+
+impl ShortCodeCapabilityTakeRequest {
+    /// Creates one exact logical capability retrieval request.
+    #[must_use]
+    pub const fn new(
+        version: ProtocolVersion,
+        attempt_id: ShortCodePairingAttemptId,
+        take_id: ShortCodeCapabilityTakeId,
+    ) -> Self {
+        Self {
+            version,
+            attempt_id,
+            take_id,
+        }
+    }
+
+    /// Returns the application protocol version.
+    #[must_use]
+    pub const fn version(self) -> ProtocolVersion {
+        self.version
+    }
+
+    /// Returns the target attempt identifier.
+    #[must_use]
+    pub const fn attempt_id(self) -> ShortCodePairingAttemptId {
+        self.attempt_id
+    }
+
+    /// Returns the stable logical retrieval identifier.
+    #[must_use]
+    pub const fn take_id(self) -> ShortCodeCapabilityTakeId {
+        self.take_id
     }
 }
 

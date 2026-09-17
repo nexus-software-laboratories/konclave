@@ -2,8 +2,8 @@ use KonclaveDomainCore::{
     MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
     MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, MAX_SHORT_CODE_RELAY_STAGES, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
-    ShortCodeAttemptSnapshot, ShortCodePairingAttemptId, ShortCodePairingLocator,
-    ShortCodeRelayMessage, ShortCodeRelayStage,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest,
+    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodeRelayMessage, ShortCodeRelayStage,
 };
 
 use super::common::{
@@ -17,6 +17,7 @@ const PUBLISH_CONTRACT: &str = "ShortCodeAttemptPublishRequest";
 const CLAIM_CONTRACT: &str = "ShortCodeAttemptClaimRequest";
 const MESSAGE_CONTRACT: &str = "ShortCodeAttemptMessageRequest";
 const READ_CONTRACT: &str = "ShortCodeAttemptReadRequest";
+const TAKE_CONTRACT: &str = "ShortCodeCapabilityTakeRequest";
 const SNAPSHOT_CONTRACT: &str = "ShortCodeAttemptSnapshot";
 const CAPABILITY_CONTRACT: &str = "ShortCodeCapabilityResponse";
 
@@ -163,6 +164,42 @@ pub fn decode_short_code_attempt_read_request(
     Ok(ShortCodeAttemptReadRequest::new(
         version_from_wire(value.version, READ_CONTRACT)?,
         attempt_id_from_wire(value.attempt_id)?,
+    ))
+}
+
+/// Encodes one bounded idempotent capability retrieval request.
+///
+/// # Errors
+///
+/// Returns a size error when the encoded request exceeds its protocol bound.
+pub fn encode_short_code_capability_take_request(
+    value: ShortCodeCapabilityTakeRequest,
+) -> Result<Vec<u8>, KonclaveProtocolError> {
+    encode_bounded(
+        &wire::ShortCodeCapabilityTakeRequest {
+            version: Some(version_to_wire(value.version())),
+            attempt_id: Some(attempt_id_to_wire(value.attempt_id())),
+            take_id: Some(take_id_to_wire(value.take_id())),
+        },
+        MAX_SHORT_CODE_RELAY_MESSAGE_BYTES,
+        TAKE_CONTRACT,
+    )
+}
+
+/// Decodes and validates one untrusted idempotent capability retrieval request.
+///
+/// # Errors
+///
+/// Returns a protocol, version, attempt, or take-identifier validation error.
+pub fn decode_short_code_capability_take_request(
+    bytes: &[u8],
+) -> Result<ShortCodeCapabilityTakeRequest, KonclaveProtocolError> {
+    let value: wire::ShortCodeCapabilityTakeRequest =
+        decode_bounded(bytes, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, TAKE_CONTRACT)?;
+    Ok(ShortCodeCapabilityTakeRequest::new(
+        version_from_wire(value.version, TAKE_CONTRACT)?,
+        attempt_id_from_wire(value.attempt_id)?,
+        take_id_from_wire(value.take_id)?,
     ))
 }
 
@@ -323,6 +360,20 @@ fn locator_from_wire(
     )?)
 }
 
+fn take_id_to_wire(value: ShortCodeCapabilityTakeId) -> wire::ShortCodeCapabilityTakeId {
+    wire::ShortCodeCapabilityTakeId {
+        value: value.as_bytes().to_vec().into(),
+    }
+}
+
+fn take_id_from_wire(
+    value: Option<wire::ShortCodeCapabilityTakeId>,
+) -> Result<ShortCodeCapabilityTakeId, KonclaveProtocolError> {
+    Ok(ShortCodeCapabilityTakeId::from_slice(
+        &required(value, "short_code_capability_take_id")?.value,
+    )?)
+}
+
 const fn stage_to_wire(value: ShortCodeRelayStage) -> wire::ShortCodeRelayStage {
     match value {
         ShortCodeRelayStage::CredentialRequest => wire::ShortCodeRelayStage::CredentialRequest,
@@ -429,6 +480,18 @@ mod tests {
         assert_eq!(
             decoded_snapshot.message(ShortCodeRelayStage::CredentialResponse),
             Some(&[4; 32][..])
+        );
+        let take = ShortCodeCapabilityTakeRequest::new(
+            version,
+            attempt(),
+            ShortCodeCapabilityTakeId::from_bytes([5; 16]),
+        );
+        assert_eq!(
+            decode_short_code_capability_take_request(
+                &encode_short_code_capability_take_request(take).unwrap()
+            )
+            .unwrap(),
+            take
         );
     }
 

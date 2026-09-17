@@ -5,7 +5,7 @@ use KonclaveDomainCore::{
     AcknowledgeRequest, PairingRendezvousRecord, PairingRendezvousTakeRequest, RelayEnvelope,
     ReplayPage, ReplayRequest, RoutingId, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
-    ShortCodeAttemptSnapshot,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest,
 };
 use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
@@ -237,7 +237,7 @@ impl RelayApplication {
     pub async fn take_short_code_capability(
         &self,
         principal: RelayPrincipalId,
-        request: ShortCodeAttemptReadRequest,
+        request: ShortCodeCapabilityTakeRequest,
     ) -> Result<Vec<u8>, RelayError> {
         self.registry
             .take_short_code_capability(principal, request, SystemRelayClock.now_unix_seconds()?)

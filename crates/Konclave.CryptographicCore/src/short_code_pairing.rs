@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use KonclaveDomainCore::{
-    DeviceId, ProtocolVersion, ShortCodePairingAttemptId, ShortCodePairingLocator,
-    ShortCodePairingSas, ShortCodePairingTranscriptHash,
+    DeviceId, ProtocolVersion, ShortCodeCapabilityTakeId, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingSas, ShortCodePairingTranscriptHash,
 };
 use KonclaveSecretStorage::{
     AUTHENTICATED_CIPHER_KEY_BYTES, AuthenticatedCipher, AuthenticatedCiphertext,
@@ -577,6 +577,18 @@ pub fn generate_short_code_pairing_attempt_id()
     let mut bytes = [0_u8; ShortCodePairingAttemptId::LENGTH];
     fill_random(&mut bytes)?;
     Ok(ShortCodePairingAttemptId::from_bytes(bytes))
+}
+
+/// Generates one random stable identifier for a logical capability retrieval.
+///
+/// # Errors
+///
+/// Returns a provider failure when secure randomness is unavailable.
+pub fn generate_short_code_capability_take_id()
+-> Result<ShortCodeCapabilityTakeId, KonclaveCryptographicError> {
+    let mut bytes = [0_u8; ShortCodeCapabilityTakeId::LENGTH];
+    fill_random(&mut bytes)?;
+    Ok(ShortCodeCapabilityTakeId::from_bytes(bytes))
 }
 
 /// Hashes one bounded canonical OPAQUE and encrypted-identity transcript.

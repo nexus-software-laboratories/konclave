@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use KonclaveDomainCore::{
     ShortCodeAttemptClaimRequest, ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest,
-    ShortCodeAttemptReadRequest, ShortCodeRelayStage,
+    ShortCodeAttemptReadRequest, ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest,
+    ShortCodeRelayStage,
 };
 
 use crate::{RelayError, RelayPrincipalId};
@@ -27,7 +28,7 @@ pub struct StoredShortCodeAttempt {
     publish: ShortCodeAttemptPublishRequest,
     messages: BTreeMap<ShortCodeRelayStage, Vec<u8>>,
     cancelled: bool,
-    capability_consumed: bool,
+    capability_take_id: Option<ShortCodeCapabilityTakeId>,
 }
 
 impl StoredShortCodeAttempt {
@@ -40,7 +41,7 @@ impl StoredShortCodeAttempt {
             publish,
             messages: BTreeMap::new(),
             cancelled: false,
-            capability_consumed: false,
+            capability_take_id: None,
         }
     }
 
@@ -83,7 +84,13 @@ impl StoredShortCodeAttempt {
     /// Reports whether the capability was consumed.
     #[must_use]
     pub const fn capability_consumed(&self) -> bool {
-        self.capability_consumed
+        self.capability_take_id.is_some()
+    }
+
+    /// Returns the stable logical capability retrieval identifier when consumed.
+    #[must_use]
+    pub const fn capability_take_id(&self) -> Option<ShortCodeCapabilityTakeId> {
+        self.capability_take_id
     }
 
     /// Records the one claimant and its credential request.
@@ -132,8 +139,8 @@ impl StoredShortCodeAttempt {
     }
 
     /// Marks the capability consumed.
-    pub fn consume_capability(&mut self) {
-        self.capability_consumed = true;
+    pub fn consume_capability(&mut self, take_id: ShortCodeCapabilityTakeId) {
+        self.capability_take_id = Some(take_id);
     }
 }
 
@@ -169,6 +176,8 @@ pub enum ShortCodeMessageDecision {
 pub enum ShortCodeCapabilityDecision {
     /// Atomically consume the capability.
     Consume,
+    /// Return the prior result for an exact logical retrieval retry.
+    Identical,
 }
 
 /// Decides whether one authenticated publish is new, idempotent, or rejected.
@@ -331,14 +340,13 @@ pub fn authorize_short_code_cancel(
 /// and contains an unconsumed capability.
 pub fn decide_short_code_capability_take(
     principal: RelayPrincipalId,
-    request: ShortCodeAttemptReadRequest,
+    request: ShortCodeCapabilityTakeRequest,
     existing: &StoredShortCodeAttempt,
     now_unix_seconds: u64,
 ) -> Result<ShortCodeCapabilityDecision, RelayError> {
     if existing.publish().version() != request.version()
         || existing.publish().deadline_unix_seconds() <= now_unix_seconds
         || existing.cancelled()
-        || existing.capability_consumed()
         || Some(principal) != existing.claimant()
         || existing
             .message(ShortCodeRelayStage::CreatorConfirmation)
@@ -350,7 +358,13 @@ pub fn decide_short_code_capability_take(
     {
         return Err(RelayError::ShortCodeAttemptUnavailable);
     }
-    Ok(ShortCodeCapabilityDecision::Consume)
+    match existing.capability_take_id() {
+        None => Ok(ShortCodeCapabilityDecision::Consume),
+        Some(existing) if existing == request.take_id() => {
+            Ok(ShortCodeCapabilityDecision::Identical)
+        }
+        Some(_) => Err(RelayError::ShortCodeAttemptUnavailable),
+    }
 }
 
 fn stage_owner(existing: &StoredShortCodeAttempt, stage: ShortCodeRelayStage) -> RelayPrincipalId {
@@ -427,6 +441,14 @@ mod tests {
 
     fn read() -> ShortCodeAttemptReadRequest {
         ShortCodeAttemptReadRequest::new(ProtocolVersion::application_v1(), publish().attempt_id())
+    }
+
+    fn take(value: u8) -> ShortCodeCapabilityTakeRequest {
+        ShortCodeCapabilityTakeRequest::new(
+            ProtocolVersion::application_v1(),
+            publish().attempt_id(),
+            ShortCodeCapabilityTakeId::from_bytes([value; 16]),
+        )
     }
 
     #[test]
@@ -547,11 +569,20 @@ mod tests {
             .insert_message(capability.stage(), capability.payload().to_vec())
             .unwrap();
         assert_eq!(
-            decide_short_code_capability_take(claimant, read(), &attempt, NOW),
+            decide_short_code_capability_take(claimant, take(1), &attempt, NOW),
             Ok(ShortCodeCapabilityDecision::Consume)
         );
+        attempt.consume_capability(take(1).take_id());
         assert_eq!(
-            decide_short_code_capability_take(owner, read(), &attempt, NOW),
+            decide_short_code_capability_take(claimant, take(1), &attempt, NOW),
+            Ok(ShortCodeCapabilityDecision::Identical)
+        );
+        assert_eq!(
+            decide_short_code_capability_take(claimant, take(2), &attempt, NOW),
+            Err(RelayError::ShortCodeAttemptUnavailable)
+        );
+        assert_eq!(
+            decide_short_code_capability_take(owner, take(1), &attempt, NOW),
             Err(RelayError::ShortCodeAttemptUnavailable)
         );
     }

@@ -7,8 +7,8 @@ use KonclaveClientLibrary::{
     RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential, RelayEnrollmentOutcome,
     RelayEnrollmentRequest, RelayTransport, ShortCodeAttemptMessageRequest,
     ShortCodeAttemptPublishRequest, ShortCodeAttemptPublishResult, ShortCodeAttemptReadRequest,
-    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodePairingTransport,
-    ShortCodeRelayStage, check_relay_health,
+    ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingTransport, ShortCodeRelayStage, check_relay_health,
 };
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
@@ -310,12 +310,29 @@ async fn client_completes_one_short_code_relay_exchange() {
     let read = ShortCodeAttemptReadRequest::new(ProtocolVersion::application_v1(), attempt_id);
     let snapshot = claimant.read_short_code_attempt(read).await.unwrap();
     assert!(snapshot.message(ShortCodeRelayStage::Capability).is_none());
+    let take = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        attempt_id,
+        ShortCodeCapabilityTakeId::from_bytes([61; ShortCodeCapabilityTakeId::LENGTH]),
+    );
     assert_eq!(
-        claimant.take_short_code_capability(read).await.unwrap(),
+        claimant.take_short_code_capability(take).await.unwrap(),
         vec![ShortCodeRelayStage::Capability as u8]
     );
+    assert_eq!(
+        claimant.take_short_code_capability(take).await.unwrap(),
+        vec![ShortCodeRelayStage::Capability as u8]
+    );
+    let conflicting_take = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        attempt_id,
+        ShortCodeCapabilityTakeId::from_bytes([62; ShortCodeCapabilityTakeId::LENGTH]),
+    );
     assert!(matches!(
-        claimant.take_short_code_capability(read).await.unwrap_err(),
+        claimant
+            .take_short_code_capability(conflicting_take)
+            .await
+            .unwrap_err(),
         KonclaveClientError::RelayRejected { status: 404, .. }
     ));
 

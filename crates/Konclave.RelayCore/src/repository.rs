@@ -2,7 +2,7 @@ use KonclaveDomainCore::{
     AcknowledgeRequest, MAX_REPLAY_PAGE_BYTES, MAX_REPLAY_PAGE_SIZE, PairingRendezvousRecord,
     PairingRendezvousTakeRequest, RelayEnvelope, ReplayPage, ReplayRequest,
     ShortCodeAttemptClaimRequest, ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest,
-    ShortCodeAttemptReadRequest, ShortCodeAttemptSnapshot,
+    ShortCodeAttemptReadRequest, ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest,
 };
 use KonclaveProtocolContracts::v1::{decode_replay_page, encode_relay_envelope};
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
@@ -279,7 +279,7 @@ pub trait ShortCodePairingRepository: Send + Sync {
     async fn take_short_code_capability(
         &self,
         principal: RelayPrincipalId,
-        request: ShortCodeAttemptReadRequest,
+        request: ShortCodeCapabilityTakeRequest,
         now_unix_seconds: u64,
     ) -> Result<Vec<u8>, RelayError>;
 }

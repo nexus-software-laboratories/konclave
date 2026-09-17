@@ -128,6 +128,12 @@ define_fixed_bytes!(
     "short_code_pairing_attempt_id"
 );
 define_fixed_bytes!(
+    /// Caller-stable identifier for one logical short-code capability retrieval.
+    ShortCodeCapabilityTakeId,
+    16,
+    "short_code_capability_take_id"
+);
+define_fixed_bytes!(
     /// Code-derived non-secret relay locator for one short-code pairing attempt.
     ShortCodePairingLocator,
     32,

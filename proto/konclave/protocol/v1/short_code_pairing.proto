@@ -12,6 +12,10 @@ message ShortCodePairingLocator {
   bytes value = 1;
 }
 
+message ShortCodeCapabilityTakeId {
+  bytes value = 1;
+}
+
 enum ShortCodeRelayStage {
   SHORT_CODE_RELAY_STAGE_UNSPECIFIED = 0;
   SHORT_CODE_RELAY_STAGE_CREDENTIAL_REQUEST = 1;
@@ -46,6 +50,12 @@ message ShortCodeAttemptMessageRequest {
 message ShortCodeAttemptReadRequest {
   ProtocolVersion version = 1;
   ShortCodePairingAttemptId attempt_id = 2;
+}
+
+message ShortCodeCapabilityTakeRequest {
+  ProtocolVersion version = 1;
+  ShortCodePairingAttemptId attempt_id = 2;
+  ShortCodeCapabilityTakeId take_id = 3;
 }
 
 message ShortCodeRelayMessage {

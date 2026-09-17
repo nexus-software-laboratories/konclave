@@ -30,8 +30,8 @@ pub use identifiers::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, MembershipOperationId, MessageId, NotificationId,
     PairingContextHash, PairingId, PairingMessageId, PairingNonce, PairingRendezvousId,
-    PairingRendezvousNonce, RoutingId, ShortCodePairingAttemptId, ShortCodePairingLocator,
-    ShortCodePairingTranscriptHash,
+    PairingRendezvousNonce, RoutingId, ShortCodeCapabilityTakeId, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingTranscriptHash,
 };
 pub use model::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_PROTOCOL_MAJOR,
@@ -59,5 +59,6 @@ pub use short_code_relay::{
     MAX_SHORT_CODE_RELAY_MESSAGE_BYTES, MAX_SHORT_CODE_RELAY_PAYLOAD_BYTES,
     MAX_SHORT_CODE_RELAY_SNAPSHOT_BYTES, MAX_SHORT_CODE_RELAY_STAGES, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
-    ShortCodeAttemptSnapshot, ShortCodeRelayMessage, ShortCodeRelayStage,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest, ShortCodeRelayMessage,
+    ShortCodeRelayStage,
 };

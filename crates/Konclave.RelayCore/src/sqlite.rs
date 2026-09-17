@@ -7,8 +7,9 @@ use KonclaveDomainCore::{
     PairingRendezvousRecord, PairingRendezvousTakeRequest, ProtocolVersion, RelayEnvelope,
     ReplayPage, ReplayRequest, RoutingId, ShortCodeAttemptClaimRequest,
     ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
-    ShortCodeAttemptSnapshot, ShortCodePairingAttemptId, ShortCodePairingLocator,
-    ShortCodeRelayMessage, ShortCodeRelayStage, StoredRelayEnvelope,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest,
+    ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodeRelayMessage, ShortCodeRelayStage,
+    StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
     decode_relay_envelope, encode_relay_envelope, encode_replay_page_preserving,
@@ -32,7 +33,7 @@ use crate::{
     decide_short_code_publish,
 };
 
-const SQLITE_SCHEMA_VERSION: u32 = 6;
+const SQLITE_SCHEMA_VERSION: u32 = 7;
 const MAX_ACTIVE_DYNAMIC_PRINCIPALS: i64 = 1_024;
 const MAX_DYNAMIC_PRINCIPAL_RECORDS: i64 = 4_096;
 const REPLAY_PAGE_FIXED_WIRE_BUDGET: usize = 64;
@@ -539,7 +540,7 @@ impl ShortCodePairingRepository for SqliteRelayRepository {
     async fn take_short_code_capability(
         &self,
         principal: RelayPrincipalId,
-        request: ShortCodeAttemptReadRequest,
+        request: ShortCodeCapabilityTakeRequest,
         now_unix_seconds: u64,
     ) -> Result<Vec<u8>, RelayError> {
         let mut transaction = self
@@ -551,33 +552,30 @@ impl ShortCodePairingRepository for SqliteRelayRepository {
         let stored = load_short_code_attempt(&mut transaction, None, Some(request.attempt_id()))
             .await?
             .ok_or(RelayError::ShortCodeAttemptUnavailable)?;
-        decide_short_code_capability_take(principal, request, &stored, now_unix_seconds)?;
+        let decision =
+            decide_short_code_capability_take(principal, request, &stored, now_unix_seconds)?;
         let payload = stored
             .message(ShortCodeRelayStage::Capability)
             .ok_or(RelayError::InvalidStoredData)?
             .to_vec();
-        let deleted = sqlx::query(
-            "DELETE FROM relay_short_code_message
-                 WHERE attempt_id = ?1 AND stage = ?2",
-        )
-        .bind(request.attempt_id().as_bytes().as_slice())
-        .bind(short_code_stage_to_sql(ShortCodeRelayStage::Capability))
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| storage_failure("short-code capability deletion"))?
-        .rows_affected();
-        let updated = sqlx::query(
-            "UPDATE relay_short_code_attempt
-                 SET capability_consumed = 1
-                 WHERE attempt_id = ?1 AND capability_consumed = 0",
-        )
-        .bind(request.attempt_id().as_bytes().as_slice())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| storage_failure("short-code capability consumption"))?
-        .rows_affected();
-        if deleted != 1 || updated != 1 {
-            return Err(storage_failure("short-code capability outcome"));
+        if decision == crate::ShortCodeCapabilityDecision::Consume {
+            let updated = sqlx::query(
+                "UPDATE relay_short_code_attempt
+                 SET capability_consumed = 1,
+                     capability_take_id = ?2
+                 WHERE attempt_id = ?1
+                   AND capability_consumed = 0
+                   AND capability_take_id IS NULL",
+            )
+            .bind(request.attempt_id().as_bytes().as_slice())
+            .bind(request.take_id().as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| storage_failure("short-code capability consumption"))?
+            .rows_affected();
+            if updated != 1 {
+                return Err(storage_failure("short-code capability outcome"));
+            }
         }
         transaction
             .commit()
@@ -1416,7 +1414,13 @@ async fn load_short_code_attempt(
             version_minor,
             deadline_unix_seconds,
             cancelled,
-            capability_consumed
+            capability_consumed,
+            typeof(capability_take_id) AS capability_take_id_type,
+            length(capability_take_id) AS capability_take_id_length,
+            CASE
+                WHEN capability_take_id IS NULL THEN NULL
+                WHEN length(capability_take_id) = 16 THEN capability_take_id
+            END AS capability_take_id
          FROM relay_short_code_attempt
          WHERE (?1 IS NOT NULL AND locator = ?1)
             OR (?2 IS NOT NULL AND attempt_id = ?2)
@@ -1461,6 +1465,32 @@ async fn load_short_code_attempt(
         .transpose()?;
     let cancelled = sql_bool(row.try_get("cancelled").map_err(invalid_row)?)?;
     let capability_consumed = sql_bool(row.try_get("capability_consumed").map_err(invalid_row)?)?;
+    let capability_take_id_type = row
+        .try_get::<String, _>("capability_take_id_type")
+        .map_err(invalid_row)?;
+    let capability_take_id_length = row
+        .try_get::<Option<i64>, _>("capability_take_id_length")
+        .map_err(invalid_row)?;
+    let capability_take_id_bytes = row
+        .try_get::<Option<Vec<u8>>, _>("capability_take_id")
+        .map_err(invalid_row)?;
+    let valid_take_id = capability_take_id_type == "null"
+        && capability_take_id_length.is_none()
+        && capability_take_id_bytes.is_none()
+        || capability_take_id_type == "blob"
+            && capability_take_id_length == Some(ShortCodeCapabilityTakeId::LENGTH as i64)
+            && capability_take_id_bytes.is_some();
+    if !valid_take_id {
+        return Err(RelayError::InvalidStoredData);
+    }
+    let capability_take_id = capability_take_id_bytes
+        .map(|bytes| {
+            ShortCodeCapabilityTakeId::from_slice(&bytes).map_err(|_| RelayError::InvalidStoredData)
+        })
+        .transpose()?;
+    if capability_consumed != capability_take_id.is_some() {
+        return Err(RelayError::InvalidStoredData);
+    }
     let message_rows = sqlx::query(
         "SELECT stage, payload
          FROM relay_short_code_message
@@ -1495,8 +1525,8 @@ async fn load_short_code_attempt(
     if cancelled {
         stored.cancel();
     }
-    if capability_consumed {
-        stored.consume_capability();
+    if let Some(take_id) = capability_take_id {
+        stored.consume_capability(take_id);
     }
     Ok(Some(stored))
 }
@@ -1620,30 +1650,34 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), RelayError> {
         initialize_dynamic_principal_schema(&mut transaction).await?;
         initialize_pairing_rendezvous_schema(&mut transaction).await?;
         initialize_short_code_schema(&mut transaction).await?;
-        sqlx::query("PRAGMA user_version = 6")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| storage_failure("schema version write"))?;
+        migrate_schema_v6_to_v7(&mut transaction).await?;
     } else if version == 1 {
         migrate_schema_v1_to_v2(&mut transaction).await?;
         migrate_schema_v2_to_v3(&mut transaction).await?;
         migrate_schema_v3_to_v4(&mut transaction).await?;
         migrate_schema_v4_to_v5(&mut transaction).await?;
         migrate_schema_v5_to_v6(&mut transaction).await?;
+        migrate_schema_v6_to_v7(&mut transaction).await?;
     } else if version == 2 {
         migrate_schema_v2_to_v3(&mut transaction).await?;
         migrate_schema_v3_to_v4(&mut transaction).await?;
         migrate_schema_v4_to_v5(&mut transaction).await?;
         migrate_schema_v5_to_v6(&mut transaction).await?;
+        migrate_schema_v6_to_v7(&mut transaction).await?;
     } else if version == 3 {
         migrate_schema_v3_to_v4(&mut transaction).await?;
         migrate_schema_v4_to_v5(&mut transaction).await?;
         migrate_schema_v5_to_v6(&mut transaction).await?;
+        migrate_schema_v6_to_v7(&mut transaction).await?;
     } else if version == 4 {
         migrate_schema_v4_to_v5(&mut transaction).await?;
         migrate_schema_v5_to_v6(&mut transaction).await?;
+        migrate_schema_v6_to_v7(&mut transaction).await?;
     } else if version == 5 {
         migrate_schema_v5_to_v6(&mut transaction).await?;
+        migrate_schema_v6_to_v7(&mut transaction).await?;
+    } else if version == 6 {
+        migrate_schema_v6_to_v7(&mut transaction).await?;
     }
     validate_schema(&mut transaction).await?;
     transaction
@@ -1668,7 +1702,7 @@ async fn validate_schema(
          FROM relay_pairing_rendezvous LIMIT 0",
         "SELECT locator, attempt_id, owner_principal_id, claimant_principal_id,
                 version_major, version_minor, deadline_unix_seconds, cancelled,
-                capability_consumed
+                capability_consumed, capability_take_id
          FROM relay_short_code_attempt LIMIT 0",
         "SELECT attempt_id, stage, payload FROM relay_short_code_message LIMIT 0",
         "SELECT locator, principal_id, window_start, attempts
@@ -1988,6 +2022,28 @@ async fn migrate_schema_v5_to_v6(
     Ok(())
 }
 
+async fn migrate_schema_v6_to_v7(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), RelayError> {
+    sqlx::query("DELETE FROM relay_short_code_attempt WHERE capability_consumed = 1")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("consumed short-code attempt migration cleanup"))?;
+    sqlx::query(
+        "ALTER TABLE relay_short_code_attempt
+         ADD COLUMN capability_take_id BLOB
+         CHECK (capability_take_id IS NULL OR length(capability_take_id) = 16)",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| storage_failure("short-code capability take schema migration"))?;
+    sqlx::query("PRAGMA user_version = 7")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| storage_failure("schema v7 version write"))?;
+    Ok(())
+}
+
 async fn initialize_short_code_schema(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> Result<(), RelayError> {
@@ -2245,6 +2301,14 @@ mod tests {
         )
     }
 
+    fn short_take(attempt: u8, take: u8) -> ShortCodeCapabilityTakeRequest {
+        ShortCodeCapabilityTakeRequest::new(
+            ProtocolVersion::application_v1(),
+            ShortCodePairingAttemptId::from_bytes(bytes(attempt)),
+            ShortCodeCapabilityTakeId::from_bytes(bytes(take)),
+        )
+    }
+
     #[tokio::test]
     async fn short_code_attempt_is_participant_bound_sequential_and_one_time() {
         let repository = SqliteRelayRepository::connect_memory().await.unwrap();
@@ -2321,14 +2385,21 @@ mod tests {
         );
         assert_eq!(
             repository
-                .take_short_code_capability(claimant, short_read(11), 1)
+                .take_short_code_capability(claimant, short_take(11, 30), 1)
                 .await
                 .unwrap(),
             vec![25]
         );
         assert_eq!(
             repository
-                .take_short_code_capability(claimant, short_read(11), 1)
+                .take_short_code_capability(claimant, short_take(11, 30), 1)
+                .await
+                .unwrap(),
+            vec![25]
+        );
+        assert_eq!(
+            repository
+                .take_short_code_capability(claimant, short_take(11, 31), 1)
                 .await
                 .err(),
             Some(RelayError::ShortCodeAttemptUnavailable)
@@ -2448,16 +2519,25 @@ mod tests {
         }
 
         let (first, second) = tokio::join!(
-            repository.take_short_code_capability(claimant, short_read(41), 1),
-            repository.take_short_code_capability(claimant, short_read(41), 1)
+            repository.take_short_code_capability(claimant, short_take(41, 42), 1),
+            repository.take_short_code_capability(claimant, short_take(41, 43), 1)
         );
-        match (first, second) {
-            (Ok(payload), Err(RelayError::ShortCodeAttemptUnavailable))
-            | (Err(RelayError::ShortCodeAttemptUnavailable), Ok(payload)) => {
-                assert_eq!(payload, vec![65]);
+        let winning_take = match (first, second) {
+            (Ok(payload), Err(RelayError::ShortCodeAttemptUnavailable)) if payload == vec![65] => {
+                42
+            }
+            (Err(RelayError::ShortCodeAttemptUnavailable), Ok(payload)) if payload == vec![65] => {
+                43
             }
             _ => panic!("exactly one concurrent short-code capability take must win"),
-        }
+        };
+        assert_eq!(
+            repository
+                .take_short_code_capability(claimant, short_take(41, winning_take), 1)
+                .await
+                .unwrap(),
+            vec![65]
+        );
     }
 
     #[tokio::test]
@@ -2743,6 +2823,7 @@ mod tests {
                     "attempt_id",
                     "cancelled",
                     "capability_consumed",
+                    "capability_take_id",
                     "claimant_principal_id",
                     "deadline_unix_seconds",
                     "locator",
@@ -3412,7 +3493,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, i64::from(SQLITE_SCHEMA_VERSION));
         let replay = repository
             .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
             .await
@@ -3453,7 +3534,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, i64::from(SQLITE_SCHEMA_VERSION));
         assert!(
             repository
                 .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
@@ -3474,6 +3555,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schema_v6_adds_retry_identity_and_discards_unrecoverable_consumed_attempts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let pool = create_v1_pool(&path).await;
+        let mut transaction = pool.begin().await.unwrap();
+        migrate_schema_v1_to_v2(&mut transaction).await.unwrap();
+        migrate_schema_v2_to_v3(&mut transaction).await.unwrap();
+        migrate_schema_v3_to_v4(&mut transaction).await.unwrap();
+        migrate_schema_v4_to_v5(&mut transaction).await.unwrap();
+        migrate_schema_v5_to_v6(&mut transaction).await.unwrap();
+        let owner = RelayPrincipalId::from_bytes(bytes(56));
+        insert_short_code_attempt(&mut transaction, owner, short_publish(57, 58))
+            .await
+            .unwrap();
+        insert_short_code_attempt(&mut transaction, owner, short_publish(59, 60))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        sqlx::query(
+            "UPDATE relay_short_code_attempt
+             SET capability_consumed = 1
+             WHERE attempt_id = ?1",
+        )
+        .bind(
+            ShortCodePairingAttemptId::from_bytes(bytes(60))
+                .as_bytes()
+                .as_slice(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let repository = SqliteRelayRepository::connect(&path).await.unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap();
+        assert_eq!(version, i64::from(SQLITE_SCHEMA_VERSION));
+        assert_eq!(
+            repository
+                .read_short_code_attempt(owner, short_read(58), 1)
+                .await
+                .unwrap()
+                .attempt_id(),
+            ShortCodePairingAttemptId::from_bytes(bytes(58))
+        );
+        assert_eq!(
+            repository
+                .read_short_code_attempt(owner, short_read(60), 1)
+                .await
+                .err(),
+            Some(RelayError::ShortCodeAttemptUnavailable)
+        );
+    }
+
+    #[tokio::test]
     async fn schema_v1_migrates_existing_payloads_to_exact_envelope_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("relay.sqlite");
@@ -3487,7 +3625,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, i64::from(SQLITE_SCHEMA_VERSION));
         let replay = repository
             .replay_encoded(ReplayRequest::new(envelope.routing_id(), 0, 100).unwrap())
             .await
@@ -3526,7 +3664,7 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, i64::from(SQLITE_SCHEMA_VERSION));
         let replay = repository
             .replay(ReplayRequest::new(existing.routing_id(), 0, 10).unwrap())
             .await
