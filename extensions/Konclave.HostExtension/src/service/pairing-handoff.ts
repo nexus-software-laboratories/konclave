@@ -43,9 +43,10 @@ export function parsePairingHandoff(value: string): PairingHandoff {
 
 /** Renders a bounded QR matrix without ANSI control sequences. */
 export function renderPairingQr(uri: string): PairingQr {
+  const handoff = parsePairingHandoff(uri);
   let encoded;
   try {
-    encoded = new Encoder({ level: 'M' }).encode(new Byte(uri));
+    encoded = new Encoder({ level: 'M' }).encode(new Byte(handoff.uri));
   } catch {
     throw new PairingHandoffError('pairing QR code could not be generated');
   }

@@ -1054,7 +1054,7 @@ describe('deterministic commands', () => {
     expect(clipboard.writeToken).toHaveBeenCalledWith(pairingToken);
     expect(clipboard.clear).toHaveBeenCalledTimes(1);
     expect(lines.join('\n')).toContain('pairing token copied (26 characters); token not echoed');
-    expect(lines.join('\n')).toContain('one-time bearer secret; expires at Unix second');
+    expect(lines.join('\n')).toContain('one-time bearer secret; expires 2026-');
     expect(lines.join('\n')).toContain(
       'clipboard: cleared the pairing token copied by this session',
     );

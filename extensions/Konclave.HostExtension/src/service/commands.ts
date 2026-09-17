@@ -1299,6 +1299,17 @@ function defaultTerminalInteractive(): boolean {
   return process.stderr.isTTY === true;
 }
 
+function formatPairingExpiry(unixSeconds: number): string {
+  const maximumDateSeconds = 8_640_000_000_000;
+  if (
+    unixSeconds <= Math.floor(Number.MAX_SAFE_INTEGER / 1_000) &&
+    unixSeconds <= maximumDateSeconds
+  ) {
+    return `${new Date(unixSeconds * 1_000).toISOString()} (Unix second ${unixSeconds})`;
+  }
+  return `Unix second ${unixSeconds}`;
+}
+
 async function renderPairingHandoff(
   presentation: CommandPresentation,
   handoff: PairingHandoff,
@@ -1309,7 +1320,7 @@ async function renderPairingHandoff(
   terminalInteractive: () => boolean,
 ): Promise<boolean> {
   await presentation.write(
-    `pairing token: one-time bearer secret; expires at Unix second ${status.authorizationDeadlineUnixSeconds}`,
+    `pairing token: one-time bearer secret; expires ${formatPairingExpiry(status.authorizationDeadlineUnixSeconds)}`,
   );
   if (mode === 'copy') {
     const copied = await clipboard.writeToken(handoff.token).catch(() => false);
@@ -2242,7 +2253,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`recovery: /konclave pairing ${redeemed.pairingId}`);
           await presentation.detail(`cancel: /konclave cancel ${redeemed.pairingId}`);
           await presentation.write(
-            `pairing token accepted: one-time bearer secret; expires at Unix second ${redeemed.authorizationDeadlineUnixSeconds}`,
+            `pairing token accepted: one-time bearer secret; expires ${formatPairingExpiry(redeemed.authorizationDeadlineUnixSeconds)}`,
           );
           if (presentation.mode === 'normal') {
             await presentation.write(
