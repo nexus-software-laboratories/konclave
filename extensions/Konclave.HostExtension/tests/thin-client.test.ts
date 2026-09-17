@@ -740,6 +740,27 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain(`legacy-device: unsupported; ${joinerDeviceId}`);
   });
 
+  it('renders a trusted-device rename result', async () => {
+    const request = vi.fn().mockResolvedValue({
+      alias: 'workstation',
+      device_id: joinerDeviceId,
+      decision: 'renamed',
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`device alias ${joinerDeviceId} workstation`));
+
+    expect(lines.join('\n')).toContain(`trusted device workstation: renamed; ${joinerDeviceId}`);
+  });
+
   it('resumes and cancels repeat-pairing operations deterministically', async () => {
     const request = vi.fn(async (operation: string, payload: unknown) => {
       switch (operation) {
