@@ -20,12 +20,7 @@ const hex32 = /^[0-9a-f]{64}$/u;
 const maxPolicyNameBytes = 128;
 const maxToolArgumentsBytes = 128 * 1024;
 const maxMessageTextBytes = 64 * 1024;
-const sendArgumentKeys = new Set([
-  'conversation_id',
-  'message_id',
-  'reply_to_message_id',
-  'text',
-]);
+const sendArgumentKeys = new Set(['conversation_id', 'message_id', 'reply_to_message_id', 'text']);
 
 type ActiveCollaborationTurn =
   | {
@@ -198,10 +193,9 @@ function authorizationTokenInTrustedHeader(prompt: string, expectedToken?: strin
     return false;
   }
   const tokenPattern = expectedToken ?? '[0-9a-f]{32}';
-  const match = new RegExp(
-    `\\n${collaborationTurnTokenLabel}: ${tokenPattern}(?:\\n|$)`,
-    'u',
-  ).exec(prompt);
+  const match = new RegExp(`\\n${collaborationTurnTokenLabel}: ${tokenPattern}(?:\\n|$)`, 'u').exec(
+    prompt,
+  );
   if (!match) {
     return false;
   }

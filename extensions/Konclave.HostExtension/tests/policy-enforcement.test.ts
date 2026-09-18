@@ -69,9 +69,7 @@ function activateGate(gate: CopilotPolicyGate): void {
     attempt: 1,
     turnToken,
   });
-  gate.observePrompt(
-    `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`,
-  );
+  gate.observePrompt(`Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`);
 }
 
 describe('Copilot collaboration policy gate', () => {

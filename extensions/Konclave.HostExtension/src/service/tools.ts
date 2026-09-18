@@ -53,9 +53,7 @@ function agentVisibleInputSchema(contract: GeneratedToolContract): Record<string
     properties: Object.fromEntries(
       Object.entries(properties).filter(([name]) => !injected.has(name)),
     ),
-    ...(required === undefined
-      ? {}
-      : { required: required.filter((name) => !injected.has(name)) }),
+    ...(required === undefined ? {} : { required: required.filter((name) => !injected.has(name)) }),
   };
 }
 
