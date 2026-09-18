@@ -4,6 +4,7 @@ import type { Tool, ToolInvocation } from '@github/copilot-sdk';
 
 import generatedToolContracts from '../../../../fixtures/local-service/v1/copilot-tools.json';
 
+import { collaborationAuthorizationArgument } from '../collaboration-contract.js';
 import type { LocalServiceClient } from './client.js';
 import type { ToolOperation } from './operations.js';
 
@@ -25,6 +26,36 @@ interface GeneratedToolContract {
 }
 
 const toolContracts = generatedToolContracts as readonly GeneratedToolContract[];
+const hookInjectedArguments: Partial<Record<ToolOperation, ReadonlySet<string>>> = {
+  send_message: new Set([collaborationAuthorizationArgument]),
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function agentVisibleInputSchema(contract: GeneratedToolContract): Record<string, unknown> {
+  const injected = hookInjectedArguments[contract.name];
+  if (!injected) {
+    return contract.inputSchema;
+  }
+  const properties = contract.inputSchema.properties;
+  const required = contract.inputSchema.required;
+  if (!isRecord(properties) || (required !== undefined && !isStringArray(required))) {
+    throw new Error(`Generated ${contract.name} tool schema is malformed.`);
+  }
+  return {
+    ...contract.inputSchema,
+    properties: Object.fromEntries(
+      Object.entries(properties).filter(([name]) => !injected.has(name)),
+    ),
+    ...(required === undefined ? {} : { required: required.filter((name) => !injected.has(name)) }),
+  };
+}
 
 export interface KonclaveToolDefinition {
   readonly name: ToolOperation;
@@ -36,7 +67,7 @@ export interface KonclaveToolDefinition {
 export const konclaveTools: readonly KonclaveToolDefinition[] = toolContracts.map((contract) => ({
   name: contract.name,
   description: contract.description,
-  parameters: contract.inputSchema,
+  parameters: agentVisibleInputSchema(contract),
 }));
 
 /** The exact SDK tool shape this extension registers. */

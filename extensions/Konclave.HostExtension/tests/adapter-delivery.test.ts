@@ -6,6 +6,10 @@ import {
   type WakeBudget,
 } from '../src/adapter/delivery.js';
 import { frameDelivery, untrustedContentMarkers } from '../src/adapter/framing.js';
+import {
+  collaborationAuthorizationArgument,
+  collaborationTurnTokenLabel,
+} from '../src/collaboration-contract.js';
 import type {
   AdapterChannel,
   AdapterRequest,
@@ -168,6 +172,10 @@ describe('untrusted content framing', () => {
     expect(framed).toContain('untrusted task input');
     expect(framed).toContain(`conversation ${'02'.repeat(32)}`);
     expect(framed).toContain('send_message');
+    expect(framed).toContain(`${collaborationTurnTokenLabel}: ${'05'.repeat(16)}`);
+    expect(framed).toContain(`without ${collaborationAuthorizationArgument}`);
+    expect(framed).toContain('policy hook');
+    expect(framed).not.toContain('Konclave collaboration authorization token');
     expect(framed).not.toContain('LOCALLY AUTHORIZED POLICY GUIDANCE');
   });
 
