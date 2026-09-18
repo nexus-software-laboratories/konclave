@@ -393,8 +393,12 @@ sender-counter, envelope identifier, timestamp, reply target, content, and expir
 An expired response or a responder removed before recovery becomes an abandoned
 counter gap rather than a different response.
 The SDK may represent pre-tool arguments as a JSON object or a serialized JSON object;
-the extension accepts only a bounded form with the exact `send_message` field allowlist
-before evaluating or modifying it.
+the extension accepts only a bounded form with the exact model-facing `send_message`
+field allowlist before evaluating or modifying it. The hook-only
+`collaboration_authorization` field is omitted from the model-facing schema and a
+caller-supplied value is rejected. The trusted synthetic prompt identifies its
+separate turn-binding token as not being a tool argument. After successful action
+evaluation, the hook injects the daemon-issued one-use send authorization.
 Workspace, shell, web, MCP, and subagent tools deny because their effects occur
 outside that atomic boundary. Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.

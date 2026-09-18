@@ -338,6 +338,13 @@ describe('agent tool surface', () => {
       expect(tool.parameters.type).toBe('object');
       expect(isKnownOperation(tool.name)).toBe(true);
     }
+    const send = konclaveTools.find((tool) => tool.name === 'send_message');
+    const sendProperties = send?.parameters.properties;
+    expect(sendProperties).toBeTypeOf('object');
+    expect(sendProperties).not.toBeNull();
+    expect(
+      Object.prototype.hasOwnProperty.call(sendProperties, 'collaboration_authorization'),
+    ).toBe(false);
   });
 
   it('maps a tool call onto the operation of the same name', async () => {

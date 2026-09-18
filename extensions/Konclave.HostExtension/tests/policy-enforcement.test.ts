@@ -7,6 +7,10 @@ import {
   createCopilotPolicyGate,
   type CopilotPolicyGate,
 } from '../src/service/policy-enforcement.js';
+import {
+  collaborationAuthorizationArgument,
+  collaborationTurnTokenLabel,
+} from '../src/collaboration-contract.js';
 
 const conversation = '11'.repeat(32);
 const policyDigest = '22'.repeat(32);
@@ -66,7 +70,7 @@ function activateGate(gate: CopilotPolicyGate): void {
     turnToken,
   });
   gate.observePrompt(
-    `Konclave delivered 1 update\nKonclave collaboration authorization token: ${turnToken}`,
+    `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`,
   );
 }
 
@@ -178,7 +182,7 @@ describe('Copilot collaboration policy gate', () => {
     gate.observePrompt('foreground user prompt');
     expect(gate.canCompleteTurn(authorization)).toBe(false);
     gate.observePrompt(
-      `Konclave delivered 1 update\nKonclave collaboration authorization token: ${authorization.turnToken}`,
+      `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${authorization.turnToken}`,
     );
     expect(gate.canCompleteTurn(authorization)).toBe(true);
     expect(gate.active).toBe(true);
@@ -199,7 +203,7 @@ describe('Copilot collaboration policy gate', () => {
     };
     gate.activate(authorization);
     gate.observePrompt(
-      `Konclave delivered 1 update\nKonclave collaboration authorization token: ${authorization.turnToken}`,
+      `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${authorization.turnToken}`,
     );
 
     gate.observePrompt('foreground user prompt');
@@ -232,7 +236,7 @@ describe('Copilot collaboration policy gate', () => {
       attempt: 1,
       turnToken,
     });
-    const prompt = `Konclave delivered 1 update\nKonclave collaboration authorization token: ${turnToken}`;
+    const prompt = `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`;
     gate.observePrompt(prompt);
     gate.observePrompt(prompt);
 
@@ -263,7 +267,7 @@ describe('Copilot collaboration policy gate', () => {
     };
     gate.activate(authorization);
     gate.observePrompt(
-      `Konclave delivered 1 update\nKonclave collaboration authorization token: ${'7b'.repeat(16)}`,
+      `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${'7b'.repeat(16)}`,
     );
 
     expect(gate.active).toBe(true);
@@ -361,13 +365,31 @@ describe('Copilot collaboration policy gate', () => {
     });
     expect(gate.lastDecision).toBe('authorized');
 
+    const evaluatedCalls = request.mock.calls.length;
+    const callerSuppliedAuthorization = await gate.hooks.onPreToolUse?.(
+      hookInput('send_message', {
+        conversation_id: conversation,
+        message_id: '46'.repeat(16),
+        reply_to_message_id: '66'.repeat(16),
+        text: 'reply',
+        [collaborationAuthorizationArgument]: '33'.repeat(16),
+      }),
+      { sessionId: 'session' },
+    );
+    expect(callerSuppliedAuthorization).toEqual({
+      permissionDecision: 'deny',
+      permissionDecisionReason: `Do not include ${collaborationAuthorizationArgument}; the Konclave policy hook injects it.`,
+    });
+    expect(gate.lastDecision).toBe('send_authorization_caller_supplied');
+    expect(request).toHaveBeenCalledTimes(evaluatedCalls);
+
     await expect(
       gate.hooks.onPreToolUse?.(
         hookInput(
           'send_message',
           JSON.stringify({
             conversation_id: conversation,
-            message_id: '46'.repeat(16),
+            message_id: '47'.repeat(16),
             text: 'reply',
             unexpected: true,
           }),

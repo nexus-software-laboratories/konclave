@@ -8,6 +8,10 @@ import type {
   DeliveredEvent,
   DeliveredPayload,
 } from '../adapter/session.js';
+import {
+  collaborationAuthorizationArgument,
+  collaborationTurnTokenLabel,
+} from '../collaboration-contract.js';
 import type { LocalServiceClient } from './client.js';
 import { collaborationOperations } from './operations.js';
 
@@ -17,7 +21,6 @@ const maxPolicyNameBytes = 128;
 const maxToolArgumentsBytes = 128 * 1024;
 const maxMessageTextBytes = 64 * 1024;
 const sendArgumentKeys = new Set([
-  'collaboration_authorization',
   'conversation_id',
   'message_id',
   'reply_to_message_id',
@@ -196,7 +199,7 @@ function authorizationTokenInTrustedHeader(prompt: string, expectedToken?: strin
   }
   const tokenPattern = expectedToken ?? '[0-9a-f]{32}';
   const match = new RegExp(
-    `\\nKonclave collaboration authorization token: ${tokenPattern}(?:\\n|$)`,
+    `\\n${collaborationTurnTokenLabel}: ${tokenPattern}(?:\\n|$)`,
     'u',
   ).exec(prompt);
   if (!match) {
@@ -292,6 +295,12 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
               'The active Konclave turn is bound to a different conversation.',
             );
           }
+          if (Object.hasOwn(toolArguments, collaborationAuthorizationArgument)) {
+            return deny(
+              'send_authorization_caller_supplied',
+              `Do not include ${collaborationAuthorizationArgument}; the Konclave policy hook injects it.`,
+            );
+          }
           if (
             action.action === 'conversation.reply' &&
             (!hasOnlySendArgumentKeys(toolArguments) ||
@@ -304,9 +313,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
                 toolArguments.reply_to_message_id !== null &&
                 (typeof toolArguments.reply_to_message_id !== 'string' ||
                   !hex16.test(toolArguments.reply_to_message_id) ||
-                  toolArguments.reply_to_message_id !== authorization.requestMessageId)) ||
-              (toolArguments.collaboration_authorization !== undefined &&
-                toolArguments.collaboration_authorization !== null))
+                  toolArguments.reply_to_message_id !== authorization.requestMessageId)))
           ) {
             return deny('send_arguments_malformed', 'Konclave send arguments are malformed.');
           }
@@ -343,7 +350,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
             modifiedArgs: {
               ...toolArguments,
               reply_to_message_id: authorization.requestMessageId,
-              collaboration_authorization: result.authorization,
+              [collaborationAuthorizationArgument]: result.authorization,
             },
             additionalContext:
               'Konclave policy permits this action, but normal Copilot permissions still apply.',
