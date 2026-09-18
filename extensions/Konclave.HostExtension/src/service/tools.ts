@@ -85,6 +85,7 @@ export interface ToolRegistrationOptions {
 const defaultToolDeadlineMs = 90_000;
 const toolRequestIdDomain = 'konclave:copilot-tool-request:1\0';
 const maxInvocationIdentifierBytes = 1_024;
+const alwaysLoadedTools = new Set<ToolOperation>(['send_message']);
 
 function toolRequestId(invocation: ToolInvocation): Buffer {
   const sessionBytes = Buffer.byteLength(invocation.sessionId, 'utf8');
@@ -122,6 +123,7 @@ export function createKonclaveTools(options: ToolRegistrationOptions): Registere
     name: definition.name,
     description: definition.description,
     parameters: definition.parameters,
+    defer: alwaysLoadedTools.has(definition.name) ? 'never' : 'auto',
     async handler(args: unknown, invocation?: ToolInvocation) {
       return options.client.request(
         definition.name,

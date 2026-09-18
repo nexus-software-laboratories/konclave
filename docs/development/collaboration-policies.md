@@ -399,6 +399,10 @@ field allowlist before evaluating or modifying it. The hook-only
 caller-supplied value is rejected. The trusted synthetic prompt identifies its
 separate turn-binding token as not being a tool argument. After successful action
 evaluation, the hook injects the daemon-issued one-use send authorization.
+The extension marks only `send_message` as non-deferred in the Copilot SDK so an
+authorized autonomous turn never depends on tool search to load its sole permitted
+effect. Every other Konclave tool remains auto-deferred, bounding the always-loaded
+schema cost and preventing the collaboration turn from gaining another operation.
 Workspace, shell, web, MCP, and subagent tools deny because their effects occur
 outside that atomic boundary. Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.

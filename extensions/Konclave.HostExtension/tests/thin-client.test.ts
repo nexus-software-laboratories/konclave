@@ -351,6 +351,10 @@ describe('agent tool surface', () => {
     const request = vi.fn().mockResolvedValue({ conversation_id: 'ab' });
     const tools = createKonclaveTools({ client: stubClient(request) });
     const send = tools.find((tool) => tool.name === 'send_message');
+    expect(send?.defer).toBe('never');
+    expect(
+      tools.filter((tool) => tool.name !== 'send_message').every((tool) => tool.defer === 'auto'),
+    ).toBe(true);
     const invocation = {
       sessionId: 'session-a',
       toolCallId: 'tool-call-a',
