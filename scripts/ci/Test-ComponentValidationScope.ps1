@@ -11,6 +11,7 @@ $contracts = Get-ComponentValidationContracts
 $expectedContracts = @(
     'client-runtime-config'
     'generic-client'
+    'installer-lifecycle'
     'pairing-rendezvous'
     'short-code-pairing'
     'trusted-device-alias'
@@ -23,6 +24,7 @@ if (($contracts.Keys -join ',') -cne ($expectedContracts -join ',')) {
 $workflowByContract = [ordered]@{
     'client-runtime-config' = 'client-runtime-config-conformance.yml'
     'generic-client' = 'generic-client-conformance.yml'
+    'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
     'short-code-pairing' = 'short-code-pairing-conformance.yml'
     'trusted-device-alias' = 'trusted-device-alias-conformance.yml'
@@ -71,6 +73,8 @@ $ownedCases = [ordered]@{
         'extensions/Konclave.HostExtension/src/service/config.ts'
     'generic-client' =
         'extensions/Konclave.HostExtension/src/generic-command.ts'
+    'installer-lifecycle' =
+        'scripts/installation/Install-Konclave.ps1'
     'pairing-rendezvous' =
         'extensions/Konclave.HostExtension/src/service/pairing-handoff.ts'
     'short-code-pairing' =
@@ -110,11 +114,16 @@ foreach ($contract in $expectedContracts) {
         -Conservative
     if (
         -not $workflowSelected -or
-        -not $cargoSelected -or
         -not $dispatchSelected -or
         -not $conservativeSelected
     ) {
         throw "Fail-closed selection is incomplete for '$contract'."
+    }
+    if (
+        ($contract -ceq 'installer-lifecycle' -and $cargoSelected) -or
+        ($contract -cne 'installer-lifecycle' -and -not $cargoSelected)
+    ) {
+        throw "Cargo ownership is incorrect for '$contract'."
     }
 }
 
