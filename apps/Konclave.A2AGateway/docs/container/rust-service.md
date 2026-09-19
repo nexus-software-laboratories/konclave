@@ -47,7 +47,7 @@ Load the unsigned prerelease image, export the required absolute roots, and star
 maintained Compose definition:
 
 ```shell
-docker image load --input konclave-a2a-gateway-container-0.1.13-linux-amd64.docker.tar
+docker image load --input konclave-a2a-gateway-container-0.1.14-linux-amd64.docker.tar
 export KONCLAVE_GATEWAY_UID="$(id -u)"
 export KONCLAVE_GATEWAY_GID="$(id -g)"
 export KONCLAVE_GATEWAY_CONFIG_ROOT=/absolute/path/to/a2a-config
