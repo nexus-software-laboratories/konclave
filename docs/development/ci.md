@@ -33,6 +33,14 @@ steps. These measurements describe elapsed Actions execution rather than CPU usa
 billed cost, and they remain fail-closed if GitHub returns malformed or incomplete
 timing data.
 
+Feature conformance workflows use one shared, fail-closed ownership resolver. Host
+Extension changes select only the client, pairing, alias, or user-presence contracts
+that own the changed source or test surface; generic runtime, policy, and tool
+changes remain with Agent Plugin and startup validation instead of compiling six
+unrelated Rust integration graphs. Workflow changes, Cargo workspace changes,
+manual dispatches, missing changed-file evidence, and GitHub's 3,000-file boundary
+select the affected component conservatively.
+
 Routine Dependabot minor and patch updates are grouped once per Cargo and GitHub
 Actions ecosystem. Major updates remain separate so compatibility changes stay
 independently reviewable. Cargo is capped at three open update pull requests and

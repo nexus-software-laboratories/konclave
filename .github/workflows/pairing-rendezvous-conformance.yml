@@ -21,6 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Checkout component validation scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: .ci-scope
+          sparse-checkout: |
+            scripts/ci/ComponentValidationScope.Functions.ps1
+            scripts/ci/Resolve-ComponentValidationScope.ps1
+          sparse-checkout-cone-mode: false
       - name: Resolve pairing rendezvous validation scope
         id: scope
         shell: pwsh
@@ -29,44 +39,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
         run: |
-          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
-            $run = $true
-          }
-          else {
-            $files = @(
-              gh api --paginate `
-                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
-                --jq '.[].filename'
-            )
-            if ($LASTEXITCODE -ne 0) {
-              throw 'Could not resolve pull-request files for pairing rendezvous conformance.'
-            }
-            if ($files.Count -eq 0) {
-              throw 'Pull-request file discovery returned no files.'
-            }
-            $run = $files.Count -ge 3000 -or @(
-              $files | Where-Object {
-                $_ -match '^Cargo\.(lock|toml)$' -or
-                $_ -match '^\.github/genesis-delivery\.json$' -or
-                $_ -match '^\.github/workflows/pairing-rendezvous-conformance\.yml$' -or
-                $_ -match '^docs/adr/adr-0023-encrypted-pairing-rendezvous\.md$' -or
-                $_ -match '^docs/development/conformance\.md$' -or
-                $_ -match '^proto/konclave/protocol/v1/pairing_rendezvous\.proto$' -or
-                $_ -match '^fixtures/local-service/v1/copilot-tools\.json$' -or
-                $_ -match '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$' -or
-                $_ -match '^apps/Konclave\.(?:CommunityRelay|LocalDaemon)/(?:Cargo\.toml|src/.*|tests/.*)$' -or
-                $_ -match '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*)$' -or
-                $_ -match '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
-              }
-            ).Count -ne 0
-          }
-          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+          ./.ci-scope/scripts/ci/Resolve-ComponentValidationScope.ps1 `
+            -Contract 'pairing-rendezvous' `
+            -EventName $env:EVENT_NAME `
+            -PullRequestNumber ([int]$env:PULL_REQUEST_NUMBER)
       - name: Checkout source
         if: steps.scope.outputs.run == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+          # Preserve the sibling scope checkout for its post-step cleanup.
+          clean: false
       - name: Install Rust
         if: steps.scope.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
