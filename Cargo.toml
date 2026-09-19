@@ -35,6 +35,6 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls"], default-feature
 thiserror = "2.0.20"
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2.5.8"
-webauthn-authenticator-rs = { version = "=0.5.4", default-features = false }
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false }
 windows-sys = "0.61.2"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
