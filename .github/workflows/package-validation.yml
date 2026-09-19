@@ -113,7 +113,7 @@ jobs:
   package-native:
     name: Package ${{ matrix.target }}
     needs: resolve-package-scope
-    if: ${{ needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.native == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.native == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -265,7 +265,7 @@ jobs:
   package-plugin:
     name: Package Agent Plugin
     needs: resolve-package-scope
-    if: ${{ needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.plugin == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.plugin == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -342,7 +342,7 @@ jobs:
   package-container:
     name: Package ${{ matrix.name }} linux/amd64 container
     needs: resolve-package-scope
-    if: ${{ needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.container == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.container == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -520,7 +520,7 @@ jobs:
       - package-native
       - package-plugin
       - package-container
-    if: ${{ needs.resolve-package-scope.outputs.release_set == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-package-scope.outputs.release_set == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -694,7 +694,7 @@ jobs:
       - package-plugin
       - package-container
       - release-integrity
-    if: ${{ needs.resolve-package-scope.outputs.acceptance == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-package-scope.outputs.acceptance == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
