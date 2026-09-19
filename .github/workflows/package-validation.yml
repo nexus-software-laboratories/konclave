@@ -693,7 +693,6 @@ jobs:
       - package-native
       - package-plugin
       - package-container
-      - release-integrity
     if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-package-scope.outputs.acceptance == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60

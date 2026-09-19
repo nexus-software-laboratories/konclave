@@ -147,6 +147,11 @@ itself as complete merely by omitting a checksum line. Negative tests mutate, re
 pass. A trusted reusable-workflow caller may retain the complete set as a one-day
 Actions artifact; pull-request validation does not.
 
+`Packaged clean-install acceptance` consumes the Linux native and container candidates
+directly, so it starts alongside `Release integrity` after package production rather
+than waiting for release-set assembly. The final `Package validation` aggregate still
+requires both jobs to pass.
+
 Repository artifact and log retention is capped at one day through the repository
 setting. The repository `GITHUB_TOKEN` cannot read that administrative setting, so
 workflows enforce one-day retention on every upload rather than fabricating a runtime
