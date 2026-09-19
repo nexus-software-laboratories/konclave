@@ -5,6 +5,7 @@ import type {
 } from './session.js';
 import {
   collaborationAuthorizationArgument,
+  collaborationReplyToolName,
   collaborationTurnTokenLabel,
 } from '../collaboration-contract.js';
 
@@ -114,7 +115,7 @@ export function frameDelivery(
   const containsDirectedRequest = events.some((event) => event.payload.kind === 'directed-request');
   const conclusion = authorization
     ? [
-        `If the request can be answered, call the Konclave send_message tool once without ${collaborationAuthorizationArgument}.`,
+        `If the request can be answered, call the Konclave ${collaborationReplyToolName} tool once without ${collaborationAuthorizationArgument}.`,
         'The policy hook binds the call to this conversation and request, then injects a separate',
         'one-use send authorization. If no response is needed, do not call a tool. Answer only',
         'from context already available in this session; do not create another request, research',

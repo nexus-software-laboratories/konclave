@@ -403,6 +403,12 @@ The extension marks only `send_message` as non-deferred in the Copilot SDK so an
 authorized autonomous turn never depends on tool search to load its sole permitted
 effect. Every other Konclave tool remains auto-deferred, bounding the always-loaded
 schema cost and preventing the collaboration turn from gaining another operation.
+The synthetic turn is submitted through the scoped session RPC with
+`requiredTool: "send_message"`, the same host-enforced mechanism used by Copilot
+continuations that require `task_complete`. The extension explicitly initializes and
+validates the session tool set before admission. If the host cannot materialize that
+tool, the turn fails before model execution instead of asking the model to repair
+tool availability from untrusted request content.
 Workspace, shell, web, MCP, and subagent tools deny because their effects occur
 outside that atomic boundary. Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.

@@ -186,12 +186,15 @@ function createSessionMock() {
   const handlers = new Map<keyof EventHandlerMap, unknown>();
   const unsubscribeMocks: Partial<Record<keyof EventHandlerMap, ReturnType<typeof vi.fn>>> = {};
   const send = vi.fn().mockResolvedValue('message-1');
+  const rpcSend = vi.fn().mockResolvedValue({ messageId: 'message-1' });
+  const initializeTools = vi.fn().mockResolvedValue({});
   const log = vi.fn().mockResolvedValue(undefined);
   const disconnect = vi.fn().mockResolvedValue(undefined);
 
   const session: ExtensionSession = {
     disconnect,
     log,
+    rpc: { send: rpcSend, tools: { initializeAndValidate: initializeTools } },
     send,
     on(eventType, handler) {
       handlers.set(eventType as keyof EventHandlerMap, handler);
@@ -206,7 +209,9 @@ function createSessionMock() {
   return {
     handlers,
     disconnect,
+    initializeTools,
     log,
+    rpcSend,
     send,
     session,
     unsubscribeMocks,
@@ -571,9 +576,17 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    const prompt = sessionMock.send.mock.calls[0]?.[0];
-    expect(prompt).toMatchObject({ mode: 'enqueue' });
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(sessionMock.initializeTools).toHaveBeenCalledTimes(1);
+    expect(sessionMock.rpcSend).toHaveBeenCalledTimes(1);
+    const initializeOrder = sessionMock.initializeTools.mock.invocationCallOrder[0];
+    const sendOrder = sessionMock.rpcSend.mock.invocationCallOrder[0];
+    if (initializeOrder === undefined || sendOrder === undefined) {
+      throw new Error('required-tool admission calls were not observed');
+    }
+    expect(initializeOrder).toBeLessThan(sendOrder);
+    const prompt = sessionMock.rpcSend.mock.calls[0]?.[0];
+    expect(prompt).toMatchObject({ mode: 'enqueue', requiredTool: 'send_message' });
     expect(prompt).toHaveProperty('prompt', expect.stringContaining('confirm the contract'));
     expect(requestCount(client, 'collaboration.turn.authorize')).toBe(1);
     expect(requestCount(client, 'delivery.acknowledge')).toBe(0);

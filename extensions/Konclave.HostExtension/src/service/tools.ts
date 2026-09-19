@@ -4,7 +4,10 @@ import type { Tool, ToolInvocation } from '@github/copilot-sdk';
 
 import generatedToolContracts from '../../../../fixtures/local-service/v1/copilot-tools.json';
 
-import { collaborationAuthorizationArgument } from '../collaboration-contract.js';
+import {
+  collaborationAuthorizationArgument,
+  collaborationReplyToolName,
+} from '../collaboration-contract.js';
 import type { LocalServiceClient } from './client.js';
 import type { ToolOperation } from './operations.js';
 
@@ -85,7 +88,7 @@ export interface ToolRegistrationOptions {
 const defaultToolDeadlineMs = 90_000;
 const toolRequestIdDomain = 'konclave:copilot-tool-request:1\0';
 const maxInvocationIdentifierBytes = 1_024;
-const alwaysLoadedTools = new Set<ToolOperation>(['send_message']);
+const alwaysLoadedTools = new Set<ToolOperation>([collaborationReplyToolName]);
 
 function toolRequestId(invocation: ToolInvocation): Buffer {
   const sessionBytes = Buffer.byteLength(invocation.sessionId, 'utf8');
