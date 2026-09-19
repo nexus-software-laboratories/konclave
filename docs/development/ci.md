@@ -25,13 +25,14 @@ fast signal for workflow YAML, expression, action, and schema failures. Keeping 
 gate outside the primary workflow lets it report when another workflow file cannot be
 loaded.
 
-The final `CI` verdict also reads the completed jobs from its own workflow attempt and
-publishes one-day performance evidence without scheduling another runner. The job
-summary and JSON artifact report initial runner delay, observed workflow span, summed
-job occupancy, active coverage, parallel overlap, idle gaps, and the slowest jobs and
-steps. These measurements describe elapsed Actions execution rather than CPU usage or
-billed cost, and they remain fail-closed if GitHub returns malformed or incomplete
-timing data.
+The final `CI` verdict also reads the executed, completed jobs from its own workflow
+attempt and publishes one-day performance evidence without scheduling another runner.
+Skipped jobs are excluded because GitHub may publish synthetic timestamps for them
+that are not execution intervals. The job summary and JSON artifact report initial
+runner delay, observed workflow span, summed job occupancy, active coverage, parallel
+overlap, idle gaps, and the slowest jobs and steps. These measurements describe
+elapsed Actions execution rather than CPU usage or billed cost, and they remain
+fail-closed if GitHub returns malformed or incomplete timing data.
 
 Feature conformance workflows use one shared, fail-closed ownership resolver. Host
 Extension changes select only the client, pairing, alias, or user-presence contracts
