@@ -182,12 +182,18 @@ class FakeProcessController implements ProcessController {
   }
 }
 
-function createSessionMock() {
+function createSessionMock(options: { deferToolInitialization?: boolean } = {}) {
   const handlers = new Map<keyof EventHandlerMap, unknown>();
   const unsubscribeMocks: Partial<Record<keyof EventHandlerMap, ReturnType<typeof vi.fn>>> = {};
   const send = vi.fn().mockResolvedValue('message-1');
   const rpcSend = vi.fn().mockResolvedValue({ messageId: 'message-1' });
-  const initializeTools = vi.fn().mockResolvedValue({});
+  let releaseToolInitialization = () => {};
+  const toolInitialization = options.deferToolInitialization
+    ? new Promise<void>((resolve) => {
+        releaseToolInitialization = resolve;
+      })
+    : Promise.resolve();
+  const initializeTools = vi.fn(() => toolInitialization);
   const log = vi.fn().mockResolvedValue(undefined);
   const disconnect = vi.fn().mockResolvedValue(undefined);
 
@@ -211,9 +217,11 @@ function createSessionMock() {
     disconnect,
     initializeTools,
     log,
+    releaseToolInitialization,
     rpcSend,
     send,
     session,
+    toolInitialization,
     unsubscribeMocks,
     emit<K extends keyof EventHandlerMap>(eventType: K, event: Parameters<EventHandlerMap[K]>[0]) {
       const handler = handlers.get(eventType) as
@@ -560,7 +568,7 @@ describe('bootExtension', () => {
   it('settles an authorized directed request only after the model turn becomes idle', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
-    const sessionMock = createSessionMock();
+    const sessionMock = createSessionMock({ deferToolInitialization: true });
     const client = queuedDirectedRequestClient();
 
     const controller = await bootExtension({
@@ -578,6 +586,11 @@ describe('bootExtension', () => {
 
     expect(sessionMock.send).not.toHaveBeenCalled();
     expect(sessionMock.initializeTools).toHaveBeenCalledTimes(1);
+    expect(sessionMock.rpcSend).not.toHaveBeenCalled();
+
+    sessionMock.releaseToolInitialization();
+    await sessionMock.toolInitialization;
+
     expect(sessionMock.rpcSend).toHaveBeenCalledTimes(1);
     const initializeOrder = sessionMock.initializeTools.mock.invocationCallOrder[0];
     const sendOrder = sessionMock.rpcSend.mock.invocationCallOrder[0];
