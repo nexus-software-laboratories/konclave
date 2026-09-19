@@ -45,10 +45,19 @@ if (
 ) {
     throw 'Rust workspace CI must run one complete workspace test command.'
 }
+if ($rustBuild -cmatch 'fuzz/Cargo\.toml') {
+    throw 'Rust workspace CI duplicates the fuzz target owned by Rust lint.'
+}
 
 $rustLint = (Get-CiJobLines -Job 'rust-lint') -join "`n"
 if ($rustLint -cnotmatch 'cargo clippy --workspace --all-targets -- -D warnings') {
     throw 'Rust lint no longer covers every workspace target.'
+}
+if (
+    $rustLint -cnotmatch
+        'cargo clippy --locked --manifest-path fuzz/Cargo\.toml --bin protocol_v1_decode -- -D warnings'
+) {
+    throw 'Rust lint no longer compiles and lints the pinned fuzz target.'
 }
 
 $packageWorkflow = Get-Content -LiteralPath $packagePath -Raw

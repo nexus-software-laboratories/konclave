@@ -15,8 +15,10 @@ validation never consumes PitCrew or another self-hosted runner.
 The Rust workspace lane starts directly with `cargo test --workspace`. It does not
 repeat a debug `cargo build` first: all-target Clippy owns compile-only target
 coverage, while ready-only package validation builds the release binaries that ship.
-`scripts/ci/Test-CiWorkDeduplication.ps1` keeps those three responsibilities
-separate so a future workflow edit cannot silently restore duplicate compilation.
+The separate fuzz manifest is compiled and linted once through its pinned Clippy
+command instead of receiving an earlier duplicate `cargo check`.
+`scripts/ci/Test-CiWorkDeduplication.ps1` keeps these responsibilities separate so a
+future workflow edit cannot silently restore duplicate compilation.
 
 Validation is grouped per pull request. A new head revision cancels the prior run for
 that pull request, while each manual dispatch uses its unique run identifier. Stale
