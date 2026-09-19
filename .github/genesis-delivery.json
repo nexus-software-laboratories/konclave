@@ -67,6 +67,7 @@
         "agent-plugin-conformance",
         "authorization-reload-conformance",
         "extension-startup-conformance",
+        "resolve-package-scope",
         "package-plugin",
         "publish",
         "authorization-store-conformance",
