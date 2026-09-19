@@ -78,6 +78,7 @@
         "native-installer-lifecycle",
         "service-failure-contract",
         "generic-client-conformance",
+        "resolve-installer-scope",
         "installer-lifecycle-conformance",
         "marketplace-conformance",
         "marketplace-materialization",

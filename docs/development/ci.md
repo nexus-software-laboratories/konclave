@@ -212,6 +212,13 @@ owner-only state, bounded archive extraction, legacy-extension preservation, and
 failed-update recovery. Windows additionally installs, inspects, stops, and removes
 the exact limited scheduled task used by the per-user supervisor.
 
+One hosted resolver now selects installer ownership before the platform matrix is
+expanded. Unrelated pull requests publish the stable aggregate after the resolver
+without allocating Windows or macOS runners; installer, package-workflow,
+distribution, platform-packaging, installation, and packaging changes retain all
+three platforms. Missing changed-file evidence and the 3,000-file boundary remain
+conservative.
+
 Ready-only package validation invokes the installer from each extracted client
 archive with an isolated empty data root. Release integrity also checksums the
 installer and its support functions in the complete release set.

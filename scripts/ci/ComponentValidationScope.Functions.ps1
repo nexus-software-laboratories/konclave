@@ -25,6 +25,15 @@ function Get-ComponentValidationContracts {
             '^docs/integrations/generic-client\.md$'
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-cli|generic-command)\.ts|src/service/(?:client|config|installed|operations|transcript)\.ts|tests/(?:generic-command|service-client|service-config)\.test\.ts)$'
         )
+        'installer-lifecycle' = @(
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/(?:installer-lifecycle-conformance|package-validation)\.yml$'
+            '^apps/Konclave\.LocalDaemon/packaging/'
+            '^distribution/'
+            '^docs/distribution/'
+            '^scripts/installation/'
+            '^scripts/packaging/'
+        )
         'pairing-rendezvous' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
