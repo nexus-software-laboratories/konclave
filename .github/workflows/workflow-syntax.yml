@@ -1,0 +1,32 @@
+name: Workflow syntax
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-syntax-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-syntax:
+    name: Workflow syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions
+            .github/workflows
+            scripts/ci/Test-WorkflowSyntax.ps1
+          sparse-checkout-cone-mode: false
+      - name: Validate GitHub Actions workflows
+        shell: pwsh
+        run: ./scripts/ci/Test-WorkflowSyntax.ps1
