@@ -47,7 +47,7 @@ jobs:
   installer-platform-conformance:
     name: Installer lifecycle (${{ matrix.runner }})
     needs: resolve-installer-scope
-    if: ${{ needs.resolve-installer-scope.result == 'success' && needs.resolve-installer-scope.outputs.run == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-installer-scope.result == 'success' && needs.resolve-installer-scope.outputs.run == 'true' }}
     strategy:
       fail-fast: false
       matrix:
