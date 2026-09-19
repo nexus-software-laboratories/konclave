@@ -5,7 +5,7 @@ members = ["apps/Konclave.A2AGateway", "apps/Konclave.CommandLine", "apps/Koncla
 [workspace.dependencies]
 async-trait = "0.1.92"
 aws-lc-rs = { version = "=1.16.3", default-features = false, features = ["alloc", "aws-lc-sys"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 cap-std = "4.0.3"
 ciborium = "=0.2.2"
 ed25519-dalek = "=2.2.0"
