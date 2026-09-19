@@ -16,6 +16,14 @@ Validation is grouped per pull request. A new head revision cancels the prior ru
 that pull request, while each manual dispatch uses its unique run identifier. Stale
 commits therefore cannot consume runner capacity or report after the current head.
 
+The final `CI` verdict also reads the completed jobs from its own workflow attempt and
+publishes one-day performance evidence without scheduling another runner. The job
+summary and JSON artifact report initial runner delay, observed workflow span, summed
+job occupancy, active coverage, parallel overlap, idle gaps, and the slowest jobs and
+steps. These measurements describe elapsed Actions execution rather than CPU usage or
+billed cost, and they remain fail-closed if GitHub returns malformed or incomplete
+timing data.
+
 Routine Dependabot minor and patch updates are grouped once per Cargo and GitHub
 Actions ecosystem. Major updates remain separate so compatibility changes stay
 independently reviewable. Cargo is capped at three open update pull requests and
