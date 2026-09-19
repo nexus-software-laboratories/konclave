@@ -80,10 +80,10 @@ function Get-CiPerformanceEvidence {
         ) {
             continue
         }
+        if ([string]$job.conclusion -ceq 'skipped') {
+            continue
+        }
         if ([string]::IsNullOrWhiteSpace([string]$job.started_at)) {
-            if ([string]$job.conclusion -ceq 'skipped') {
-                continue
-            }
             throw "Completed workflow job start time is missing: $jobName"
         }
 

@@ -92,6 +92,12 @@ $jobs = @(
         -CompletedAt '' `
         -Status 'in_progress' `
         -Conclusion ''
+    New-Job `
+        -Id 5 `
+        -Name 'Skipped matrix' `
+        -StartedAt '2026-09-19T00:01:31Z' `
+        -CompletedAt '2026-09-19T00:01:30Z' `
+        -Conclusion 'skipped'
 )
 
 $evidence = Get-CiPerformanceEvidence -Run $run -Jobs $jobs
