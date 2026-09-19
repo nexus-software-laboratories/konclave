@@ -97,6 +97,7 @@ foreach ($required in @(
     'authorize-storage-cleanup:',
     'Manual storage cleanup requires the current default-branch head.',
     'Resolve cleanup work',
+    'sparse-checkout: scripts/ci/ActionsStoragePolicy.Functions.ps1',
     'Get-ActionsStorageCleanupPlan',
     "if: needs.authorize-storage-cleanup.outputs.delete_artifacts == 'true'",
     "if: needs.authorize-storage-cleanup.outputs.prune_caches == 'true'",
