@@ -160,6 +160,13 @@ orphaning bytes. Failed publication runs keep their candidate for at most one da
 a maintainer can diagnose or resume a draft or tag failure without presenting it as
 a release.
 
+The authorization job first plans whether any reconciliation work exists. Pull
+requests cannot persist caches, so a no-artifact package or Agent Plugin run stops
+after that one planner instead of scheduling artifact deletion and cache pruning.
+Artifact-producing pull requests schedule deletion only; default-branch, scheduled,
+and trusted manual runs may also prune caches. Failed publication artifacts remain
+available for diagnosis while its trusted default-branch caches stay bounded.
+
 Pull requests may restore Rust caches created from `main`, but cannot persist new
 Rust or npm caches. Trusted `main` runs share npm's content-addressed download store
 instead of creating one copy per job. Scheduled and post-package cleanup removes every

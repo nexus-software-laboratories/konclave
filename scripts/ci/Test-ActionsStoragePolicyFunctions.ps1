@@ -357,7 +357,145 @@ foreach ($invalid in @(
     }
 }
 
+$cleanupCases = @(
+    @{
+        name = 'scheduled reconciliation'
+        arguments = @{ EventName = 'schedule' }
+        deleteArtifacts = $true
+        pruneCaches = $true
+    },
+    @{
+        name = 'manual reconciliation'
+        arguments = @{ EventName = 'workflow_dispatch' }
+        deleteArtifacts = $true
+        pruneCaches = $true
+    },
+    @{
+        name = 'no-work package pull request'
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $packageWorkflow
+            SourceConclusion = 'success'
+            SourceHeadBranch = 'feature'
+            DefaultBranch = 'main'
+            ArtifactCount = 0
+        }
+        deleteArtifacts = $false
+        pruneCaches = $false
+    },
+    @{
+        name = 'package pull request with artifacts'
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $packageWorkflow
+            SourceConclusion = 'success'
+            SourceHeadBranch = 'feature'
+            DefaultBranch = 'main'
+            ArtifactCount = 12
+        }
+        deleteArtifacts = $true
+        pruneCaches = $false
+    },
+    @{
+        name = 'default-branch package dispatch'
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $packageWorkflow
+            SourceConclusion = 'success'
+            SourceHeadBranch = 'main'
+            DefaultBranch = 'main'
+            ArtifactCount = 12
+        }
+        deleteArtifacts = $true
+        pruneCaches = $true
+    },
+    @{
+        name = 'Agent Plugin pull request artifact'
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $agentPluginWorkflow
+            SourceConclusion = 'failure'
+            SourceHeadBranch = 'feature'
+            DefaultBranch = 'main'
+            ArtifactCount = 1
+        }
+        deleteArtifacts = $true
+        pruneCaches = $false
+    },
+    @{
+        name = 'failed publication'
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $publishWorkflow
+            SourceConclusion = 'failure'
+            SourceHeadBranch = 'main'
+            DefaultBranch = 'main'
+            ArtifactCount = 1
+        }
+        deleteArtifacts = $false
+        pruneCaches = $true
+    },
+    @{
+        name = 'successful publication'
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $publishWorkflow
+            SourceConclusion = 'success'
+            SourceHeadBranch = 'main'
+            DefaultBranch = 'main'
+            ArtifactCount = 1
+        }
+        deleteArtifacts = $true
+        pruneCaches = $true
+    }
+)
+foreach ($case in $cleanupCases) {
+    $arguments = $case.arguments
+    $plan = Get-ActionsStorageCleanupPlan @arguments
+    if (
+        [bool]$plan.DeleteArtifacts -ne [bool]$case.deleteArtifacts -or
+        [bool]$plan.PruneCaches -ne [bool]$case.pruneCaches
+    ) {
+        throw "Actions storage cleanup planning failed: $($case.name)"
+    }
+}
+foreach ($invalid in @(
+    @{
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = '.github/workflows/unknown.yml'
+            SourceHeadBranch = 'main'
+            DefaultBranch = 'main'
+        }
+        error = 'Unsupported'
+    },
+    @{
+        arguments = @{
+            EventName = 'workflow_run'
+            SourceWorkflowPath = $packageWorkflow
+            SourceHeadBranch = ''
+            DefaultBranch = 'main'
+        }
+        error = 'incomplete'
+    }
+)) {
+    $failed = $false
+    try {
+        $arguments = $invalid.arguments
+        [void](Get-ActionsStorageCleanupPlan @arguments)
+    }
+    catch {
+        $failed = $_.Exception.Message.Contains(
+            [string]$invalid.error,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    if (-not $failed) {
+        throw "Invalid cleanup plan was not rejected: $($invalid.error)"
+    }
+}
+
 Write-Output (
     "Actions storage decision tests passed: $($artifactCases.Count) artifact and " +
-    "$($cases.Count) cache cases."
+    "$($cases.Count) cache and $($cleanupCases.Count) cleanup-plan cases."
 )
