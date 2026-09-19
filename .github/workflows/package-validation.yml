@@ -89,9 +89,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/workflows/package-validation.yml
-            scripts/ci/PackageValidationScope.Functions.ps1
-            scripts/ci/Resolve-PackageValidationScope.ps1
-            scripts/ci/Test-PackageValidationScope.ps1
+            scripts/ci/**
           sparse-checkout-cone-mode: false
       - name: Verify package validation scope contract
         shell: pwsh
