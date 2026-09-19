@@ -67,7 +67,10 @@ fn verify_pinned_file(
     label: &str,
 ) -> Result<(), Box<dyn Error>> {
     let bytes = fs::read(path)?;
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     if bytes.len() != expected_bytes || digest != expected_sha256 {
         return Err(format!("{label} does not match its pinned digest").into());
     }
