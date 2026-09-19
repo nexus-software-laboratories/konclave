@@ -61,14 +61,14 @@ $scope = Get-PackageValidationScope `
 if ([string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
     throw 'GITHUB_OUTPUT is required to publish package validation scope.'
 }
-foreach ($entry in [ordered]@{
+foreach ($entry in ([ordered]@{
     mode = $scope.Mode
     native = $scope.Native.ToString().ToLowerInvariant()
     plugin = $scope.Plugin.ToString().ToLowerInvariant()
     container = $scope.Container.ToString().ToLowerInvariant()
     release_set = $scope.ReleaseSet.ToString().ToLowerInvariant()
     acceptance = $scope.Acceptance.ToString().ToLowerInvariant()
-}.GetEnumerator()) {
+}).GetEnumerator()) {
     "$($entry.Key)=$($entry.Value)" |
         Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
 }
