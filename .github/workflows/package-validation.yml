@@ -62,6 +62,7 @@ run-name: >-
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   # Each dispatch is consumed and cancelled independently by its caller.
@@ -69,9 +70,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolve-package-scope:
+    name: Resolve package validation scope
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+      native: ${{ steps.scope.outputs.native }}
+      plugin: ${{ steps.scope.outputs.plugin }}
+      container: ${{ steps.scope.outputs.container }}
+      release_set: ${{ steps.scope.outputs.release_set }}
+      acceptance: ${{ steps.scope.outputs.acceptance }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/workflows/package-validation.yml
+            scripts/ci/PackageValidationScope.Functions.ps1
+            scripts/ci/Resolve-PackageValidationScope.ps1
+            scripts/ci/Test-PackageValidationScope.ps1
+          sparse-checkout-cone-mode: false
+      - name: Verify package validation scope contract
+        shell: pwsh
+        run: ./scripts/ci/Test-PackageValidationScope.ps1
+      - name: Resolve package validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+          IS_DRAFT: ${{ github.event.pull_request.draft || false }}
+          DEMO_WINDOWS_ONLY: ${{ inputs.demo_windows_only || false }}
+        run: |
+          ./scripts/ci/Resolve-PackageValidationScope.ps1 `
+            -EventName $env:EVENT_NAME `
+            -PullRequestNumber ([int]$env:PULL_REQUEST_NUMBER) `
+            -IsDraft ([bool]::Parse($env:IS_DRAFT)) `
+            -DemoWindowsOnly ([bool]::Parse($env:DEMO_WINDOWS_ONLY))
+
   package-native:
     name: Package ${{ matrix.target }}
-    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) }}
+    needs: resolve-package-scope
+    if: ${{ needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.native == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -222,7 +266,8 @@ jobs:
 
   package-plugin:
     name: Package Agent Plugin
-    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
+    needs: resolve-package-scope
+    if: ${{ needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.plugin == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -298,7 +343,8 @@ jobs:
 
   package-container:
     name: Package ${{ matrix.name }} linux/amd64 container
-    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && !inputs.demo_windows_only }}
+    needs: resolve-package-scope
+    if: ${{ needs.resolve-package-scope.result == 'success' && needs.resolve-package-scope.outputs.container == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -471,11 +517,12 @@ jobs:
 
   release-integrity:
     name: Release integrity
-    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && !inputs.demo_windows_only }}
     needs:
+      - resolve-package-scope
       - package-native
       - package-plugin
       - package-container
+    if: ${{ needs.resolve-package-scope.outputs.release_set == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -643,12 +690,13 @@ jobs:
           compression-level: 0
   packaged-acceptance:
     name: Packaged clean-install acceptance
-    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && !inputs.demo_windows_only }}
     needs:
+      - resolve-package-scope
       - package-native
       - package-plugin
       - package-container
       - release-integrity
+    if: ${{ needs.resolve-package-scope.outputs.acceptance == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -738,6 +786,7 @@ jobs:
     name: Package validation
     if: ${{ always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
     needs:
+      - resolve-package-scope
       - package-native
       - package-plugin
       - package-container
@@ -749,8 +798,13 @@ jobs:
       - name: Check package matrix
         shell: bash
         env:
-          IS_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
-          DEMO_WINDOWS_ONLY: ${{ inputs.demo_windows_only }}
+          PLAN_RESULT: ${{ needs.resolve-package-scope.result }}
+          MODE: ${{ needs.resolve-package-scope.outputs.mode }}
+          NATIVE_SELECTED: ${{ needs.resolve-package-scope.outputs.native }}
+          PLUGIN_SELECTED: ${{ needs.resolve-package-scope.outputs.plugin }}
+          CONTAINER_SELECTED: ${{ needs.resolve-package-scope.outputs.container }}
+          INTEGRITY_SELECTED: ${{ needs.resolve-package-scope.outputs.release_set }}
+          ACCEPTANCE_SELECTED: ${{ needs.resolve-package-scope.outputs.acceptance }}
           NATIVE_RESULT: ${{ needs.package-native.result }}
           PLUGIN_RESULT: ${{ needs.package-plugin.result }}
           CONTAINER_RESULT: ${{ needs.package-container.result }}
@@ -758,32 +812,26 @@ jobs:
           ACCEPTANCE_RESULT: ${{ needs.packaged-acceptance.result }}
         run: |
           set -eu
-          if [ "$IS_DRAFT" = 'true' ]; then
-            echo 'Draft package validation deferred until the pull request is ready.'
-            exit 0
-          fi
-          if [ "$NATIVE_RESULT" != 'success' ]; then
-            echo "::error::Native package matrix concluded with $NATIVE_RESULT."
+          if [ "$PLAN_RESULT" != 'success' ]; then
+            echo "::error::Package validation planning concluded with $PLAN_RESULT."
             exit 1
           fi
-          if [ "$DEMO_WINDOWS_ONLY" = 'true' ]; then
-            echo 'Transient Windows demo package passed.'
-            exit 0
-          fi
-          if [ "$PLUGIN_RESULT" != 'success' ]; then
-            echo "::error::Agent Plugin packaging concluded with $PLUGIN_RESULT."
-            exit 1
-          fi
-          if [ "$CONTAINER_RESULT" != 'success' ]; then
-            echo "::error::Container packaging concluded with $CONTAINER_RESULT."
-            exit 1
-          fi
-          if [ "$INTEGRITY_RESULT" != 'success' ]; then
-            echo "::error::Release integrity concluded with $INTEGRITY_RESULT."
-            exit 1
-          fi
-          if [ "$ACCEPTANCE_RESULT" != 'success' ]; then
-            echo "::error::Packaged acceptance concluded with $ACCEPTANCE_RESULT."
-            exit 1
-          fi
-          echo 'Native, container, integrity, and packaged acceptance passed.'
+          check_lane() {
+            label="$1"
+            selected="$2"
+            result="$3"
+            if [ "$selected" = 'true' ] && [ "$result" != 'success' ]; then
+              echo "::error::$label was selected but concluded with $result."
+              exit 1
+            fi
+            if [ "$selected" != 'true' ] && [ "$result" != 'skipped' ]; then
+              echo "::error::$label was not selected but concluded with $result."
+              exit 1
+            fi
+          }
+          check_lane 'Native package matrix' "$NATIVE_SELECTED" "$NATIVE_RESULT"
+          check_lane 'Agent Plugin packaging' "$PLUGIN_SELECTED" "$PLUGIN_RESULT"
+          check_lane 'Container packaging' "$CONTAINER_SELECTED" "$CONTAINER_RESULT"
+          check_lane 'Release integrity' "$INTEGRITY_SELECTED" "$INTEGRITY_RESULT"
+          check_lane 'Packaged acceptance' "$ACCEPTANCE_SELECTED" "$ACCEPTANCE_RESULT"
+          echo "Package validation scope '$MODE' passed."

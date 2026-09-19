@@ -103,6 +103,16 @@ service, standalone relay, platform service files, and built Copilot plugin acco
 to `distribution/release-artifacts.json`. A separate hosted lane builds the portable
 Agent Plugin once and emits its provenance.
 
+A fail-closed package plan resolves the complete pull-request file set once before
+runner-intensive jobs start. Rust, application, release-manifest, installer,
+marketplace, packaging, package-workflow, or unknown package-owned changes retain the
+complete native, Agent Plugin, container, integrity, and acceptance matrix. Changes
+limited to the Host Extension select only Agent Plugin packaging, while changes to
+container-validation support select only the container lanes. Distribution
+documentation and unrelated CI support publish the stable `Package validation`
+context without building candidates. File-discovery failures and inventories at
+GitHub's 3,000-file limit expand back to the complete matrix.
+
 The package gate creates each native archive twice and requires byte-identical output,
 extracts it outside the source tree, runs the packaged CLI, and requires `konclave
 doctor` to recognize the packaged daemon and plugin. Candidates are uploaded as transient unsigned workflow artifacts used only to
