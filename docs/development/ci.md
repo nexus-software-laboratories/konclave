@@ -16,6 +16,15 @@ Validation is grouped per pull request. A new head revision cancels the prior ru
 that pull request, while each manual dispatch uses its unique run identifier. Stale
 commits therefore cannot consume runner capacity or report after the current head.
 
+`Workflow syntax` is an independent five-minute merge gate on every pull-request
+revision. It downloads the pinned Linux x64 actionlint `1.7.12` archive, verifies its
+SHA-256 digest, proves the binary rejects a deterministic invalid fixture, and checks
+every top-level GitHub Actions workflow. The gate disables ShellCheck and pyflakes
+integration because command bodies have separate repository checks; its purpose is a
+fast signal for workflow YAML, expression, action, and schema failures. Keeping this
+gate outside the primary workflow lets it report when another workflow file cannot be
+loaded.
+
 The final `CI` verdict also reads the completed jobs from its own workflow attempt and
 publishes one-day performance evidence without scheduling another runner. The job
 summary and JSON artifact report initial runner delay, observed workflow span, summed

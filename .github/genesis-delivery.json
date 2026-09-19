@@ -6,6 +6,7 @@
   "ciWorkflow": "CI",
   "requiredChecks": [
     "CI",
+    "Workflow syntax",
     "A2A conformance",
     "Adapter conformance",
     "Actions storage conformance",
@@ -54,6 +55,7 @@
         "guidance-policy",
         "dependabot-validation",
         "ci",
+        "workflow-syntax",
         "pr-base/base",
         "pr-title/title",
         "pr-review-policy/evaluate",
@@ -103,6 +105,17 @@
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/workflow-syntax.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Workflow syntax"
+      ]
+    },
     {
       "source": "project",
       "path": ".github/workflows/a2a-conformance.yml",

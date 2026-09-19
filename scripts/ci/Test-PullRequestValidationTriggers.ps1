@@ -8,6 +8,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $workflowRoot = Join-Path $repositoryRoot '.github' 'workflows'
 $contracts = [ordered]@{
     'ci.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'workflow-syntax.yml' = '    types: [opened, synchronize, reopened]'
     'a2a-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'adapter-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'actions-storage-conformance.yml' = '    types: [opened, synchronize, reopened]'
