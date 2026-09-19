@@ -13,6 +13,47 @@ $packageWorkflowPath = Join-Path `
     'workflows' `
     'package-validation.yml'
 $workflowContent = Get-Content -LiteralPath $packageWorkflowPath -Raw
+
+function Get-WorkflowJobBlock {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Job
+    )
+
+    $escapedJob = [regex]::Escape($Job)
+    $match = [regex]::Match(
+        $workflowContent,
+        "(?ms)^  ${escapedJob}:\r?\n(?<body>.*?)(?=^  [a-z0-9][a-z0-9-]*:\r?\n|\z)"
+    )
+    if (-not $match.Success) {
+        throw "Package workflow is missing job '$Job'."
+    }
+    return $match.Groups['body'].Value
+}
+
+$acceptanceJob = Get-WorkflowJobBlock -Job 'packaged-acceptance'
+foreach ($required in @(
+    '      - package-native',
+    '      - package-plugin',
+    '      - package-container'
+)) {
+    if (-not $acceptanceJob.Contains($required)) {
+        throw "Packaged acceptance is missing dependency '$required'."
+    }
+}
+if ($acceptanceJob.Contains('      - release-integrity')) {
+    throw 'Packaged acceptance waits for release integrity instead of overlapping it.'
+}
+$aggregateJob = Get-WorkflowJobBlock -Job 'package-validation'
+foreach ($required in @(
+    '      - release-integrity',
+    '      - packaged-acceptance'
+)) {
+    if (-not $aggregateJob.Contains($required)) {
+        throw "Package validation aggregate is missing '$required'."
+    }
+}
+
 $directContainerScripts = @(
     [regex]::Matches(
         $workflowContent,
