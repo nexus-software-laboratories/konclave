@@ -33,6 +33,9 @@ while unrelated Konclave tools remain absent until ordinary tool search loads th
 The extension also marks `send_message` as the turn's required tool through the
 session-scoped RPC before model execution begins. A host that cannot resolve the
 required tool rejects admission rather than starting an incapable autonomous turn.
+The pre-tool hook stages its daemon-issued one-use authorization privately, and the
+handler injects it only after exact argument matching. The token never appears in
+model-visible tool arguments or later conversation history.
 
 ## Injection timing
 

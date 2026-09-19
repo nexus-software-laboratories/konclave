@@ -52,9 +52,19 @@ export interface CopilotPolicyGate {
   canCompleteTurn(authorization: CollaborationTurnAuthorization): boolean;
   activate(authorization: CollaborationTurnAuthorization): void;
   observePrompt(prompt: string): void;
+  prepareToolArguments(toolName: string, toolArgs: unknown): unknown;
   clear(): void;
   readonly active: boolean;
   readonly lastDecision: string | null;
+}
+
+interface PendingSendAuthorization {
+  readonly turn: CollaborationTurnAuthorization;
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly replyToMessageId: string;
+  readonly text: string;
+  readonly authorization: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -189,6 +199,14 @@ function toolArgumentRecord(value: unknown): Record<string, unknown> | null {
   }
 }
 
+function withoutCallerAuthorization(
+  value: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => key !== collaborationAuthorizationArgument),
+  );
+}
+
 function authorizationTokenInTrustedHeader(prompt: string, expectedToken?: string): boolean {
   if (!prompt.startsWith('Konclave delivered ')) {
     return false;
@@ -218,6 +236,41 @@ function hasOnlySendArgumentKeys(value: Readonly<Record<string, unknown>>): bool
   return keys.length <= sendArgumentKeys.size && keys.every((key) => sendArgumentKeys.has(key));
 }
 
+function parseSendArguments(
+  value: Readonly<Record<string, unknown>>,
+  authorization: CollaborationTurnAuthorization,
+): {
+  readonly conversation_id: string;
+  readonly message_id: string;
+  readonly reply_to_message_id?: string | null;
+  readonly text: string;
+} | null {
+  if (
+    !hasOnlySendArgumentKeys(value) ||
+    value.conversation_id !== authorization.conversation ||
+    typeof value.message_id !== 'string' ||
+    !hex16.test(value.message_id) ||
+    typeof value.text !== 'string' ||
+    Buffer.byteLength(value.text, 'utf8') === 0 ||
+    Buffer.byteLength(value.text, 'utf8') > maxMessageTextBytes ||
+    (value.reply_to_message_id !== undefined &&
+      value.reply_to_message_id !== null &&
+      (typeof value.reply_to_message_id !== 'string' ||
+        !hex16.test(value.reply_to_message_id) ||
+        value.reply_to_message_id !== authorization.requestMessageId))
+  ) {
+    return null;
+  }
+  return {
+    conversation_id: value.conversation_id,
+    message_id: value.message_id,
+    ...(value.reply_to_message_id === undefined
+      ? {}
+      : { reply_to_message_id: value.reply_to_message_id }),
+    text: value.text,
+  };
+}
+
 function targetsAuthorizedConversation(
   action: ToolAction,
   toolArgs: Readonly<Record<string, unknown>>,
@@ -245,6 +298,7 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
   let active: ActiveCollaborationTurn | null = null;
   let pending: CollaborationTurnAuthorization | null = null;
   let delayed: CollaborationTurnAuthorization | null = null;
+  let pendingSendAuthorization: PendingSendAuthorization | null = null;
   let lastDecision: string | null = null;
   const deny = (reason: string, message: string) => {
     lastDecision = reason;
@@ -280,37 +334,29 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
             return deny('tool_unmapped', 'The active Konclave policy does not map this tool.');
           }
           const authorization = turn.authorization;
-          const toolArguments = toolArgumentRecord(input.toolArgs);
-          if (!toolArguments) {
+          const rawToolArguments = toolArgumentRecord(input.toolArgs);
+          if (!rawToolArguments) {
             return deny('tool_arguments_malformed', 'Konclave tool arguments are malformed.');
           }
+          const toolArguments = withoutCallerAuthorization(rawToolArguments);
           if (!targetsAuthorizedConversation(action, toolArguments, authorization.conversation)) {
             return deny(
               'conversation_mismatch',
               'The active Konclave turn is bound to a different conversation.',
             );
           }
-          if (Object.hasOwn(toolArguments, collaborationAuthorizationArgument)) {
-            return deny(
-              'send_authorization_caller_supplied',
-              `Do not include ${collaborationAuthorizationArgument}; the Konclave policy hook injects it.`,
-            );
-          }
-          if (
-            action.action === 'conversation.reply' &&
-            (!hasOnlySendArgumentKeys(toolArguments) ||
-              typeof toolArguments.message_id !== 'string' ||
-              !hex16.test(toolArguments.message_id) ||
-              typeof toolArguments.text !== 'string' ||
-              Buffer.byteLength(toolArguments.text, 'utf8') === 0 ||
-              Buffer.byteLength(toolArguments.text, 'utf8') > maxMessageTextBytes ||
-              (toolArguments.reply_to_message_id !== undefined &&
-                toolArguments.reply_to_message_id !== null &&
-                (typeof toolArguments.reply_to_message_id !== 'string' ||
-                  !hex16.test(toolArguments.reply_to_message_id) ||
-                  toolArguments.reply_to_message_id !== authorization.requestMessageId)))
-          ) {
+          const sendArguments =
+            action.action === 'conversation.reply'
+              ? parseSendArguments(toolArguments, authorization)
+              : null;
+          if (action.action === 'conversation.reply' && sendArguments === null) {
             return deny('send_arguments_malformed', 'Konclave send arguments are malformed.');
+          }
+          if (pendingSendAuthorization !== null) {
+            return deny(
+              'send_authorization_pending',
+              'Konclave already authorized one reply for this collaboration turn.',
+            );
           }
           const result = parseActionDecision(
             await client.request(collaborationOperations.evaluateAction, {
@@ -318,9 +364,9 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
               policyDigest: authorization.policyDigest,
               action: action.action,
               resource: action.resource ?? null,
-              messageId: toolArguments?.message_id,
+              messageId: sendArguments?.message_id,
               replyToMessageId: authorization.requestMessageId,
-              text: toolArguments?.text,
+              text: sendArguments?.text,
               requestMessageId: authorization.requestMessageId,
               attempt: authorization.attempt,
             }),
@@ -340,18 +386,38 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
               'Konclave did not issue a send authorization.',
             );
           }
+          if (sendArguments === null) {
+            return deny('send_arguments_malformed', 'Konclave send arguments are malformed.');
+          }
+          pendingSendAuthorization = {
+            turn: authorization,
+            conversationId: authorization.conversation,
+            messageId: sendArguments.message_id,
+            replyToMessageId: authorization.requestMessageId,
+            text: sendArguments.text,
+            authorization: result.authorization,
+          };
           lastDecision = 'authorized';
           return {
             modifiedArgs: {
-              ...toolArguments,
+              ...sendArguments,
               reply_to_message_id: authorization.requestMessageId,
-              [collaborationAuthorizationArgument]: result.authorization,
             },
             additionalContext:
               'Konclave policy permits this action, but normal Copilot permissions still apply.',
           };
         } catch {
           return deny('gate_unavailable', 'Konclave policy evaluation was unavailable.');
+        }
+      },
+      onPostToolUse(input) {
+        if (normalizedToolName(input.toolName) === collaborationReplyToolName) {
+          pendingSendAuthorization = null;
+        }
+      },
+      onPostToolUseFailure(input) {
+        if (normalizedToolName(input.toolName) === collaborationReplyToolName) {
+          pendingSendAuthorization = null;
         }
       },
     },
@@ -427,6 +493,42 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
           ? { kind: 'blocked', authorization: null }
           : null;
       }
+    },
+    prepareToolArguments(toolName, toolArgs) {
+      if (normalizedToolName(toolName) !== collaborationReplyToolName) {
+        return toolArgs;
+      }
+      const pendingAuthorization = pendingSendAuthorization;
+      if (pendingAuthorization === null) {
+        if (active?.kind === 'authorized') {
+          throw new Error('Konclave collaboration send authorization is unavailable.');
+        }
+        return toolArgs;
+      }
+      pendingSendAuthorization = null;
+      const turn = active;
+      if (
+        !turn ||
+        turn.kind !== 'authorized' ||
+        !isSameTurn(turn.authorization, pendingAuthorization.turn)
+      ) {
+        throw new Error('Konclave collaboration turn changed after authorization.');
+      }
+      const record = toolArgumentRecord(toolArgs);
+      if (
+        record === null ||
+        Object.hasOwn(record, collaborationAuthorizationArgument) ||
+        record.conversation_id !== pendingAuthorization.conversationId ||
+        record.message_id !== pendingAuthorization.messageId ||
+        record.reply_to_message_id !== pendingAuthorization.replyToMessageId ||
+        record.text !== pendingAuthorization.text
+      ) {
+        throw new Error('Konclave collaboration send arguments changed after authorization.');
+      }
+      return {
+        ...record,
+        [collaborationAuthorizationArgument]: pendingAuthorization.authorization,
+      };
     },
     clear() {
       active = null;

@@ -184,3 +184,58 @@ function Select-ActionsCacheDeletion {
         retainedCount = $Caches.Count - $deleteIds.Count
     }
 }
+
+function Get-ActionsStorageCleanupPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('schedule', 'workflow_dispatch', 'workflow_run')]
+        [string]$EventName,
+
+        [string]$SourceWorkflowPath = '',
+        [string]$SourceConclusion = '',
+        [string]$SourceHeadBranch = '',
+        [string]$DefaultBranch = '',
+
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$ArtifactCount = 0
+    )
+
+    if ($EventName -ne 'workflow_run') {
+        return [pscustomobject]@{
+            DeleteArtifacts = $true
+            PruneCaches = $true
+        }
+    }
+    if (
+        [string]::IsNullOrWhiteSpace($SourceWorkflowPath) -or
+        [string]::IsNullOrWhiteSpace($SourceHeadBranch) -or
+        [string]::IsNullOrWhiteSpace($DefaultBranch)
+    ) {
+        throw 'Workflow-run cleanup evidence is incomplete.'
+    }
+
+    $agentPluginWorkflow = '.github/workflows/agent-plugin-conformance.yml'
+    $packageWorkflow = '.github/workflows/package-validation.yml'
+    $publishWorkflow = '.github/workflows/publish-prerelease.yml'
+    if (
+        $SourceWorkflowPath -notin @(
+            $agentPluginWorkflow,
+            $packageWorkflow,
+            $publishWorkflow
+        )
+    ) {
+        throw "Unsupported cleanup source workflow '$SourceWorkflowPath'."
+    }
+
+    $deleteArtifacts =
+        $ArtifactCount -gt 0 -and
+        (
+            $SourceWorkflowPath -cne $publishWorkflow -or
+            $SourceConclusion -ceq 'success'
+        )
+    return [pscustomobject]@{
+        DeleteArtifacts = $deleteArtifacts
+        PruneCaches = $SourceHeadBranch -ceq $DefaultBranch
+    }
+}

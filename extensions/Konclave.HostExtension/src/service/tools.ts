@@ -83,6 +83,7 @@ export interface RegisteredTool extends Tool<unknown> {
 export interface ToolRegistrationOptions {
   readonly client: LocalServiceClient;
   readonly toolDeadlineMs?: number;
+  readonly prepareArguments?: (operation: ToolOperation, args: unknown) => unknown;
 }
 
 const defaultToolDeadlineMs = 90_000;
@@ -128,9 +129,10 @@ export function createKonclaveTools(options: ToolRegistrationOptions): Registere
     parameters: definition.parameters,
     defer: alwaysLoadedTools.has(definition.name) ? 'never' : 'auto',
     async handler(args: unknown, invocation?: ToolInvocation) {
+      const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
       return options.client.request(
         definition.name,
-        args ?? {},
+        preparedArgs,
         invocation ? { deadlineMs: deadline, requestId: toolRequestId(invocation) } : deadline,
       );
     },
