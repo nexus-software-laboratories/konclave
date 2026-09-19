@@ -18,7 +18,7 @@ dependencies = [
  "log",
  "reqwest",
  "rustix",
- "sha2",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
@@ -39,7 +39,7 @@ dependencies = [
  "mls-rs-crypto-awslc",
  "opaque-ke",
  "rand 0.8.8",
- "sha2",
+ "sha2 0.11.0",
  "thiserror",
  "zeroize",
 ]
@@ -78,7 +78,7 @@ name = "KonclaveRelayAuthentication"
 version = "0.1.14"
 dependencies = [
  "KonclaveDomainCore",
- "sha2",
+ "sha2 0.11.0",
  "thiserror",
 ]
 
@@ -1972,6 +1972,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2328,7 +2339,7 @@ dependencies = [
  "elliptic-curve",
  "generic-array",
  "rand_core 0.6.4",
- "sha2",
+ "sha2 0.10.9",
  "subtle",
  "zeroize",
 ]
