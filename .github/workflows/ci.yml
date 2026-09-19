@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
   workflow_dispatch:
     inputs:
       validation_scope:
@@ -27,6 +27,7 @@ concurrency:
 jobs:
   source-policy:
     name: PR source policy
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -409,7 +410,7 @@ jobs:
       - container-ci
       - local-daemon-daemon-packaging
       - dependabot-validation
-    if: ${{ !cancelled() }}
+    if: ${{ github.event.action != 'closed' && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

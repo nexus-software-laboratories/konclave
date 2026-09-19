@@ -23,6 +23,9 @@ future workflow edit cannot silently restore duplicate compilation.
 Validation is grouped per pull request. A new head revision cancels the prior run for
 that pull request, while each manual dispatch uses its unique run identifier. Stale
 commits therefore cannot consume runner capacity or report after the current head.
+Closing or merging a pull request also emits no-work CI, Adapter, and PR-base runs in
+their existing concurrency groups. Those sentinels allocate no validation job and
+cancel any older run still queued or active for the pull request.
 
 `Workflow syntax` is an independent five-minute merge gate on every pull-request
 revision. It downloads the pinned Linux x64 actionlint `1.7.12` archive, verifies its
