@@ -6,6 +6,7 @@
   "ciWorkflow": "CI",
   "requiredChecks": [
     "CI",
+    "Workflow syntax",
     "A2A conformance",
     "Adapter conformance",
     "Actions storage conformance",
@@ -54,6 +55,7 @@
         "guidance-policy",
         "dependabot-validation",
         "ci",
+        "workflow-syntax",
         "pr-base/base",
         "pr-title/title",
         "pr-review-policy/evaluate",
@@ -65,6 +67,7 @@
         "agent-plugin-conformance",
         "authorization-reload-conformance",
         "extension-startup-conformance",
+        "resolve-package-scope",
         "package-plugin",
         "publish",
         "authorization-store-conformance",
@@ -75,6 +78,7 @@
         "native-installer-lifecycle",
         "service-failure-contract",
         "generic-client-conformance",
+        "resolve-installer-scope",
         "installer-lifecycle-conformance",
         "marketplace-conformance",
         "marketplace-materialization",
@@ -103,6 +107,17 @@
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/workflow-syntax.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Workflow syntax"
+      ]
+    },
     {
       "source": "project",
       "path": ".github/workflows/a2a-conformance.yml",

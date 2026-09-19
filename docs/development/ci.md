@@ -12,9 +12,46 @@ validation never consumes PitCrew or another self-hosted runner.
 - `ubuntu-latest`, `windows-latest`, `macos-15`, and `macos-15-intel`
   (GitHub-hosted) build and exercise native unsigned release candidates.
 
+The Rust workspace lane starts directly with `cargo test --workspace`. It does not
+repeat a debug `cargo build` first: all-target Clippy owns compile-only target
+coverage, while ready-only package validation builds the release binaries that ship.
+The separate fuzz manifest is compiled and linted once through its pinned Clippy
+command instead of receiving an earlier duplicate `cargo check`.
+`scripts/ci/Test-CiWorkDeduplication.ps1` keeps these responsibilities separate so a
+future workflow edit cannot silently restore duplicate compilation.
+
 Validation is grouped per pull request. A new head revision cancels the prior run for
 that pull request, while each manual dispatch uses its unique run identifier. Stale
 commits therefore cannot consume runner capacity or report after the current head.
+Closing or merging a pull request also emits no-work CI, Adapter, and PR-base runs in
+their existing concurrency groups. Those sentinels allocate no validation job and
+cancel any older run still queued or active for the pull request.
+
+`Workflow syntax` is an independent five-minute merge gate on every pull-request
+revision. It downloads the pinned Linux x64 actionlint `1.7.12` archive, verifies its
+SHA-256 digest, proves the binary rejects a deterministic invalid fixture, and checks
+every top-level GitHub Actions workflow. The gate disables ShellCheck and pyflakes
+integration because command bodies have separate repository checks; its purpose is a
+fast signal for workflow YAML, expression, action, and schema failures. Keeping this
+gate outside the primary workflow lets it report when another workflow file cannot be
+loaded.
+
+The final `CI` verdict also reads the executed, completed jobs from its own workflow
+attempt and publishes one-day performance evidence without scheduling another runner.
+Skipped jobs are excluded because GitHub may publish synthetic timestamps for them
+that are not execution intervals. The job summary and JSON artifact report initial
+runner delay, observed workflow span, summed job occupancy, active coverage, parallel
+overlap, idle gaps, and the slowest jobs and steps. These measurements describe
+elapsed Actions execution rather than CPU usage or billed cost, and they remain
+fail-closed if GitHub returns malformed or incomplete timing data.
+
+Feature conformance workflows use one shared, fail-closed ownership resolver. Host
+Extension changes select only the client, pairing, alias, or user-presence contracts
+that own the changed source or test surface; generic runtime, policy, and tool
+changes remain with Agent Plugin and startup validation instead of compiling six
+unrelated Rust integration graphs. Workflow changes, Cargo workspace changes,
+manual dispatches, missing changed-file evidence, and GitHub's 3,000-file boundary
+select the affected component conservatively.
 
 Routine Dependabot minor and patch updates are grouped once per Cargo and GitHub
 Actions ecosystem. Major updates remain separate so compatibility changes stay
@@ -86,6 +123,16 @@ service, standalone relay, platform service files, and built Copilot plugin acco
 to `distribution/release-artifacts.json`. A separate hosted lane builds the portable
 Agent Plugin once and emits its provenance.
 
+A fail-closed package plan resolves the complete pull-request file set once before
+runner-intensive jobs start. Rust, application, release-manifest, installer,
+marketplace, packaging, package-workflow, or unknown package-owned changes retain the
+complete native, Agent Plugin, container, integrity, and acceptance matrix. Changes
+limited to the Host Extension select only Agent Plugin packaging, while changes to
+container-validation support select only the container lanes. Distribution
+documentation and unrelated CI support publish the stable `Package validation`
+context without building candidates. File-discovery failures and inventories at
+GitHub's 3,000-file limit expand back to the complete matrix.
+
 The package gate creates each native archive twice and requires byte-identical output,
 extracts it outside the source tree, runs the packaged CLI, and requires `konclave
 doctor` to recognize the packaged daemon and plugin. Candidates are uploaded as transient unsigned workflow artifacts used only to
@@ -100,6 +147,11 @@ itself as complete merely by omitting a checksum line. Negative tests mutate, re
 pass. A trusted reusable-workflow caller may retain the complete set as a one-day
 Actions artifact; pull-request validation does not.
 
+`Packaged clean-install acceptance` consumes the Linux native and container candidates
+directly, so it starts alongside `Release integrity` after package production rather
+than waiting for release-set assembly. The final `Package validation` aggregate still
+requires both jobs to pass.
+
 Repository artifact and log retention is capped at one day through the repository
 setting. The repository `GITHUB_TOKEN` cannot read that administrative setting, so
 workflows enforce one-day retention on every upload rather than fabricating a runtime
@@ -112,6 +164,13 @@ The newest invocation therefore subsumes older queued or interrupted cleanup wit
 orphaning bytes. Failed publication runs keep their candidate for at most one day so
 a maintainer can diagnose or resume a draft or tag failure without presenting it as
 a release.
+
+The authorization job first plans whether any reconciliation work exists. Pull
+requests cannot persist caches, so a no-artifact package or Agent Plugin run stops
+after that one planner instead of scheduling artifact deletion and cache pruning.
+Artifact-producing pull requests schedule deletion only; default-branch, scheduled,
+and trusted manual runs may also prune caches. Failed publication artifacts remain
+available for diagnosis while its trusted default-branch caches stay bounded.
 
 Pull requests may restore Rust caches created from `main`, but cannot persist new
 Rust or npm caches. Trusted `main` runs share npm's content-addressed download store
@@ -175,6 +234,13 @@ check. The platform jobs exercise pure install/update/rollback/uninstall decisio
 owner-only state, bounded archive extraction, legacy-extension preservation, and
 failed-update recovery. Windows additionally installs, inspects, stops, and removes
 the exact limited scheduled task used by the per-user supervisor.
+
+One hosted resolver now selects installer ownership before the platform matrix is
+expanded. Unrelated pull requests publish the stable aggregate after the resolver
+without allocating Windows or macOS runners; installer, package-workflow,
+distribution, platform-packaging, installation, and packaging changes retain all
+three platforms. Missing changed-file evidence and the 3,000-file boundary remain
+conservative.
 
 Ready-only package validation invokes the installer from each extracted client
 archive with an isolated empty data root. Release integrity also checksums the

@@ -7,9 +7,10 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $workflowRoot = Join-Path $repositoryRoot '.github' 'workflows'
 $contracts = [ordered]@{
-    'ci.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'ci.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]'
+    'workflow-syntax.yml' = '    types: [opened, synchronize, reopened]'
     'a2a-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
-    'adapter-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'adapter-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]'
     'actions-storage-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'agent-plugin-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'authorization-reload-conformance.yml' = '    types: [opened, synchronize, reopened]'
@@ -28,7 +29,7 @@ $contracts = [ordered]@{
     'user-presence-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'package-validation.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
     'pr-title.yml' = '    types: [opened, edited, synchronize, reopened]'
-    'pr-base.yml' = '    types: [opened, edited, synchronize, reopened]'
+    'pr-base.yml' = '    types: [opened, edited, synchronize, reopened, closed]'
 }
 
 foreach ($entry in $contracts.GetEnumerator()) {
@@ -52,10 +53,19 @@ if ($reviewPolicyTrigger -cnotin $reviewPolicyLines) {
 $prBase = Get-Content -LiteralPath (Join-Path $workflowRoot 'pr-base.yml') -Raw
 foreach ($required in @(
     'PREVIOUS_BASE_REF: ${{ github.event.changes.base.ref.from || '''' }}',
-    'Close and reopen it, or push a new commit'
+    'Close and reopen it, or push a new commit',
+    'group: pr-base-${{ github.event.pull_request.number }}',
+    "github.event.action != 'closed'"
 )) {
     if (-not $prBase.Contains($required)) {
         throw "PR base retarget recovery is missing '$required'."
+    }
+
+    foreach ($workflow in @('ci.yml', 'adapter-conformance.yml')) {
+        $content = Get-Content -LiteralPath (Join-Path $workflowRoot $workflow) -Raw
+        if (-not $content.Contains("github.event.action != 'closed'")) {
+            throw "$workflow does not suppress jobs on the cancellation sentinel."
+        }
     }
 }
 

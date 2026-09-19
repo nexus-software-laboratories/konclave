@@ -24,9 +24,20 @@ permissions:
 jobs:
   authorize-storage-cleanup:
     name: Authorize storage cleanup
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      delete_artifacts: ${{ steps.plan.outputs.delete_artifacts }}
+      prune_caches: ${{ steps.plan.outputs.prune_caches }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci/ActionsStoragePolicy.Functions.ps1
+          sparse-checkout-cone-mode: false
       - name: Require trusted manual dispatch
         if: github.event_name == 'workflow_dispatch'
         shell: bash
@@ -48,23 +59,56 @@ jobs:
             echo 'Manual storage cleanup requires the current default-branch head.' >&2
             exit 1
           fi
+      - name: Resolve cleanup work
+        id: plan
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
+          SOURCE_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || 0 }}
+          SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path || '' }}
+        run: |
+          . ./scripts/ci/ActionsStoragePolicy.Functions.ps1
+
+          $artifactCount = 0
+          if ($env:EVENT_NAME -ceq 'workflow_run') {
+            $artifactCountOutput = @(
+              gh api `
+                "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN_ID/artifacts?per_page=1" `
+                --jq '.total_count' 2>&1
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw (
+                "Could not inspect source-run artifacts.`n" +
+                ($artifactCountOutput -join "`n")
+              )
+            }
+            $artifactCount = [int](($artifactCountOutput -join '').Trim())
+          }
+
+          $plan = Get-ActionsStorageCleanupPlan `
+            -EventName $env:EVENT_NAME `
+            -SourceWorkflowPath $env:SOURCE_WORKFLOW_PATH `
+            -SourceConclusion $env:SOURCE_CONCLUSION `
+            -SourceHeadBranch $env:SOURCE_HEAD_BRANCH `
+            -DefaultBranch $env:DEFAULT_BRANCH `
+            -ArtifactCount $artifactCount
+          "delete_artifacts=$($plan.DeleteArtifacts.ToString().ToLowerInvariant())" |
+            Out-File $env:GITHUB_OUTPUT -Append
+          "prune_caches=$($plan.PruneCaches.ToString().ToLowerInvariant())" |
+            Out-File $env:GITHUB_OUTPUT -Append
+          Write-Output (
+            "Storage cleanup plan: artifacts=$artifactCount, " +
+            "delete=$($plan.DeleteArtifacts), prune=$($plan.PruneCaches)."
+          )
 
   delete-run-artifacts:
     name: Delete transient artifacts
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (
-        github.event_name == 'workflow_run' &&
-        (
-          github.event.workflow_run.path == '.github/workflows/agent-plugin-conformance.yml' ||
-          github.event.workflow_run.path == '.github/workflows/package-validation.yml' ||
-          (
-            github.event.workflow_run.path == '.github/workflows/publish-prerelease.yml' &&
-            github.event.workflow_run.conclusion == 'success'
-          )
-        )
-      )
     needs: authorize-storage-cleanup
+    if: needs.authorize-storage-cleanup.outputs.delete_artifacts == 'true'
     permissions:
       actions: write
       contents: read
@@ -176,6 +220,7 @@ jobs:
   prune-actions-caches:
     name: Bound Actions caches
     needs: authorize-storage-cleanup
+    if: needs.authorize-storage-cleanup.outputs.prune_caches == 'true'
     permissions:
       actions: write
       contents: read

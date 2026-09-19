@@ -17,12 +17,12 @@ require_single_version() {
     fi
 }
 
-require_single_version log v0.4.33
+require_single_version log v0.4.34
 require_single_version rustls-webpki v0.103.14
 require_single_version aws-lc-rs v1.16.3
 require_single_version opaque-ke v4.0.1
 
-log_features="$(cargo tree --workspace --locked -e features -i log@0.4.33)"
+log_features="$(cargo tree --workspace --locked -e features -i log@0.4.34)"
 for required_feature in max_level_debug release_max_level_info; do
     if ! grep -Fq "log feature \"$required_feature\"" <<<"$log_features"; then
         echo "::error::log feature '$required_feature' is required to compile dependency trace logging out."

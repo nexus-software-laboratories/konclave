@@ -3,7 +3,7 @@ name: Adapter conformance
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   adapter-conformance:
     name: Adapter conformance
-    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    if: ${{ github.event.action != 'closed' && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:

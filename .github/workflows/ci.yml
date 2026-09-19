@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
   workflow_dispatch:
     inputs:
       validation_scope:
@@ -27,6 +27,7 @@ concurrency:
 jobs:
   source-policy:
     name: PR source policy
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -71,6 +72,15 @@ jobs:
       - name: Verify Actions storage policy
         shell: pwsh
         run: ./scripts/ci/Test-ActionsStoragePolicy.ps1
+      - name: Verify CI performance evidence
+        shell: pwsh
+        run: ./scripts/ci/Test-CiPerformanceEvidence.ps1
+      - name: Verify component validation scope
+        shell: pwsh
+        run: ./scripts/ci/Test-ComponentValidationScope.ps1
+      - name: Verify CI work deduplication
+        shell: pwsh
+        run: ./scripts/ci/Test-CiWorkDeduplication.ps1
 
   dependabot-validation:
     needs: source-policy
@@ -159,11 +169,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo build --workspace --verbose
       - run: cargo test --workspace --verbose
       - run: cargo test -p KonclaveSecretStorage --no-default-features
       - run: cargo test -p KonclaveSecretStorage --no-default-features --features sqlite
-      - run: cargo check --locked --manifest-path fuzz/Cargo.toml --bin protocol_v1_decode
 
   rust-lint:
     needs: validation-plan
@@ -389,6 +397,9 @@ jobs:
 
   ci:
     name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
+    permissions:
+      actions: read
+      contents: read
     needs:
       - source-policy
       - validation-plan
@@ -399,7 +410,7 @@ jobs:
       - container-ci
       - local-daemon-daemon-packaging
       - dependabot-validation
-    if: ${{ !cancelled() }}
+    if: ${{ github.event.action != 'closed' && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -439,3 +450,34 @@ jobs:
           if [ "$SCOPE" = "full" ] && [ "$CONTAINER_RESULT" != "success" ]; then exit 1; fi
           if [ "$SCOPE" = "full" ] && [ "$DAEMON_PACKAGING_RESULT" != "success" ]; then exit 1; fi
           echo "Validation scope '$SCOPE' passed."
+      - name: Checkout CI performance evidence
+        if: ${{ always() }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci/CiPerformance.Functions.ps1
+            scripts/ci/Write-CiPerformanceEvidence.ps1
+          sparse-checkout-cone-mode: false
+      - name: Publish CI performance evidence
+        id: performance-evidence
+        if: ${{ always() }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/ci/Write-CiPerformanceEvidence.ps1 `
+            -Repository $env:GITHUB_REPOSITORY `
+            -RunId ([long]$env:GITHUB_RUN_ID) `
+            -Attempt ([int]$env:GITHUB_RUN_ATTEMPT) `
+            -OutputDirectory (Join-Path $env:RUNNER_TEMP 'ci-performance')
+      - name: Upload CI performance evidence
+        if: ${{ always() && steps.performance-evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-performance/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
