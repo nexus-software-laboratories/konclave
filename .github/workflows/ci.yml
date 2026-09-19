@@ -459,6 +459,7 @@ jobs:
             scripts/ci/Write-CiPerformanceEvidence.ps1
           sparse-checkout-cone-mode: false
       - name: Publish CI performance evidence
+        id: performance-evidence
         if: ${{ always() }}
         shell: pwsh
         env:
@@ -470,7 +471,7 @@ jobs:
             -Attempt ([int]$env:GITHUB_RUN_ATTEMPT) `
             -OutputDirectory (Join-Path $env:RUNNER_TEMP 'ci-performance')
       - name: Upload CI performance evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.performance-evidence.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-performance-${{ github.run_id }}-${{ github.run_attempt }}
