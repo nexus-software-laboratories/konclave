@@ -8,6 +8,7 @@ import {
 import { frameDelivery, untrustedContentMarkers } from '../src/adapter/framing.js';
 import {
   collaborationAuthorizationArgument,
+  collaborationReplyToolName,
   collaborationTurnTokenLabel,
 } from '../src/collaboration-contract.js';
 import type {
@@ -280,14 +281,13 @@ describe('delivery coordinator', () => {
   it('acknowledges an authorized request only after its model turn completes', async () => {
     const state = harness();
     const complete = vi.fn().mockResolvedValue('completed-no-response');
+    const send = vi.fn(async (message) => {
+      state.sent.push(message.prompt);
+      return 'message-id';
+    });
     const delivery = createDeliveryCoordinator({
       channel: state.channel,
-      session: {
-        async send(message) {
-          state.sent.push(message.prompt);
-          return 'message-id';
-        },
-      },
+      session: { send },
       diagnostics: { error: (message) => state.errors.push(message) },
       authorizeTurn: async ([request]) => (request ? authorizationFor(request) : null),
       completeAuthorizedTurn: complete,
@@ -298,6 +298,12 @@ describe('delivery coordinator', () => {
     await delivery.markIdle();
 
     expect(state.sent).toHaveLength(1);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'enqueue',
+        requiredTool: collaborationReplyToolName,
+      }),
+    );
     expect(delivery.outstanding).toBe(true);
     expect(state.requests).toHaveLength(0);
     delivery.markActive();

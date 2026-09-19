@@ -30,6 +30,9 @@ turn can reserve at most one ordinary-text response correlated to the request.
 The extension always preloads only the `send_message` tool. The autonomous turn
 therefore cannot lose its single permitted effect behind deferred tool discovery,
 while unrelated Konclave tools remain absent until ordinary tool search loads them.
+The extension also marks `send_message` as the turn's required tool through the
+session-scoped RPC before model execution begins. A host that cannot resolve the
+required tool rejects admission rather than starting an incapable autonomous turn.
 
 ## Injection timing
 

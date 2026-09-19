@@ -182,16 +182,25 @@ class FakeProcessController implements ProcessController {
   }
 }
 
-function createSessionMock() {
+function createSessionMock(options: { deferToolInitialization?: boolean } = {}) {
   const handlers = new Map<keyof EventHandlerMap, unknown>();
   const unsubscribeMocks: Partial<Record<keyof EventHandlerMap, ReturnType<typeof vi.fn>>> = {};
   const send = vi.fn().mockResolvedValue('message-1');
+  const rpcSend = vi.fn().mockResolvedValue({ messageId: 'message-1' });
+  let releaseToolInitialization = () => {};
+  const toolInitialization = options.deferToolInitialization
+    ? new Promise<void>((resolve) => {
+        releaseToolInitialization = resolve;
+      })
+    : Promise.resolve();
+  const initializeTools = vi.fn(() => toolInitialization);
   const log = vi.fn().mockResolvedValue(undefined);
   const disconnect = vi.fn().mockResolvedValue(undefined);
 
   const session: ExtensionSession = {
     disconnect,
     log,
+    rpc: { send: rpcSend, tools: { initializeAndValidate: initializeTools } },
     send,
     on(eventType, handler) {
       handlers.set(eventType as keyof EventHandlerMap, handler);
@@ -206,9 +215,13 @@ function createSessionMock() {
   return {
     handlers,
     disconnect,
+    initializeTools,
     log,
+    releaseToolInitialization,
+    rpcSend,
     send,
     session,
+    toolInitialization,
     unsubscribeMocks,
     emit<K extends keyof EventHandlerMap>(eventType: K, event: Parameters<EventHandlerMap[K]>[0]) {
       const handler = handlers.get(eventType) as
@@ -555,7 +568,7 @@ describe('bootExtension', () => {
   it('settles an authorized directed request only after the model turn becomes idle', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
-    const sessionMock = createSessionMock();
+    const sessionMock = createSessionMock({ deferToolInitialization: true });
     const client = queuedDirectedRequestClient();
 
     const controller = await bootExtension({
@@ -571,9 +584,22 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    const prompt = sessionMock.send.mock.calls[0]?.[0];
-    expect(prompt).toMatchObject({ mode: 'enqueue' });
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(sessionMock.initializeTools).toHaveBeenCalledTimes(1);
+    expect(sessionMock.rpcSend).not.toHaveBeenCalled();
+
+    sessionMock.releaseToolInitialization();
+    await sessionMock.toolInitialization;
+
+    expect(sessionMock.rpcSend).toHaveBeenCalledTimes(1);
+    const initializeOrder = sessionMock.initializeTools.mock.invocationCallOrder[0];
+    const sendOrder = sessionMock.rpcSend.mock.invocationCallOrder[0];
+    if (initializeOrder === undefined || sendOrder === undefined) {
+      throw new Error('required-tool admission calls were not observed');
+    }
+    expect(initializeOrder).toBeLessThan(sendOrder);
+    const prompt = sessionMock.rpcSend.mock.calls[0]?.[0];
+    expect(prompt).toMatchObject({ mode: 'enqueue', requiredTool: 'send_message' });
     expect(prompt).toHaveProperty('prompt', expect.stringContaining('confirm the contract'));
     expect(requestCount(client, 'collaboration.turn.authorize')).toBe(1);
     expect(requestCount(client, 'delivery.acknowledge')).toBe(0);

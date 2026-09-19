@@ -10,6 +10,7 @@ import type {
 } from '../adapter/session.js';
 import {
   collaborationAuthorizationArgument,
+  collaborationReplyToolName,
   collaborationTurnTokenLabel,
 } from '../collaboration-contract.js';
 import type { LocalServiceClient } from './client.js';
@@ -205,7 +206,7 @@ function authorizationTokenInTrustedHeader(prompt: string, expectedToken?: strin
 
 function toolAction(toolName: string): ToolAction | null {
   switch (normalizedToolName(toolName)) {
-    case 'send_message':
+    case collaborationReplyToolName:
       return { action: 'conversation.reply', conversationBound: true };
     default:
       return null;

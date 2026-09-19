@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { JoinSessionConfig as CopilotJoinSessionConfig } from '@github/copilot-sdk/extension';
 import type { SessionHooks } from '@github/copilot-sdk';
 
+import type { DeliveryPrompt, DeliverySession } from './adapter/delivery.js';
 import { createDeliveryCoordinator, startDeliveryRuntime } from './adapter/runtime.js';
 import type { LocalServiceClient } from './service/client.js';
 import { createLocalServiceDeliveryChannel } from './service/delivery.js';
@@ -75,6 +76,12 @@ export interface SessionShutdownEvent {
 
 export interface ExtensionSession {
   send(message: string | PromptMessage): Promise<string>;
+  rpc: {
+    send(message: DeliveryPrompt): Promise<{ readonly messageId: string }>;
+    tools: {
+      initializeAndValidate(): Promise<unknown>;
+    };
+  };
   log(
     message: string,
     options?: {
@@ -314,9 +321,16 @@ export async function bootExtension(
       policyGate,
     );
     const deliveryChannel = createLocalServiceDeliveryChannel(connectedClient);
+    const deliverySession: DeliverySession = {
+      async send(message) {
+        await session.rpc.tools.initializeAndValidate();
+        const sent = await session.rpc.send(message);
+        return sent.messageId;
+      },
+    };
     const coordinator = createDeliveryCoordinator({
       channel: deliveryChannel,
-      session,
+      session: deliverySession,
       diagnostics: options.diagnostics,
       authorizeTurn: (events) => policyGate.authorizeTurn(events),
       completeAuthorizedTurn: (authorization) => policyGate.completeTurn(authorization),
