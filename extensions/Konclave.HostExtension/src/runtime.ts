@@ -310,7 +310,12 @@ export async function bootExtension(
     const connectedClient = client;
     const policyGate = createCopilotPolicyGate(connectedClient);
     const session = await options.joinSession(
-      createExtensionJoinConfig(connectedClient, commandOutput, policyGate.hooks),
+      createExtensionJoinConfig(
+        connectedClient,
+        commandOutput,
+        policyGate.hooks,
+        policyGate.prepareToolArguments,
+      ),
     );
     joinedSession = session;
     const controller = attachExtension(
@@ -396,9 +401,10 @@ export function createExtensionJoinConfig(
   client: LocalServiceClient,
   output: CommandOutput,
   hooks: SessionHooks = {},
+  prepareToolArguments?: (toolName: string, toolArgs: unknown) => unknown,
 ): JoinSessionConfig {
   return {
-    tools: createKonclaveTools({ client }),
+    tools: createKonclaveTools({ client, prepareArguments: prepareToolArguments }),
     commands: createKonclaveCommands({ client, output }),
     hooks,
     mcpServers: {},

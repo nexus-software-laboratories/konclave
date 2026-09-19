@@ -349,7 +349,15 @@ describe('agent tool surface', () => {
 
   it('maps a tool call onto the operation of the same name', async () => {
     const request = vi.fn().mockResolvedValue({ conversation_id: 'ab' });
-    const tools = createKonclaveTools({ client: stubClient(request) });
+    const prepareArguments = vi.fn((operation, args) =>
+      operation === 'send_message'
+        ? {
+            ...(args as Record<string, unknown>),
+            collaboration_authorization: 'aa'.repeat(16),
+          }
+        : args,
+    );
+    const tools = createKonclaveTools({ client: stubClient(request), prepareArguments });
     const send = tools.find((tool) => tool.name === 'send_message');
     expect(send?.defer).toBe('never');
     expect(
@@ -375,12 +383,22 @@ describe('agent tool surface', () => {
 
     expect(request).toHaveBeenCalledWith(
       'send_message',
-      { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
+      {
+        conversation_id: 'ab',
+        message_id: 'cd',
+        text: 'hi',
+        collaboration_authorization: 'aa'.repeat(16),
+      },
       {
         deadlineMs: expect.any(Number),
         requestId: expect.any(Buffer),
       },
     );
+    expect(prepareArguments).toHaveBeenCalledWith('send_message', {
+      conversation_id: 'ab',
+      message_id: 'cd',
+      text: 'hi',
+    });
     expect(request.mock.calls[0]?.[2]).toEqual(request.mock.calls[1]?.[2]);
     expect(request.mock.calls[2]?.[2]).not.toEqual(request.mock.calls[3]?.[2]);
     await expect(
@@ -392,6 +410,7 @@ describe('agent tool surface', () => {
 
     const identity = tools.find((tool) => tool.name === 'get_identity');
     await identity?.handler(undefined);
+    expect(prepareArguments).toHaveBeenCalledWith('get_identity', {});
     expect(request).toHaveBeenCalledWith('get_identity', {}, expect.any(Number));
   });
 });
