@@ -59,7 +59,7 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Could not restrict the actionlint executable permissions.'
 }
 $reportedVersion = @(& $actionlintPath -version 2>&1) -join "`n"
-$reportedVersion = $reportedVersion.Trim()
+$reportedVersion = ($reportedVersion -replace '\s+', ' ').Trim()
 $expectedVersionPrefix =
     "$version installed by downloading from release page built with "
 if (
