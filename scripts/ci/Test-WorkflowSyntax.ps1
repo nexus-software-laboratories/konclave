@@ -59,7 +59,20 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Could not restrict the actionlint executable permissions.'
 }
 $reportedVersion = @(& $actionlintPath -version 2>&1) -join "`n"
-if ($LASTEXITCODE -ne 0 -or $reportedVersion.Trim() -cne $version) {
+$reportedVersion = $reportedVersion.Trim()
+$expectedVersionPrefix =
+    "$version installed by downloading from release page built with "
+if (
+    $LASTEXITCODE -ne 0 -or
+    -not $reportedVersion.StartsWith(
+        $expectedVersionPrefix,
+        [StringComparison]::Ordinal
+    ) -or
+    -not $reportedVersion.EndsWith(
+        ' compiler for linux/amd64',
+        [StringComparison]::Ordinal
+    )
+) {
     throw "Unexpected actionlint version: $reportedVersion"
 }
 
