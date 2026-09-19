@@ -27,7 +27,7 @@ dependencies = [
  "KonclaveA2AContracts",
  "KonclaveSecretStorage",
  "base64 0.22.1",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "url",
@@ -48,7 +48,7 @@ dependencies = [
  "protoc-bin-vendored",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
  "url",
  "zeroize",
@@ -64,7 +64,7 @@ dependencies = [
  "pbjson-types",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "url",
@@ -76,7 +76,7 @@ version = "0.1.14"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveDomainCore",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
 ]
 
@@ -99,7 +99,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -156,7 +156,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -170,7 +170,7 @@ dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADomain",
  "KonclaveDomainCore",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
 ]
 
@@ -183,7 +183,7 @@ dependencies = [
  "KonclaveA2ATaskStore",
  "KonclaveDomainCore",
  "rusqlite",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
 ]
 
@@ -246,7 +246,7 @@ dependencies = [
  "reqwest",
  "rustix",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -289,7 +289,7 @@ dependencies = [
  "rpassword",
  "rusqlite",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "zeroize",
@@ -342,7 +342,7 @@ dependencies = [
  "mls-rs-crypto-awslc",
  "opaque-ke",
  "rand 0.8.8",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "zeroize",
@@ -366,7 +366,7 @@ dependencies = [
  "KonclaveUserPresence",
  "rusqlite",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
 ]
@@ -407,7 +407,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -439,7 +439,7 @@ dependencies = [
  "KonclaveLocalServiceTransport",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -487,7 +487,7 @@ name = "KonclaveRelayAuthentication"
 version = "0.1.14"
 dependencies = [
  "KonclaveDomainCore",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
 ]
 
@@ -532,7 +532,7 @@ dependencies = [
  "passkey-auth",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
  "url",
  "webauthn-authenticator-rs",
@@ -1648,7 +1648,7 @@ dependencies = [
  "curve25519-dalek",
  "ed25519",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "subtle",
  "zeroize",
 ]
@@ -3072,7 +3072,7 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "primeorder",
- "sha2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3118,7 +3118,7 @@ dependencies = [
  "rand 0.8.8",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "url",
  "x509-cert",
@@ -3994,7 +3994,7 @@ dependencies = [
  "num",
  "once_cell",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "zbus",
 ]
 
@@ -4159,6 +4159,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4295,7 +4306,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.20",
  "tokio",
@@ -4333,7 +4344,7 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "sqlx-core",
  "sqlx-sqlite",
  "syn 2.0.119",
@@ -4993,7 +5004,7 @@ dependencies = [
  "elliptic-curve",
  "generic-array",
  "rand_core 0.6.4",
- "sha2",
+ "sha2 0.10.9",
  "subtle",
  "zeroize",
 ]
