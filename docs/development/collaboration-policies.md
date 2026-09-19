@@ -396,7 +396,7 @@ The SDK may represent pre-tool arguments as a JSON object or a serialized JSON o
 the extension accepts only a bounded form with the exact model-facing `send_message`
 field allowlist before evaluating or modifying it. The hook-only
 `collaboration_authorization` field is omitted from the model-facing schema and a
-caller-supplied value is rejected. The trusted synthetic prompt identifies its
+caller-supplied value is discarded without being evaluated or forwarded. The trusted synthetic prompt identifies its
 separate turn-binding token as not being a tool argument. After successful action
 evaluation, the hook stages the daemon-issued one-use send authorization inside the
 extension. The model-visible modified arguments contain only public `send_message`

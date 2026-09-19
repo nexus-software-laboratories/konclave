@@ -406,23 +406,52 @@ describe('Copilot collaboration policy gate', () => {
     gate.clear();
     activateGate(gate);
 
-    const evaluatedCalls = request.mock.calls.length;
-    const callerSuppliedAuthorization = await gate.hooks.onPreToolUse?.(
+    const lifecycleResponse = await gate.hooks.onPreToolUse?.(
       hookInput('send_message', {
         conversation_id: conversation,
         message_id: '47'.repeat(16),
+        reply_to_message_id: '66'.repeat(16),
+        text: 'lifecycle reply',
+      }),
+      { sessionId: 'session' },
+    );
+    gate.observePrompt('foreground user prompt');
+    expect(() =>
+      gate.prepareToolArguments('send_message', lifecycleResponse?.modifiedArgs),
+    ).toThrow('turn changed after authorization');
+    gate.clear();
+    activateGate(gate);
+
+    const callerSuppliedAuthorization = await gate.hooks.onPreToolUse?.(
+      hookInput('send_message', {
+        conversation_id: conversation,
+        message_id: '48'.repeat(16),
         reply_to_message_id: '66'.repeat(16),
         text: 'reply',
         [collaborationAuthorizationArgument]: '33'.repeat(16),
       }),
       { sessionId: 'session' },
     );
-    expect(callerSuppliedAuthorization).toEqual({
-      permissionDecision: 'deny',
-      permissionDecisionReason: `Do not include ${collaborationAuthorizationArgument}; the Konclave policy hook injects it.`,
+    expect(callerSuppliedAuthorization).toMatchObject({
+      modifiedArgs: {
+        conversation_id: conversation,
+        message_id: '48'.repeat(16),
+        reply_to_message_id: '66'.repeat(16),
+        text: 'reply',
+      },
     });
-    expect(gate.lastDecision).toBe('send_authorization_caller_supplied');
-    expect(request).toHaveBeenCalledTimes(evaluatedCalls);
+    expect(callerSuppliedAuthorization?.modifiedArgs).not.toHaveProperty(
+      collaborationAuthorizationArgument,
+    );
+    expect(
+      gate.prepareToolArguments('send_message', callerSuppliedAuthorization?.modifiedArgs),
+    ).toEqual({
+      conversation_id: conversation,
+      message_id: '48'.repeat(16),
+      reply_to_message_id: '66'.repeat(16),
+      text: 'reply',
+      collaboration_authorization: 'aa'.repeat(16),
+    });
 
     expect(
       gate.prepareToolArguments('get_identity', {
@@ -436,7 +465,7 @@ describe('Copilot collaboration policy gate', () => {
           'send_message',
           JSON.stringify({
             conversation_id: conversation,
-            message_id: '48'.repeat(16),
+            message_id: '49'.repeat(16),
             text: 'reply',
             unexpected: true,
           }),
