@@ -6,18 +6,31 @@
   "ciWorkflow": "CI",
   "requiredChecks": [
     "CI",
+    "Workflow syntax",
     "A2A conformance",
     "Adapter conformance",
+    "Actions storage conformance",
     "Agent plugin conformance",
+    "Authorization reload conformance",
+    "Extension startup conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
+    "Distribution lifecycle acceptance",
     "Generic client conformance",
+    "Installer lifecycle conformance",
+    "Marketplace conformance",
+    "Pairing rendezvous conformance",
+    "Relay migration conformance",
+    "Relay migration Windows conformance",
+    "Short-code pairing conformance",
+    "Trusted device alias conformance",
     "User presence conformance",
     "Container CI (a2a-gateway)",
     "Container CI (community-relay)",
     "Daemon packaging (local-daemon)",
     "Package validation",
     "PR title",
+    "Release publication conformance",
     "Review policy"
   ],
   "draftValidation": {
@@ -40,24 +53,71 @@
         "source-policy",
         "validation-plan",
         "guidance-policy",
+        "dependabot-validation",
         "ci",
+        "workflow-syntax",
         "pr-base/base",
         "pr-title/title",
         "pr-review-policy/evaluate",
+        "release-publication-conformance",
+        "authorize-storage-cleanup",
         "a2a-conformance",
         "adapter-conformance",
+        "actions-storage-conformance",
         "agent-plugin-conformance",
+        "authorization-reload-conformance",
+        "extension-startup-conformance",
+        "resolve-package-scope",
+        "package-plugin",
+        "publish",
         "authorization-store-conformance",
         "client-runtime-config-conformance",
+        "distribution-lifecycle-acceptance",
+        "resolve-scope",
+        "copilot-plugin-lifecycle",
+        "native-installer-lifecycle",
+        "service-failure-contract",
         "generic-client-conformance",
+        "resolve-installer-scope",
+        "installer-lifecycle-conformance",
+        "marketplace-conformance",
+        "marketplace-materialization",
+        "marketplace-client-lifecycle",
+        "managed-marketplace-policy",
+        "pairing-rendezvous-conformance",
+        "relay-migration-conformance",
+        "short-code-pairing-conformance",
+        "trusted-device-alias-conformance",
         "user-presence-conformance",
         "community-relay-container-ci",
         "container-ci",
-        "delete-run-artifacts"
+        "delete-run-artifacts",
+        "prune-actions-caches"
+      ]
+    },
+    {
+      "id": "windows-latest-hosted",
+      "source": "github-hosted",
+      "labels": [
+        "windows-latest"
+      ],
+      "jobs": [
+        "relay-migration-windows-conformance"
       ]
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/workflow-syntax.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Workflow syntax"
+      ]
+    },
     {
       "source": "project",
       "path": ".github/workflows/a2a-conformance.yml",
@@ -82,6 +142,17 @@
     },
     {
       "source": "project",
+      "path": ".github/workflows/actions-storage-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Actions storage conformance"
+      ]
+    },
+    {
+      "source": "project",
       "path": ".github/workflows/agent-plugin-conformance.yml",
       "roles": [
         "merge-gate"
@@ -89,6 +160,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Agent plugin conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/extension-startup-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Extension startup conformance"
       ]
     },
     {
@@ -104,6 +186,17 @@
     },
     {
       "source": "project",
+      "path": ".github/workflows/authorization-reload-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Authorization reload conformance"
+      ]
+    },
+    {
+      "source": "project",
       "path": ".github/workflows/client-runtime-config-conformance.yml",
       "roles": [
         "merge-gate"
@@ -111,6 +204,62 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Client runtime config conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/relay-migration-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Relay migration conformance",
+        "Relay migration Windows conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/pairing-rendezvous-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Pairing rendezvous conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/short-code-pairing-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Short-code pairing conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/trusted-device-alias-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Trusted device alias conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/distribution-lifecycle-acceptance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Distribution lifecycle acceptance"
       ]
     },
     {
@@ -126,6 +275,17 @@
     },
     {
       "source": "project",
+      "path": ".github/workflows/installer-lifecycle-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Installer lifecycle conformance"
+      ]
+    },
+    {
+      "source": "project",
       "path": ".github/workflows/user-presence-conformance.yml",
       "roles": [
         "merge-gate"
@@ -133,6 +293,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "User presence conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/marketplace-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Marketplace conformance"
       ]
     },
     {
@@ -145,6 +316,26 @@
       "requiredChecks": [
         "Package validation"
       ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/release-publication-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Release publication conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/publish-prerelease.yml",
+      "roles": [
+        "repository-automation"
+      ],
+      "draftBehavior": "not-applicable",
+      "requiredChecks": []
     },
     {
       "source": "project",

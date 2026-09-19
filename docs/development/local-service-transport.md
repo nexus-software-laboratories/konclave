@@ -101,10 +101,13 @@ revocation, profile suspension, policy invalidation, or revoke-on-disable transi
 is observed within one second of a successful durable commit, excluding an
 already-failing storage operation. A reload error, corruption finding, installation
 mismatch, or generation rollback stops admission, makes the current projection
-unusable, closes clients, and terminates the service instead of retaining stale
-authority. If authorization changes while another request is running, the transport
-closes immediately; already-committed work remains owned until reconciliation, but
-its result is not written to the revoked connection.
+unusable, and closes clients without terminating the service or retaining stale
+authority. A read that misses the 500-millisecond observation deadline remains the
+only in-flight read; its late result is discarded, and access reopens only after a
+subsequent fresh verified snapshot. Blocking-worker failure or unexpected reload-task
+termination remains fatal. If authorization changes while another request is
+running, the transport closes immediately; already-committed work remains owned until
+reconciliation, but its result is not written to the revoked connection.
 
 Disabling an issuer always denies new issuance. `retain_until_expiry` keeps its
 already-issued grants active until expiry or another terminal transition, while

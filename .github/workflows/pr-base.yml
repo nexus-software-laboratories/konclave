@@ -2,21 +2,27 @@ name: PR base
 
 on:
   pull_request_target:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, closed]
 
 permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: pr-base-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   base:
     name: PR base
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: ${{ github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
+      EVENT_ACTION: ${{ github.event.action }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      PREVIOUS_BASE_REF: ${{ github.event.changes.base.ref.from || '' }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: Verify the pull request targets the default branch
@@ -60,6 +66,11 @@ jobs:
 
           if [ "$base_ref" != "$default_branch" ]; then
             echo "::error::This pull request targets '$base_ref' instead of the default branch '$default_branch'. A non-default base, including a stacked pull request, is not supported: every validation workflow is scoped to '$default_branch', so no CI, PR title, or Review policy check runs here, and auto-merge will never consider it. Retarget the pull request at '$default_branch'. The repository's Genesis delivery contract owns this rule."
+            exit 1
+          fi
+
+          if [ "$EVENT_ACTION" = 'edited' ] && [ -n "$PREVIOUS_BASE_REF" ]; then
+            echo "::error::The pull request was retargeted from '$PREVIOUS_BASE_REF' to '$default_branch'. Close and reopen it, or push a new commit, so code-validation workflows run against the current base."
             exit 1
           fi
 

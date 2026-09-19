@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "konclave",
+  "version": "0.1.8",
+  "description": "Secure, durable agent-to-agent communication for GitHub Copilot CLI",
+  "author": {
+    "name": "Nexus Software Laboratories",
+    "url": "https://github.com/nexus-software-laboratories"
+  },
+  "homepage": "https://github.com/nexus-software-laboratories/konclave",
+  "repository": "https://github.com/nexus-software-laboratories/konclave",
+  "license": "Apache-2.0",
+  "keywords": ["agent", "communication", "copilot", "encrypted", "plugin"],
+  "extensions": {
+    "com.github.copilot": {}
+  }
+}

@@ -69,26 +69,37 @@ try {
     foreach ($relative in @(
         'distribution/release-artifacts.schema.json',
         'distribution/UNSIGNED-PRERELEASE.txt',
+        'scripts/installation/Install-Konclave.ps1',
+        'scripts/installation/InstallationLifecycle.Functions.ps1',
+        'scripts/installation/InstallationRuntime.Functions.ps1',
         'scripts/packaging/ReleaseIntegrity.Functions.ps1',
+        'scripts/packaging/ReleasePublication.Functions.ps1',
         'scripts/packaging/Verify-Release.ps1'
     )) {
         Copy-Item (Join-Path $projectRoot $relative) $contractRoot
     }
+    Copy-Item (
+        Join-Path $projectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+            'manage-user-service.ps1'
+    ) (
+        Join-Path $contractRoot 'WindowsUserService.ps1'
+    )
     $manifest = Get-Content (Join-Path $contractRoot 'RELEASE.json') -Raw |
         ConvertFrom-Json -Depth 100
-    [IO.File]::WriteAllText(
-        (Join-Path $contractRoot "konclave-copilot-plugin-$($manifest.release.version).cdx.json"),
-        '{}'
-    )
     foreach ($entry in $manifest.artifacts) {
         $archive = Join-Path $contractRoot ([string]$entry.fileName)
         [IO.File]::WriteAllText($archive, [string]$entry.id)
         [IO.File]::WriteAllText("$archive.intoto.jsonl", '{}')
-        if ([string]$entry.kind -in @('client', 'relay', 'gateway')) {
-            [IO.File]::WriteAllText("$archive.rust.cdx.json", '{}')
-        }
-        else {
-            [IO.File]::WriteAllText("$archive.cdx.json", '{}')
+        switch ([string]$entry.kind) {
+            { $_ -in @('client', 'relay', 'gateway') } {
+                [IO.File]::WriteAllText("$archive.rust.cdx.json", '{}')
+            }
+            { $_ -in @('plugin', 'container') } {
+                [IO.File]::WriteAllText("$archive.cdx.json", '{}')
+            }
+            default {
+                throw "Unsupported fixture artifact kind: $($entry.kind)"
+            }
         }
     }
     [void](New-ReleaseChecksums -Directory $contractRoot)

@@ -416,7 +416,10 @@ impl ProfileStore {
         update_state: bool,
     ) -> Result<(), ProfileStoreError> {
         let (kind, proposal_id, policy_digest, response_outcome) = match message.content() {
-            ApplicationContent::Text(_) | ApplicationContent::DirectedRequest(_) => return Ok(()),
+            ApplicationContent::Text(_)
+            | ApplicationContent::DirectedRequest(_)
+            | ApplicationContent::RepeatPairingRequest(_)
+            | ApplicationContent::RepeatPairingResponse(_) => return Ok(()),
             ApplicationContent::CollaborationPolicyProposal(proposal) => {
                 verify_collaboration_policy_proposal(proposal)
                     .map_err(|_| ProfileStoreError::CorruptData)?;
@@ -879,7 +882,10 @@ impl ProfileStore {
         )?;
         let (expected_kind, expected_proposal_id, expected_digest, expected_outcome) =
             match history.message.content() {
-                ApplicationContent::Text(_) | ApplicationContent::DirectedRequest(_) => {
+                ApplicationContent::Text(_)
+                | ApplicationContent::DirectedRequest(_)
+                | ApplicationContent::RepeatPairingRequest(_)
+                | ApplicationContent::RepeatPairingResponse(_) => {
                     return Err(ProfileStoreError::CorruptData);
                 }
                 ApplicationContent::CollaborationPolicyProposal(proposal) => {

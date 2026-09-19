@@ -5,15 +5,24 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use KonclaveDomainCore::{
-    AcknowledgeRequest, MAX_RELAY_CONTROL_MESSAGE_BYTES, MAX_RELAY_ENVELOPE_BYTES,
+    AcknowledgeRequest, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES, MAX_RELAY_CONTROL_MESSAGE_BYTES,
+    MAX_RELAY_ENVELOPE_BYTES, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES,
 };
 use KonclaveProtocolContracts::KonclaveProtocolError;
 use KonclaveProtocolContracts::v1::{
-    decode_acknowledge_request, decode_relay_enrollment_request, decode_replay_request,
-    encode_acknowledge_request, encode_relay_enrollment_response,
+    decode_acknowledge_request, decode_pairing_rendezvous_record,
+    decode_pairing_rendezvous_take_request, decode_relay_enrollment_request, decode_replay_request,
+    decode_short_code_attempt_claim_request, decode_short_code_attempt_message_request,
+    decode_short_code_attempt_publish_request, decode_short_code_attempt_read_request,
+    decode_short_code_capability_take_request, encode_acknowledge_request,
+    encode_pairing_rendezvous_record, encode_relay_enrollment_response,
+    encode_short_code_attempt_snapshot, encode_short_code_capability_response,
     encode_stored_relay_envelope_preserving,
 };
-use KonclaveRelayCore::{RelayError, RelayPrincipalId};
+use KonclaveRelayCore::{
+    PairingRendezvousPublishOutcome, RelayError, RelayPrincipalId, ShortCodeAttemptMessageOutcome,
+    ShortCodeAttemptPublishOutcome,
+};
 use anyhow::{Context, bail};
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Extension, State, WebSocketUpgrade};
@@ -145,6 +154,29 @@ pub fn router(
         .route("/v1/envelopes", post(submit))
         .route("/v1/replay", post(replay))
         .route("/v1/acknowledgments", post(acknowledge))
+        .route("/v1/pairing-rendezvous", post(publish_pairing_rendezvous))
+        .route("/v1/pairing-rendezvous/take", post(take_pairing_rendezvous))
+        .route("/v1/short-code-attempts", post(publish_short_code_attempt))
+        .route(
+            "/v1/short-code-attempts/claim",
+            post(claim_short_code_attempt),
+        )
+        .route(
+            "/v1/short-code-attempts/messages",
+            post(publish_short_code_message),
+        )
+        .route(
+            "/v1/short-code-attempts/read",
+            post(read_short_code_attempt),
+        )
+        .route(
+            "/v1/short-code-attempts/cancel",
+            post(cancel_short_code_attempt),
+        )
+        .route(
+            "/v1/short-code-attempts/capability/take",
+            post(take_short_code_capability),
+        )
         .route(
             "/ws",
             get(
@@ -443,6 +475,210 @@ async fn acknowledge(
     }
 }
 
+async fn publish_pairing_rendezvous(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let record = match decode_pairing_rendezvous_record(&bytes) {
+        Ok(record) => record,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let outcome = match state
+        .application
+        .publish_pairing_rendezvous(principal, record)
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return relay_error_response(&error),
+    };
+    match outcome {
+        PairingRendezvousPublishOutcome::Published => StatusCode::CREATED.into_response(),
+        PairingRendezvousPublishOutcome::AlreadyPublished => StatusCode::OK.into_response(),
+    }
+}
+
+async fn take_pairing_rendezvous(
+    State(state): State<HttpState>,
+    Extension(_principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_RELAY_CONTROL_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_pairing_rendezvous_take_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let record = match state.application.take_pairing_rendezvous(request).await {
+        Ok(record) => record,
+        Err(error) => return relay_error_response(&error),
+    };
+    match encode_pairing_rendezvous_record(&record) {
+        Ok(bytes) => protobuf_response(StatusCode::OK, bytes),
+        Err(_) => internal_error_response(),
+    }
+}
+
+async fn publish_short_code_attempt(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_short_code_attempt_publish_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    match state
+        .application
+        .publish_short_code_attempt(principal, request)
+        .await
+    {
+        Ok(ShortCodeAttemptPublishOutcome::Published) => StatusCode::CREATED.into_response(),
+        Ok(ShortCodeAttemptPublishOutcome::AlreadyPublished) => StatusCode::OK.into_response(),
+        Err(error) => relay_error_response(&error),
+    }
+}
+
+async fn claim_short_code_attempt(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_short_code_attempt_claim_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let snapshot = match state
+        .application
+        .claim_short_code_attempt(principal, request)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return relay_error_response(&error),
+    };
+    match encode_short_code_attempt_snapshot(&snapshot) {
+        Ok(bytes) => protobuf_response(StatusCode::OK, bytes),
+        Err(_) => internal_error_response(),
+    }
+}
+
+async fn publish_short_code_message(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_short_code_attempt_message_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    match state
+        .application
+        .publish_short_code_message(principal, request)
+        .await
+    {
+        Ok(ShortCodeAttemptMessageOutcome::Published) => StatusCode::CREATED.into_response(),
+        Ok(ShortCodeAttemptMessageOutcome::AlreadyPublished) => StatusCode::OK.into_response(),
+        Err(error) => relay_error_response(&error),
+    }
+}
+
+async fn read_short_code_attempt(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_short_code_attempt_read_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let snapshot = match state
+        .application
+        .read_short_code_attempt(principal, request)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return relay_error_response(&error),
+    };
+    match encode_short_code_attempt_snapshot(&snapshot) {
+        Ok(bytes) => protobuf_response(StatusCode::OK, bytes),
+        Err(_) => internal_error_response(),
+    }
+}
+
+async fn cancel_short_code_attempt(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_short_code_attempt_read_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    match state
+        .application
+        .cancel_short_code_attempt(principal, request)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(error) => relay_error_response(&error),
+    }
+}
+
+async fn take_short_code_capability(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<RelayPrincipalId>,
+    request: Request<Body>,
+) -> Response {
+    let bytes = match read_protobuf(request, MAX_SHORT_CODE_RELAY_MESSAGE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    let request = match decode_short_code_capability_take_request(&bytes) {
+        Ok(request) => request,
+        Err(error) => return protocol_error_response(&error),
+    };
+    let version = request.version();
+    let attempt_id = request.attempt_id();
+    let payload = match state
+        .application
+        .take_short_code_capability(principal, request)
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => return relay_error_response(&error),
+    };
+    match encode_short_code_capability_response(version, attempt_id, &payload) {
+        Ok(bytes) => protobuf_response(StatusCode::OK, bytes),
+        Err(_) => internal_error_response(),
+    }
+}
+
 async fn read_protobuf(request: Request<Body>, maximum: usize) -> Result<Bytes, Box<Response>> {
     read_protobuf_with_timeout(request, maximum, REQUEST_BODY_TIMEOUT).await
 }
@@ -524,11 +760,23 @@ fn protocol_error_response(error: &KonclaveProtocolError) -> Response {
 fn relay_error_response(error: &RelayError) -> Response {
     let status = match error {
         RelayError::Unauthorized => StatusCode::FORBIDDEN,
-        RelayError::ExpiredEnvelope => StatusCode::GONE,
+        RelayError::ExpiredEnvelope | RelayError::ExpiredPairingRendezvous => StatusCode::GONE,
         RelayError::IdempotencyConflict
         | RelayError::StaleEpoch
-        | RelayError::EnrollmentConflict => StatusCode::CONFLICT,
-        RelayError::PrincipalCapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+        | RelayError::EnrollmentConflict
+        | RelayError::PairingRendezvousConflict => StatusCode::CONFLICT,
+        RelayError::PrincipalCapacityExceeded
+        | RelayError::PairingRendezvousGlobalCapacityExceeded
+        | RelayError::PairingRendezvousPrincipalCapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+        RelayError::PairingRendezvousUnavailable => StatusCode::NOT_FOUND,
+        RelayError::InvalidShortCodeDeadline => StatusCode::UNPROCESSABLE_ENTITY,
+        RelayError::ExpiredShortCodeAttempt => StatusCode::GONE,
+        RelayError::ShortCodeAttemptConflict => StatusCode::CONFLICT,
+        RelayError::ShortCodeAttemptUnavailable => StatusCode::NOT_FOUND,
+        RelayError::ShortCodeClaimRateLimited
+        | RelayError::ShortCodeGlobalCapacityExceeded
+        | RelayError::ShortCodeCreatorCapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+        RelayError::InvalidShortCodeStage => StatusCode::CONFLICT,
         RelayError::PrincipalRevoked => StatusCode::FORBIDDEN,
         RelayError::UnsupportedEnrollmentVersion => StatusCode::BAD_REQUEST,
         RelayError::InvalidAcknowledgment => StatusCode::UNPROCESSABLE_ENTITY,

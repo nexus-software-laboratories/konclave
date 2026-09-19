@@ -9,7 +9,8 @@ use KonclaveDomainCore::{
     CollaborationPolicyLimits, CollaborationPolicyProposalId, CollaborationPolicyResponseOutcome,
     ConversationId, ConversationRole, DeviceId, Ed25519PublicKey, EnvelopeId,
     MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MessageId, PairingId,
-    RoutingId,
+    RepeatPairingOperationId, RoutingId, ShortCodePairingAttemptId, ShortCodePairingSas,
+    TrustedDeviceAlias, TrustedDeviceBindingStatus,
 };
 use KonclaveProtocolContracts::v1::{
     decode_collaboration_policy_bundle, decode_device_credential_binding, decode_invitation,
@@ -37,17 +38,23 @@ use crate::conversation::{
     ProcessedApplication,
 };
 use crate::health::DeliveryHealth;
-use crate::pairing_service::{MAX_AUTHORIZATION_WINDOW_SECONDS, PairingService, PairingStatus};
+use crate::pairing_service::{
+    MAX_AUTHORIZATION_WINDOW_SECONDS, PairingService, PairingServiceError, PairingStatus,
+    RepeatPairingStatus, ShortCodePairingStatus,
+};
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
     ActiveCollaborationPolicy, CollaborationActionAuthorization, MessageDirection,
     ProfileStoreError, StoredHistoryMessage,
 };
+use crate::repeat_pairing::{RepeatPairingPhase, RepeatPairingRole};
+use crate::short_code_pairing::{ShortCodePhase, ShortCodeRole};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const MESSAGE_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 const INVITATION_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
+const REPEAT_PAIRING_VALIDITY_SECONDS: u64 = 10 * 60;
 pub struct AuthorizationContext<'a> {
     pub method: &'a str,
 }
@@ -64,6 +71,52 @@ struct ConversationRequest {
 struct ListConversationsRequest {
     after_conversation_id: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustedDeviceAliasRequest {
+    device_id: String,
+    alias: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustedDeviceRequest {
+    alias: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepeatPairingRequest {
+    operation_id: String,
+}
+
+#[derive(Serialize)]
+struct TrustedDeviceResult {
+    alias: String,
+    device_id: String,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct TrustedDevicesResult {
+    devices: Vec<TrustedDeviceResult>,
+}
+
+#[derive(Serialize)]
+struct TrustedDeviceAliasResult {
+    alias: String,
+    device_id: String,
+    decision: &'static str,
+}
+
+#[derive(Serialize)]
+struct RepeatPairingStatusResult {
+    operation_id: String,
+    role: &'static str,
+    phase: &'static str,
+    peer_device_id: String,
+    conversation_id: String,
+    pairing_id: Option<String>,
+    deadline_unix_seconds: u64,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -190,9 +243,43 @@ impl Drop for RedeemPairingCapabilityRequest {
     }
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RedeemPairingRendezvousRequest {
+    token: String,
+}
+
+impl Drop for RedeemPairingRendezvousRequest {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PairingRequest {
     pairing_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ClaimShortCodePairingRequest {
+    code: String,
+}
+
+impl Drop for ClaimShortCodePairingRequest {
+    fn drop(&mut self) {
+        self.code.zeroize();
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ShortCodePairingRequest {
+    attempt_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ConfirmShortCodePairingRequest {
+    attempt_id: String,
+    peer_device_id: String,
+    sas: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -418,6 +505,18 @@ struct PairingCapabilityResult {
     capability: String,
 }
 
+#[derive(Serialize, schemars::JsonSchema)]
+struct PairingRendezvousResult {
+    pairing: PairingStatusResult,
+    token: String,
+}
+
+impl Drop for PairingRendezvousResult {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
 impl Drop for PairingCapabilityResult {
     fn drop(&mut self) {
         self.capability.zeroize();
@@ -428,6 +527,38 @@ impl Drop for PairingCapabilityResult {
 struct PairingSyncResult {
     pairing: PairingStatusResult,
     processed_records: usize,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct CreatedShortCodePairingResult {
+    code: String,
+    verification: ShortCodePairingStatusResult,
+}
+
+impl Drop for CreatedShortCodePairingResult {
+    fn drop(&mut self) {
+        self.code.zeroize();
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ShortCodePairingStatusResult {
+    attempt_id: String,
+    local_role: String,
+    phase: String,
+    local_device_id: String,
+    peer_device_id: Option<String>,
+    sas: Option<String>,
+    deadline_unix_seconds: u64,
+    local_confirmed: bool,
+    peer_confirmed: bool,
+    pairing_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ShortCodePairingSyncResult {
+    verification: ShortCodePairingStatusResult,
+    processed_stages: usize,
 }
 
 #[derive(Clone)]
@@ -486,6 +617,30 @@ impl StdioServer {
             }
             "list_conversations" => Self::encode_json(
                 self.list_conversations(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "list_trusted_devices" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.list_trusted_devices().await?)
+            }
+            "set_trusted_device_alias" => Self::encode_json(
+                self.set_trusted_device_alias(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "start_repeat_pairing" => Self::encode_json(
+                self.start_repeat_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "get_repeat_pairing_status" => Self::encode_json(
+                self.get_repeat_pairing_status(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "sync_repeat_pairing" => Self::encode_json(
+                self.sync_repeat_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "cancel_repeat_pairing" => Self::encode_json(
+                self.cancel_repeat_pairing(Self::parse_parameters(payload)?)
                     .await?,
             ),
             "send_message" => {
@@ -563,8 +718,40 @@ impl StdioServer {
                 self.create_pairing_capability(Self::parse_parameters(payload)?)
                     .await?,
             ),
+            "create_pairing_rendezvous" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.create_pairing_rendezvous().await?)
+            }
+            "create_short_code_pairing" => {
+                Self::require_empty_request(payload)?;
+                Self::encode_json(self.create_short_code_pairing().await?)
+            }
+            "claim_short_code_pairing" => Self::encode_json(
+                self.claim_short_code_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "get_short_code_pairing_status" => Self::encode_json(
+                self.get_short_code_pairing_status(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "confirm_short_code_pairing" => Self::encode_json(
+                self.confirm_short_code_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "sync_short_code_pairing" => Self::encode_json(
+                self.sync_short_code_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "cancel_short_code_pairing" => Self::encode_json(
+                self.cancel_short_code_pairing(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             "redeem_pairing_capability" => Self::encode_json(
                 self.redeem_pairing_capability(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "redeem_pairing_rendezvous" => Self::encode_json(
+                self.redeem_pairing_rendezvous(Self::parse_parameters(payload)?)
                     .await?,
             ),
             "get_pairing_status" => Self::encode_json(
@@ -600,6 +787,118 @@ impl StdioServer {
             ),
             _ => Err("unknown_operation".to_string()),
         }
+    }
+
+    async fn list_trusted_devices(&self) -> Result<Json<TrustedDevicesResult>, String> {
+        self.authorize("list_trusted_devices")?;
+        let conversations = self.conversations.clone();
+        let devices = tokio::task::spawn_blocking(move || conversations.trusted_devices())
+            .await
+            .map_err(|_| "task_failed".to_string())?
+            .map_err(trusted_device_error)?
+            .into_iter()
+            .map(|device| TrustedDeviceResult {
+                alias: device.alias,
+                device_id: encode_hex(device.device_id.as_bytes()),
+                status: trusted_device_status(device.status),
+            })
+            .collect();
+        Ok(Json(TrustedDevicesResult { devices }))
+    }
+
+    async fn set_trusted_device_alias(
+        &self,
+        Parameters(request): Parameters<TrustedDeviceAliasRequest>,
+    ) -> Result<Json<TrustedDeviceAliasResult>, String> {
+        self.authorize("set_trusted_device_alias")?;
+        let device_id =
+            parse_device_id(&request.device_id).map_err(|_| "invalid_device_id".to_string())?;
+        let alias = TrustedDeviceAlias::parse(request.alias)
+            .map_err(|_| "invalid_trusted_device_alias".to_string())?;
+        let alias_text = alias.as_str().to_owned();
+        let conversations = self.conversations.clone();
+        let decision = tokio::task::spawn_blocking(move || {
+            conversations.set_trusted_device_alias(device_id, alias)
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(trusted_device_error)?;
+        Ok(Json(TrustedDeviceAliasResult {
+            alias: alias_text,
+            device_id: encode_hex(device_id.as_bytes()),
+            decision: trusted_device_alias_decision(decision),
+        }))
+    }
+
+    async fn start_repeat_pairing(
+        &self,
+        Parameters(request): Parameters<TrustedDeviceRequest>,
+    ) -> Result<Json<RepeatPairingStatusResult>, String> {
+        self.authorize("start_repeat_pairing")?;
+        let alias = TrustedDeviceAlias::parse(request.alias)
+            .map_err(|_| "invalid_trusted_device_alias".to_string())?;
+        let pairings = self
+            .pairings
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?;
+        let now = current_unix_seconds()?;
+        let deadline = now
+            .checked_add(REPEAT_PAIRING_VALIDITY_SECONDS)
+            .ok_or_else(|| "invalid_deadline".to_string())?;
+        pairings
+            .start_repeat_pairing(alias, deadline, now)
+            .await
+            .map(repeat_pairing_status_result)
+            .map(Json)
+            .map_err(repeat_pairing_error)
+    }
+
+    async fn get_repeat_pairing_status(
+        &self,
+        Parameters(request): Parameters<RepeatPairingRequest>,
+    ) -> Result<Json<RepeatPairingStatusResult>, String> {
+        self.authorize("get_repeat_pairing_status")?;
+        let operation_id = parse_repeat_pairing_operation_id(&request.operation_id)?;
+        self.pairings
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?
+            .repeat_pairing_status(operation_id)
+            .await
+            .map(repeat_pairing_status_result)
+            .map(Json)
+            .map_err(repeat_pairing_error)
+    }
+
+    async fn sync_repeat_pairing(
+        &self,
+        Parameters(request): Parameters<RepeatPairingRequest>,
+    ) -> Result<Json<RepeatPairingStatusResult>, String> {
+        self.authorize("sync_repeat_pairing")?;
+        let operation_id = parse_repeat_pairing_operation_id(&request.operation_id)?;
+        self.pairings
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?
+            .sync_repeat_pairing(operation_id, current_unix_seconds()?)
+            .await
+            .map(repeat_pairing_status_result)
+            .map(Json)
+            .map_err(repeat_pairing_error)
+    }
+
+    async fn cancel_repeat_pairing(
+        &self,
+        Parameters(request): Parameters<RepeatPairingRequest>,
+    ) -> Result<Json<RepeatPairingStatusResult>, String> {
+        self.authorize("cancel_repeat_pairing")?;
+        let operation_id = parse_repeat_pairing_operation_id(&request.operation_id)?;
+        self.pairings
+            .as_ref()
+            .ok_or_else(|| "relay_not_configured".to_string())?
+            .cancel_repeat_pairing(operation_id, current_unix_seconds()?)
+            .await
+            .map(repeat_pairing_status_result)
+            .map(Json)
+            .map_err(repeat_pairing_error)
     }
 
     #[tool(
@@ -750,6 +1049,145 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "create_pairing_rendezvous",
+        description = "Create one compact encrypted member-pairing token another session can redeem through the relay."
+    )]
+    async fn create_pairing_rendezvous(&self) -> Result<Json<PairingRendezvousResult>, String> {
+        self.authorize("create_pairing_rendezvous")?;
+        let pairings = self.pairing_service()?;
+        let now = current_unix_seconds()?;
+        let expires_at = now
+            .checked_add(MAX_AUTHORIZATION_WINDOW_SECONDS)
+            .ok_or_else(|| "system_time_unavailable".to_string())?;
+        let created = pairings
+            .create_rendezvous(expires_at, now)
+            .await
+            .map_err(tool_error)?;
+        let status = pairings
+            .status(created.pairing_id)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(PairingRendezvousResult {
+            pairing: pairing_status_result(status),
+            token: created.token.as_str().to_owned(),
+        }))
+    }
+
+    #[tool(
+        name = "create_short_code_pairing",
+        description = "Create a six-digit member-pairing code that grants no authority until both devices explicitly confirm the same SAS and peer identity."
+    )]
+    async fn create_short_code_pairing(
+        &self,
+    ) -> Result<Json<CreatedShortCodePairingResult>, String> {
+        self.authorize("create_short_code_pairing")?;
+        let created = self
+            .pairing_service()?
+            .create_short_code_pairing(current_unix_seconds()?)
+            .await
+            .map_err(short_code_tool_error)?;
+        Ok(Json(CreatedShortCodePairingResult {
+            code: created.code.as_str().to_owned(),
+            verification: short_code_pairing_status_result(created.status),
+        }))
+    }
+
+    #[tool(
+        name = "claim_short_code_pairing",
+        description = "Enter one six-digit code to begin OPAQUE verification; the code alone grants no membership authority."
+    )]
+    async fn claim_short_code_pairing(
+        &self,
+        Parameters(request): Parameters<ClaimShortCodePairingRequest>,
+    ) -> Result<Json<ShortCodePairingStatusResult>, String> {
+        self.authorize("claim_short_code_pairing")?;
+        let status = self
+            .pairing_service()?
+            .claim_short_code_pairing(&request.code, current_unix_seconds()?)
+            .await
+            .map_err(short_code_tool_error)?;
+        Ok(Json(short_code_pairing_status_result(status)))
+    }
+
+    #[tool(
+        name = "get_short_code_pairing_status",
+        description = "Show one short-code attempt's bounded peer identity, SAS, confirmations, deadline, and resulting pairing identifier."
+    )]
+    async fn get_short_code_pairing_status(
+        &self,
+        Parameters(request): Parameters<ShortCodePairingRequest>,
+    ) -> Result<Json<ShortCodePairingStatusResult>, String> {
+        self.authorize("get_short_code_pairing_status")?;
+        let status = self
+            .pairing_service()?
+            .short_code_status(parse_short_code_attempt_id(&request.attempt_id)?)
+            .await
+            .map_err(short_code_tool_error)?;
+        Ok(Json(short_code_pairing_status_result(status)))
+    }
+
+    async fn confirm_short_code_pairing(
+        &self,
+        Parameters(request): Parameters<ConfirmShortCodePairingRequest>,
+    ) -> Result<Json<ShortCodePairingStatusResult>, String> {
+        self.authorize("confirm_short_code_pairing")?;
+        let status = self
+            .pairing_service()?
+            .confirm_short_code_pairing(
+                parse_short_code_attempt_id(&request.attempt_id)?,
+                parse_device_id(&request.peer_device_id)?,
+                parse_short_code_sas(&request.sas)?,
+                current_unix_seconds()?,
+            )
+            .await
+            .map_err(short_code_tool_error)?;
+        Ok(Json(short_code_pairing_status_result(status)))
+    }
+
+    #[tool(
+        name = "sync_short_code_pairing",
+        description = "Process bounded OPAQUE, identity, confirmation, or capability stages for one short-code attempt."
+    )]
+    async fn sync_short_code_pairing(
+        &self,
+        Parameters(request): Parameters<ShortCodePairingRequest>,
+    ) -> Result<Json<ShortCodePairingSyncResult>, String> {
+        self.authorize("sync_short_code_pairing")?;
+        let synced = self
+            .pairing_service()?
+            .sync_short_code_pairing(
+                parse_short_code_attempt_id(&request.attempt_id)?,
+                current_unix_seconds()?,
+            )
+            .await
+            .map_err(short_code_tool_error)?;
+        Ok(Json(ShortCodePairingSyncResult {
+            verification: short_code_pairing_status_result(synced.status),
+            processed_stages: synced.processed_stages,
+        }))
+    }
+
+    #[tool(
+        name = "cancel_short_code_pairing",
+        description = "Cancel one active short-code attempt and any unreleased member-pairing reservation."
+    )]
+    async fn cancel_short_code_pairing(
+        &self,
+        Parameters(request): Parameters<ShortCodePairingRequest>,
+    ) -> Result<Json<ShortCodePairingStatusResult>, String> {
+        self.authorize("cancel_short_code_pairing")?;
+        let status = self
+            .pairing_service()?
+            .cancel_short_code_pairing(
+                parse_short_code_attempt_id(&request.attempt_id)?,
+                current_unix_seconds()?,
+            )
+            .await
+            .map_err(short_code_tool_error)?;
+        Ok(Json(short_code_pairing_status_result(status)))
+    }
+
+    #[tool(
         name = "redeem_pairing_capability",
         description = "Open an authorization request from a capability received from another session."
     )]
@@ -761,6 +1199,23 @@ impl StdioServer {
         let status = self
             .pairing_service()?
             .redeem_capability(&request.capability, current_unix_seconds()?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Json(pairing_status_result(status)))
+    }
+
+    #[tool(
+        name = "redeem_pairing_rendezvous",
+        description = "Take and decrypt one compact relay rendezvous into the existing pairing flow."
+    )]
+    async fn redeem_pairing_rendezvous(
+        &self,
+        Parameters(request): Parameters<RedeemPairingRendezvousRequest>,
+    ) -> Result<Json<PairingStatusResult>, String> {
+        self.authorize("redeem_pairing_rendezvous")?;
+        let status = self
+            .pairing_service()?
+            .redeem_rendezvous(&request.token, current_unix_seconds()?)
             .await
             .map_err(tool_error)?;
         Ok(Json(pairing_status_result(status)))
@@ -1724,11 +2179,25 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "read_messages"
         | "delivery_status"
         | "get_pairing_status"
+        | "get_short_code_pairing_status"
+        | "list_trusted_devices"
+        | "get_repeat_pairing_status"
         | "get_collaboration_policy_status"
         | "inspect_collaboration_policy_proposal" => Ok(()),
         "create_conversation"
         | "create_pairing_capability"
+        | "create_pairing_rendezvous"
+        | "create_short_code_pairing"
+        | "claim_short_code_pairing"
+        | "confirm_short_code_pairing"
+        | "sync_short_code_pairing"
+        | "cancel_short_code_pairing"
+        | "set_trusted_device_alias"
+        | "start_repeat_pairing"
+        | "sync_repeat_pairing"
+        | "cancel_repeat_pairing"
         | "redeem_pairing_capability"
+        | "redeem_pairing_rendezvous"
         | "authorize_pairing_joiner"
         | "authorize_pairing_inviter"
         | "sync_pairing"
@@ -1819,6 +2288,31 @@ fn parse_pairing_id(value: &str) -> Result<PairingId, String> {
     decode_hex(value)
         .map(PairingId::from_bytes)
         .map_err(|_| "invalid_pairing_id".to_string())
+}
+
+fn parse_repeat_pairing_operation_id(value: &str) -> Result<RepeatPairingOperationId, String> {
+    decode_hex(value)
+        .map(RepeatPairingOperationId::from_bytes)
+        .map_err(|_| "invalid_repeat_pairing_operation_id".to_string())
+}
+
+fn parse_short_code_attempt_id(value: &str) -> Result<ShortCodePairingAttemptId, String> {
+    decode_hex(value)
+        .map(ShortCodePairingAttemptId::from_bytes)
+        .map_err(|_| "invalid_short_code_pairing_attempt_id".to_string())
+}
+
+fn parse_short_code_sas(value: &str) -> Result<ShortCodePairingSas, String> {
+    if value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid_short_code_pairing_sas".to_string());
+    }
+    value
+        .parse::<u32>()
+        .map_err(|_| "invalid_short_code_pairing_sas".to_string())
+        .and_then(|value| {
+            ShortCodePairingSas::new(value)
+                .map_err(|_| "invalid_short_code_pairing_sas".to_string())
+        })
 }
 
 fn parse_message_id(value: &str) -> Result<MessageId, String> {
@@ -1942,6 +2436,94 @@ fn pairing_status_result(status: PairingStatus) -> PairingStatusResult {
     }
 }
 
+fn repeat_pairing_status_result(status: RepeatPairingStatus) -> RepeatPairingStatusResult {
+    RepeatPairingStatusResult {
+        operation_id: encode_hex(status.operation_id.as_bytes()),
+        role: match status.role {
+            RepeatPairingRole::Initiator => "initiator",
+            RepeatPairingRole::Responder => "responder",
+        },
+        phase: match status.phase {
+            RepeatPairingPhase::InitiatorSendingRequest => "initiator_sending_request",
+            RepeatPairingPhase::InitiatorAwaitingResponse => "initiator_awaiting_response",
+            RepeatPairingPhase::InitiatorRedeemingCapability => "initiator_redeeming_capability",
+            RepeatPairingPhase::InitiatorCreatingConversation => "initiator_creating_conversation",
+            RepeatPairingPhase::InitiatorPairing => "initiator_pairing",
+            RepeatPairingPhase::ResponderIssuingCapability => "responder_issuing_capability",
+            RepeatPairingPhase::ResponderReservingPairing => "responder_reserving_pairing",
+            RepeatPairingPhase::ResponderSendingResponse => "responder_sending_response",
+            RepeatPairingPhase::ResponderPairing => "responder_pairing",
+            RepeatPairingPhase::Completed => "completed",
+            RepeatPairingPhase::Cancelling => "cancelling",
+            RepeatPairingPhase::Cancelled => "cancelled",
+        },
+        peer_device_id: encode_hex(status.peer_device_id.as_bytes()),
+        conversation_id: encode_hex(status.conversation_id.as_bytes()),
+        pairing_id: status
+            .pairing_id
+            .map(|pairing_id| encode_hex(pairing_id.as_bytes())),
+        deadline_unix_seconds: status.deadline_unix_seconds,
+    }
+}
+
+const fn trusted_device_status(status: TrustedDeviceBindingStatus) -> &'static str {
+    match status {
+        TrustedDeviceBindingStatus::Active => "active",
+        TrustedDeviceBindingStatus::Removed => "removed",
+        TrustedDeviceBindingStatus::RootMismatch => "root_mismatch",
+        TrustedDeviceBindingStatus::Unsupported => "unsupported",
+    }
+}
+
+const fn trusted_device_alias_decision(
+    decision: KonclaveDomainCore::TrustedDeviceAliasDecision,
+) -> &'static str {
+    match decision {
+        KonclaveDomainCore::TrustedDeviceAliasDecision::Insert => "inserted",
+        KonclaveDomainCore::TrustedDeviceAliasDecision::Identical => "unchanged",
+        KonclaveDomainCore::TrustedDeviceAliasDecision::Rename => "renamed",
+        KonclaveDomainCore::TrustedDeviceAliasDecision::RebindStale => "rebound_stale",
+    }
+}
+
+fn short_code_pairing_status_result(
+    status: ShortCodePairingStatus,
+) -> ShortCodePairingStatusResult {
+    ShortCodePairingStatusResult {
+        attempt_id: encode_hex(status.attempt_id.as_bytes()),
+        local_role: match status.role {
+            ShortCodeRole::Creator => "creator",
+            ShortCodeRole::Claimant => "claimant",
+        }
+        .to_string(),
+        phase: match status.phase {
+            ShortCodePhase::CreatorAwaitingClaim => "creator_awaiting_claim",
+            ShortCodePhase::CreatorAwaitingFinalization => "creator_awaiting_finalization",
+            ShortCodePhase::CreatorAwaitingConfirmation => "creator_awaiting_confirmation",
+            ShortCodePhase::CreatorPublishingCapability => "creator_publishing_capability",
+            ShortCodePhase::CreatorCompleted => "creator_completed",
+            ShortCodePhase::ClaimantClaiming => "claimant_claiming",
+            ShortCodePhase::ClaimantAwaitingResponse => "claimant_awaiting_response",
+            ShortCodePhase::ClaimantAwaitingCreatorIdentity => "claimant_awaiting_creator_identity",
+            ShortCodePhase::ClaimantAwaitingConfirmation => "claimant_awaiting_confirmation",
+            ShortCodePhase::ClaimantTakingCapability => "claimant_taking_capability",
+            ShortCodePhase::ClaimantCompleted => "claimant_completed",
+            ShortCodePhase::Cancelling => "cancelling",
+            ShortCodePhase::Cancelled => "cancelled",
+        }
+        .to_string(),
+        local_device_id: encode_hex(status.local_device_id.as_bytes()),
+        peer_device_id: status
+            .peer_device_id
+            .map(|value| encode_hex(value.as_bytes())),
+        sas: status.sas.map(ShortCodePairingSas::to_text),
+        deadline_unix_seconds: status.deadline_unix_seconds,
+        local_confirmed: status.local_confirmed,
+        peer_confirmed: status.peer_confirmed,
+        pairing_id: status.pairing_id.map(|value| encode_hex(value.as_bytes())),
+    }
+}
+
 const fn role_name(role: ConversationRole) -> &'static str {
     match role {
         ConversationRole::Administrator => "administrator",
@@ -2038,6 +2620,10 @@ fn message_result(
                 policy_digest: encode_hex(revocation.policy_digest().as_bytes()),
             }
         }
+        ApplicationContent::RepeatPairingRequest(_)
+        | ApplicationContent::RepeatPairingResponse(_) => {
+            return Err("internal_application_content".to_string());
+        }
     };
     Ok(MessageResult {
         conversation_id: encode_hex(conversation_id.as_bytes()),
@@ -2112,6 +2698,73 @@ const fn hex_nibble(value: u8) -> Result<u8, ()> {
 
 fn tool_error(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn trusted_device_error(error: ConversationCoordinatorError) -> String {
+    match error {
+        ConversationCoordinatorError::Profile(ProfileStoreError::TrustedDeviceNotFound) => {
+            "trusted_device_not_found".to_string()
+        }
+        ConversationCoordinatorError::Profile(ProfileStoreError::TrustedDeviceAliasConflict) => {
+            "trusted_device_alias_conflict".to_string()
+        }
+        ConversationCoordinatorError::Profile(ProfileStoreError::TrustedDeviceRootMismatch)
+        | ConversationCoordinatorError::TrustedDeviceRootMismatch => {
+            "trusted_device_root_mismatch".to_string()
+        }
+        ConversationCoordinatorError::Profile(ProfileStoreError::TrustedDeviceRemoved)
+        | ConversationCoordinatorError::TrustedDeviceRemoved => {
+            "trusted_device_removed".to_string()
+        }
+        ConversationCoordinatorError::Profile(
+            ProfileStoreError::TrustedDeviceRepeatPairingUnsupported,
+        )
+        | ConversationCoordinatorError::TrustedDeviceRepeatPairingUnsupported => {
+            "trusted_device_repeat_pairing_unsupported".to_string()
+        }
+        ConversationCoordinatorError::TrustedDeviceSelf => "trusted_device_self".to_string(),
+        ConversationCoordinatorError::TrustedDeviceEvidenceCapacity
+        | ConversationCoordinatorError::Profile(ProfileStoreError::TrustedDeviceCapacityExceeded) => {
+            "capacity".to_string()
+        }
+        other => tool_error(other),
+    }
+}
+
+fn repeat_pairing_error(error: PairingServiceError) -> String {
+    match error {
+        PairingServiceError::Persistence(ProfileStoreError::RepeatPairingNotFound) => {
+            "repeat_pairing_not_found".to_string()
+        }
+        PairingServiceError::Persistence(ProfileStoreError::RepeatPairingCapacityExceeded) => {
+            "capacity".to_string()
+        }
+        PairingServiceError::Conversation(error) => trusted_device_error(error),
+        PairingServiceError::Expired => "repeat_pairing_expired".to_string(),
+        PairingServiceError::InvalidTransition => "repeat_pairing_invalid_transition".to_string(),
+        PairingServiceError::AuthorizationMismatch => {
+            "repeat_pairing_authorization_mismatch".to_string()
+        }
+        other => tool_error(other),
+    }
+}
+
+fn short_code_tool_error(error: PairingServiceError) -> String {
+    match error {
+        PairingServiceError::Expired => "short_code_pairing_expired".to_string(),
+        PairingServiceError::InvalidTransition => {
+            "short_code_pairing_invalid_transition".to_string()
+        }
+        PairingServiceError::AuthorizationMismatch => {
+            "short_code_pairing_confirmation_mismatch".to_string()
+        }
+        PairingServiceError::ShortCodeRejected => "short_code_pairing_rejected".to_string(),
+        PairingServiceError::Cryptographic(error) => error.code().to_string(),
+        PairingServiceError::Persistence(ProfileStoreError::PairingCapacityExceeded) => {
+            "capacity".to_string()
+        }
+        other => tool_error(other),
+    }
 }
 
 fn send_message_error(error: ApplicationServiceError) -> String {
@@ -2191,6 +2844,7 @@ mod tests {
         CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
         CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
         ConversationRole, DeviceId, EnvelopeId, MessageId, PairingId, ProtocolVersion,
+        ShortCodePairingAttemptId, ShortCodePairingSas,
     };
     use rmcp::model::CallToolRequestParams;
     use rmcp::{ClientHandler, ServiceExt};
@@ -2201,12 +2855,15 @@ mod tests {
         collaboration_policy_operation_error, compile_collaboration_policy_tool_source,
         ensure_stdout_safe_diagnostics, local_stdio_authorization, pairing_status_result,
         parse_collaboration_policy_digest, parse_collaboration_policy_proposal_id,
+        parse_short_code_sas, short_code_pairing_status_result,
     };
     use crate::conversation::ProcessedApplication;
     use crate::conversation::tests::open_coordinator;
     use crate::pairing_service::PairingStatus;
+    use crate::pairing_service::ShortCodePairingStatus;
     use crate::persistence::MessageDirection;
     use crate::persistence::pairing::{PairingPhase, PairingRole};
+    use crate::short_code_pairing::{ShortCodePhase, ShortCodeRole};
 
     #[derive(Clone, Default)]
     struct TestClient;
@@ -2221,6 +2878,20 @@ mod tests {
         .unwrap();
         let actual = serde_json::to_value(StdioServer::tool_router().list_all()).unwrap();
         assert_eq!(actual, expected);
+        assert!(actual.as_array().unwrap().iter().all(|tool| {
+            !matches!(
+                tool["name"].as_str(),
+                Some(
+                    "confirm_short_code_pairing"
+                        | "list_trusted_devices"
+                        | "set_trusted_device_alias"
+                        | "start_repeat_pairing"
+                        | "get_repeat_pairing_status"
+                        | "sync_repeat_pairing"
+                        | "cancel_repeat_pairing"
+                )
+            )
+        }));
     }
 
     #[test]
@@ -2266,6 +2937,18 @@ mod tests {
             method: "get_pairing_status",
         })
         .unwrap();
+        read_only(AuthorizationContext {
+            method: "get_short_code_pairing_status",
+        })
+        .unwrap();
+        read_only(AuthorizationContext {
+            method: "list_trusted_devices",
+        })
+        .unwrap();
+        read_only(AuthorizationContext {
+            method: "get_repeat_pairing_status",
+        })
+        .unwrap();
         assert!(
             read_only(AuthorizationContext {
                 method: "create_conversation",
@@ -2275,6 +2958,12 @@ mod tests {
         assert!(
             read_only(AuthorizationContext {
                 method: "create_pairing_capability",
+            })
+            .is_err()
+        );
+        assert!(
+            read_only(AuthorizationContext {
+                method: "create_pairing_rendezvous",
             })
             .is_err()
         );
@@ -2302,7 +2991,32 @@ mod tests {
         })
         .unwrap();
         writable(AuthorizationContext {
+            method: "create_pairing_rendezvous",
+        })
+        .unwrap();
+        for method in [
+            "create_short_code_pairing",
+            "claim_short_code_pairing",
+            "confirm_short_code_pairing",
+            "sync_short_code_pairing",
+            "cancel_short_code_pairing",
+        ] {
+            writable(AuthorizationContext { method }).unwrap();
+        }
+        for method in [
+            "set_trusted_device_alias",
+            "start_repeat_pairing",
+            "sync_repeat_pairing",
+            "cancel_repeat_pairing",
+        ] {
+            writable(AuthorizationContext { method }).unwrap();
+        }
+        writable(AuthorizationContext {
             method: "redeem_pairing_capability",
+        })
+        .unwrap();
+        writable(AuthorizationContext {
+            method: "redeem_pairing_rendezvous",
         })
         .unwrap();
         writable(AuthorizationContext {
@@ -2641,6 +3355,28 @@ mod tests {
         assert_eq!(result.phase, "joiner_awaiting_inviter_authorization");
         assert_eq!(result.requested_role, "member");
         assert_eq!(result.granted_role.as_deref(), Some("administrator"));
+    }
+
+    #[test]
+    fn short_code_status_and_sas_use_stable_exact_values() {
+        let result = short_code_pairing_status_result(ShortCodePairingStatus {
+            attempt_id: ShortCodePairingAttemptId::from_bytes([1; 16]),
+            role: ShortCodeRole::Creator,
+            phase: ShortCodePhase::CreatorAwaitingConfirmation,
+            local_device_id: DeviceId::from_bytes([2; 32]),
+            peer_device_id: Some(DeviceId::from_bytes([3; 32])),
+            sas: Some(ShortCodePairingSas::new(42).unwrap()),
+            deadline_unix_seconds: 10,
+            local_confirmed: false,
+            peer_confirmed: true,
+            pairing_id: None,
+        });
+        assert_eq!(result.local_role, "creator");
+        assert_eq!(result.phase, "creator_awaiting_confirmation");
+        assert_eq!(result.sas.as_deref(), Some("000042"));
+        assert!(parse_short_code_sas("000042").is_ok());
+        assert!(parse_short_code_sas("42").is_err());
+        assert!(parse_short_code_sas("00004O").is_err());
     }
 
     #[tokio::test]

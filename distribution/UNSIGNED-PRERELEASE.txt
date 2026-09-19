@@ -9,4 +9,6 @@ build provenance are separate release metadata and do not replace a code signatu
 
 SHA-256 verification detects changed or incomplete files after obtaining a release
 set. It does not prove who created that release set. Review the recorded source
-revision and obtain artifacts through a channel you trust.
+revision and obtain artifacts through a channel you trust. An immutable GitHub
+Release supplies a separate GitHub release attestation for its tag and asset set; it
+does not add a platform code signature to the native executables.

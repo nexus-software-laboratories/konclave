@@ -1,6 +1,6 @@
 [package]
 name = "KonclaveCryptographicCore"
-version = "0.1.0"
+version = "0.1.14"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -13,6 +13,9 @@ aws-lc-rs.workspace = true
 mls-rs.workspace = true
 mls-rs-core.workspace = true
 mls-rs-crypto-awslc.workspace = true
+opaque-ke = { version = "=4.0.1", default-features = false, features = ["argon2", "ristretto255", "std"] }
+rand = { version = "=0.8.8", default-features = false, features = ["std", "std_rng"] }
+sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 

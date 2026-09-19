@@ -456,8 +456,12 @@ function Copy-ClientPayload {
 
     $suffix = if ([string]$Artifact.operatingSystem -ceq 'windows') { '.exe' } else { '' }
     $cliSource = Join-Path $BinaryDirectory "KonclaveCommandLine$suffix"
+    $migrationSource = Join-Path $BinaryDirectory "KonclaveRelayMigration$suffix"
     $serviceSource = Join-Path $BinaryDirectory "KonclaveLocalService$suffix"
     Copy-ReleaseFile $cliSource (Join-Path $DestinationRoot 'bin' "konclave$suffix")
+    Copy-ReleaseFile $migrationSource (
+        Join-Path $DestinationRoot 'bin' "KonclaveRelayMigration$suffix"
+    )
     Copy-ReleaseFile $serviceSource (
         Join-Path $DestinationRoot 'bin' "KonclaveLocalService$suffix"
     )
@@ -483,6 +487,34 @@ function Copy-ClientPayload {
             'skills' 'konclave-generic' 'SKILL.md'
     ) (
         Join-Path $clientSupportRoot 'skills' 'konclave-generic' 'SKILL.md'
+    )
+    $installerRoot = Join-Path $DestinationRoot 'share' 'konclave' 'installer'
+    foreach ($relative in @(
+        'Install-Konclave.ps1',
+        'InstallationLifecycle.Functions.ps1',
+        'InstallationRuntime.Functions.ps1'
+    )) {
+        Copy-ReleaseFile (
+            Join-Path $ProjectRoot 'scripts' 'installation' $relative
+        ) (
+            Join-Path $installerRoot $relative
+        )
+    }
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'scripts' 'packaging' 'ReleaseIntegrity.Functions.ps1'
+    ) (
+        Join-Path $installerRoot 'ReleaseIntegrity.Functions.ps1'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'scripts' 'packaging' 'ReleasePublication.Functions.ps1'
+    ) (
+        Join-Path $installerRoot 'ReleasePublication.Functions.ps1'
+    )
+    Copy-ReleaseFile (
+        Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+            'manage-user-service.ps1'
+    ) (
+        Join-Path $installerRoot 'WindowsUserService.ps1'
     )
     $policyRoot = Join-Path $DestinationRoot 'share' 'konclave' 'policy'
     foreach ($relative in @(
@@ -543,6 +575,12 @@ function Copy-ClientPayload {
                     'install-service.ps1'
             ) (
                 Join-Path $serviceRoot 'windows' 'install-service.ps1'
+            )
+            Copy-ReleaseFile (
+                Join-Path $ProjectRoot 'apps' 'Konclave.LocalDaemon' 'packaging' 'windows' `
+                    'manage-user-service.ps1'
+            ) (
+                Join-Path $serviceRoot 'windows' 'manage-user-service.ps1'
             )
         }
         default {

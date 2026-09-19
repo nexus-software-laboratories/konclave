@@ -1,52 +1,283 @@
-name: Package artifact cleanup
+name: Actions storage cleanup
 
 on:
   workflow_run:
     workflows:
+      - Agent plugin conformance
       - Package validation
+      - Publish prerelease
     types:
       - completed
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Every run reconciles all eligible artifacts and caches, so the newest trigger
+  # subsumes any older cleanup still queued or running.
+  group: actions-storage-cleanup
+  cancel-in-progress: true
 
 permissions:
-  actions: write
   contents: read
 
 jobs:
+  authorize-storage-cleanup:
+    name: Authorize storage cleanup
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      delete_artifacts: ${{ steps.plan.outputs.delete_artifacts }}
+      prune_caches: ${{ steps.plan.outputs.prune_caches }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci/ActionsStoragePolicy.Functions.ps1
+          sparse-checkout-cone-mode: false
+      - name: Require trusted manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo 'Manual storage cleanup must run from the default branch.' >&2
+            exit 1
+          fi
+          default_head="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" \
+              --jq '.object.sha'
+          )"
+          if [ "$GITHUB_SHA" != "$default_head" ]; then
+            echo 'Manual storage cleanup requires the current default-branch head.' >&2
+            exit 1
+          fi
+      - name: Resolve cleanup work
+        id: plan
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
+          SOURCE_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || 0 }}
+          SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path || '' }}
+        run: |
+          . ./scripts/ci/ActionsStoragePolicy.Functions.ps1
+
+          $artifactCount = 0
+          if ($env:EVENT_NAME -ceq 'workflow_run') {
+            $artifactCountOutput = @(
+              gh api `
+                "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN_ID/artifacts?per_page=1" `
+                --jq '.total_count' 2>&1
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw (
+                "Could not inspect source-run artifacts.`n" +
+                ($artifactCountOutput -join "`n")
+              )
+            }
+            $artifactCount = [int](($artifactCountOutput -join '').Trim())
+          }
+
+          $plan = Get-ActionsStorageCleanupPlan `
+            -EventName $env:EVENT_NAME `
+            -SourceWorkflowPath $env:SOURCE_WORKFLOW_PATH `
+            -SourceConclusion $env:SOURCE_CONCLUSION `
+            -SourceHeadBranch $env:SOURCE_HEAD_BRANCH `
+            -DefaultBranch $env:DEFAULT_BRANCH `
+            -ArtifactCount $artifactCount
+          "delete_artifacts=$($plan.DeleteArtifacts.ToString().ToLowerInvariant())" |
+            Out-File $env:GITHUB_OUTPUT -Append
+          "prune_caches=$($plan.PruneCaches.ToString().ToLowerInvariant())" |
+            Out-File $env:GITHUB_OUTPUT -Append
+          Write-Output (
+            "Storage cleanup plan: artifacts=$artifactCount, " +
+            "delete=$($plan.DeleteArtifacts), prune=$($plan.PruneCaches)."
+          )
+
   delete-run-artifacts:
-    name: Delete package run artifacts
+    name: Delete transient artifacts
+    needs: authorize-storage-cleanup
+    if: needs.authorize-storage-cleanup.outputs.delete_artifacts == 'true'
+    permissions:
+      actions: write
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Delete artifacts from completed package run
-        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Delete transient artifacts from completed eligible runs
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          set -euo pipefail
-          mapfile -t artifact_ids < <(
-            gh api \
-              --paginate \
-              "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
-              --jq '.artifacts[].id'
+          . ./scripts/ci/ActionsStoragePolicy.Functions.ps1
+
+          function Get-RepositoryArtifacts {
+            $items = @(
+              gh api `
+                --paginate `
+                "repos/$env:REPOSITORY/actions/artifacts?per_page=100" `
+                --jq '.artifacts[]' |
+                  ConvertFrom-Json
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not list repository Actions artifacts.'
+            }
+            return $items
+          }
+
+          function Get-ArtifactWorkflowRuns {
+            param(
+              [Parameter(Mandatory)]
+              [AllowEmptyCollection()]
+              [object[]]$Artifacts
+            )
+
+            $runs = foreach ($runId in @(
+              Get-ActionsArtifactWorkflowRunIds -Artifacts $Artifacts
+            )) {
+              $run = gh api `
+                "repos/$env:REPOSITORY/actions/runs/$runId" |
+                  ConvertFrom-Json -Depth 20
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not read Actions workflow run $runId."
+              }
+              $run
+            }
+            return @($runs)
+          }
+
+          $deleted = 0
+          $alreadyAbsent = 0
+          [long]$deletedBytes = 0
+          for ($pass = 1; $pass -le 3; $pass++) {
+            $artifacts = @(Get-RepositoryArtifacts)
+            $runs = @(Get-ArtifactWorkflowRuns -Artifacts $artifacts)
+            $selection = Select-ActionsArtifactDeletion `
+              -Artifacts $artifacts `
+              -Runs $runs
+            if ($selection.deleteIds.Count -eq 0) {
+              break
+            }
+            $sizesById = [Collections.Generic.Dictionary[long, long]]::new()
+            foreach ($artifact in $artifacts) {
+              $sizesById.Add(
+                [long]$artifact.id,
+                [long]$artifact.size_in_bytes
+              )
+            }
+            foreach ($artifactId in $selection.deleteIds) {
+              $output = gh api `
+                --method DELETE `
+                "repos/$env:REPOSITORY/actions/artifacts/$artifactId" 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                $diagnostics = $output -join "`n"
+                if ($diagnostics -notmatch '\bHTTP 404\b') {
+                  throw "Could not delete Actions artifact $artifactId.`n$diagnostics"
+                }
+                # The local demo may win this exact-artifact deletion race.
+                Write-Output "::notice::Artifact $artifactId was already deleted."
+                $alreadyAbsent++
+                continue
+              }
+              $deleted++
+              $deletedBytes += $sizesById[[long]$artifactId]
+            }
+          }
+
+          $remainingArtifacts = @(Get-RepositoryArtifacts)
+          $remainingRuns = @(
+            Get-ArtifactWorkflowRuns -Artifacts $remainingArtifacts
           )
-          for artifact_id in "${artifact_ids[@]}"; do
-            if ! gh api \
-              --method DELETE \
-              "repos/$REPOSITORY/actions/artifacts/$artifact_id"; then
-              # The local demo has an authenticated exact-run fallback and may
-              # win this deletion race; the final count remains authoritative.
-              echo "::notice::Artifact $artifact_id was already handled by the caller."
-            fi
-          done
-          remaining="$(
-            gh api \
-              "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=1" \
-              --jq '.total_count'
-          )"
-          if [ "$remaining" != '0' ]; then
-            echo "::error::Package run still retains $remaining artifact(s)."
-            exit 1
-          fi
-          echo "Deleted ${#artifact_ids[@]} transient package artifact(s)."
+          $remainingSelection = Select-ActionsArtifactDeletion `
+            -Artifacts $remainingArtifacts `
+            -Runs $remainingRuns
+          if ($remainingSelection.deleteIds.Count -ne 0) {
+            throw (
+              "Repository still retains " +
+              "$($remainingSelection.deleteIds.Count) eligible artifact(s)."
+            )
+          }
+          (
+            "Deleted $deleted transient artifact(s), totaling $deletedBytes bytes; " +
+            "$alreadyAbsent were already absent."
+          )
+
+  prune-actions-caches:
+    name: Bound Actions caches
+    needs: authorize-storage-cleanup
+    if: needs.authorize-storage-cleanup.outputs.prune_caches == 'true'
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Remove pull-request caches and enforce five-GiB budget
+        shell: pwsh
+        env:
+          CACHE_BUDGET_BYTES: '5368709120'
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $caches = @(
+            gh api `
+              --paginate `
+              "repos/$env:REPOSITORY/actions/caches?per_page=100" `
+              --jq '.actions_caches[]' |
+                ConvertFrom-Json
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not list repository Actions caches.'
+          }
+          [long]$budget = $env:CACHE_BUDGET_BYTES
+          . ./scripts/ci/ActionsStoragePolicy.Functions.ps1
+          $selection = Select-ActionsCacheDeletion `
+            -Caches $caches `
+            -BudgetBytes $budget
+          foreach ($cacheId in $selection.deleteIds) {
+            gh api `
+              --method DELETE `
+              "repos/$env:REPOSITORY/actions/caches/$cacheId"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not delete Actions cache $cacheId."
+            }
+          }
+          $remaining = @(
+            gh api `
+              --paginate `
+              "repos/$env:REPOSITORY/actions/caches?per_page=100" `
+              --jq '.actions_caches[]' |
+                ConvertFrom-Json
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not verify repository Actions caches.'
+          }
+          [long]$remainingBytes = 0
+          foreach ($cache in $remaining) {
+            $remainingBytes += [long]$cache.size_in_bytes
+            if ([string]$cache.ref -ne 'refs/heads/main') {
+              throw "Pull-request cache remained after cleanup: $($cache.id)"
+            }
+          }
+          if ($remainingBytes -gt $budget) {
+            throw "Actions caches remain above the five-GiB budget: $remainingBytes bytes."
+          }
+          "Actions caches are bounded at $remainingBytes bytes."

@@ -12,6 +12,8 @@ export {
   MAX_CONSUMED_INVITATIONS,
   MAX_MEMBERS,
   MAX_MLS_KEY_PACKAGE_BYTES,
+  MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES,
+  MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
   MAX_PROTOBUF_TOP_LEVEL_FIELDS,
   MAX_RELAY_CONTROL_MESSAGE_BYTES,
   MAX_RELAY_ENVELOPE_BYTES,
@@ -27,4 +29,6 @@ export * from './generated/konclave/protocol/v1/common_pb.js';
 export * from './generated/konclave/protocol/v1/enrollment_pb.js';
 export * from './generated/konclave/protocol/v1/identity_pb.js';
 export * from './generated/konclave/protocol/v1/membership_pb.js';
+export * from './generated/konclave/protocol/v1/pairing_rendezvous_pb.js';
+export * from './generated/konclave/protocol/v1/short_code_pairing_pb.js';
 export * from './generated/konclave/protocol/v1/relay_pb.js';

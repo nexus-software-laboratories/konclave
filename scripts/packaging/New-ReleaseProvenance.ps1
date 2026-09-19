@@ -17,7 +17,7 @@ param(
     [string]$Target,
 
     [Parameter(Mandatory)]
-    [ValidateSet('native', 'container')]
+    [ValidateSet('native', 'plugin', 'container')]
     [string]$BuildKind,
 
     [Parameter(Mandatory)]
@@ -89,10 +89,12 @@ if (
     throw 'Provenance artifact does not match the release manifest.'
 }
 $artifact = $artifacts[0]
-if (
-    ($BuildKind -ceq 'container' -and [string]$artifact.kind -cne 'container') -or
-    ($BuildKind -ceq 'native' -and [string]$artifact.kind -ceq 'container')
-) {
+$expectedKinds = switch ($BuildKind) {
+    'native' { @('client', 'relay', 'gateway') }
+    'plugin' { @('plugin') }
+    'container' { @('container') }
+}
+if ([string]$artifact.kind -cnotin $expectedKinds) {
     throw 'Provenance build kind does not match the release artifact.'
 }
 $sourceCommit = (Invoke-VersionCommand git @('-C', $projectRootPath, 'rev-parse', 'HEAD')).Trim()
@@ -102,6 +104,16 @@ if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
 
 $toolVersions = [ordered]@{
     powershell = $PSVersionTable.PSVersion.ToString()
+}
+if ($BuildKind -in @('native', 'plugin')) {
+    $toolVersions.node = (Invoke-VersionCommand node @('--version')).TrimStart('v')
+    $toolVersions.npm = Invoke-VersionCommand npm @('--version')
+    if (
+        $toolVersions.node -cne [string]$release.release.toolchains.node -or
+        $toolVersions.npm -cne [string]$release.release.toolchains.npm
+    ) {
+        throw 'Resolved Node toolchains do not match the release manifest.'
+    }
 }
 if ($BuildKind -ceq 'native') {
     $rust = Invoke-VersionCommand rustc @('--version', '--verbose')
@@ -113,17 +125,11 @@ if ($BuildKind -ceq 'native') {
         $toolVersions[$field.Replace(' ', '-').ToLowerInvariant()] = $match.Groups[1].Value
     }
     $toolVersions.cargo = Invoke-VersionCommand cargo @('--version')
-    $toolVersions.node = (Invoke-VersionCommand node @('--version')).TrimStart('v')
-    $toolVersions.npm = Invoke-VersionCommand npm @('--version')
-    if (
-        $toolVersions.release -cne [string]$release.release.toolchains.rust -or
-        $toolVersions.node -cne [string]$release.release.toolchains.node -or
-        $toolVersions.npm -cne [string]$release.release.toolchains.npm
-    ) {
-        throw 'Resolved native toolchains do not match the release manifest.'
+    if ($toolVersions.release -cne [string]$release.release.toolchains.rust) {
+        throw 'Resolved Rust toolchain does not match the release manifest.'
     }
 }
-else {
+elseif ($BuildKind -ceq 'container') {
     if ([string]::IsNullOrWhiteSpace($SyftCommand)) {
         throw 'Container provenance requires the pinned Syft command.'
     }
@@ -168,16 +174,34 @@ else {
 
 $inputPaths = [Collections.Generic.List[string]]::new()
 foreach ($path in @(
-    'Cargo.lock',
     'distribution/release-artifacts.json',
     '.github/workflows/package-validation.yml'
 )) {
     $inputPaths.Add($path)
 }
 if ($BuildKind -ceq 'native') {
-    $inputPaths.Add('extensions/Konclave.HostExtension/package-lock.json')
+    foreach ($path in @(
+        'Cargo.lock',
+        'extensions/Konclave.HostExtension/package-lock.json',
+        'scripts/installation/Install-Konclave.ps1',
+        'scripts/installation/InstallationLifecycle.Functions.ps1',
+        'scripts/installation/InstallationRuntime.Functions.ps1',
+        'scripts/packaging/ReleasePackaging.Functions.ps1'
+    )) {
+        $inputPaths.Add($path)
+    }
+}
+elseif ($BuildKind -ceq 'plugin') {
+    foreach ($path in @(
+        'extensions/Konclave.HostExtension/package-lock.json',
+        'extensions/Konclave.HostExtension/package.json',
+        'extensions/Konclave.HostExtension/plugin.json'
+    )) {
+        $inputPaths.Add($path)
+    }
 }
 else {
+    $inputPaths.Add('Cargo.lock')
     $requiredContainerInputs = @(
         "$applicationRoot/.container/image.json",
         "$applicationRoot/Dockerfile",

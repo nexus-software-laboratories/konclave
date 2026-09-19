@@ -1213,7 +1213,7 @@ fn parse_harness(value: &str) -> Option<HarnessKind> {
 
 fn operation_handler(services: &ProfileServices) -> StdioServer {
     let authorize: AuthorizationHook = Arc::new(|context: AuthorizationContext<'_>| {
-        if is_tool_operation(context.method) {
+        if is_tool_operation(context.method) || is_command_operation(context.method) {
             Ok(())
         } else {
             anyhow::bail!("local service operation is not authorized")
@@ -1757,7 +1757,7 @@ async fn dispatch_request(
             }
         }
         "send_message" => dispatch_send_message(state, request.payload()).await,
-        _ if is_tool_operation(operation) => {
+        _ if is_tool_operation(operation) || is_command_operation(operation) => {
             state
                 .handler
                 .dispatch_json(operation, request.payload())
@@ -1900,7 +1900,7 @@ fn is_fresh_collaboration_policy_request(operation: &str) -> bool {
 }
 
 fn required_capability(operation: &str) -> Option<SessionCapabilities> {
-    if is_tool_operation(operation) {
+    if is_tool_operation(operation) || is_command_operation(operation) {
         Some(SessionCapabilities::PROFILE_OPERATIONS)
     } else if operation.starts_with("delivery.") || operation.starts_with("collaboration.") {
         Some(SessionCapabilities::DELIVERY)
@@ -2584,6 +2584,9 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "collaboration_policy_proposal_not_found"
         | "invalid_conversation_id"
         | "invalid_pairing_id"
+        | "invalid_short_code_pairing_attempt_id"
+        | "invalid_short_code_pairing_sas"
+        | "invalid_short_code_pairing_code"
         | "invalid_message_id"
         | "invalid_device_id"
         | "invalid_role"
@@ -2596,6 +2599,8 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "invalid_peer_binding"
         | "invalid_issuer_public_key"
         | "invalid_routing_id"
+        | "invalid_trusted_device_alias"
+        | "invalid_repeat_pairing_operation_id"
         | "directed_request_unsupported"
         | "directed_request_target_required" => LocalServiceErrorCode::InvalidRequest,
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
@@ -2609,7 +2614,21 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         "capacity" => LocalServiceErrorCode::Capacity,
         "busy" => LocalServiceErrorCode::Busy,
         "deadline_exceeded" => LocalServiceErrorCode::DeadlineExceeded,
-        "collaboration_policy_conflict" => LocalServiceErrorCode::Conflict,
+        "short_code_pairing_expired" => LocalServiceErrorCode::DeadlineExceeded,
+        "repeat_pairing_expired" => LocalServiceErrorCode::DeadlineExceeded,
+        "collaboration_policy_conflict"
+        | "short_code_pairing_invalid_transition"
+        | "short_code_pairing_confirmation_mismatch"
+        | "short_code_pairing_rejected"
+        | "trusted_device_not_found"
+        | "trusted_device_alias_conflict"
+        | "trusted_device_root_mismatch"
+        | "trusted_device_removed"
+        | "trusted_device_repeat_pairing_unsupported"
+        | "trusted_device_self"
+        | "repeat_pairing_not_found"
+        | "repeat_pairing_invalid_transition"
+        | "repeat_pairing_authorization_mismatch" => LocalServiceErrorCode::Conflict,
         _ => LocalServiceErrorCode::Internal,
     }
 }
@@ -2640,7 +2659,14 @@ fn is_tool_operation(operation: &str) -> bool {
             | "remove_member"
             | "change_member_role"
             | "create_pairing_capability"
+            | "create_pairing_rendezvous"
+            | "create_short_code_pairing"
+            | "claim_short_code_pairing"
+            | "get_short_code_pairing_status"
+            | "sync_short_code_pairing"
+            | "cancel_short_code_pairing"
             | "redeem_pairing_capability"
+            | "redeem_pairing_rendezvous"
             | "get_pairing_status"
             | "authorize_pairing_joiner"
             | "authorize_pairing_inviter"
@@ -2649,6 +2675,19 @@ fn is_tool_operation(operation: &str) -> bool {
             | "set_active_conversation"
             | "set_auto_delivery"
             | "delivery_status"
+    )
+}
+
+fn is_command_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "confirm_short_code_pairing"
+            | "list_trusted_devices"
+            | "set_trusted_device_alias"
+            | "start_repeat_pairing"
+            | "get_repeat_pairing_status"
+            | "sync_repeat_pairing"
+            | "cancel_repeat_pairing"
     )
 }
 
@@ -3020,6 +3059,10 @@ fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
                             revocation.policy_digest().as_bytes(),
                         ),
                     }
+                }
+                ApplicationContent::RepeatPairingRequest(_)
+                | ApplicationContent::RepeatPairingResponse(_) => {
+                    unreachable!("internal application content cannot enter client delivery")
                 }
             },
             RemoteEventPayload::MemberAdded { device_id, role } => {
@@ -3605,8 +3648,9 @@ mod collaboration_policy_tests {
     };
     use KonclaveLocalServiceTransport::{
         AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicyVersion,
-        ClientInstanceId, HarnessKind, IssuerKeyId, IssuerKeyVersion, RequestId, ServiceProfileId,
-        SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
+        ClientInstanceId, HarnessKind, IssuerKeyId, IssuerKeyVersion, LocalServiceErrorCode,
+        RequestId, ServiceProfileId, SessionCapabilities, SessionGrant, SessionGrantClaims,
+        SessionGrantId,
     };
     use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
     use serde_json::json;
@@ -3616,7 +3660,8 @@ mod collaboration_policy_tests {
         CollaborationAuthorizedSendRequest, CollaborationSendAuthorization,
         CollaborationSendCandidate, SystemUnixClock, UnixClock, authorize_collaboration_turn,
         complete_collaboration_turn, consume_collaboration_send_authorization,
-        evaluate_collaboration_action, issue_collaboration_action_evaluation,
+        evaluate_collaboration_action, is_command_operation, is_tool_operation,
+        issue_collaboration_action_evaluation, operation_error_code, required_capability,
     };
     use crate::adapter::DeliveryAttachment;
     use crate::conversation::tests::open_coordinator;
@@ -3662,6 +3707,73 @@ mod collaboration_policy_tests {
         assert!(
             super::LedgerKey::for_grant(&first, request_id)
                 != super::LedgerKey::for_grant(&another_session, request_id)
+        );
+    }
+
+    #[test]
+    fn short_code_operations_use_stable_local_service_capabilities_and_errors() {
+        for operation in [
+            "create_short_code_pairing",
+            "claim_short_code_pairing",
+            "get_short_code_pairing_status",
+            "sync_short_code_pairing",
+            "cancel_short_code_pairing",
+        ] {
+            assert!(is_tool_operation(operation));
+            assert_eq!(
+                required_capability(operation),
+                Some(SessionCapabilities::PROFILE_OPERATIONS)
+            );
+        }
+
+        assert!(!is_tool_operation("confirm_short_code_pairing"));
+        assert!(is_command_operation("confirm_short_code_pairing"));
+        assert_eq!(
+            required_capability("confirm_short_code_pairing"),
+            Some(SessionCapabilities::PROFILE_OPERATIONS)
+        );
+        assert_eq!(
+            operation_error_code("invalid_short_code_pairing_sas"),
+            LocalServiceErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            operation_error_code("short_code_pairing_confirmation_mismatch"),
+            LocalServiceErrorCode::Conflict
+        );
+        assert_eq!(
+            operation_error_code("short_code_pairing_expired"),
+            LocalServiceErrorCode::DeadlineExceeded
+        );
+    }
+
+    #[test]
+    fn trusted_device_operations_remain_deterministic_commands_only() {
+        for operation in [
+            "list_trusted_devices",
+            "set_trusted_device_alias",
+            "start_repeat_pairing",
+            "get_repeat_pairing_status",
+            "sync_repeat_pairing",
+            "cancel_repeat_pairing",
+        ] {
+            assert!(!is_tool_operation(operation));
+            assert!(is_command_operation(operation));
+            assert_eq!(
+                required_capability(operation),
+                Some(SessionCapabilities::PROFILE_OPERATIONS)
+            );
+        }
+        assert_eq!(
+            operation_error_code("invalid_trusted_device_alias"),
+            LocalServiceErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            operation_error_code("trusted_device_root_mismatch"),
+            LocalServiceErrorCode::Conflict
+        );
+        assert_eq!(
+            operation_error_code("repeat_pairing_expired"),
+            LocalServiceErrorCode::DeadlineExceeded
         );
     }
 
@@ -6422,9 +6534,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn reload_failure_stops_the_service_and_closes_clients() {
+    async fn reload_failure_closes_clients_and_service_recovers() {
         let fixture = Fixture::new().await;
-        let (_hold_shutdown, stop_rx) = oneshot::channel::<()>();
+        let grant = fixture.grant("session-reload-failure", 81);
+        fixture.persist_grant(grant.clone()).await;
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let mut service = tokio::spawn(run_shared_local_service_until(
             fixture.config(),
             async move {
@@ -6435,27 +6549,60 @@ mod tests {
             result = &mut service => {
                 panic!("shared service exited before the client connected: {result:?}")
             }
-            stream = fixture.connect("session-reload-failure", 81) => stream,
+            stream = fixture.connect_grant(grant.clone(), 81) => stream,
         };
+        let mut status = fixture.authorization.subscribe();
         fixture.authorization.fail_next_reload_for_test();
         fixture.authorization.request_reload();
 
-        let result = tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, &mut service)
-            .await
-            .expect("authorization reload failure did not stop the service")
-            .unwrap();
-        let error = result.expect_err("authorization reload failure returned success");
-        assert!(
-            error
-                .to_string()
-                .contains("local authorization storage is unavailable")
-        );
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                if matches!(
+                    *status.borrow_and_update(),
+                    AuthorizationRuntimeStatus::Failed(_)
+                ) {
+                    break;
+                }
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("authorization reload failure was not published");
         assert!(
             tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
                 .await
                 .unwrap()
                 .is_err()
         );
+        assert!(!service.is_finished());
+
+        fixture.authorization.request_reload();
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            loop {
+                if matches!(
+                    *status.borrow_and_update(),
+                    AuthorizationRuntimeStatus::Active(_)
+                ) {
+                    break;
+                }
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("authorization reload did not recover");
+        let mut recovered = fixture.connect_grant(grant, 82).await;
+        assert!(matches!(
+            request(&mut recovered, 82, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+
+        drop((client, recovered));
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await
+            .expect("shared service shutdown exceeded the test deadline")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

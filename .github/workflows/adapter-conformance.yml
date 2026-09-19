@@ -3,7 +3,7 @@ name: Adapter conformance
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +17,7 @@ concurrency:
 jobs:
   adapter-conformance:
     name: Adapter conformance
+    if: ${{ github.event.action != 'closed' && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -74,6 +75,8 @@ jobs:
       - name: Cache Rust dependencies
         if: steps.scope.outputs.run == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Resolve pinned Node version
         if: steps.scope.outputs.run == 'true'
         id: toolchains

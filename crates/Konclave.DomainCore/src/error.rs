@@ -108,6 +108,30 @@ pub enum KonclaveDomainError {
     /// A pairing envelope field contradicts its finite stage.
     #[error("pairing envelope {field} contradicts its stage")]
     InvalidPairingEnvelope { field: &'static str },
+
+    /// A short-code pairing transition was attempted at or after its deadline.
+    #[error("short-code pairing attempt is expired")]
+    ShortCodePairingExpired,
+
+    /// A short-code pairing confirmation event contradicts its durable state.
+    #[error("short-code pairing confirmation transition is invalid")]
+    InvalidShortCodePairingTransition,
+
+    /// A requested local alias still belongs to another active device root.
+    #[error("trusted-device alias belongs to another active device")]
+    TrustedDeviceAliasConflict,
+
+    /// Current authenticated evidence contradicts the stored device root.
+    #[error("trusted-device root no longer matches authenticated state")]
+    TrustedDeviceRootMismatch,
+
+    /// No current authenticated conversation contains the stored device.
+    #[error("trusted device is no longer a current conversation member")]
+    TrustedDeviceRemoved,
+
+    /// Current membership exists but cannot safely decode repeat-pairing control.
+    #[error("trusted device has no conversation with repeat-pairing capability")]
+    TrustedDeviceRepeatPairingUnsupported,
 }
 
 impl KonclaveDomainError {
@@ -138,6 +162,14 @@ impl KonclaveDomainError {
             Self::InvalidExpectedParentEpoch { .. } => "invalid_expected_parent_epoch",
             Self::InvalidReplayOrder => "invalid_replay_order",
             Self::InvalidPairingEnvelope { .. } => "invalid_pairing_envelope",
+            Self::ShortCodePairingExpired => "short_code_pairing_expired",
+            Self::InvalidShortCodePairingTransition => "invalid_short_code_pairing_transition",
+            Self::TrustedDeviceAliasConflict => "trusted_device_alias_conflict",
+            Self::TrustedDeviceRootMismatch => "trusted_device_root_mismatch",
+            Self::TrustedDeviceRemoved => "trusted_device_removed",
+            Self::TrustedDeviceRepeatPairingUnsupported => {
+                "trusted_device_repeat_pairing_unsupported"
+            }
         }
     }
 }

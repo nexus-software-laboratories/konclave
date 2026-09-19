@@ -1,12 +1,19 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use KonclaveDomainCore::{AcknowledgeRequest, RelayEnvelope, ReplayPage, ReplayRequest, RoutingId};
+use KonclaveDomainCore::{
+    AcknowledgeRequest, PairingRendezvousRecord, PairingRendezvousTakeRequest, RelayEnvelope,
+    ReplayPage, ReplayRequest, RoutingId, ShortCodeAttemptClaimRequest,
+    ShortCodeAttemptMessageRequest, ShortCodeAttemptPublishRequest, ShortCodeAttemptReadRequest,
+    ShortCodeAttemptSnapshot, ShortCodeCapabilityTakeRequest,
+};
 use KonclaveProtocolContracts::v1::decode_relay_envelope;
 use KonclaveRelayAuthentication::{RelayEnrollmentRequest, RelayEnrollmentResponse};
 use KonclaveRelayCore::{
-    EncodedReplayPage, RelayError, RelayPrincipalId, RelayPrincipalRegistry, RelayService,
-    SqliteRelayRepository, SubmitResult,
+    EncodedReplayPage, PairingRendezvousPublishOutcome, PairingRendezvousRepository, RelayClock,
+    RelayError, RelayPrincipalId, RelayPrincipalRegistry, RelayService,
+    ShortCodeAttemptMessageOutcome, ShortCodeAttemptPublishOutcome, ShortCodePairingRepository,
+    SqliteRelayRepository, SubmitResult, SystemRelayClock,
 };
 
 use crate::access::{RelayAccess, StaticRelayAccess};
@@ -114,6 +121,127 @@ impl RelayApplication {
         request: AcknowledgeRequest,
     ) -> Result<u64, RelayError> {
         self.service.acknowledge(principal, request).await
+    }
+
+    /// Publishes one bounded encrypted pairing rendezvous for an authenticated principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed expiry, conflict, capacity, clock, malformed-data, or storage error.
+    pub async fn publish_pairing_rendezvous(
+        &self,
+        principal: RelayPrincipalId,
+        record: PairingRendezvousRecord,
+    ) -> Result<PairingRendezvousPublishOutcome, RelayError> {
+        self.registry
+            .publish_pairing_rendezvous(principal, record, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Atomically returns and consumes one active encrypted pairing rendezvous.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable outcome for absent, expired, or consumed records, or
+    /// a typed clock, malformed-data, or storage error.
+    pub async fn take_pairing_rendezvous(
+        &self,
+        request: PairingRendezvousTakeRequest,
+    ) -> Result<PairingRendezvousRecord, RelayError> {
+        self.registry
+            .take_pairing_rendezvous(request, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Publishes one bounded short-code attempt for its authenticated creator.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed expiry, conflict, capacity, clock, malformed-data, or storage error.
+    pub async fn publish_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptPublishRequest,
+    ) -> Result<ShortCodeAttemptPublishOutcome, RelayError> {
+        self.registry
+            .publish_short_code_attempt(principal, request, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Atomically claims one active locator with an opaque credential request.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable response for hidden attempt state, or a typed rate,
+    /// clock, malformed-data, or storage error.
+    pub async fn claim_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptClaimRequest,
+    ) -> Result<ShortCodeAttemptSnapshot, RelayError> {
+        self.registry
+            .claim_short_code_attempt(principal, request, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Publishes one role- and order-checked opaque attempt stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed unavailable, conflict, invalid-stage, clock, or storage error.
+    pub async fn publish_short_code_message(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptMessageRequest,
+    ) -> Result<ShortCodeAttemptMessageOutcome, RelayError> {
+        self.registry
+            .publish_short_code_message(principal, request, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Reads one capability-filtered snapshot as its authenticated participant.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable response for absent, expired, cancelled, or unauthorized state.
+    pub async fn read_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+    ) -> Result<ShortCodeAttemptSnapshot, RelayError> {
+        self.registry
+            .read_short_code_attempt(principal, request, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Cancels one attempt as its authenticated creator or claimant.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable response for absent or unauthorized state, or a storage error.
+    pub async fn cancel_short_code_attempt(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeAttemptReadRequest,
+    ) -> Result<(), RelayError> {
+        self.registry
+            .cancel_short_code_attempt(principal, request, SystemRelayClock.now_unix_seconds()?)
+            .await
+    }
+
+    /// Atomically consumes one mutually confirmed opaque capability as claimant.
+    ///
+    /// # Errors
+    ///
+    /// Returns one unavailable response unless every required stage is present and active.
+    pub async fn take_short_code_capability(
+        &self,
+        principal: RelayPrincipalId,
+        request: ShortCodeCapabilityTakeRequest,
+    ) -> Result<Vec<u8>, RelayError> {
+        self.registry
+            .take_short_code_capability(principal, request, SystemRelayClock.now_unix_seconds()?)
+            .await
     }
 
     /// Registers one client-generated dynamic relay principal.

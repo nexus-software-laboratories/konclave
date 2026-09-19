@@ -1,4 +1,5 @@
 import { frameDelivery } from './framing.js';
+import { collaborationReplyToolName } from '../collaboration-contract.js';
 import {
   type CollaborationTurnAuthorization,
   type CollaborationTurnDecision,
@@ -38,8 +39,14 @@ export const defaultWakeBudget: WakeBudget = {
 const deferredRetryMilliseconds = 20_000;
 export const defaultPromptStartTimeoutMilliseconds = 5 * 60_000;
 
+export interface DeliveryPrompt {
+  readonly prompt: string;
+  readonly mode: 'enqueue';
+  readonly requiredTool: typeof collaborationReplyToolName;
+}
+
 export interface DeliverySession {
-  send(message: { readonly prompt: string; readonly mode: 'enqueue' }): Promise<string>;
+  send(message: DeliveryPrompt): Promise<string>;
 }
 
 export interface DeliveryDiagnostics {
@@ -379,6 +386,7 @@ export function createDeliveryCoordinator(
       await options.session.send({
         prompt: frameDelivery([request], authorization),
         mode: 'enqueue',
+        requiredTool: collaborationReplyToolName,
       });
     } catch (error) {
       deferredUntil.delete(notificationKey);

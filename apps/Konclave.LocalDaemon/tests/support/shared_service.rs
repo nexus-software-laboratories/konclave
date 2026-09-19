@@ -260,21 +260,16 @@ pub async fn complete_pairing(
     second: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
 ) -> (String, String) {
     timeout(Duration::from_secs(30), async {
-        let created = rpc(
-            first,
-            "create_pairing_capability",
-            serde_json::json!({"requested_role": "member"}),
-        )
-        .await;
-        let capability = Zeroizing::new(created["capability"].as_str().unwrap().to_string());
+        let created = rpc(first, "create_pairing_rendezvous", serde_json::json!({})).await;
+        let token = Zeroizing::new(created["token"].as_str().unwrap().to_string());
         let pairing_id = created["pairing"]["pairing_id"]
             .as_str()
             .unwrap()
             .to_string();
         let redeemed = rpc(
             second,
-            "redeem_pairing_capability",
-            serde_json::json!({"capability": capability.as_str()}),
+            "redeem_pairing_rendezvous",
+            serde_json::json!({"token": token.as_str()}),
         )
         .await;
         assert_eq!(redeemed["pairing_id"], pairing_id);

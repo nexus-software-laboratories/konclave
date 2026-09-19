@@ -6,7 +6,7 @@ inputs:
     description: Node.js version passed to actions/setup-node.
     required: true
   npm-cache-scope:
-    description: Stable workload scope for an optional npm download cache.
+    description: Workload label that opts into the shared npm download cache.
     required: false
     default: ''
   npm-cache-dependency-hash:
@@ -62,11 +62,16 @@ runs:
         "node-version=$nodeVersion" | Out-File $env:GITHUB_OUTPUT -Append
         "npm-version=$npmVersion" | Out-File $env:GITHUB_OUTPUT -Append
 
-    - name: Restore npm download cache
+    # Advisory only: npm's content-addressed download store improves trusted main
+    # runs, but pull requests must not persist one duplicate cache per workflow job.
+    - name: Restore shared npm download cache
       id: npm-cache
-      if: inputs.npm-cache-scope != '' && inputs.npm-cache-dependency-hash != ''
+      if: >-
+        inputs.npm-cache-scope != '' &&
+        inputs.npm-cache-dependency-hash != '' &&
+        github.ref == 'refs/heads/main'
       continue-on-error: true
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ~/.npm
-        key: npm-download-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.node-version }}-${{ steps.versions.outputs.npm-version }}-${{ inputs.npm-cache-scope }}-${{ inputs.npm-cache-dependency-hash }}
+        key: npm-download-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.node-version }}-${{ steps.versions.outputs.npm-version }}-${{ inputs.npm-cache-dependency-hash }}

@@ -1,0 +1,140 @@
+name: Installer lifecycle conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: installer-lifecycle-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-installer-scope:
+    name: Resolve installer lifecycle scope
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci/ComponentValidationScope.Functions.ps1
+            scripts/ci/Resolve-ComponentValidationScope.ps1
+          sparse-checkout-cone-mode: false
+      - name: Resolve installer validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          ./scripts/ci/Resolve-ComponentValidationScope.ps1 `
+            -Contract 'installer-lifecycle' `
+            -EventName $env:EVENT_NAME `
+            -PullRequestNumber ([int]$env:PULL_REQUEST_NUMBER)
+
+  installer-platform-conformance:
+    name: Installer lifecycle (${{ matrix.runner }})
+    needs: resolve-installer-scope
+    if: ${{ (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') && needs.resolve-installer-scope.result == 'success' && needs.resolve-installer-scope.outputs.run == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify installer lifecycle
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'apps/Konclave.LocalDaemon/packaging/windows/manage-user-service.ps1',
+            'scripts/installation/Install-Konclave.ps1',
+            'scripts/installation/InstallationLifecycle.Functions.ps1',
+            'scripts/installation/InstallationRuntime.Functions.ps1',
+            'scripts/installation/Test-InstallationLifecycle.ps1',
+            'scripts/installation/Test-InstallationRuntime.ps1',
+            'scripts/packaging/Test-WindowsExecutableSubsystem.ps1',
+            'scripts/packaging/WindowsExecutableSubsystem.Functions.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              $details = @(
+                $errors | ForEach-Object {
+                  "line $($_.Extent.StartLineNumber): $($_.Message)"
+                }
+              ) -join "`n"
+              throw "$path contains PowerShell parse errors:`n$details"
+            }
+          }
+          ./scripts/installation/Test-InstallationLifecycle.ps1
+          ./scripts/installation/Test-InstallationRuntime.ps1
+          ./scripts/packaging/Test-WindowsExecutableSubsystem.ps1
+          bash -n apps/Konclave.LocalDaemon/packaging/systemd/manage-user-service.sh
+          if ($LASTEXITCODE -ne 0) {
+            throw 'systemd user-service manager has invalid shell syntax.'
+          }
+          bash -n apps/Konclave.LocalDaemon/packaging/launchd/manage-agent.sh
+          if ($LASTEXITCODE -ne 0) {
+            throw 'launchd user-service manager has invalid shell syntax.'
+          }
+
+  installer-lifecycle-conformance:
+    name: Installer lifecycle conformance
+    if: ${{ always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]') }}
+    needs:
+      - resolve-installer-scope
+      - installer-platform-conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check installer platform matrix
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.resolve-installer-scope.result }}
+          SELECTED: ${{ needs.resolve-installer-scope.outputs.run }}
+          RESULT: ${{ needs.installer-platform-conformance.result }}
+        run: |
+          set -euo pipefail
+          if [ "$PLAN_RESULT" != 'success' ]; then
+            echo "::error::Installer lifecycle planning concluded with $PLAN_RESULT."
+            exit 1
+          fi
+          if [ "$SELECTED" = 'true' ] && [ "$RESULT" != 'success' ]; then
+            echo "::error::Installer platform matrix concluded with $RESULT."
+            exit 1
+          fi
+          if [ "$SELECTED" != 'true' ] && [ "$RESULT" != 'skipped' ]; then
+            echo "::error::Unselected installer matrix concluded with $RESULT."
+            exit 1
+          fi
+          if [ "$SELECTED" = 'true' ]; then
+            echo 'Installer lifecycle passed on Linux, Windows, and macOS.'
+          else
+            echo 'Installer lifecycle is not relevant to this change.'
+          fi

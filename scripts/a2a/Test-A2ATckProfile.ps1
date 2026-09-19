@@ -183,7 +183,7 @@ $uvRequirement = (
     "uv==$($profile.tck.uvVersion) --hash=sha256:$($profile.tck.uvArtifact.sha256)"
 )
 if (
-    $workflow -notmatch '(?m)^\s+types: \[opened, edited, synchronize, reopened, ready_for_review, converted_to_draft\]\s*$' -or
+    $workflow -notmatch '(?m)^\s+types: \[opened, synchronize, reopened, ready_for_review, converted_to_draft\]\s*$' -or
     $workflow -notmatch '(?m)^\s+cancel-in-progress: true\s*$' -or
     $workflow -notmatch '(?m)^\s+runs-on: ubuntu-latest\s*$' -or
     $workflow -match '\b(?:self-hosted|general-purpose|automation-control)\b' -or

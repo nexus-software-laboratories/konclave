@@ -5,6 +5,8 @@ mod adapter;
 #[allow(dead_code)]
 mod application;
 #[cfg(feature = "rust-service-mcp")]
+mod authorization_reload;
+#[cfg(feature = "rust-service-mcp")]
 mod authorization_runtime;
 mod clock;
 #[allow(dead_code)]
@@ -28,12 +30,17 @@ mod persistence;
 mod profile_runtime;
 #[allow(dead_code)]
 mod profile_supervisor;
+#[allow(dead_code)]
+mod relay_migration;
+mod repeat_pairing;
 mod runtime;
 mod service;
 #[cfg(feature = "rust-service-mcp")]
 mod shared_runtime;
 #[cfg(feature = "rust-service-mcp")]
 mod shared_service_arguments;
+#[allow(dead_code)]
+mod short_code_pairing;
 #[cfg(test)]
 mod test_support;
 
@@ -84,3 +91,6 @@ pub fn parse_shared_service_installation_path(
 ) -> anyhow::Result<std::path::PathBuf> {
     shared_service_arguments::parse_installation_path(arguments.into_iter())
 }
+
+#[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
+pub use relay_migration::{RelayMigrationReport, run_relay_migration};

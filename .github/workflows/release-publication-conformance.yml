@@ -1,0 +1,91 @@
+name: Release publication conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-publication-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-publication-conformance:
+    name: Release publication conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve release publication validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(
+              gh api --paginate `
+                "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" `
+                --jq '.[].filename'
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not resolve pull-request files for release publication conformance.'
+            }
+            if ($files.Count -eq 0) {
+              throw 'Pull-request file discovery returned no files.'
+            }
+            $run = $files.Count -ge 3000 -or @(
+              $files | Where-Object {
+                $_ -match '^\.github/genesis-delivery\.json$' -or
+                $_ -match '^\.github/workflows/(?:package-artifact-cleanup|package-validation|publish-prerelease|release-publication-conformance)\.yml$' -or
+                $_ -match '^distribution/' -or
+                $_ -match '^docs/(?:development/ci|distribution/(?:installation|integrity))\.md$' -or
+                $_ -match '^scripts/packaging/(?:Complete-ReleaseSet|New-ReleaseProvenance|ReleaseIntegrity\.Functions|ReleasePublication\.Functions|Test-CompleteReleaseSet|Test-ReleaseIntegrity|Test-ReleasePublication)\.ps1$'
+              }
+            ).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify release publication contract
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'scripts/packaging/Complete-ReleaseSet.ps1',
+            'scripts/packaging/New-ReleaseProvenance.ps1',
+            'scripts/packaging/ReleaseIntegrity.Functions.ps1',
+            'scripts/packaging/ReleasePublication.Functions.ps1',
+            'scripts/packaging/Test-CompleteReleaseSet.ps1',
+            'scripts/packaging/Test-ReleaseIntegrity.ps1',
+            'scripts/packaging/Test-ReleasePublication.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) {
+              throw "$path contains PowerShell parse errors."
+            }
+          }
+          ./scripts/packaging/Test-ReleaseIntegrity.ps1
+          ./scripts/packaging/Test-ReleaseMetadata.ps1
+          ./scripts/packaging/Test-ReleasePublication.ps1
+          ./scripts/packaging/Test-CompleteReleaseSet.ps1

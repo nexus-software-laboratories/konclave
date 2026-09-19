@@ -35,7 +35,14 @@ configuration. The record contains only:
 
 The extension never discovers an endpoint, trusts a network URL, broadens a
 registration, or starts a service. Missing, malformed, unsafe, or unauthorized state
-fails visibly with no per-session fallback.
+joins the Copilot session in a fail-closed degraded state with only `/konclave`
+repair guidance. It registers no tools, hooks, delivery, MCP server, or per-session
+daemon until a later extension process authenticates to the repaired service.
+
+A healthy connection registers policy-enforcement hooks and therefore requires the
+user's Copilot extension-permission approval. Copilot withholds the entire extension
+when that approval is denied; installation guidance must not represent plugin
+presence alone as command activation.
 
 The installed client gives initial authorization transport a two-second deadline.
 That bound applies independently to the issuer exchange and the first session
@@ -74,10 +81,10 @@ Command output defaults to `normal`, which combines status and operation metadat
 into concise summaries and suppresses diagnostic phase, grant, cursor, and policy
 detail. `/konclave output verbose` restores the complete field-by-field view for the
 current extension process; `/konclave output normal` switches back. The setting is
-intentionally process-local and resets to normal on restart. Capability handoff,
-failure recovery, exact retry identifiers, policy accept/reject commands, message
-bodies, and explicit policy inspection remain visible when they are required to
-continue safely.
+intentionally process-local and resets to normal on restart. Compact token handoff,
+full-capability recovery, exact retry identifiers, policy accept/reject commands,
+message bodies, and explicit policy inspection remain visible when they are required
+to continue safely.
 
 ```text
 /konclave help
@@ -85,16 +92,28 @@ continue safely.
 /konclave status
 /konclave identity
 /konclave conversations
-/konclave connect
-/konclave connect <capability>
+/konclave devices
+/konclave device alias <device> <alias>
+/konclave connect [--copy|--qr]
+/konclave connect --short
+/konclave connect <six-digit-code>
+/konclave connect <token-or-konclave-uri>
+/konclave connect resume <pairing>
+/konclave clipboard clear
 /konclave pair [member|administrator]
 /konclave join <capability>
 /konclave new
+/konclave new <alias>
+/konclave repeat <operation>
+/konclave cancel-repeat <operation>
 /konclave pairing <pairing>
+/konclave verification <attempt>
+/konclave verify <attempt> <peer> <sas>
 /konclave approve <pairing> <conversation> [role]
 /konclave approve <pairing> <inviter> <conversation> <role>
 /konclave sync <pairing>
 /konclave cancel <pairing>
+/konclave cancel-verification <attempt>
 /konclave send [conversation] [message-id] -- <text>
 /konclave reply <conversation> <reply-to> [message-id] -- <text>
 /konclave messages <conversation> [after-cursor]
@@ -110,17 +129,55 @@ continue safely.
 /konclave policy revoke <digest> [message-id]
 ```
 
+`/konclave connect` prints the raw 26-character token ephemerally. `--copy` writes
+only that token to the native clipboard without placing it in process arguments and
+does not echo it again. `--qr` renders a bounded terminal QR code containing
+`konclave://pair/<token>` plus an accessible raw-token fallback. Pasting either the
+URI or raw token into `connect` follows the same validation path. Every handoff names
+the expiry and warns that the token is a one-time bearer secret. Unsupported
+clipboards, narrow terminals, and non-interactive output degrade to the raw token.
+After a successful copy, `/konclave clipboard clear` explicitly replaces the current
+clipboard content with empty text.
+
+`/konclave connect --short` instead creates a six-digit OPAQUE code that grants no
+authority. The other computer enters it with `/konclave connect <six-digit-code>`.
+Both commands wait for the encrypted identity exchange, then display the exact attempt,
+local and peer device identifiers, common deadline, and six-digit SAS. Each operator
+must compare those values through an independent channel and run the displayed
+`/konclave verify <attempt> <peer> <sas>` command. The extension never infers or
+automates that confirmation, and the confirmation operation is deliberately absent
+from the registered agent-tool table. Only after both exact confirmations authenticate
+does the daemon create an ordinary member-only capability and continue the existing
+durable pairing flow. `/konclave verification <attempt>` resumes inspection and
+`/konclave cancel-verification <attempt>` cancels the attempt.
+
+Trusted-device aliases are local sealed address-book entries, not protocol
+identities. `/konclave device alias <device> <alias>` accepts only a device currently
+authenticated in local conversation membership and binds the alias to that exact
+device root. `/konclave new <alias>` requests a fresh member capability over the
+lowest qualifying existing MLS conversation and reuses the durable pairing flow to
+create a separate conversation. The alias never appears on the wire, and the internal
+request and response are excluded from message history and adapter delivery.
+`/konclave repeat <operation>` resumes an interrupted attempt;
+`/konclave cancel-repeat <operation>` cancels it.
+
 Arguments and rendered output are bounded. High-level commands orchestrate only the
 existing closed operations; they do not implement a second pairing or messaging
 domain. Under `AccountTrusted`, `/konclave connect` treats the explicit transfer and
 redemption of one short-lived capability as the configured approval evidence, grants
 only `member`, and drives both durable pairing state machines to completion. It
 labels that policy as capability-possession trust and never claims independent
-identity verification. Stronger evidence policies and administrator grants retain the
-manual approval workflow. The command refuses before creating pairing or conversation
+identity verification. The short-code variant labels its independent mutual
+verification and remains member-only. Stronger evidence policies and administrator
+grants retain the manual approval workflow. The command refuses before creating pairing or conversation
 state when no relay is configured. Every progress request receives the remaining
-pairing/command deadline, non-advancing phases back off, phase changes are rendered,
-and failures leave explicit pairing-status and cancellation commands.
+pairing/command deadline, non-advancing phases back off, and normal output identifies
+the next device action with a live countdown. The command remains active for the
+daemon's complete authorization and completion windows. Failures provide
+`/konclave connect resume <pairing>`, pairing-status, and cancellation commands so an
+interrupted extension process can continue the same durable pairing. A command
+deadline requests bounded cancellation before returning, and `connected` is emitted
+only after the completed conversation is present in the local profile.
 
 `/konclave approve` reads authenticated pairing state before selecting the
 role-specific authorization operation. Inviter-side approval defaults to `member`;

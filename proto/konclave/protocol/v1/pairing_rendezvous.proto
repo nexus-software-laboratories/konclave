@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package konclave.protocol.v1;
+
+import "konclave/protocol/v1/common.proto";
+
+// Identifies one opaque encrypted pairing rendezvous record.
+message PairingRendezvousId {
+  // Exactly 32 token-derived lookup bytes in protocol v1.
+  bytes value = 1;
+}
+
+// Carries one bounded capability ciphertext that the relay cannot decrypt.
+message PairingRendezvousRecord {
+  ProtocolVersion version = 1;
+  PairingRendezvousId lookup_id = 2;
+  uint64 expires_at_unix_seconds = 3;
+  // Exactly 12 public AES-GCM nonce bytes in protocol v1.
+  bytes nonce = 4;
+  // Bounded authenticated ciphertext with an appended 16-byte tag.
+  bytes ciphertext = 5;
+}
+
+// Requests atomic retrieval and consumption of one rendezvous record.
+message PairingRendezvousTakeRequest {
+  ProtocolVersion version = 1;
+  PairingRendezvousId lookup_id = 2;
+}

@@ -88,9 +88,13 @@ function Test-ReleaseContractCoverage {
         'RELEASE.json',
         'release-artifacts.schema.json',
         'UNSIGNED-PRERELEASE.txt',
+        'Install-Konclave.ps1',
+        'InstallationLifecycle.Functions.ps1',
+        'InstallationRuntime.Functions.ps1',
         'ReleaseIntegrity.Functions.ps1',
-        'Verify-Release.ps1',
-        "konclave-copilot-plugin-$($manifest.release.version).cdx.json"
+        'ReleasePublication.Functions.ps1',
+        'WindowsUserService.ps1',
+        'Verify-Release.ps1'
     )) {
         [void]$expected.Add($name)
     }
@@ -102,6 +106,9 @@ function Test-ReleaseContractCoverage {
             [void]$expected.Add("$fileName.rust.cdx.json")
         }
         elseif ([string]$artifact.kind -ceq 'container') {
+            [void]$expected.Add("$fileName.cdx.json")
+        }
+        elseif ([string]$artifact.kind -ceq 'plugin') {
             [void]$expected.Add("$fileName.cdx.json")
         }
         else {

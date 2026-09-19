@@ -22,6 +22,51 @@ test, and Clippy commands plus the daemon's authorization-runtime and local-serv
 tests before client, administration, or package integration relies on new store
 behavior.
 
+`Authorization reload conformance` is the focused draft-capable gate for the daemon's
+failed-closed reload recovery state machine. It runs the exhaustive transition table,
+deterministic delayed-read recovery, a real exclusive SQLite-lock boundary test,
+shared-service client closure and fresh-snapshot recovery, Rust formatting, and
+Clippy before distribution or package integration relies on the behavior.
+
+`Relay migration conformance` and `Relay migration Windows conformance` are the
+focused draft-capable gates for moving durable profiles between self-hosted relay
+endpoints. They run the exhaustive migration transition table, shared
+installation-identity derivation, exact endpoint-bound credential resealing,
+interrupted apply/resume and local abort, partial-migration profile admission denial,
+exact retry after stable enrollment rate limiting, repeated migration against a real
+enrollment endpoint, a real 30-profile batch above one relay rate window, installer
+argument contracts, Rust formatting, and component lint. The Windows gate additionally
+proves exact owner-restricted file replacement and the packaged PowerShell
+orchestration scope.
+
+`Pairing rendezvous conformance` is the focused draft-capable gate for compact
+pairing handoff. It runs the fixed Crockford Base32 and HKDF vectors, authenticated
+capability round trips, token/lookup/expiry/ciphertext negative cases, protocol
+compatibility, relay publish/take policy and SQLite migration, authenticated HTTP and
+client redirect safety, a complete two-client daemon pairing, generated local-service
+tool contracts, generated TypeScript protocol bindings and schema checks, extension
+command acceptance, Rust and TypeScript formatting, and component lint.
+
+`Short-code pairing conformance` is the focused draft-capable gate for the
+non-bearer human-code authorization flow. It runs the pure confirmation transition
+table, six-digit code and locator validation, RFC 9807 OPAQUE registration/login and
+wrong-code cases, opaque state canonicalization, deterministic transcript/SAS
+vectors, role-separated encrypted-channel tests, bounded protocol codecs, relay
+policy and SQLite migration, authenticated HTTP and real client transport acceptance,
+generated TypeScript protocol checks, sealed daemon schema migration and restart
+recovery, malicious-relay and wrong-code rejection, mutual-confirmation-to-MLS
+acceptance, deterministic local tool contracts, extension command acceptance, Rust
+and TypeScript formatting, strict lint, and the pinned security-dependency policy.
+
+`Trusted device alias conformance` is the focused draft-capable gate for local
+address-book binding and repeat-conversation bootstrap. It runs canonical alias and
+current-root decisions, sealed profile migrations and tamper checks, bounded internal
+request/response codecs, restart and accepted-response-loss recovery, exact
+pairing-authorization binding, a two-device second-conversation and real-message
+acceptance, user-history and adapter-delivery exclusion, deterministic command-only
+tool boundaries, generated TypeScript protocol checks, extension command acceptance,
+Rust and TypeScript formatting, and strict lint.
+
 `Generic client conformance` is the focused draft-capable gate for the unsupported
 harness fallback. It runs the generic argument and identity contract, the shared
 TypeScript client and policy-configuration tests, full extension formatting and lint,
@@ -181,7 +226,9 @@ crash or excessive-allocation case becomes a permanent regression input.
 - refuse startup without a valid installation-bound authorization store, preserve
   grants across service restart, and observe exact revocation, profile suspension,
   issuer disablement, policy invalidation, and reload failure within the documented
-  one-second live-state bound, including an in-flight long delivery claim;
+  one-second live-state bound, including an in-flight long delivery claim; reload
+  failure must close clients without terminating the service and restore access only
+  after a fresh verified snapshot;
 - prove the issuer cannot invoke operational methods, grants expire without active
   eviction, quota exhaustion denies, and active-registration checks close revoked
   connections;

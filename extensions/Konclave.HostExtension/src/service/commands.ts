@@ -6,10 +6,26 @@ import { TextDecoder } from 'node:util';
 
 import type { CommandContext, CommandDefinition } from '@github/copilot-sdk';
 
+import {
+  createPairingClipboard,
+  type ClipboardWriteReceipt,
+  type PairingClipboard,
+} from './clipboard.js';
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
-import { serviceOperations } from './operations.js';
+import {
+  serviceOperations,
+  trustedDeviceOperations,
+  verificationOperations,
+} from './operations.js';
+import {
+  PairingHandoffError,
+  pairingRendezvousTokenCharacters,
+  parsePairingHandoff,
+  renderPairingQr,
+  type PairingHandoff,
+} from './pairing-handoff.js';
 
 /**
  * Deterministic `/konclave` commands.
@@ -66,6 +82,9 @@ export interface CommandDependencies {
   readonly nowUnixMilliseconds?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly readPolicySource?: (path: string) => Promise<string>;
+  readonly clipboard?: PairingClipboard;
+  readonly terminalColumns?: () => number | undefined;
+  readonly terminalInteractive?: () => boolean;
 }
 
 export interface PolicySourceReadOptions {
@@ -90,12 +109,16 @@ const maxPolicySourcePathBytes = 4_096;
 const commandMessageRequestDomain = 'konclave:command-message-request:1\0';
 const commandPolicyRequestDomain = 'konclave:command-policy-request:1\0';
 const connectPollMilliseconds = 500;
-const maxConnectIterations = 640;
-const maxConnectWaitMilliseconds = 5 * 60 * 1_000;
+const connectProgressIntervalMilliseconds = 30_000;
+const maxConnectIterations = 2_400;
+const maxConnectWaitMilliseconds = 20 * 60 * 1_000;
 const pairingIdCharacters = 32;
+const shortCodeAttemptIdCharacters = 32;
 const messageIdCharacters = 32;
 const conversationIdCharacters = 64;
 const deviceIdCharacters = 64;
+const repeatPairingOperationIdCharacters = 32;
+const maxTrustedDeviceAliasBytes = 32;
 const policyProposalIdCharacters = 32;
 const policyDigestCharacters = 64;
 const uint64Maximum = 18_446_744_073_709_551_615n;
@@ -116,6 +139,8 @@ const pairingPhases = [
 ] as const;
 type PairingPhase = (typeof pairingPhases)[number];
 
+class ConnectTimeoutError extends Error {}
+
 interface PairingStatus {
   readonly pairingId: string;
   readonly localRole: PairingLocalRole;
@@ -127,6 +152,73 @@ interface PairingStatus {
   readonly conversationId: string | undefined;
   readonly authorizationDeadlineUnixSeconds: number;
   readonly completionDeadlineUnixSeconds: number | undefined;
+}
+
+type ShortCodeRole = 'creator' | 'claimant';
+
+const shortCodePhases = [
+  'creator_awaiting_claim',
+  'creator_awaiting_finalization',
+  'creator_awaiting_confirmation',
+  'creator_publishing_capability',
+  'creator_completed',
+  'claimant_claiming',
+  'claimant_awaiting_response',
+  'claimant_awaiting_creator_identity',
+  'claimant_awaiting_confirmation',
+  'claimant_taking_capability',
+  'claimant_completed',
+  'cancelling',
+  'cancelled',
+] as const;
+type ShortCodePhase = (typeof shortCodePhases)[number];
+
+interface ShortCodePairingStatus {
+  readonly attemptId: string;
+  readonly localRole: ShortCodeRole;
+  readonly phase: ShortCodePhase;
+  readonly localDeviceId: string;
+  readonly peerDeviceId: string | undefined;
+  readonly sas: string | undefined;
+  readonly deadlineUnixSeconds: number;
+  readonly localConfirmed: boolean;
+  readonly peerConfirmed: boolean;
+  readonly pairingId: string | undefined;
+}
+
+type RepeatPairingRole = 'initiator' | 'responder';
+type TrustedDeviceStatus = 'active' | 'removed' | 'root_mismatch' | 'unsupported';
+
+const repeatPairingPhases = [
+  'initiator_sending_request',
+  'initiator_awaiting_response',
+  'initiator_redeeming_capability',
+  'initiator_creating_conversation',
+  'initiator_pairing',
+  'responder_issuing_capability',
+  'responder_reserving_pairing',
+  'responder_sending_response',
+  'responder_pairing',
+  'completed',
+  'cancelling',
+  'cancelled',
+] as const;
+type RepeatPairingPhase = (typeof repeatPairingPhases)[number];
+
+interface RepeatPairingStatus {
+  readonly operationId: string;
+  readonly role: RepeatPairingRole;
+  readonly phase: RepeatPairingPhase;
+  readonly peerDeviceId: string;
+  readonly conversationId: string;
+  readonly pairingId: string | undefined;
+  readonly deadlineUnixSeconds: number;
+}
+
+interface TrustedDevice {
+  readonly alias: string;
+  readonly deviceId: string;
+  readonly status: TrustedDeviceStatus;
 }
 
 interface MessageSummary {
@@ -254,17 +346,30 @@ const helpLines = [
   '  /konclave status                                    Show profile, delivery, and relay state.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
-  '  /konclave connect                                   Create a two-session connection capability.',
-  '  /konclave connect <capability>                      Join and complete an AccountTrusted connection.',
-  '  /konclave pair [member|administrator]               Create a one-time pairing capability.',
-  '  /konclave join <capability>                         Redeem a pairing capability.',
-  '  /konclave new                                       Create a conversation for an approved peer.',
+  '  /konclave devices                                   List local trusted-device aliases.',
+  '  /konclave device alias <device> <alias>             Bind a local alias to a current member.',
+  '  /konclave connect [--copy|--qr]                     Create a compact two-session connection token.',
+  '  /konclave connect --short                           Create a six-digit mutually verified connection code.',
+  '  /konclave connect <six-digit-code>                  Join a short-code verification attempt.',
+  '  /konclave connect <token>                           Join and complete an AccountTrusted connection.',
+  '  /konclave connect <konclave://pair/token>           Join from a pairing deep link.',
+  '  /konclave connect resume <pairing>                  Resume one interrupted AccountTrusted connection.',
+  '  /konclave clipboard clear                           Clear a token copied by this session.',
+  '  /konclave pair [member|administrator]               Create a full recovery capability.',
+  '  /konclave join <capability>                         Redeem a full recovery capability.',
+  '  /konclave new                                       Create an empty conversation.',
+  '  /konclave new <alias>                               Create and connect a new conversation.',
+  '  /konclave repeat <operation>                        Resume one alias-based connection.',
+  '  /konclave cancel-repeat <operation>                 Cancel one alias-based connection.',
   '  /konclave pairing <pairing>                         Show authenticated pairing state.',
+  '  /konclave verification <attempt>                    Show short-code verification state.',
+  '  /konclave verify <attempt> <peer> <sas>             Explicitly confirm displayed short-code values.',
   '  /konclave approve <pairing> <conversation> [role]   Approve a displayed joiner.',
   '  /konclave approve <pairing> <inviter> <conversation> <role>',
   '                                                       Approve displayed inviter fields.',
   '  /konclave sync <pairing>                            Process one pairing progress page.',
   '  /konclave cancel <pairing>                          Cancel an active pairing.',
+  '  /konclave cancel-verification <attempt>             Cancel a short-code verification attempt.',
   '  /konclave send [conversation] [message-id] -- <text>',
   '                                                       Send or retry a message.',
   '  /konclave request <conversation> [target-device] [message-id] -- <text>',
@@ -361,6 +466,31 @@ function isPairingLocalRole(value: string): value is PairingLocalRole {
 
 function isPairingPhase(value: string): value is PairingPhase {
   return pairingPhases.some((phase) => phase === value);
+}
+
+function isShortCodeRole(value: string): value is ShortCodeRole {
+  return value === 'creator' || value === 'claimant';
+}
+
+function isShortCodePhase(value: string): value is ShortCodePhase {
+  return shortCodePhases.some((phase) => phase === value);
+}
+
+function isRepeatPairingRole(value: string): value is RepeatPairingRole {
+  return value === 'initiator' || value === 'responder';
+}
+
+function isRepeatPairingPhase(value: string): value is RepeatPairingPhase {
+  return repeatPairingPhases.some((phase) => phase === value);
+}
+
+function isTrustedDeviceStatus(value: string): value is TrustedDeviceStatus {
+  return (
+    value === 'active' ||
+    value === 'removed' ||
+    value === 'root_mismatch' ||
+    value === 'unsupported'
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -501,6 +631,289 @@ function parsePairingCapability(value: unknown): {
     pairing: parsePairingStatus(value.pairing),
     capability: value.capability,
   };
+}
+
+function parsePairingRendezvous(value: unknown): {
+  readonly pairing: PairingStatus;
+  readonly token: string;
+} {
+  if (!isRecord(value) || typeof value.token !== 'string') {
+    throw new Error('the local service pairing rendezvous response is malformed');
+  }
+  let handoff: PairingHandoff;
+  try {
+    handoff = parsePairingHandoff(value.token);
+  } catch {
+    throw new Error('the local service pairing rendezvous response is malformed');
+  }
+  return {
+    pairing: parsePairingStatus(value.pairing),
+    token: handoff.token,
+  };
+}
+
+function parseRepeatPairingStatus(value: unknown): RepeatPairingStatus {
+  if (!isRecord(value)) {
+    throw new Error('the local service repeat-pairing response is malformed');
+  }
+  const role = requiredString(value, 'role', 'the local service repeat-pairing role is malformed');
+  const phase = requiredString(
+    value,
+    'phase',
+    'the local service repeat-pairing phase is malformed',
+  );
+  if (!isRepeatPairingRole(role) || !isRepeatPairingPhase(phase)) {
+    throw new Error('the local service repeat-pairing state is malformed');
+  }
+  return {
+    operationId: requireHexIdentifier(
+      requiredString(
+        value,
+        'operation_id',
+        'the local service repeat-pairing operation is malformed',
+      ),
+      repeatPairingOperationIdCharacters,
+      'repeat-pairing operation identifier',
+    ),
+    role,
+    phase,
+    peerDeviceId: requireHexIdentifier(
+      requiredString(value, 'peer_device_id', 'the local service repeat-pairing peer is malformed'),
+      deviceIdCharacters,
+      'peer device identifier',
+    ),
+    conversationId: requireHexIdentifier(
+      requiredString(
+        value,
+        'conversation_id',
+        'the local service repeat-pairing conversation is malformed',
+      ),
+      conversationIdCharacters,
+      'conversation identifier',
+    ),
+    pairingId: optionalIdentifier(value, 'pairing_id', pairingIdCharacters, 'pairing identifier'),
+    deadlineUnixSeconds: requiredNonnegativeSafeInteger(
+      value,
+      'deadline_unix_seconds',
+      'the local service repeat-pairing deadline is malformed',
+    ),
+  };
+}
+
+function parseTrustedDeviceAlias(value: string): string {
+  if (
+    Buffer.byteLength(value, 'utf8') === 0 ||
+    Buffer.byteLength(value, 'utf8') > maxTrustedDeviceAliasBytes ||
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(value)
+  ) {
+    throw new Error(
+      'device alias must contain 1-32 lowercase letters, digits, or interior hyphens',
+    );
+  }
+  return value;
+}
+
+function parseTrustedDevices(value: unknown): readonly TrustedDevice[] {
+  if (!isRecord(value) || !Array.isArray(value.devices) || value.devices.length > 256) {
+    throw new Error('the local service trusted-device response is malformed');
+  }
+  return value.devices.map((device) => {
+    if (!isRecord(device)) {
+      throw new Error('the local service trusted-device response is malformed');
+    }
+    const alias = parseTrustedDeviceAlias(
+      requiredString(device, 'alias', 'the local service trusted-device alias is malformed'),
+    );
+    const status = requiredString(
+      device,
+      'status',
+      'the local service trusted-device status is malformed',
+    );
+    if (!isTrustedDeviceStatus(status)) {
+      throw new Error('the local service trusted-device status is malformed');
+    }
+    return {
+      alias,
+      deviceId: requireHexIdentifier(
+        requiredString(
+          device,
+          'device_id',
+          'the local service trusted-device identity is malformed',
+        ),
+        deviceIdCharacters,
+        'device identifier',
+      ),
+      status,
+    };
+  });
+}
+
+function parseTrustedDeviceAliasResult(value: unknown): {
+  readonly alias: string;
+  readonly deviceId: string;
+  readonly decision: 'inserted' | 'unchanged' | 'renamed' | 'rebound_stale';
+} {
+  if (!isRecord(value)) {
+    throw new Error('the local service trusted-device alias response is malformed');
+  }
+  const decision = requiredString(
+    value,
+    'decision',
+    'the local service trusted-device alias decision is malformed',
+  );
+  if (
+    decision !== 'inserted' &&
+    decision !== 'unchanged' &&
+    decision !== 'renamed' &&
+    decision !== 'rebound_stale'
+  ) {
+    throw new Error('the local service trusted-device alias decision is malformed');
+  }
+  return {
+    alias: parseTrustedDeviceAlias(
+      requiredString(value, 'alias', 'the local service trusted-device alias is malformed'),
+    ),
+    deviceId: requireHexIdentifier(
+      requiredString(value, 'device_id', 'the local service trusted-device identity is malformed'),
+      deviceIdCharacters,
+      'device identifier',
+    ),
+    decision,
+  };
+}
+
+function parseShortCodePairingStatus(value: unknown): ShortCodePairingStatus {
+  if (
+    !isRecord(value) ||
+    typeof value.local_confirmed !== 'boolean' ||
+    typeof value.peer_confirmed !== 'boolean'
+  ) {
+    throw new Error('the local service short-code pairing response is malformed');
+  }
+  const localRole = requiredString(
+    value,
+    'local_role',
+    'the local service short-code role is malformed',
+  );
+  const phase = requiredString(value, 'phase', 'the local service short-code phase is malformed');
+  if (!isShortCodeRole(localRole) || !isShortCodePhase(phase)) {
+    throw new Error('the local service short-code state is malformed');
+  }
+  const sas =
+    value.sas === null || value.sas === undefined
+      ? undefined
+      : requiredShortCode(value.sas, 'short authentication string');
+  return {
+    attemptId: requireHexIdentifier(
+      requiredString(
+        value,
+        'attempt_id',
+        'the local service short-code attempt identifier is malformed',
+      ),
+      shortCodeAttemptIdCharacters,
+      'short-code attempt identifier',
+    ),
+    localRole,
+    phase,
+    localDeviceId: requireHexIdentifier(
+      requiredString(
+        value,
+        'local_device_id',
+        'the local service short-code local identity is malformed',
+      ),
+      deviceIdCharacters,
+      'local device identifier',
+    ),
+    peerDeviceId: optionalIdentifier(
+      value,
+      'peer_device_id',
+      deviceIdCharacters,
+      'peer device identifier',
+    ),
+    sas,
+    deadlineUnixSeconds: requiredNonnegativeSafeInteger(
+      value,
+      'deadline_unix_seconds',
+      'the local service short-code deadline is malformed',
+    ),
+    localConfirmed: value.local_confirmed,
+    peerConfirmed: value.peer_confirmed,
+    pairingId: optionalIdentifier(value, 'pairing_id', pairingIdCharacters, 'pairing identifier'),
+  };
+}
+
+function parseCreatedShortCodePairing(value: unknown): {
+  readonly code: string;
+  readonly verification: ShortCodePairingStatus;
+} {
+  if (!isRecord(value)) {
+    throw new Error('the local service short-code creation response is malformed');
+  }
+  return {
+    code: requiredShortCode(value.code, 'pairing code'),
+    verification: parseShortCodePairingStatus(value.verification),
+  };
+}
+
+function parseShortCodePairingSync(value: unknown): {
+  readonly verification: ShortCodePairingStatus;
+  readonly processedStages: number;
+} {
+  if (
+    !isRecord(value) ||
+    typeof value.processed_stages !== 'number' ||
+    !Number.isSafeInteger(value.processed_stages) ||
+    value.processed_stages < 0
+  ) {
+    throw new Error('the local service short-code sync response is malformed');
+  }
+  return {
+    verification: parseShortCodePairingStatus(value.verification),
+    processedStages: value.processed_stages,
+  };
+}
+
+function requiredShortCode(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[0-9]{6}$/u.test(value)) {
+    throw new Error(`the ${label} must contain exactly six decimal digits`);
+  }
+  return value;
+}
+
+function requirePairingHandoff(value: string): PairingHandoff {
+  try {
+    return parsePairingHandoff(value);
+  } catch (error: unknown) {
+    if (!(error instanceof PairingHandoffError)) {
+      throw error;
+    }
+    throw new Error(
+      'connect requires a 26-character pairing token or konclave://pair/<token> URI; use /konclave join <capability> for a full recovery capability',
+      { cause: error },
+    );
+  }
+}
+
+type PairingHandoffMode = 'raw' | 'copy' | 'qr' | 'short';
+
+function pairingHandoffMode(argumentsText: string): PairingHandoffMode | undefined {
+  const value = argumentsText.trim().toLowerCase();
+  if (value.length === 0) {
+    return 'raw';
+  }
+  if (value === '--copy') {
+    return 'copy';
+  }
+  if (value === '--qr') {
+    return 'qr';
+  }
+  if (value === '--short') {
+    return 'short';
+  }
+  if (value.startsWith('--')) {
+    throw new Error('usage: /konclave connect [--copy|--qr|--short]');
+  }
+  return undefined;
 }
 
 function requirePairingCapability(value: string): string {
@@ -1174,9 +1587,136 @@ function remainingPairingRequestMilliseconds(
   const remaining =
     Math.min(commandDeadline, pairingDeadlineMilliseconds(status)) - nowUnixMilliseconds();
   if (remaining <= 0) {
-    throw new Error(`connect timed out for pairing ${status.pairingId}`);
+    throw new ConnectTimeoutError(`connect timed out for pairing ${status.pairingId}`);
   }
   return Math.min(remaining, 30_000);
+}
+
+function formatRemainingPairingTime(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes === 0 ? `${seconds}s` : `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+}
+
+function connectPhaseMessage(status: PairingStatus): string {
+  switch (status.phase) {
+    case 'joiner_awaiting_invitation':
+      return 'waiting for the other session to redeem the token';
+    case 'joiner_awaiting_inviter_authorization':
+      return 'authorizing the authenticated inviter';
+    case 'joiner_awaiting_welcome':
+      return 'waiting for the inviter to publish the encrypted Welcome';
+    case 'inviter_awaiting_authorization':
+      return 'authorizing the requesting device';
+    case 'inviter_awaiting_join_proof':
+      return 'waiting for the other session to publish its join proof';
+    case 'inviter_awaiting_completion':
+      return 'waiting for the other session to accept the encrypted Welcome';
+    case 'compensating':
+      return 'restoring membership after cancellation';
+    case 'completed':
+      return 'connected';
+    case 'cancelled':
+      return 'cancelled';
+  }
+}
+
+async function renderConnectProgress(
+  presentation: CommandPresentation,
+  status: PairingStatus,
+  nowUnixMilliseconds: () => number,
+): Promise<void> {
+  const remaining = pairingDeadlineMilliseconds(status) - nowUnixMilliseconds();
+  await presentation.detail(`connect phase: ${status.phase}`);
+  await presentation.write(
+    `connect: ${connectPhaseMessage(status)}; ${formatRemainingPairingTime(remaining)} remaining`,
+    { ephemeral: true },
+  );
+}
+
+function defaultTerminalColumns(): number | undefined {
+  return process.stderr.columns;
+}
+
+function defaultTerminalInteractive(): boolean {
+  return process.stderr.isTTY === true;
+}
+
+function formatPairingExpiry(unixSeconds: number): string {
+  const maximumDateSeconds = 8_640_000_000_000;
+  if (
+    unixSeconds <= Math.floor(Number.MAX_SAFE_INTEGER / 1_000) &&
+    unixSeconds <= maximumDateSeconds
+  ) {
+    return `${new Date(unixSeconds * 1_000).toISOString()} (Unix second ${unixSeconds})`;
+  }
+  return `Unix second ${unixSeconds}`;
+}
+
+async function renderPairingHandoff(
+  presentation: CommandPresentation,
+  handoff: PairingHandoff,
+  status: PairingStatus,
+  mode: PairingHandoffMode,
+  clipboard: PairingClipboard,
+  terminalColumns: () => number | undefined,
+  terminalInteractive: () => boolean,
+): Promise<ClipboardWriteReceipt | undefined> {
+  await presentation.write(
+    `pairing token: one-time bearer secret; expires ${formatPairingExpiry(status.authorizationDeadlineUnixSeconds)}`,
+  );
+  if (mode === 'copy') {
+    const outcome = await clipboard
+      .writeToken(handoff.token)
+      .catch(() => ({ copied: false, providers: [] }));
+    if (outcome.copied) {
+      await presentation.write(
+        `pairing token copied (${pairingRendezvousTokenCharacters} characters); token not echoed; clear with /konclave clipboard clear`,
+      );
+      return outcome;
+    }
+    await presentation.write(
+      outcome.providers.length > 0
+        ? 'clipboard copy could not be confirmed; use the raw token below and clear with /konclave clipboard clear'
+        : 'clipboard unavailable; use the raw token below',
+    );
+    await presentation.write(handoff.token, { ephemeral: true });
+    return outcome.providers.length > 0 ? outcome : undefined;
+  }
+  if (mode === 'qr') {
+    let qr;
+    try {
+      qr = renderPairingQr(handoff.uri);
+    } catch {
+      qr = undefined;
+    }
+    const columns = terminalColumns();
+    if (
+      qr === undefined ||
+      !terminalInteractive() ||
+      columns === undefined ||
+      columns < qr.columns
+    ) {
+      await presentation.write('QR unavailable for this terminal; use the raw token below');
+      await presentation.write(handoff.token, { ephemeral: true });
+      return undefined;
+    }
+    await presentation.write(
+      'QR code: scan the Konclave pairing URI; accessible raw token follows',
+    );
+    for (const line of qr.lines) {
+      await presentation.write(line, { ephemeral: true });
+    }
+    await presentation.write(
+      `accessible pairing token (${pairingRendezvousTokenCharacters} characters):`,
+    );
+    await presentation.write(handoff.token, { ephemeral: true });
+    return undefined;
+  }
+  await presentation.write('raw pairing token:');
+  await presentation.write(handoff.token, { ephemeral: true });
+  return undefined;
 }
 
 async function completeAccountTrustedPairing(
@@ -1188,14 +1728,43 @@ async function completeAccountTrustedPairing(
   sleep: (milliseconds: number) => Promise<void>,
 ): Promise<PairingStatus> {
   let status = initialStatus;
+  let nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
 
   try {
+    await renderConnectProgress(presentation, status, nowUnixMilliseconds);
     for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
       if (status.phase === 'completed') {
         return status;
       }
       if (status.phase === 'cancelled') {
         throw new Error('pairing was cancelled before connection completed');
+      }
+      if (status.localRole === 'inviter' && status.phase === 'inviter_awaiting_authorization') {
+        if (status.requestedRole !== 'member') {
+          throw new Error('connect accepts only member pairing requests');
+        }
+        const deadlineMs = remainingPairingRequestMilliseconds(
+          status,
+          commandDeadline,
+          nowUnixMilliseconds,
+        );
+        const conversationId = parseConversation(await client.request('create_conversation', {}));
+        status = parsePairingStatus(
+          await client.request(
+            'authorize_pairing_joiner',
+            {
+              pairing_id: status.pairingId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+            },
+            {
+              deadlineMs,
+            },
+          ),
+        );
+        await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+        nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+        continue;
       }
       if (
         status.localRole === 'joiner' &&
@@ -1224,7 +1793,8 @@ async function completeAccountTrustedPairing(
           ),
         );
         if (status.phase !== previousPhase) {
-          await presentation.detail(`connect phase: ${status.phase}`);
+          await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+          nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
         }
         continue;
       }
@@ -1247,18 +1817,59 @@ async function completeAccountTrustedPairing(
       }
       status = synced.pairing;
       if (status.phase !== previousPhase) {
-        await presentation.detail(`connect phase: ${status.phase}`);
+        await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+        nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
       } else {
+        if (nowUnixMilliseconds() >= nextProgressAt) {
+          await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+          nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+        }
         await sleep(connectPollMilliseconds);
       }
     }
 
-    throw new Error(`connect exceeded its progress limit for pairing ${status.pairingId}`);
+    throw new ConnectTimeoutError(
+      `connect exceeded its progress limit for pairing ${status.pairingId}`,
+    );
   } catch (error) {
-    await presentation.write(`recovery: /konclave pairing ${status.pairingId}`);
+    if (
+      error instanceof ConnectTimeoutError &&
+      status.phase !== 'completed' &&
+      status.phase !== 'cancelled'
+    ) {
+      try {
+        const cancelled = parsePairingStatus(
+          await client.request(
+            'cancel_pairing',
+            { pairing_id: status.pairingId },
+            { deadlineMs: 30_000 },
+          ),
+        );
+        if (cancelled.pairingId !== status.pairingId) {
+          throw new Error('the local service pairing cancellation identity is malformed', {
+            cause: error,
+          });
+        }
+        status = cancelled;
+        await renderConnectProgress(presentation, status, nowUnixMilliseconds);
+        if (status.phase === 'completed') {
+          return status;
+        }
+      } catch (cancellationError) {
+        await presentation.write(`status: /konclave pairing ${status.pairingId}`);
+        await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
+        throw new Error(`${error.message}; automatic pairing cancellation failed`, {
+          cause: cancellationError,
+        });
+      }
+    }
+    await presentation.write(`status: /konclave pairing ${status.pairingId}`);
     if (status.phase === 'cancelled') {
       await presentation.write('next: run /konclave connect to start a new pairing');
+    } else if (status.phase === 'compensating') {
+      await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
     } else {
+      await presentation.write(`resume: /konclave connect resume ${status.pairingId}`);
       await presentation.write(`cancel: /konclave cancel ${status.pairingId}`);
     }
     throw error;
@@ -1373,6 +1984,174 @@ async function renderPairing(
   if (status.conversationId) {
     await presentation.write(`conversation: ${status.conversationId}`);
   }
+}
+
+async function renderShortCodeVerification(
+  presentation: CommandPresentation,
+  status: ShortCodePairingStatus,
+): Promise<void> {
+  if (status.sas === undefined || status.peerDeviceId === undefined) {
+    await presentation.write(
+      `verification ${status.attemptId}: ${status.phase}; no authority granted`,
+    );
+    return;
+  }
+  await presentation.write(`verification attempt: ${status.attemptId}`);
+  await presentation.write(`local device: ${status.localDeviceId}`);
+  await presentation.write(`peer device: ${status.peerDeviceId}`);
+  await presentation.write(`short authentication string: ${status.sas}`);
+  await presentation.write(
+    'compare the SAS and both device identifiers on the other computer before confirming',
+  );
+  await presentation.write(
+    `confirm only if every value matches: /konclave verify ${status.attemptId} ${status.peerDeviceId} ${status.sas}`,
+  );
+}
+
+async function renderRepeatPairing(
+  presentation: CommandPresentation,
+  alias: string | undefined,
+  status: RepeatPairingStatus,
+): Promise<void> {
+  const subject = alias === undefined ? status.peerDeviceId : alias;
+  await presentation.write(
+    `repeat connection ${status.operationId}: ${status.phase}; ${subject} -> ${status.conversationId}`,
+  );
+  await presentation.detail(`peer device: ${status.peerDeviceId}`);
+  if (status.pairingId !== undefined) {
+    await presentation.detail(`pairing: ${status.pairingId}`);
+  }
+  await presentation.detail(`expires: ${formatPairingExpiry(status.deadlineUnixSeconds)}`);
+}
+
+async function completeRepeatPairing(
+  client: LocalServiceClient,
+  initialStatus: RepeatPairingStatus,
+  alias: string | undefined,
+  presentation: CommandPresentation,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<RepeatPairingStatus> {
+  let status = initialStatus;
+  let nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+  await renderRepeatPairing(presentation, alias, status);
+  for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+    if (status.phase === 'completed') {
+      return status;
+    }
+    if (status.phase === 'cancelled') {
+      throw new Error(`repeat connection ${status.operationId} was cancelled`);
+    }
+    const deadline = Math.min(commandDeadline, status.deadlineUnixSeconds * 1_000);
+    if (!Number.isSafeInteger(deadline) || nowUnixMilliseconds() >= deadline) {
+      throw new ConnectTimeoutError(
+        `repeat connection ${status.operationId} timed out; resume with /konclave repeat ${status.operationId}`,
+      );
+    }
+    const previousPhase = status.phase;
+    await sleep(connectPollMilliseconds);
+    const synced = parseRepeatPairingStatus(
+      await client.request(
+        trustedDeviceOperations.syncRepeatPairing,
+        { operation_id: status.operationId },
+        { deadlineMs: Math.min(30_000, deadline - nowUnixMilliseconds()) },
+      ),
+    );
+    if (
+      synced.operationId !== status.operationId ||
+      synced.conversationId !== status.conversationId ||
+      synced.peerDeviceId !== status.peerDeviceId
+    ) {
+      throw new Error('the local service repeat-pairing identity is malformed');
+    }
+    status = synced;
+    if (status.phase !== previousPhase || nowUnixMilliseconds() >= nextProgressAt) {
+      await renderRepeatPairing(presentation, alias, status);
+      nextProgressAt = nowUnixMilliseconds() + connectProgressIntervalMilliseconds;
+    }
+  }
+  throw new ConnectTimeoutError(
+    `repeat connection ${status.operationId} exceeded its progress limit; resume with /konclave repeat ${status.operationId}`,
+  );
+}
+
+async function waitForShortCodeSas(
+  client: LocalServiceClient,
+  initialStatus: ShortCodePairingStatus,
+  presentation: CommandPresentation,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<ShortCodePairingStatus> {
+  let status = initialStatus;
+  for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+    if (status.phase === 'cancelled') {
+      throw new Error('short-code verification was cancelled');
+    }
+    if (status.sas !== undefined && status.peerDeviceId !== undefined) {
+      return status;
+    }
+    const deadline = Math.min(commandDeadline, status.deadlineUnixSeconds * 1_000);
+    if (nowUnixMilliseconds() >= deadline) {
+      throw new ConnectTimeoutError(`short-code verification ${status.attemptId} expired`);
+    }
+    const synced = parseShortCodePairingSync(
+      await client.request('sync_short_code_pairing', { attempt_id: status.attemptId }),
+    );
+    if (synced.verification.attemptId !== status.attemptId) {
+      throw new Error('the short-code synchronization identity is malformed');
+    }
+    const previousPhase = status.phase;
+    status = synced.verification;
+    if (status.phase !== previousPhase) {
+      await presentation.detail(`verification phase: ${status.phase}`);
+    } else {
+      await sleep(connectPollMilliseconds);
+    }
+  }
+  throw new ConnectTimeoutError(
+    `short-code verification exceeded its progress limit for ${status.attemptId}`,
+  );
+}
+
+async function waitForShortCodePairing(
+  client: LocalServiceClient,
+  initialStatus: ShortCodePairingStatus,
+  presentation: CommandPresentation,
+  commandDeadline: number,
+  nowUnixMilliseconds: () => number,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<ShortCodePairingStatus> {
+  let status = initialStatus;
+  for (let iteration = 0; iteration < maxConnectIterations; iteration += 1) {
+    if (status.phase === 'cancelled') {
+      throw new Error('short-code verification was cancelled');
+    }
+    if (status.pairingId !== undefined) {
+      return status;
+    }
+    const deadline = Math.min(commandDeadline, status.deadlineUnixSeconds * 1_000);
+    if (nowUnixMilliseconds() >= deadline) {
+      throw new ConnectTimeoutError(`short-code verification ${status.attemptId} expired`);
+    }
+    const synced = parseShortCodePairingSync(
+      await client.request('sync_short_code_pairing', { attempt_id: status.attemptId }),
+    );
+    if (synced.verification.attemptId !== status.attemptId) {
+      throw new Error('the short-code synchronization identity is malformed');
+    }
+    const previousPhase = status.phase;
+    status = synced.verification;
+    if (status.phase !== previousPhase) {
+      await presentation.detail(`verification phase: ${status.phase}`);
+    } else {
+      await sleep(connectPollMilliseconds);
+    }
+  }
+  throw new ConnectTimeoutError(
+    `short-code verification exceeded its progress limit for ${status.attemptId}`,
+  );
 }
 
 async function renderCollaborationPolicyOperation(
@@ -1552,7 +2331,11 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
   const nowUnixMilliseconds = dependencies.nowUnixMilliseconds ?? Date.now;
   const sleep = dependencies.sleep ?? defaultSleep;
   const readPolicySource = dependencies.readPolicySource ?? readBoundedPolicySource;
+  const clipboard = dependencies.clipboard ?? createPairingClipboard();
+  const terminalColumns = dependencies.terminalColumns ?? defaultTerminalColumns;
+  const terminalInteractive = dependencies.terminalInteractive ?? defaultTerminalInteractive;
   let activeConversationId: string | undefined;
+  let clipboardReceipt: ClipboardWriteReceipt | undefined;
 
   const runPolicy = async (raw: string): Promise<void> => {
     const parsed = parseCommand(raw);
@@ -1881,16 +2664,99 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         return;
       }
+      case 'devices': {
+        requireNoArguments(argumentsText, subcommand);
+        const devices = parseTrustedDevices(await client.request(trustedDeviceOperations.list, {}));
+        if (devices.length === 0) {
+          await presentation.write('trusted devices: none');
+          await presentation.detail('assign one with /konclave device alias <device> <alias>');
+          return;
+        }
+        for (const device of devices) {
+          await presentation.write(`${device.alias}: ${device.status}; ${device.deviceId}`);
+        }
+        return;
+      }
+      case 'device': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 3, 3, '/konclave device alias <device> <alias>');
+        if (parts[0]?.toLowerCase() !== 'alias') {
+          throw new Error('usage: /konclave device alias <device> <alias>');
+        }
+        const deviceId = requireHexIdentifier(parts[1], deviceIdCharacters, 'device identifier');
+        const alias = parseTrustedDeviceAlias(parts[2] ?? '');
+        const result = parseTrustedDeviceAliasResult(
+          await client.request(trustedDeviceOperations.setAlias, {
+            device_id: deviceId,
+            alias,
+          }),
+        );
+        if (result.deviceId !== deviceId || result.alias !== alias) {
+          throw new Error('the local service trusted-device alias identity is malformed');
+        }
+        await presentation.write(
+          `trusted device ${result.alias}: ${result.decision}; ${result.deviceId}`,
+        );
+        await presentation.detail(`next: /konclave new ${result.alias}`);
+        return;
+      }
+      case 'clipboard': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave clipboard clear');
+        if (parts[0]?.toLowerCase() !== 'clear') {
+          throw new Error('usage: /konclave clipboard clear');
+        }
+        if (clipboardReceipt === undefined) {
+          await presentation.write('clipboard: no pairing token was copied by this session');
+          return;
+        }
+        const cleared = await clipboard.clear(clipboardReceipt).catch(() => false);
+        if (!cleared) {
+          throw new Error('the pairing token clipboard could not be cleared');
+        }
+        clipboardReceipt = undefined;
+        await presentation.write('clipboard: cleared the pairing token copied by this session');
+        return;
+      }
       case 'connect': {
         await requireAccountTrusted(client);
         const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
         let status: PairingStatus;
-        if (argumentsText.length === 0) {
-          const created = parsePairingCapability(
-            await client.request('create_pairing_capability', {
-              requested_role: 'member',
-            }),
+        const handoffMode = pairingHandoffMode(argumentsText);
+        if (handoffMode === 'short') {
+          const created = parseCreatedShortCodePairing(
+            await client.request('create_short_code_pairing', {}),
           );
+          await presentation.write(
+            `six-digit pairing code: ${created.code}; expires ${formatPairingExpiry(created.verification.deadlineUnixSeconds)}`,
+            { ephemeral: true },
+          );
+          await presentation.write(`the other computer runs: /konclave connect ${created.code}`, {
+            ephemeral: true,
+          });
+          await presentation.detail('the code locates an OPAQUE attempt and grants no authority');
+          await presentation.detail(
+            `status: /konclave verification ${created.verification.attemptId}`,
+          );
+          await presentation.detail(
+            `cancel: /konclave cancel-verification ${created.verification.attemptId}`,
+          );
+          const verification = await waitForShortCodeSas(
+            client,
+            created.verification,
+            presentation,
+            commandDeadline,
+            nowUnixMilliseconds,
+            sleep,
+          );
+          await renderShortCodeVerification(presentation, verification);
+          return;
+        }
+        if (handoffMode !== undefined) {
+          const created = parsePairingRendezvous(
+            await client.request('create_pairing_rendezvous', {}),
+          );
+          const handoff = requirePairingHandoff(created.token);
           await presentation.detail(
             'approval policy: AccountTrusted capability possession; no independent identity verification',
           );
@@ -1899,12 +2765,28 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`cancel: /konclave cancel ${created.pairing.pairingId}`);
           await presentation.write(
             presentation.mode === 'normal'
-              ? `pairing ${created.pairing.pairingId} (same-account trust): paste this capability in the other session`
-              : 'capability (ephemeral; paste the next line in the other session):',
+              ? `pairing ${created.pairing.pairingId} (same-account trust): the other session runs /konclave connect <token-or-uri>`
+              : 'compact pairing handoff:',
           );
-          await presentation.write(created.capability, { ephemeral: true });
+          const receipt = await renderPairingHandoff(
+            presentation,
+            handoff,
+            created.pairing,
+            handoffMode,
+            clipboard,
+            terminalColumns,
+            terminalInteractive,
+          );
+          if (receipt !== undefined) {
+            clipboardReceipt = {
+              copied: receipt.copied,
+              providers: [
+                ...new Set([...(clipboardReceipt?.providers ?? []), ...receipt.providers]),
+              ],
+            };
+          }
           await presentation.detail(
-            'waiting for the other session to run /konclave connect <capability>',
+            'waiting for the other session to run /konclave connect <token-or-uri>',
           );
           status = await completeAccountTrustedPairing(
             client,
@@ -1914,10 +2796,60 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             nowUnixMilliseconds,
             sleep,
           );
+        } else if (/^resume(?:\s|$)/iu.test(argumentsText)) {
+          const parts = parseCommandArguments(argumentsText);
+          requireArgumentCount(parts, 2, 2, '/konclave connect resume <pairing>');
+          if (parts[0]?.toLowerCase() !== 'resume') {
+            throw new Error('usage: /konclave connect resume <pairing>');
+          }
+          const pairingId = requireHexIdentifier(
+            parts[1],
+            pairingIdCharacters,
+            'pairing identifier',
+          );
+          status = parsePairingStatus(
+            await client.request('get_pairing_status', { pairing_id: pairingId }),
+          );
+          if (status.pairingId !== pairingId) {
+            throw new Error('the resumed pairing identity is malformed');
+          }
+          if (status.requestedRole !== 'member' || status.grantedRole === 'administrator') {
+            throw new Error('connect resumes only member pairing requests');
+          }
+          await presentation.write(`pairing ${pairingId} (same-account trust): resuming`);
+          status = await completeAccountTrustedPairing(
+            client,
+            status,
+            presentation,
+            commandDeadline,
+            nowUnixMilliseconds,
+            sleep,
+          );
         } else {
-          const capability = requirePairingCapability(argumentsText);
+          const shortCode = argumentsText.trim();
+          if (/^[0-9]{6}$/u.test(shortCode)) {
+            const claimed = parseShortCodePairingStatus(
+              await client.request('claim_short_code_pairing', { code: shortCode }),
+            );
+            await presentation.write(
+              `short-code verification ${claimed.attemptId}: code accepted for OPAQUE; no authority granted`,
+            );
+            await presentation.detail(`status: /konclave verification ${claimed.attemptId}`);
+            await presentation.detail(`cancel: /konclave cancel-verification ${claimed.attemptId}`);
+            const verification = await waitForShortCodeSas(
+              client,
+              claimed,
+              presentation,
+              commandDeadline,
+              nowUnixMilliseconds,
+              sleep,
+            );
+            await renderShortCodeVerification(presentation, verification);
+            return;
+          }
+          const handoff = requirePairingHandoff(shortCode);
           const redeemed = parsePairingStatus(
-            await client.request('redeem_pairing_capability', { capability }),
+            await client.request('redeem_pairing_rendezvous', { token: handoff.token }),
           );
           if (redeemed.requestedRole !== 'member') {
             throw new Error('connect accepts only member pairing requests');
@@ -1928,33 +2860,17 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           await presentation.detail(`pairing: ${redeemed.pairingId}`);
           await presentation.detail(`recovery: /konclave pairing ${redeemed.pairingId}`);
           await presentation.detail(`cancel: /konclave cancel ${redeemed.pairingId}`);
+          await presentation.write(
+            `pairing token accepted: one-time bearer secret; expires ${formatPairingExpiry(redeemed.authorizationDeadlineUnixSeconds)}`,
+          );
           if (presentation.mode === 'normal') {
             await presentation.write(
               `pairing ${redeemed.pairingId} (same-account trust): connecting`,
             );
           }
-          const conversationId = parseConversation(await client.request('create_conversation', {}));
-          await presentation.detail(`conversation: ${conversationId}`);
-          const approved = parsePairingStatus(
-            await client.request(
-              'authorize_pairing_joiner',
-              {
-                pairing_id: redeemed.pairingId,
-                conversation_id: conversationId,
-                granted_role: 'member',
-              },
-              {
-                deadlineMs: remainingPairingRequestMilliseconds(
-                  redeemed,
-                  commandDeadline,
-                  nowUnixMilliseconds,
-                ),
-              },
-            ),
-          );
           status = await completeAccountTrustedPairing(
             client,
-            approved,
+            redeemed,
             presentation,
             commandDeadline,
             nowUnixMilliseconds,
@@ -1963,6 +2879,10 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         }
         if (!status.conversationId) {
           throw new Error('completed pairing is missing its conversation');
+        }
+        const selection = conversations(await client.request('list_conversations', {}));
+        if (!selection.conversationIds.includes(status.conversationId)) {
+          throw new Error('completed pairing conversation is unavailable locally');
         }
         activeConversationId = status.conversationId;
         if (presentation.mode === 'verbose') {
@@ -2003,16 +2923,101 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         return;
       }
       case 'new': {
-        requireNoArguments(argumentsText, subcommand);
-        const conversationId = parseConversation(await client.request('create_conversation', {}));
-        activeConversationId = conversationId;
-        await presentation.write(`conversation created: ${conversationId}`);
-        await presentation.detail(
-          'conversation created durably; it remains if the pending pairing is abandoned',
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 0, 1, '/konclave new [alias]');
+        if (parts.length === 0) {
+          const conversationId = parseConversation(await client.request('create_conversation', {}));
+          activeConversationId = conversationId;
+          await presentation.write(`conversation created: ${conversationId}`);
+          await presentation.detail(
+            'conversation created durably; it remains if the pending pairing is abandoned',
+          );
+          await presentation.detail(
+            'next: use this conversation when approving an inviter-side pairing or sending a message',
+          );
+          return;
+        }
+        const alias = parseTrustedDeviceAlias(parts[0] ?? '');
+        const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
+        const started = parseRepeatPairingStatus(
+          await client.request(trustedDeviceOperations.startRepeatPairing, { alias }),
         );
-        await presentation.detail(
-          'next: use this conversation when approving an inviter-side pairing or sending a message',
+        const completed = await completeRepeatPairing(
+          client,
+          started,
+          alias,
+          presentation,
+          commandDeadline,
+          nowUnixMilliseconds,
+          sleep,
         );
+        const selected = selectedConversation(
+          await client.request('set_active_conversation', {
+            conversation_id: completed.conversationId,
+          }),
+        );
+        if (selected !== completed.conversationId) {
+          throw new Error('the local service selected a different repeat-pairing conversation');
+        }
+        activeConversationId = completed.conversationId;
+        await presentation.write(`connected ${alias}: ${completed.conversationId}`);
+        await presentation.detail('next: /konclave send -- <message>');
+        return;
+      }
+      case 'repeat': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave repeat <operation>');
+        const operationId = requireHexIdentifier(
+          parts[0],
+          repeatPairingOperationIdCharacters,
+          'repeat-pairing operation identifier',
+        );
+        const status = parseRepeatPairingStatus(
+          await client.request(trustedDeviceOperations.getRepeatPairingStatus, {
+            operation_id: operationId,
+          }),
+        );
+        if (status.operationId !== operationId) {
+          throw new Error('the local service returned another repeat-pairing operation');
+        }
+        const completed = await completeRepeatPairing(
+          client,
+          status,
+          undefined,
+          presentation,
+          nowUnixMilliseconds() + maxConnectWaitMilliseconds,
+          nowUnixMilliseconds,
+          sleep,
+        );
+        const selected = selectedConversation(
+          await client.request('set_active_conversation', {
+            conversation_id: completed.conversationId,
+          }),
+        );
+        if (selected !== completed.conversationId) {
+          throw new Error('the local service selected a different repeat-pairing conversation');
+        }
+        activeConversationId = completed.conversationId;
+        await presentation.write(`connected: ${completed.conversationId}`);
+        return;
+      }
+      case 'cancel-repeat': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave cancel-repeat <operation>');
+        const operationId = requireHexIdentifier(
+          parts[0],
+          repeatPairingOperationIdCharacters,
+          'repeat-pairing operation identifier',
+        );
+        const status = parseRepeatPairingStatus(
+          await client.request(trustedDeviceOperations.cancelRepeatPairing, {
+            operation_id: operationId,
+          }),
+        );
+        if (status.operationId !== operationId) {
+          throw new Error('the local service cancelled another repeat-pairing operation');
+        }
+        await renderRepeatPairing(presentation, undefined, status);
         return;
       }
       case 'pairing': {
@@ -2023,6 +3028,94 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           presentation,
           parsePairingStatus(await client.request('get_pairing_status', { pairing_id: pairingId })),
         );
+        return;
+      }
+      case 'verification': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave verification <attempt>');
+        const attemptId = requireHexIdentifier(
+          parts[0],
+          shortCodeAttemptIdCharacters,
+          'short-code attempt identifier',
+        );
+        await renderShortCodeVerification(
+          presentation,
+          parseShortCodePairingStatus(
+            await client.request('get_short_code_pairing_status', { attempt_id: attemptId }),
+          ),
+        );
+        return;
+      }
+      case 'verify': {
+        await requireAccountTrusted(client);
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 3, 3, '/konclave verify <attempt> <peer> <sas>');
+        const attemptId = requireHexIdentifier(
+          parts[0],
+          shortCodeAttemptIdCharacters,
+          'short-code attempt identifier',
+        );
+        const peerDeviceId = requireHexIdentifier(
+          parts[1],
+          deviceIdCharacters,
+          'peer device identifier',
+        );
+        const sas = requiredShortCode(parts[2], 'short authentication string');
+        let verification = parseShortCodePairingStatus(
+          await client.request(verificationOperations.confirmShortCodePairing, {
+            attempt_id: attemptId,
+            peer_device_id: peerDeviceId,
+            sas,
+          }),
+        );
+        if (
+          verification.attemptId !== attemptId ||
+          verification.peerDeviceId !== peerDeviceId ||
+          verification.sas !== sas ||
+          !verification.localConfirmed
+        ) {
+          throw new Error('the local service confirmed different short-code values');
+        }
+        await presentation.write(
+          `verification ${attemptId}: confirmed locally; waiting for the peer's exact confirmation`,
+        );
+        const commandDeadline = nowUnixMilliseconds() + maxConnectWaitMilliseconds;
+        verification = await waitForShortCodePairing(
+          client,
+          verification,
+          presentation,
+          commandDeadline,
+          nowUnixMilliseconds,
+          sleep,
+        );
+        const pairingId = verification.pairingId;
+        if (pairingId === undefined) {
+          throw new Error('confirmed short-code verification is missing its pairing');
+        }
+        let connected = parsePairingStatus(
+          await client.request('get_pairing_status', { pairing_id: pairingId }),
+        );
+        connected = await completeAccountTrustedPairing(
+          client,
+          connected,
+          presentation,
+          commandDeadline,
+          nowUnixMilliseconds,
+          sleep,
+        );
+        if (!connected.conversationId) {
+          throw new Error('completed pairing is missing its conversation');
+        }
+        const selection = conversations(await client.request('list_conversations', {}));
+        if (!selection.conversationIds.includes(connected.conversationId)) {
+          throw new Error('completed pairing conversation is unavailable locally');
+        }
+        activeConversationId = connected.conversationId;
+        if (presentation.mode === 'verbose') {
+          await renderPairing(presentation, connected);
+        }
+        await presentation.write(`connected: ${connected.conversationId}`);
+        await presentation.detail('next: /konclave send -- <message>');
         return;
       }
       case 'approve': {
@@ -2127,6 +3220,23 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           presentation,
           parsePairingStatus(await client.request('cancel_pairing', { pairing_id: pairingId })),
         );
+        return;
+      }
+      case 'cancel-verification': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 1, 1, '/konclave cancel-verification <attempt>');
+        const attemptId = requireHexIdentifier(
+          parts[0],
+          shortCodeAttemptIdCharacters,
+          'short-code attempt identifier',
+        );
+        const status = parseShortCodePairingStatus(
+          await client.request('cancel_short_code_pairing', { attempt_id: attemptId }),
+        );
+        if (status.attemptId !== attemptId || status.phase !== 'cancelled') {
+          throw new Error('the local service short-code cancellation is malformed');
+        }
+        await presentation.write(`verification ${attemptId}: cancelled`);
         return;
       }
       case 'send':

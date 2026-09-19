@@ -14,7 +14,14 @@ export const toolOperations = [
   'delivery_status',
   'get_identity',
   'create_pairing_capability',
+  'create_pairing_rendezvous',
+  'create_short_code_pairing',
+  'claim_short_code_pairing',
+  'get_short_code_pairing_status',
+  'sync_short_code_pairing',
+  'cancel_short_code_pairing',
   'redeem_pairing_capability',
+  'redeem_pairing_rendezvous',
   'get_pairing_status',
   'authorize_pairing_joiner',
   'authorize_pairing_inviter',
@@ -65,11 +72,28 @@ export const serviceOperations = {
   status: 'service.status',
 } as const;
 
+/** Human-entered deterministic commands intentionally absent from the agent tool surface. */
+export const verificationOperations = {
+  confirmShortCodePairing: 'confirm_short_code_pairing',
+} as const;
+
+/** Local address-book and repeat-pairing commands intentionally absent from agent tools. */
+export const trustedDeviceOperations = {
+  list: 'list_trusted_devices',
+  setAlias: 'set_trusted_device_alias',
+  startRepeatPairing: 'start_repeat_pairing',
+  getRepeatPairingStatus: 'get_repeat_pairing_status',
+  syncRepeatPairing: 'sync_repeat_pairing',
+  cancelRepeatPairing: 'cancel_repeat_pairing',
+} as const;
+
 export const allOperations: readonly string[] = [
   ...toolOperations,
   ...Object.values(deliveryOperations),
   ...Object.values(collaborationOperations),
   ...Object.values(serviceOperations),
+  ...Object.values(verificationOperations),
+  ...Object.values(trustedDeviceOperations),
 ];
 
 export function isKnownOperation(name: string): boolean {

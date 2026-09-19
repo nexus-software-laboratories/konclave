@@ -75,9 +75,13 @@ function serviceStatus(overrides: Partial<ServiceStatusResult> = {}): ServiceSta
 }
 
 const pairingId = '11'.repeat(16);
+const pairingToken = '000G40R40M30E209185GR38E1W';
 const conversationId = '22'.repeat(32);
 const joinerDeviceId = '33'.repeat(32);
 const inviterDeviceId = '44'.repeat(32);
+const shortCodeAttemptId = '55'.repeat(16);
+const shortCodeSas = '123456';
+const repeatPairingOperationId = '66'.repeat(16);
 
 function pairingStatus(overrides: Record<string, unknown> = {}) {
   return {
@@ -91,6 +95,35 @@ function pairingStatus(overrides: Record<string, unknown> = {}) {
     conversation_id: null,
     authorization_deadline_unix_seconds: 1_787_805_388,
     completion_deadline_unix_seconds: null,
+    ...overrides,
+  };
+}
+
+function shortCodeStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    attempt_id: shortCodeAttemptId,
+    local_role: 'creator',
+    phase: 'creator_awaiting_claim',
+    local_device_id: joinerDeviceId,
+    peer_device_id: null,
+    sas: null,
+    deadline_unix_seconds: 1_787_805_388,
+    local_confirmed: false,
+    peer_confirmed: false,
+    pairing_id: null,
+    ...overrides,
+  };
+}
+
+function repeatPairingStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    operation_id: repeatPairingOperationId,
+    role: 'initiator',
+    phase: 'initiator_awaiting_response',
+    peer_device_id: joinerDeviceId,
+    conversation_id: conversationId,
+    pairing_id: null,
+    deadline_unix_seconds: 2_000_000_000,
     ...overrides,
   };
 }
@@ -299,16 +332,37 @@ describe('agent tool surface', () => {
     expect(new Set(names).size).toBe(names.length);
     expect(names.sort()).toEqual([...toolOperations].sort());
     expect(names).not.toContain('*');
+    expect(names).not.toContain('confirm_short_code_pairing');
+    expect(isKnownOperation('confirm_short_code_pairing')).toBe(true);
     for (const tool of konclaveTools) {
       expect(tool.parameters.type).toBe('object');
       expect(isKnownOperation(tool.name)).toBe(true);
     }
+    const send = konclaveTools.find((tool) => tool.name === 'send_message');
+    const sendProperties = send?.parameters.properties;
+    expect(sendProperties).toBeTypeOf('object');
+    expect(sendProperties).not.toBeNull();
+    expect(
+      Object.prototype.hasOwnProperty.call(sendProperties, 'collaboration_authorization'),
+    ).toBe(false);
   });
 
   it('maps a tool call onto the operation of the same name', async () => {
     const request = vi.fn().mockResolvedValue({ conversation_id: 'ab' });
-    const tools = createKonclaveTools({ client: stubClient(request) });
+    const prepareArguments = vi.fn((operation, args) =>
+      operation === 'send_message'
+        ? {
+            ...(args as Record<string, unknown>),
+            collaboration_authorization: 'aa'.repeat(16),
+          }
+        : args,
+    );
+    const tools = createKonclaveTools({ client: stubClient(request), prepareArguments });
     const send = tools.find((tool) => tool.name === 'send_message');
+    expect(send?.defer).toBe('never');
+    expect(
+      tools.filter((tool) => tool.name !== 'send_message').every((tool) => tool.defer === 'auto'),
+    ).toBe(true);
     const invocation = {
       sessionId: 'session-a',
       toolCallId: 'tool-call-a',
@@ -329,12 +383,22 @@ describe('agent tool surface', () => {
 
     expect(request).toHaveBeenCalledWith(
       'send_message',
-      { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
+      {
+        conversation_id: 'ab',
+        message_id: 'cd',
+        text: 'hi',
+        collaboration_authorization: 'aa'.repeat(16),
+      },
       {
         deadlineMs: expect.any(Number),
         requestId: expect.any(Buffer),
       },
     );
+    expect(prepareArguments).toHaveBeenCalledWith('send_message', {
+      conversation_id: 'ab',
+      message_id: 'cd',
+      text: 'hi',
+    });
     expect(request.mock.calls[0]?.[2]).toEqual(request.mock.calls[1]?.[2]);
     expect(request.mock.calls[2]?.[2]).not.toEqual(request.mock.calls[3]?.[2]);
     await expect(
@@ -346,6 +410,7 @@ describe('agent tool surface', () => {
 
     const identity = tools.find((tool) => tool.name === 'get_identity');
     await identity?.handler(undefined);
+    expect(prepareArguments).toHaveBeenCalledWith('get_identity', {});
     expect(request).toHaveBeenCalledWith('get_identity', {}, expect.any(Number));
   });
 });
@@ -607,6 +672,194 @@ describe('deterministic commands', () => {
     ).toHaveLength(2);
   });
 
+  it('lists, aliases, and reconnects trusted devices without exposing agent tools', async () => {
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      switch (operation) {
+        case 'list_trusted_devices':
+          return {
+            devices: [
+              {
+                alias: 'alienware',
+                device_id: joinerDeviceId,
+                status: 'active',
+              },
+            ],
+          };
+        case 'set_trusted_device_alias':
+          return {
+            alias: 'alienware',
+            device_id: joinerDeviceId,
+            decision: 'inserted',
+          };
+        case 'start_repeat_pairing':
+          return repeatPairingStatus();
+        case 'sync_repeat_pairing':
+          return repeatPairingStatus({
+            phase: 'completed',
+            pairing_id: pairingId,
+          });
+        case 'set_active_conversation':
+          return {
+            active_conversation_id:
+              typeof payload === 'object' && payload !== null && 'conversation_id' in payload
+                ? payload.conversation_id
+                : null,
+          };
+        default:
+          throw new Error(`unexpected operation ${operation}`);
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+      nowUnixMilliseconds: () => 1_900_000_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })[0];
+
+    await command?.handler(commandContext('devices'));
+    await command?.handler(commandContext(`device alias ${joinerDeviceId} alienware`));
+    await command?.handler(commandContext('new alienware'));
+
+    expect(lines.join('\n')).toContain(`alienware: active; ${joinerDeviceId}`);
+    expect(lines.join('\n')).toContain(`connected alienware: ${conversationId}`);
+    expect(request).toHaveBeenCalledWith('set_trusted_device_alias', {
+      device_id: joinerDeviceId,
+      alias: 'alienware',
+    });
+    expect(request).toHaveBeenCalledWith('start_repeat_pairing', {
+      alias: 'alienware',
+    });
+    expect(toolOperations).not.toContain('set_trusted_device_alias');
+    expect(toolOperations).not.toContain('start_repeat_pairing');
+    expect(isKnownOperation('set_trusted_device_alias')).toBe(true);
+    expect(isKnownOperation('start_repeat_pairing')).toBe(true);
+  });
+
+  it('renders empty and incompatible trusted-device states', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ devices: [] })
+      .mockResolvedValueOnce({
+        devices: [
+          {
+            alias: 'legacy-device',
+            device_id: joinerDeviceId,
+            status: 'unsupported',
+          },
+        ],
+      });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('devices'));
+    await command?.handler(commandContext('devices'));
+
+    expect(lines.join('\n')).toContain('trusted devices: none');
+    expect(lines.join('\n')).toContain(`legacy-device: unsupported; ${joinerDeviceId}`);
+  });
+
+  it('renders a trusted-device rename result', async () => {
+    const request = vi.fn().mockResolvedValue({
+      alias: 'workstation',
+      device_id: joinerDeviceId,
+      decision: 'renamed',
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`device alias ${joinerDeviceId} workstation`));
+
+    expect(lines.join('\n')).toContain(`trusted device workstation: renamed; ${joinerDeviceId}`);
+  });
+
+  it('resumes and cancels repeat-pairing operations deterministically', async () => {
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      switch (operation) {
+        case 'get_repeat_pairing_status':
+          return repeatPairingStatus({
+            phase: 'completed',
+            pairing_id: pairingId,
+          });
+        case 'set_active_conversation':
+          return {
+            active_conversation_id:
+              typeof payload === 'object' && payload !== null && 'conversation_id' in payload
+                ? payload.conversation_id
+                : null,
+          };
+        case 'cancel_repeat_pairing':
+          return repeatPairingStatus({ phase: 'cancelled' });
+        default:
+          throw new Error(`unexpected operation ${operation}`);
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+      nowUnixMilliseconds: () => 1_900_000_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })[0];
+
+    await command?.handler(commandContext(`repeat ${repeatPairingOperationId}`));
+    await command?.handler(commandContext(`cancel-repeat ${repeatPairingOperationId}`));
+
+    expect(lines.join('\n')).toContain(`connected: ${conversationId}`);
+    expect(lines.join('\n')).toContain(`repeat connection ${repeatPairingOperationId}: cancelled`);
+  });
+
+  it('rejects noncanonical aliases and reports repeat-pairing expiry', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'start_repeat_pairing') {
+        return repeatPairingStatus({ deadline_unix_seconds: 1_900_000_000 });
+      }
+      throw new Error(`unexpected operation ${operation}`);
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+      nowUnixMilliseconds: () => 1_900_000_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })[0];
+
+    await command?.handler(commandContext(`device alias ${joinerDeviceId} Alienware`));
+    await command?.handler(commandContext('new Alienware'));
+    await command?.handler(commandContext('new alienware'));
+
+    expect(lines.join('\n')).toContain('device alias must contain 1-32 lowercase letters');
+    expect(lines.join('\n')).toContain('repeat connection');
+    expect(lines.join('\n')).toContain('timed out');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('manages collaboration policies through deterministic nested commands', async () => {
     const proposalId = '55'.repeat(16);
     const replacementProposalId = '56'.repeat(16);
@@ -825,6 +1078,269 @@ describe('deterministic commands', () => {
     });
   });
 
+  it('creates a six-digit code and requires explicit SAS confirmation', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'create_short_code_pairing':
+          return {
+            code: '654321',
+            verification: shortCodeStatus(),
+          };
+        case 'sync_short_code_pairing':
+          return {
+            verification: shortCodeStatus({
+              phase: 'creator_awaiting_confirmation',
+              peer_device_id: inviterDeviceId,
+              sas: shortCodeSas,
+            }),
+            processed_stages: 3,
+          };
+        default:
+          throw new Error(`unexpected operation: ${operation}`);
+      }
+    });
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line, options) => {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect --short'));
+
+    expect(request).toHaveBeenCalledWith('create_short_code_pairing', {});
+    expect(request).toHaveBeenCalledWith('sync_short_code_pairing', {
+      attempt_id: shortCodeAttemptId,
+    });
+    expect(request).not.toHaveBeenCalledWith('confirm_short_code_pairing', expect.anything());
+    expect(entries).toContainEqual({
+      line: 'six-digit pairing code: 654321; expires 2026-08-27T04:36:28.000Z (Unix second 1787805388)',
+      options: { ephemeral: true },
+    });
+    expect(entries.map(({ line }) => line).join('\n')).toContain(
+      `confirm only if every value matches: /konclave verify ${shortCodeAttemptId} ${inviterDeviceId} ${shortCodeSas}`,
+    );
+  });
+
+  it('claims a six-digit code without treating it as a bearer token', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'claim_short_code_pairing':
+          return shortCodeStatus({
+            local_role: 'claimant',
+            phase: 'claimant_awaiting_response',
+            local_device_id: inviterDeviceId,
+          });
+        case 'sync_short_code_pairing':
+          return {
+            verification: shortCodeStatus({
+              local_role: 'claimant',
+              phase: 'claimant_awaiting_confirmation',
+              local_device_id: inviterDeviceId,
+              peer_device_id: joinerDeviceId,
+              sas: shortCodeSas,
+            }),
+            processed_stages: 2,
+          };
+        default:
+          throw new Error(`unexpected operation: ${operation}`);
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect 654321'));
+
+    expect(request).toHaveBeenCalledWith('claim_short_code_pairing', { code: '654321' });
+    expect(request).not.toHaveBeenCalledWith('redeem_pairing_rendezvous', expect.anything());
+    expect(lines.join('\n')).toContain('code accepted for OPAQUE; no authority granted');
+    expect(lines.join('\n')).toContain(`short authentication string: ${shortCodeSas}`);
+  });
+
+  it('confirms exact short-code values before completing the existing pairing', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'confirm_short_code_pairing':
+          return shortCodeStatus({
+            phase: 'creator_awaiting_confirmation',
+            peer_device_id: inviterDeviceId,
+            sas: shortCodeSas,
+            local_confirmed: true,
+          });
+        case 'sync_short_code_pairing':
+          return {
+            verification: shortCodeStatus({
+              phase: 'creator_completed',
+              peer_device_id: inviterDeviceId,
+              sas: shortCodeSas,
+              local_confirmed: true,
+              peer_confirmed: true,
+              pairing_id: pairingId,
+            }),
+            processed_stages: 3,
+          };
+        case 'get_pairing_status':
+          return pairingStatus({
+            phase: 'completed',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+          });
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error(`unexpected operation: ${operation}`);
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(
+      commandContext(`verify ${shortCodeAttemptId} ${inviterDeviceId} ${shortCodeSas}`),
+    );
+
+    expect(request).toHaveBeenCalledWith('confirm_short_code_pairing', {
+      attempt_id: shortCodeAttemptId,
+      peer_device_id: inviterDeviceId,
+      sas: shortCodeSas,
+    });
+    expect(request).toHaveBeenCalledWith('get_pairing_status', { pairing_id: pairingId });
+    expect(lines).toContain(`connected: ${conversationId}`);
+  });
+
+  it('shows and cancels a short-code verification without confirmation', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'get_short_code_pairing_status') {
+        return shortCodeStatus();
+      }
+      if (operation === 'cancel_short_code_pairing') {
+        return shortCodeStatus({ phase: 'cancelled' });
+      }
+      throw new Error(`unexpected operation: ${operation}`);
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`verification ${shortCodeAttemptId}`));
+    await command?.handler(commandContext(`cancel-verification ${shortCodeAttemptId}`));
+
+    expect(lines).toContain(
+      `verification ${shortCodeAttemptId}: creator_awaiting_claim; no authority granted`,
+    );
+    expect(lines).toContain(`verification ${shortCodeAttemptId}: cancelled`);
+    expect(request).not.toHaveBeenCalledWith('confirm_short_code_pairing', expect.anything());
+  });
+
+  it('rejects malformed short-code command responses and confirmation mismatches', async () => {
+    const scenarios: ReadonlyArray<{
+      readonly args: string;
+      readonly request: (operation: string) => Promise<unknown>;
+      readonly expected: string;
+    }> = [
+      {
+        args: 'connect --short',
+        request: async (operation) =>
+          operation === 'service.status'
+            ? serviceStatus()
+            : { code: '12345', verification: shortCodeStatus() },
+        expected: 'pairing code must contain exactly six decimal digits',
+      },
+      {
+        args: 'connect 123456',
+        request: async (operation) =>
+          operation === 'service.status'
+            ? serviceStatus()
+            : shortCodeStatus({ local_confirmed: 'yes' }),
+        expected: 'short-code pairing response is malformed',
+      },
+      {
+        args: `verification ${shortCodeAttemptId}`,
+        request: async () => shortCodeStatus({ local_role: 'unknown' }),
+        expected: 'short-code state is malformed',
+      },
+      {
+        args: 'connect --short',
+        request: async (operation) => {
+          if (operation === 'service.status') {
+            return serviceStatus();
+          }
+          if (operation === 'create_short_code_pairing') {
+            return { code: '123456', verification: shortCodeStatus() };
+          }
+          return { verification: shortCodeStatus(), processed_stages: -1 };
+        },
+        expected: 'short-code sync response is malformed',
+      },
+      {
+        args: `verify ${shortCodeAttemptId} ${inviterDeviceId} ${shortCodeSas}`,
+        request: async (operation) =>
+          operation === 'service.status'
+            ? serviceStatus()
+            : shortCodeStatus({
+                peer_device_id: joinerDeviceId,
+                sas: shortCodeSas,
+                local_confirmed: true,
+              }),
+        expected: 'confirmed different short-code values',
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const lines: string[] = [];
+      const command = createKonclaveCommands({
+        client: stubClient(vi.fn(scenario.request)),
+        nowUnixMilliseconds: () => 1_787_805_000_000,
+        sleep: vi.fn().mockResolvedValue(undefined),
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
+        },
+      })[0];
+      await command?.handler(commandContext(scenario.args));
+      expect(lines.join('\n')).toContain(scenario.expected);
+    }
+  });
+
   it('completes the joiner side of an AccountTrusted connection', async () => {
     let syncCount = 0;
     const sleep = vi.fn().mockResolvedValue(undefined);
@@ -832,10 +1348,10 @@ describe('deterministic commands', () => {
       switch (operation) {
         case 'service.status':
           return serviceStatus();
-        case 'create_pairing_capability':
+        case 'create_pairing_rendezvous':
           return {
             pairing: pairingStatus(),
-            capability: 'pairing_capability-1',
+            token: pairingToken,
           };
         case 'sync_pairing':
           syncCount += 1;
@@ -872,6 +1388,11 @@ describe('deterministic commands', () => {
             granted_role: 'member',
             completion_deadline_unix_seconds: 1_787_806_000,
           });
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
         default:
           throw new Error('unexpected operation');
       }
@@ -890,9 +1411,7 @@ describe('deterministic commands', () => {
 
     await command?.handler(commandContext('connect'));
 
-    expect(request).toHaveBeenCalledWith('create_pairing_capability', {
-      requested_role: 'member',
-    });
+    expect(request).toHaveBeenCalledWith('create_pairing_rendezvous', {});
     expect(request).toHaveBeenCalledWith(
       'authorize_pairing_inviter',
       {
@@ -906,12 +1425,22 @@ describe('deterministic commands', () => {
       },
     );
     expect(entries).toContainEqual({
-      line: 'pairing_capability-1',
+      line: pairingToken,
       options: { ephemeral: true },
     });
+    expect(entries.map((entry) => entry.line).join('\n')).toContain(
+      'waiting for the other session to run /konclave connect <token-or-uri>',
+    );
     expect(entries.some((entry) => entry.line === `connected: ${conversationId}`)).toBe(true);
     expect(entries.map((entry) => entry.line).join('\n')).toContain(
       'no independent identity verification',
+    );
+    expect(entries).toContainEqual({
+      line: 'connect: waiting for the other session to redeem the token; 6m 28s remaining',
+      options: { ephemeral: true },
+    });
+    expect(entries.map((entry) => entry.line).join('\n')).toContain(
+      'connect: waiting for the inviter to publish the encrypted Welcome',
     );
     expect(sleep).toHaveBeenCalledWith(500);
   });
@@ -922,7 +1451,7 @@ describe('deterministic commands', () => {
       switch (operation) {
         case 'service.status':
           return serviceStatus();
-        case 'redeem_pairing_capability':
+        case 'redeem_pairing_rendezvous':
           return pairingStatus({
             local_role: 'inviter',
             phase: 'inviter_awaiting_authorization',
@@ -950,6 +1479,11 @@ describe('deterministic commands', () => {
             }),
             processed_records: 1,
           };
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
         default:
           throw new Error('unexpected operation');
       }
@@ -966,10 +1500,10 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext('connect pairing_capability-1'));
+    await command?.handler(commandContext(`connect konclave://pair/${pairingToken.toLowerCase()}`));
 
-    expect(request).toHaveBeenCalledWith('redeem_pairing_capability', {
-      capability: 'pairing_capability-1',
+    expect(request).toHaveBeenCalledWith('redeem_pairing_rendezvous', {
+      token: pairingToken,
     });
     expect(request).toHaveBeenCalledWith('create_conversation', {});
     expect(request).toHaveBeenCalledWith(
@@ -984,6 +1518,346 @@ describe('deterministic commands', () => {
       },
     );
     expect(lines).toContain(`connected: ${conversationId}`);
+    expect(lines.join('\n')).toContain(
+      'connect: waiting for the other session to publish its join proof',
+    );
+  });
+
+  it('copies a compact token without echo and clears it explicitly', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'create_pairing_rendezvous':
+          return {
+            pairing: pairingStatus({
+              phase: 'completed',
+              inviter_device_id: inviterDeviceId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+            }),
+            token: pairingToken,
+          };
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const clipboard = {
+      writeToken: vi.fn().mockResolvedValue({ copied: true, providers: ['windows'] as const }),
+      clear: vi.fn().mockResolvedValue(true),
+    };
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      clipboard,
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect --copy'));
+    await command?.handler(commandContext('clipboard clear'));
+    await command?.handler(commandContext('clipboard clear'));
+
+    expect(clipboard.writeToken).toHaveBeenCalledWith(pairingToken);
+    expect(clipboard.clear).toHaveBeenCalledTimes(1);
+    expect(clipboard.clear).toHaveBeenCalledWith({
+      copied: true,
+      providers: ['windows'],
+    });
+    expect(lines.join('\n')).toContain('pairing token copied (26 characters); token not echoed');
+    expect(lines.join('\n')).toContain('one-time bearer secret; expires 2026-');
+    expect(lines.join('\n')).toContain(
+      'clipboard: cleared the pairing token copied by this session',
+    );
+    expect(lines.join('\n')).toContain('clipboard: no pairing token was copied by this session');
+    expect(lines).not.toContain(pairingToken);
+  });
+
+  it('keeps clear available when clipboard copy completion is indeterminate', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'service.status') {
+        return serviceStatus();
+      }
+      if (operation === 'create_pairing_rendezvous') {
+        return {
+          pairing: pairingStatus({
+            phase: 'completed',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+          }),
+          token: pairingToken,
+        };
+      }
+      if (operation === 'list_conversations') {
+        return {
+          conversation_ids: [conversationId],
+          active_conversation_id: null,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const clipboard = {
+      writeToken: vi.fn().mockResolvedValue({ copied: false, providers: ['wayland'] as const }),
+      clear: vi.fn().mockResolvedValue(true),
+    };
+    const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      clipboard,
+      output: {
+        write: (line, options) => {
+          entries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect --copy'));
+    await command?.handler(commandContext('clipboard clear'));
+
+    expect(entries.map(({ line }) => line).join('\n')).toContain(
+      'clipboard copy could not be confirmed',
+    );
+    expect(entries).toContainEqual({
+      line: pairingToken,
+      options: { ephemeral: true },
+    });
+    expect(clipboard.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders an accessible QR handoff and degrades to raw output when non-interactive', async () => {
+    const completed = {
+      pairing: pairingStatus({
+        phase: 'completed',
+        inviter_device_id: inviterDeviceId,
+        conversation_id: conversationId,
+        granted_role: 'member',
+      }),
+      token: pairingToken,
+    };
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'service.status') {
+        return serviceStatus();
+      }
+      if (operation === 'create_pairing_rendezvous') {
+        return completed;
+      }
+      if (operation === 'list_conversations') {
+        return {
+          conversation_ids: [conversationId],
+          active_conversation_id: null,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const interactiveEntries: Array<{
+      line: string;
+      options: CommandOutputOptions | undefined;
+    }> = [];
+    const interactive = createKonclaveCommands({
+      client: stubClient(request),
+      terminalColumns: () => 100,
+      terminalInteractive: () => true,
+      output: {
+        write: (line, options) => {
+          interactiveEntries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await interactive?.handler(commandContext('connect --qr'));
+
+    expect(interactiveEntries.map(({ line }) => line).join('\n')).toContain(
+      'QR code: scan the Konclave pairing URI; accessible raw token follows',
+    );
+    expect(interactiveEntries.some(({ line }) => /[▀▄█]/u.test(line))).toBe(true);
+    expect(
+      interactiveEntries
+        .filter(({ line }) => /[▀▄█]/u.test(line))
+        .every(({ options }) => options?.ephemeral === true),
+    ).toBe(true);
+    expect(interactiveEntries).toContainEqual({
+      line: pairingToken,
+      options: { ephemeral: true },
+    });
+    expect(interactiveEntries.map(({ line }) => line).join('\n')).not.toContain(
+      `konclave://pair/${pairingToken}`,
+    );
+
+    const fallbackEntries: Array<{
+      line: string;
+      options: CommandOutputOptions | undefined;
+    }> = [];
+    const fallback = createKonclaveCommands({
+      client: stubClient(request),
+      terminalColumns: () => 100,
+      terminalInteractive: () => false,
+      output: {
+        write: (line, options) => {
+          fallbackEntries.push({ line, options });
+        },
+      },
+    })[0];
+
+    await fallback?.handler(commandContext('connect --qr'));
+
+    expect(fallbackEntries.map(({ line }) => line).join('\n')).toContain(
+      'QR unavailable for this terminal; use the raw token below',
+    );
+    expect(fallbackEntries.some(({ line }) => /[▀▄█]/u.test(line))).toBe(false);
+    expect(fallbackEntries).toContainEqual({
+      line: pairingToken,
+      options: { ephemeral: true },
+    });
+
+    const narrowEntries: string[] = [];
+    const narrow = createKonclaveCommands({
+      client: stubClient(request),
+      terminalColumns: () => 20,
+      terminalInteractive: () => true,
+      output: {
+        write: (line) => {
+          narrowEntries.push(line);
+        },
+      },
+    })[0];
+
+    await narrow?.handler(commandContext('connect --qr'));
+
+    expect(narrowEntries.join('\n')).toContain(
+      'QR unavailable for this terminal; use the raw token below',
+    );
+    expect(narrowEntries.some((line) => /[▀▄█]/u.test(line))).toBe(false);
+  });
+
+  it('resumes an interrupted joiner-side AccountTrusted connection', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'get_pairing_status':
+          return pairingStatus({
+            phase: 'joiner_awaiting_inviter_authorization',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+          });
+        case 'authorize_pairing_inviter':
+          return pairingStatus({
+            phase: 'joiner_awaiting_welcome',
+            inviter_device_id: inviterDeviceId,
+            conversation_id: conversationId,
+            granted_role: 'member',
+            completion_deadline_unix_seconds: 1_787_806_000,
+          });
+        case 'sync_pairing':
+          return {
+            pairing: pairingStatus({
+              phase: 'completed',
+              inviter_device_id: inviterDeviceId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+              completion_deadline_unix_seconds: 1_787_806_000,
+            }),
+            processed_records: 1,
+          };
+        case 'list_conversations':
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(`connect resume ${pairingId}`));
+
+    expect(request).toHaveBeenCalledWith('get_pairing_status', { pairing_id: pairingId });
+    expect(request).toHaveBeenCalledWith(
+      'authorize_pairing_inviter',
+      {
+        pairing_id: pairingId,
+        inviter_device_id: inviterDeviceId,
+        conversation_id: conversationId,
+        granted_role: 'member',
+      },
+      {
+        deadlineMs: expect.any(Number),
+      },
+    );
+    expect(request).not.toHaveBeenCalledWith('create_pairing_rendezvous', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('redeem_pairing_rendezvous', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_conversation', expect.anything());
+    expect(lines).toContain(`pairing ${pairingId} (same-account trust): resuming`);
+    expect(lines).toContain(`connected: ${conversationId}`);
+  });
+
+  it('does not report connected before the completed conversation exists locally', async () => {
+    const request = vi.fn(async (operation: string) => {
+      switch (operation) {
+        case 'service.status':
+          return serviceStatus();
+        case 'create_pairing_rendezvous':
+          return {
+            pairing: pairingStatus(),
+            token: pairingToken,
+          };
+        case 'sync_pairing':
+          return {
+            pairing: pairingStatus({
+              phase: 'completed',
+              inviter_device_id: inviterDeviceId,
+              conversation_id: conversationId,
+              granted_role: 'member',
+              completion_deadline_unix_seconds: 1_787_806_000,
+            }),
+            processed_records: 1,
+          };
+        case 'list_conversations':
+          return {
+            conversation_ids: [],
+            active_conversation_id: null,
+          };
+        default:
+          throw new Error('unexpected operation');
+      }
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      nowUnixMilliseconds: () => 1_787_805_000_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('connect'));
+
+    expect(lines.join('\n')).toContain('completed pairing conversation is unavailable locally');
+    expect(lines.some((line) => line.startsWith('connected: '))).toBe(false);
   });
 
   it('refuses connection automation outside AccountTrusted policy', async () => {
@@ -1007,7 +1881,7 @@ describe('deterministic commands', () => {
 
     expect(lines.join('\n')).toContain('connect requires the AccountTrusted');
     expect(request).toHaveBeenCalledTimes(1);
-    expect(request).not.toHaveBeenCalledWith('create_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_pairing_rendezvous', expect.anything());
   });
 
   it('refuses connection setup before side effects when the relay is unavailable', async () => {
@@ -1026,7 +1900,7 @@ describe('deterministic commands', () => {
 
     expect(lines.join('\n')).toContain('connect requires a configured relay');
     expect(request).toHaveBeenCalledTimes(1);
-    expect(request).not.toHaveBeenCalledWith('create_pairing_capability', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('create_pairing_rendezvous', expect.anything());
   });
 
   it('refuses administrator capabilities in the AccountTrusted connection flow', async () => {
@@ -1034,7 +1908,7 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'redeem_pairing_capability') {
+      if (operation === 'redeem_pairing_rendezvous') {
         return pairingStatus({
           local_role: 'inviter',
           phase: 'inviter_awaiting_authorization',
@@ -1053,7 +1927,7 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext('connect pairing_capability-1'));
+    await command?.handler(commandContext(`connect ${pairingToken}`));
 
     expect(lines.join('\n')).toContain('accepts only member pairing requests');
     expect(request).not.toHaveBeenCalledWith('create_conversation', expect.anything());
@@ -1065,10 +1939,10 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'create_pairing_capability') {
+      if (operation === 'create_pairing_rendezvous') {
         return {
           pairing: pairingStatus(),
-          capability: 'pairing_capability-1',
+          token: pairingToken,
         };
       }
       if (operation === 'sync_pairing') {
@@ -1096,11 +1970,17 @@ describe('deterministic commands', () => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'create_pairing_capability') {
+      if (operation === 'create_pairing_rendezvous') {
         return {
           pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_000 }),
-          capability: 'pairing_capability-1',
+          token: pairingToken,
         };
+      }
+      if (operation === 'cancel_pairing') {
+        return pairingStatus({
+          phase: 'cancelled',
+          authorization_deadline_unix_seconds: 1_787_805_000,
+        });
       }
       throw new Error('unexpected operation');
     });
@@ -1119,33 +1999,49 @@ describe('deterministic commands', () => {
 
     expect(cancelledLines.join('\n')).toContain('pairing was cancelled');
     expect(expiredLines.join('\n')).toContain('connect timed out');
+    expect(expiredLines.join('\n')).toContain('next: run /konclave connect');
+    expect(expiredRequest).toHaveBeenCalledWith(
+      'cancel_pairing',
+      { pairing_id: pairingId },
+      { deadlineMs: 30_000 },
+    );
     expect(expiredRequest).not.toHaveBeenCalledWith('sync_pairing', expect.anything());
   });
 
   it('bounds stalled and malformed AccountTrusted connection state', async () => {
+    let now = 1_787_805_000_000;
+    const sleep = vi.fn(async (milliseconds: number) => {
+      now += milliseconds;
+    });
     const stalledRequest = vi.fn(async (operation: string) => {
       if (operation === 'service.status') {
         return serviceStatus();
       }
-      if (operation === 'create_pairing_capability') {
+      if (operation === 'create_pairing_rendezvous') {
         return {
-          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_806_000 }),
-          capability: 'pairing_capability-1',
+          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_002 }),
+          token: pairingToken,
         };
       }
       if (operation === 'sync_pairing') {
         return {
-          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_806_000 }),
+          pairing: pairingStatus({ authorization_deadline_unix_seconds: 1_787_805_002 }),
           processed_records: 1,
         };
+      }
+      if (operation === 'cancel_pairing') {
+        return pairingStatus({
+          phase: 'cancelled',
+          authorization_deadline_unix_seconds: 1_787_805_002,
+        });
       }
       throw new Error('unexpected operation');
     });
     const stalledLines: string[] = [];
     const stalledCommand = createKonclaveCommands({
       client: stubClient(stalledRequest),
-      nowUnixMilliseconds: () => 1_787_805_000_000,
-      sleep: vi.fn().mockResolvedValue(undefined),
+      nowUnixMilliseconds: () => now,
+      sleep,
       output: {
         write: (line) => {
           stalledLines.push(line);
@@ -1172,11 +2068,12 @@ describe('deterministic commands', () => {
     })[0];
     await malformedCommand?.handler(commandContext('connect pairing_capability-1'));
 
-    expect(stalledLines.join('\n')).toContain('connect exceeded its progress limit');
+    expect(stalledLines.join('\n')).toContain('connect timed out');
+    expect(stalledLines.join('\n')).toContain('next: run /konclave connect');
     expect(
       stalledRequest.mock.calls.filter(([operation]) => operation === 'sync_pairing'),
-    ).toHaveLength(640);
-    expect(malformedLines.join('\n')).toContain('pairing role is malformed');
+    ).toHaveLength(4);
+    expect(malformedLines.join('\n')).toContain('use /konclave join');
   });
 
   it('redeems, creates, and approves an inviter-side pairing explicitly', async () => {

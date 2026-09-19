@@ -393,8 +393,27 @@ sender-counter, envelope identifier, timestamp, reply target, content, and expir
 An expired response or a responder removed before recovery becomes an abandoned
 counter gap rather than a different response.
 The SDK may represent pre-tool arguments as a JSON object or a serialized JSON object;
-the extension accepts only a bounded form with the exact `send_message` field allowlist
-before evaluating or modifying it.
+the extension accepts only a bounded form with the exact model-facing `send_message`
+field allowlist before evaluating or modifying it. The hook-only
+`collaboration_authorization` field is omitted from the model-facing schema and a
+caller-supplied value is discarded without being evaluated or forwarded. The trusted synthetic prompt identifies its
+separate turn-binding token as not being a tool argument. After successful action
+evaluation, the hook stages the daemon-issued one-use send authorization inside the
+extension. The model-visible modified arguments contain only public `send_message`
+fields. The handler consumes the staged authorization only when the exact
+conversation, message, reply target, and text still match, then injects it into the
+local-service request. The authorization never enters model tool history, so a later
+turn cannot learn or replay it from an earlier successful call.
+The extension marks only `send_message` as non-deferred in the Copilot SDK so an
+authorized autonomous turn never depends on tool search to load its sole permitted
+effect. Every other Konclave tool remains auto-deferred, bounding the always-loaded
+schema cost and preventing the collaboration turn from gaining another operation.
+The synthetic turn is submitted through the scoped session RPC with
+`requiredTool: "send_message"`, the same host-enforced mechanism used by Copilot
+continuations that require `task_complete`. The extension explicitly initializes and
+validates the session tool set before admission. If the host cannot materialize that
+tool, the turn fails before model execution instead of asking the model to repair
+tool availability from untrusted request content.
 Workspace, shell, web, MCP, and subagent tools deny because their effects occur
 outside that atomic boundary. Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.

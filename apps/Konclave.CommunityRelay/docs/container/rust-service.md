@@ -40,7 +40,7 @@ Load the unsigned prerelease image and start the example with an explicit access
 document:
 
 ```shell
-docker image load --input konclave-community-relay-container-0.1.0-linux-amd64.docker.tar
+docker image load --input konclave-community-relay-container-0.1.14-linux-amd64.docker.tar
 KONCLAVE_RELAY_ACCESS_SOURCE=/absolute/path/to/relay-access.json docker compose --file compose.example.yaml up --detach
 ```
 

@@ -2,16 +2,21 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use KonclaveClientLibrary::{
-    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError, RelayAccessCredential,
-    RelayClient, RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential,
-    RelayEnrollmentOutcome, RelayEnrollmentRequest, RelayTransport, check_relay_health,
+    EnrollmentRequestId, HttpRelayEnrollmentTransport, KonclaveClientError,
+    PairingRendezvousPublishResult, PairingRendezvousTransport, RelayAccessCredential, RelayClient,
+    RelayEndpoint, RelayEnrollmentClient, RelayEnrollmentCredential, RelayEnrollmentOutcome,
+    RelayEnrollmentRequest, RelayTransport, ShortCodeAttemptMessageRequest,
+    ShortCodeAttemptPublishRequest, ShortCodeAttemptPublishResult, ShortCodeAttemptReadRequest,
+    ShortCodeCapabilityTakeId, ShortCodeCapabilityTakeRequest, ShortCodePairingAttemptId,
+    ShortCodePairingLocator, ShortCodePairingTransport, ShortCodeRelayStage, check_relay_health,
 };
 use KonclaveCommunityRelay::access::StaticRelayAccess;
 use KonclaveCommunityRelay::application::RelayApplication;
 use KonclaveCommunityRelay::http::{HttpState, router};
 use KonclaveDomainCore::{
-    AcknowledgeRequest, DeliveryClass, EnvelopeId, ProtocolVersion, RelayEnvelope, ReplayRequest,
-    RoutingId,
+    AcknowledgeRequest, DeliveryClass, EnvelopeId, MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES,
+    PairingRendezvousId, PairingRendezvousNonce, PairingRendezvousRecord,
+    PairingRendezvousTakeRequest, ProtocolVersion, RelayEnvelope, ReplayRequest, RoutingId,
 };
 use KonclaveRelayCore::RelayPrincipalId;
 use base64::Engine as _;
@@ -120,9 +125,13 @@ impl TestServer {
     }
 
     fn client(&self) -> RelayClient {
+        self.client_with_token(self.token)
+    }
+
+    fn client_with_token(&self, token: [u8; RelayPrincipalId::LENGTH]) -> RelayClient {
         RelayClient::new(
             RelayEndpoint::parse(&format!("http://{}", self.address)).unwrap(),
-            RelayAccessCredential::from_bytes(self.token),
+            RelayAccessCredential::from_bytes(token),
         )
         .unwrap()
     }
@@ -159,6 +168,17 @@ fn envelope(route: RoutingId, id: u8, payload: u8) -> RelayEnvelope {
     .unwrap()
 }
 
+fn pairing_rendezvous(id: u8, ciphertext: u8) -> PairingRendezvousRecord {
+    PairingRendezvousRecord::new(
+        ProtocolVersion::application_v1(),
+        PairingRendezvousId::from_bytes([id; 32]),
+        u64::MAX / 2,
+        PairingRendezvousNonce::from_bytes([id.wrapping_add(1); 12]),
+        vec![ciphertext; MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES],
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn client_submits_replays_and_acknowledges_idempotently() {
     let server = TestServer::start(true).await;
@@ -184,6 +204,138 @@ async fn client_submits_replays_and_acknowledges_idempotently() {
             .cursor(),
         1
     );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn client_publishes_and_takes_one_pairing_rendezvous() {
+    let server = TestServer::start(true).await;
+    let client = server.client();
+    let record = pairing_rendezvous(20, 21);
+    assert_eq!(
+        client.publish_pairing_rendezvous(&record).await.unwrap(),
+        PairingRendezvousPublishResult::Published
+    );
+    assert_eq!(
+        client
+            .publish_pairing_rendezvous(&pairing_rendezvous(20, 21))
+            .await
+            .unwrap(),
+        PairingRendezvousPublishResult::AlreadyPublished
+    );
+    let request =
+        PairingRendezvousTakeRequest::new(ProtocolVersion::application_v1(), record.lookup_id());
+    let taken = client.take_pairing_rendezvous(request).await.unwrap();
+    assert_eq!(taken.lookup_id(), record.lookup_id());
+    assert_eq!(taken.ciphertext(), record.ciphertext());
+    let error = client.take_pairing_rendezvous(request).await.err().unwrap();
+    assert!(matches!(
+        error,
+        KonclaveClientError::RelayRejected {
+            status: 404,
+            ref relay_code
+        } if relay_code == "relay_pairing_rendezvous_unavailable"
+    ));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn client_completes_one_short_code_relay_exchange() {
+    let server = TestServer::start_enrollment().await;
+    let creator_token = server.token;
+    let claimant_token = [8_u8; RelayPrincipalId::LENGTH];
+    let enrollment = server.enrollment_client();
+    for (request_id, token) in [(31, creator_token), (32, claimant_token)] {
+        let request = RelayEnrollmentRequest::new(
+            ProtocolVersion::application_v1(),
+            EnrollmentRequestId::from_bytes([request_id; EnrollmentRequestId::LENGTH]),
+            RelayPrincipalId::from_access_token(&token),
+        );
+        assert_eq!(
+            enrollment.register(request).await.unwrap().outcome(),
+            RelayEnrollmentOutcome::Registered
+        );
+    }
+    let creator = server.client_with_token(creator_token);
+    let claimant = server.client_with_token(claimant_token);
+    let locator = ShortCodePairingLocator::from_bytes([41; ShortCodePairingLocator::LENGTH]);
+    let attempt_id = ShortCodePairingAttemptId::from_bytes([42; ShortCodePairingAttemptId::LENGTH]);
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 600;
+    let publish = ShortCodeAttemptPublishRequest::new(
+        ProtocolVersion::application_v1(),
+        locator,
+        attempt_id,
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(
+        creator.publish_short_code_attempt(publish).await.unwrap(),
+        ShortCodeAttemptPublishResult::Published
+    );
+    let claim = KonclaveClientLibrary::ShortCodeAttemptClaimRequest::new(
+        ProtocolVersion::application_v1(),
+        locator,
+        vec![51],
+    )
+    .unwrap();
+    let snapshot = claimant.claim_short_code_attempt(&claim).await.unwrap();
+    assert_eq!(
+        snapshot.message(ShortCodeRelayStage::CredentialRequest),
+        Some(&[51][..])
+    );
+    for (stage, client) in [
+        (
+            ShortCodeRelayStage::CredentialResponse,
+            &creator as &RelayClient,
+        ),
+        (ShortCodeRelayStage::ClaimantFinalization, &claimant),
+        (ShortCodeRelayStage::CreatorIdentity, &creator),
+        (ShortCodeRelayStage::CreatorConfirmation, &creator),
+        (ShortCodeRelayStage::ClaimantConfirmation, &claimant),
+        (ShortCodeRelayStage::Capability, &creator),
+    ] {
+        let message = ShortCodeAttemptMessageRequest::new(
+            ProtocolVersion::application_v1(),
+            attempt_id,
+            stage,
+            vec![stage as u8],
+        )
+        .unwrap();
+        client.publish_short_code_message(&message).await.unwrap();
+    }
+    let read = ShortCodeAttemptReadRequest::new(ProtocolVersion::application_v1(), attempt_id);
+    let snapshot = claimant.read_short_code_attempt(read).await.unwrap();
+    assert!(snapshot.message(ShortCodeRelayStage::Capability).is_none());
+    let take = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        attempt_id,
+        ShortCodeCapabilityTakeId::from_bytes([61; ShortCodeCapabilityTakeId::LENGTH]),
+    );
+    assert_eq!(
+        claimant.take_short_code_capability(take).await.unwrap(),
+        vec![ShortCodeRelayStage::Capability as u8]
+    );
+    assert_eq!(
+        claimant.take_short_code_capability(take).await.unwrap(),
+        vec![ShortCodeRelayStage::Capability as u8]
+    );
+    let conflicting_take = ShortCodeCapabilityTakeRequest::new(
+        ProtocolVersion::application_v1(),
+        attempt_id,
+        ShortCodeCapabilityTakeId::from_bytes([62; ShortCodeCapabilityTakeId::LENGTH]),
+    );
+    assert!(matches!(
+        claimant
+            .take_short_code_capability(conflicting_take)
+            .await
+            .unwrap_err(),
+        KonclaveClientError::RelayRejected { status: 404, .. }
+    ));
+
     server.stop().await;
 }
 

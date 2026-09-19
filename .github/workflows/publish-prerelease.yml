@@ -1,0 +1,435 @@
+name: Publish prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build a new draft or resume an existing draft from retained bytes
+        required: true
+        default: publish
+        type: choice
+        options:
+          - publish
+          - resume
+      version:
+        description: Exact version declared by distribution/release-artifacts.json
+        required: true
+        type: string
+      source_run_id:
+        description: Failed Publish prerelease run containing the retained complete set
+        required: false
+        type: string
+
+run-name: ${{ inputs.mode }} Konclave v${{ inputs.version }} prerelease
+
+concurrency:
+  group: publish-prerelease
+  cancel-in-progress: false
+
+jobs:
+  package-validation:
+    if: ${{ inputs.mode == 'publish' }}
+    uses: ./.github/workflows/package-validation.yml
+    with:
+      request_id: prerelease-v${{ inputs.version }}
+      demo_windows_only: false
+      retain_release_set: true
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish immutable prerelease
+    if: >-
+      always() &&
+      (
+        (inputs.mode == 'publish' && needs.package-validation.result == 'success') ||
+        inputs.mode == 'resume'
+      )
+    needs: package-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Download newly validated release set
+        if: ${{ inputs.mode == 'publish' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: konclave-complete-release-set
+          path: target/release-set
+      - name: Download retained release set
+        if: ${{ inputs.mode == 'resume' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: konclave-complete-release-set
+          path: target/release-set
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify publication preconditions
+        id: release
+        shell: pwsh
+        env:
+          CONFIRMED_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          PUBLICATION_MODE: ${{ inputs.mode }}
+          RELEASE_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          WORKFLOW_COMMIT: ${{ github.sha }}
+        run: |
+          if ($env:RELEASE_REF -cne 'refs/heads/main') {
+            throw 'Prereleases can be dispatched only from main.'
+          }
+          . ./scripts/packaging/ReleasePublication.Functions.ps1
+          $tag = "v$env:CONFIRMED_VERSION"
+          $manifest = Get-Content -LiteralPath (
+            Join-Path 'target/release-set' 'RELEASE.json'
+          ) -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
+          if ([string]$manifest.release.version -cne $env:CONFIRMED_VERSION) {
+            throw 'Confirmed version does not match the release manifest.'
+          }
+          if ((Get-PrereleaseTag -Manifest $manifest) -cne $tag) {
+            throw 'Confirmed version does not produce the expected release tag.'
+          }
+          $sourceCommit = Get-ReleaseProvenanceSourceCommit `
+            -Directory ./target/release-set `
+            -Manifest $manifest
+          if ($env:PUBLICATION_MODE -ceq 'publish') {
+            [void](Assert-PrereleaseSourceVersions `
+              -ProjectRoot $PWD.Path `
+              -Tag $tag)
+            if ($sourceCommit -cne $env:WORKFLOW_COMMIT) {
+              throw 'New release provenance does not identify the workflow commit.'
+            }
+          }
+          elseif ($env:SOURCE_RUN_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw 'Resume mode requires a positive source run identifier.'
+          }
+          if ($env:PUBLICATION_MODE -ceq 'resume') {
+            $sourceRun = gh api `
+              -H 'Accept: application/vnd.github+json' `
+              "repos/$env:REPOSITORY/actions/runs/$env:SOURCE_RUN_ID" |
+                ConvertFrom-Json -Depth 20
+            if (
+              $LASTEXITCODE -ne 0 -or
+              [string]$sourceRun.path -cne '.github/workflows/publish-prerelease.yml' -or
+              [string]$sourceRun.event -cne 'workflow_dispatch' -or
+              [string]$sourceRun.conclusion -cne 'failure' -or
+              [string]$sourceRun.head_sha -cne $sourceCommit
+            ) {
+              throw 'Resume source run does not match the failed publication source.'
+            }
+          }
+          $matchingRefs = @(
+            gh api `
+              -H 'Accept: application/vnd.github+json' `
+              "repos/$env:REPOSITORY/git/matching-refs/tags/$tag" |
+                ConvertFrom-Json -Depth 20
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not inspect existing release tags.'
+          }
+          $releases = @(
+            gh api `
+              -H 'Accept: application/vnd.github+json' `
+              "repos/$env:REPOSITORY/releases?per_page=100" |
+                ConvertFrom-Json -Depth 20
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not inspect existing releases.'
+          }
+          $matchingReleases = @($releases | Where-Object tag_name -CEQ $tag)
+          $matchingTag = @(
+            $matchingRefs | Where-Object ref -CEQ "refs/tags/$tag"
+          )
+          if ($env:PUBLICATION_MODE -ceq 'publish') {
+            if ($matchingTag.Count -ne 0 -or $matchingReleases.Count -ne 0) {
+              throw "Release tag or release already exists: $tag"
+            }
+            $releaseId = ''
+          }
+          else {
+            if (
+              $matchingTag.Count -ne 1 -or
+              [string]$matchingTag[0].object.type -cne 'commit' -or
+              [string]$matchingTag[0].object.sha -cne $sourceCommit -or
+              $matchingReleases.Count -ne 1 -or
+              $matchingReleases[0].draft -ne $true -or
+              $matchingReleases[0].prerelease -ne $true -or
+              $matchingReleases[0].immutable -ne $false
+            ) {
+              throw 'Resume target is not the expected mutable draft and source tag.'
+            }
+            $releaseId = [string]$matchingReleases[0].id
+          }
+          & ./target/release-set/Verify-Release.ps1 `
+            -Directory ./target/release-set
+          [void](Assert-ReleaseProvenanceSet `
+            -Directory ./target/release-set `
+            -Manifest $manifest `
+            -SourceCommit $sourceCommit)
+          ./scripts/packaging/Test-PublicReleaseMetadata.ps1 `
+            -Directory ./target/release-set
+          "tag=$tag" >>$env:GITHUB_OUTPUT
+          "version=$env:CONFIRMED_VERSION" >>$env:GITHUB_OUTPUT
+          "source-commit=$sourceCommit" >>$env:GITHUB_OUTPUT
+          "release-id=$releaseId" >>$env:GITHUB_OUTPUT
+      - name: Create release tag
+        if: ${{ inputs.mode == 'publish' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.source-commit }}
+        run: |
+          set -euo pipefail
+          main_commit="$(
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$REPOSITORY/git/ref/heads/main" \
+              --jq '.object.sha'
+          )"
+          if [ "$main_commit" != "$SOURCE_COMMIT" ]; then
+            echo 'Main advanced after prerelease validation started.' >&2
+            exit 1
+          fi
+          gh api \
+            --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" \
+            -f "sha=$SOURCE_COMMIT" \
+            >/dev/null
+      - name: Create draft release
+        if: ${{ inputs.mode == 'publish' }}
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.source-commit }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat >"$notes" <<EOF
+          This is the unsigned Konclave $RELEASE_VERSION prerelease.
+
+          Source revision: [$SOURCE_COMMIT](https://github.com/$REPOSITORY/commit/$SOURCE_COMMIT)
+
+          Download every release asset into one directory and run:
+
+          \`\`\`shell
+          pwsh ./Verify-Release.ps1
+          \`\`\`
+
+          Read \`UNSIGNED-PRERELEASE.txt\` before running the native packages.
+
+          - [Installation and rollback](https://github.com/$REPOSITORY/blob/$SOURCE_COMMIT/docs/distribution/installation.md)
+          - [Integrity and provenance](https://github.com/$REPOSITORY/blob/$SOURCE_COMMIT/docs/distribution/integrity.md)
+          EOF
+          response="$(
+            gh api \
+              --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$REPOSITORY/releases" \
+              -f "tag_name=$RELEASE_TAG" \
+              -f "name=Konclave $RELEASE_VERSION prerelease" \
+              --raw-field "body=$(cat "$notes")" \
+              -F draft=true \
+              -F prerelease=true \
+              -f make_latest=false
+          )"
+          release_id="$(jq -er '.id' <<<"$response")"
+          printf 'release-id=%s\n' "$release_id" >>"$GITHUB_OUTPUT"
+      - name: Reconcile validated assets in draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.mode == 'publish' && steps.draft.outputs.release-id || steps.release.outputs.release-id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          . ./scripts/packaging/ReleasePublication.Functions.ps1
+          $assets = @(
+            gh api `
+              -H 'Accept: application/vnd.github+json' `
+              "repos/$env:REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100" |
+                ConvertFrom-Json -Depth 20
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not read existing draft release assets.'
+          }
+          $missing = @(
+            Get-MissingPublishedReleaseAssetNames `
+              -Directory ./target/release-set `
+              -Assets $assets
+          )
+          if ($missing.Count -ne 0) {
+            $arguments = [Collections.Generic.List[string]]::new()
+            foreach ($argument in @('release', 'upload', $env:RELEASE_TAG)) {
+              $arguments.Add($argument)
+            }
+            foreach ($name in $missing) {
+              $arguments.Add((Join-Path 'target/release-set' $name))
+            }
+            foreach ($argument in @('--repo', $env:REPOSITORY)) {
+              $arguments.Add($argument)
+            }
+            & gh @arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not upload every missing draft release asset.'
+            }
+          }
+          $assets = @(
+            gh api `
+              -H 'Accept: application/vnd.github+json' `
+              "repos/$env:REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100" |
+                ConvertFrom-Json -Depth 20
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not re-read reconciled draft release assets.'
+          }
+          [void](Assert-PublishedReleaseAssetInventory `
+            -Directory ./target/release-set `
+            -Assets $assets)
+      - name: Re-download and verify draft assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.mode == 'publish' && steps.draft.outputs.release-id || steps.release.outputs.release-id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          . ./scripts/packaging/ReleasePublication.Functions.ps1
+          $assets = @(
+            gh api `
+              -H 'Accept: application/vnd.github+json' `
+              "repos/$env:REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100" |
+                ConvertFrom-Json -Depth 20
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not read draft release assets.'
+          }
+          [void](Assert-PublishedReleaseAssetInventory `
+            -Directory ./target/release-set `
+            -Assets $assets)
+
+          $downloadRoot = Join-Path $env:RUNNER_TEMP 'downloaded-release'
+          New-Item -ItemType Directory -Path $downloadRoot | Out-Null
+          foreach ($asset in $assets) {
+            $destination = Join-Path $downloadRoot ([string]$asset.name)
+            $downloaded = $false
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              $temporary = "$destination.part"
+              gh api `
+                -H 'Accept: application/octet-stream' `
+                "repos/$env:REPOSITORY/releases/assets/$($asset.id)" >$temporary
+              if ($LASTEXITCODE -eq 0) {
+                $digest = 'sha256:' + (
+                  Get-FileHash -LiteralPath $temporary -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                if ($digest -ceq [string]$asset.digest) {
+                  [IO.File]::Move($temporary, $destination, $true)
+                  $downloaded = $true
+                  break
+                }
+              }
+              if (Test-Path -LiteralPath $temporary) {
+                Remove-Item -LiteralPath $temporary -Force
+              }
+              if ($attempt -lt 5) {
+                Start-Sleep -Seconds ($attempt * 2)
+              }
+            }
+            if (-not $downloaded) {
+              throw "Could not download draft release asset: $($asset.name)"
+            }
+          }
+          & (Join-Path $downloadRoot 'Verify-Release.ps1') `
+            -Directory $downloadRoot
+      - name: Publish immutable prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.mode == 'publish' && steps.draft.outputs.release-id || steps.release.outputs.release-id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.source-commit }}
+        run: |
+          $release = gh api `
+            --method PATCH `
+            -H 'Accept: application/vnd.github+json' `
+            "repos/$env:REPOSITORY/releases/$env:RELEASE_ID" `
+            -F draft=false `
+            -F prerelease=true `
+            -f make_latest=false |
+              ConvertFrom-Json -Depth 20
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not publish the verified draft release.'
+          }
+          if (
+            $release.draft -ne $false -or
+            $release.prerelease -ne $true -or
+            $release.immutable -ne $true -or
+            [string]$release.tag_name -cne $env:RELEASE_TAG
+          ) {
+            if ($release.draft -eq $false -and $release.immutable -ne $true) {
+              gh api `
+                --method PATCH `
+                -H 'Accept: application/vnd.github+json' `
+                "repos/$env:REPOSITORY/releases/$env:RELEASE_ID" `
+                -F draft=true |
+                  Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Unexpected mutable release could not be returned to draft.'
+              }
+            }
+            throw 'Published release is not the expected immutable prerelease.'
+          }
+          $tag = gh api `
+            -H 'Accept: application/vnd.github+json' `
+            "repos/$env:REPOSITORY/git/ref/tags/$env:RELEASE_TAG" |
+              ConvertFrom-Json -Depth 20
+          if (
+            $LASTEXITCODE -ne 0 -or
+            [string]$tag.object.type -cne 'commit' -or
+            [string]$tag.object.sha -cne $env:SOURCE_COMMIT
+          ) {
+            throw 'Published release tag does not identify the validated source commit.'
+          }
+      - name: Delete retained source-run artifacts
+        if: ${{ inputs.mode == 'resume' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          mapfile -t artifact_ids < <(
+            gh api \
+              --paginate \
+              "repos/$REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+              --jq '.artifacts[].id'
+          )
+          for artifact_id in "${artifact_ids[@]}"; do
+            gh api \
+              --method DELETE \
+              "repos/$REPOSITORY/actions/artifacts/$artifact_id"
+          done
+          remaining="$(
+            gh api \
+              "repos/$REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=1" \
+              --jq '.total_count'
+          )"
+          if [ "$remaining" != '0' ]; then
+            echo "Source run still retains $remaining artifact(s)." >&2
+            exit 1
+          fi

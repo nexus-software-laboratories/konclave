@@ -32,6 +32,10 @@ export const MAX_STORED_RELAY_ENVELOPE_BYTES = MAX_RELAY_ENVELOPE_BYTES + 32;
 export const MAX_REPLAY_PAGE_BYTES = 16 * 1024 * 1024;
 /** Maximum encoded replay-request or acknowledgment bytes in protocol v1. */
 export const MAX_RELAY_CONTROL_MESSAGE_BYTES = 1024;
+/** Maximum encrypted capability bytes in one pairing rendezvous record. */
+export const MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES = 8 * 1024 + 16;
+/** Maximum encoded pairing rendezvous record bytes in protocol v1. */
+export const MAX_PAIRING_RENDEZVOUS_RECORD_BYTES = 9 * 1024;
 /** Maximum top-level fields accepted in one protocol v1 Protobuf message. */
 export const MAX_PROTOBUF_TOP_LEVEL_FIELDS = 4096;
 

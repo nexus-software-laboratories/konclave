@@ -7,7 +7,9 @@ mod enrollment;
 mod identity;
 mod membership;
 mod pairing;
+mod pairing_rendezvous;
 mod relay;
+mod short_code_pairing;
 
 #[cfg(test)]
 mod tests;
@@ -34,9 +36,26 @@ pub use pairing::{
     decode_pairing_welcome, encode_pairing_control, encode_pairing_envelope,
     encode_pairing_invitation, encode_pairing_welcome,
 };
+pub use pairing_rendezvous::{
+    decode_pairing_rendezvous_record, decode_pairing_rendezvous_take_request,
+    encode_pairing_rendezvous_record, encode_pairing_rendezvous_take_request,
+};
 pub use relay::{
     decode_acknowledge_request, decode_relay_envelope, decode_replay_page, decode_replay_request,
     decode_stored_relay_envelope, encode_acknowledge_request, encode_relay_envelope,
     encode_replay_page, encode_replay_page_preserving, encode_replay_request,
     encode_stored_relay_envelope, encode_stored_relay_envelope_preserving,
+};
+pub use short_code_pairing::{
+    decode_short_code_attempt_claim_request, decode_short_code_attempt_message_request,
+    decode_short_code_attempt_publish_request, decode_short_code_attempt_read_request,
+    decode_short_code_attempt_snapshot, decode_short_code_capability_response,
+    decode_short_code_capability_take_request, decode_short_code_claimant_finalization_record,
+    decode_short_code_confirmation_record, decode_short_code_identity_record,
+    decode_short_code_protected_record, encode_short_code_attempt_claim_request,
+    encode_short_code_attempt_message_request, encode_short_code_attempt_publish_request,
+    encode_short_code_attempt_read_request, encode_short_code_attempt_snapshot,
+    encode_short_code_capability_response, encode_short_code_capability_take_request,
+    encode_short_code_claimant_finalization_record, encode_short_code_confirmation_record,
+    encode_short_code_identity_record, encode_short_code_protected_record,
 };

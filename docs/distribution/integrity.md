@@ -5,11 +5,13 @@ Each complete unsigned prerelease set assembled during package validation contai
 - all native client, standalone-relay, and A2A-gateway archives declared by
   `RELEASE.json`;
 - the Docker-loadable Community Relay and A2A gateway archives;
+- the portable Agent Plugins 1.0 archive;
 - `SHA256SUMS`, covering every other file in the set;
 - target-specific Rust CycloneDX SBOMs;
-- one CycloneDX SBOM for the bundled Copilot plugin;
+- one CycloneDX SBOM for the Agent Plugin;
 - one Syft-generated CycloneDX SBOM for each container;
 - one SLSA v1 in-toto provenance statement per executable archive;
+- the per-user installer, lifecycle/runtime support, and provenance verifier;
 - `Verify-Release.ps1` and its shared verification functions; and
 - the unsigned-prerelease notice and release-contract schema.
 
@@ -64,6 +66,15 @@ Because both `RELEASE.json` and `SHA256SUMS` are unsigned, a party able to repla
 entire release set can also replace its declared contract. Exact coverage detects
 truncation or coordinated removal only relative to the `RELEASE.json` you obtained.
 
-Package validation currently verifies this set on ephemeral runner storage and does
-not upload or publish the aggregate. These files become a user-facing download only
-after a maintainer explicitly authorizes a public release channel.
+The manually dispatched `Publish prerelease` workflow builds and accepts the complete
+set before creating its release tag. It uploads those exact bytes to a draft release,
+compares every GitHub asset name, size, and SHA-256 digest with the validated set,
+downloads the draft into a clean directory, and runs the shipped verifier there.
+Only then does it publish the prerelease. Repository release immutability locks the
+tag and assets and supplies GitHub's release attestation.
+
+Published assets are never replaced. A correction requires a new release version.
+Successful publication deletes its transient Actions artifacts; failed publication
+retains them for at most one day while leaving any partial release in draft state.
+The resume path consumes that exact retained set, reconciles only missing assets, and
+repeats clean-download verification without rebuilding after tag creation.

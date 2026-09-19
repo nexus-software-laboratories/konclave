@@ -2,12 +2,9 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
-use sha2::{Digest as _, Sha256};
 use KonclaveClientLibrary::{
-    default_profile_root, RelayEnrollmentCredential, RelayEnrollmentSourceConfig,
-    RelayInstallationConfig, RELAY_INSTALLATION_CONFIG_FILE,
+    default_profile_root, relay_enrollment_installation_id, RelayEnrollmentCredential,
+    RelayEnrollmentSourceConfig, RelayInstallationConfig, RELAY_INSTALLATION_CONFIG_FILE,
 };
 use KonclaveSecretStorage::NativeEnrollmentCredentialStore;
 
@@ -90,11 +87,7 @@ pub(crate) fn native_installation_id(
     credential: &RelayEnrollmentCredential,
     endpoint: &KonclaveClientLibrary::RelayEndpoint,
 ) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"konclave:relay-enrollment-installation:1\0");
-    digest.update(credential.authority_id().as_bytes());
-    digest.update(endpoint.as_str().as_bytes());
-    URL_SAFE_NO_PAD.encode(digest.finalize())
+    relay_enrollment_installation_id(credential, endpoint)
 }
 
 pub(crate) fn write_exact(root: &Path, config: &RelayInstallationConfig) -> anyhow::Result<()> {

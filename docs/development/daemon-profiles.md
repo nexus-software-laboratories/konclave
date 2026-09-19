@@ -141,6 +141,15 @@ never changes the request attempt or lease generation. A queued or deferred requ
 therefore cannot keep an abandoned handling claim alive, while a healthy long model
 turn remains authoritative without permitting concurrent redelivery.
 
+Version 19 adds a bounded sealed short-code pairing journal. It stores only the
+non-secret locator, optional attempt and resulting pairing identifiers, role, phase,
+deadline, generation, and sealed state. OPAQUE setup/login/session state, exchanged
+device identifiers, transcript hashes, SAS values, confirmations, and capability
+material remain inside the authenticated ciphertext. The migration transaction adds
+the table, advances the authenticated device-identity schema floor, and leaves version
+18 authoritative if either change fails. Active operations are bounded; expired
+terminal records are pruned before new reservations.
+
 Remote application and membership completion create one context-bound event before
 advancing the relay cursor. Local echoes do not create events. Muted conversations
 create terminally suppressed records while relay replay and sealed history continue.
@@ -191,6 +200,29 @@ offline route substitution fails before any relay operation. Journal records als
 their profile, conversation, operation scope, identifier, counter or cursor, and
 authenticated sender where applicable. Metadata is cross-checked against the opened
 record before recovery proceeds.
+
+Relay endpoint migration therefore never edits the plaintext endpoint alone. The
+installer stops the shared service and the migration helper acquires every existing
+profile lock before network effects. A separate owner-protected SQLite journal under
+the profile root records one source, one destination, and each profile's deterministic
+registration request and existing principal identifier. The existing data-plane
+credential remains sealed in its profile database until the destination accepts that
+exact principal. One conditional update then reseals the same credential under the
+destination endpoint.
+
+An interrupted migration remains resumable because the destination sees the same
+request identifier on every attempt. Abort uses the journal to reseal committed
+profiles back under the source endpoint without another network request. While any
+profile remains uncommitted, the shared service denies all profile opens. After every
+profile commits, a health-check restart permits only the journaled profiles and denies
+new profile creation. Finalization removes the journal only after health succeeds.
+If abort stops after restoring a committed profile but before deleting its journal
+row, the source endpoint plus the exact destination-bound request is a recoverable
+prepared state. Another abort completes local cleanup without network access; another
+apply reuses that request before recommitting the destination. Installation
+configuration replacement is atomic and retains the owner-protected file policy.
+Profile schema, device identity, MLS state, conversations, and relay principal
+identity do not change.
 
 An unconfigured profile can be provisioned outside MCP by setting both
 `KONCLAVE_RELAY_ENDPOINT` and `KONCLAVE_RELAY_CREDENTIAL_FILE` in the daemon
@@ -504,13 +536,15 @@ Workers, retry timers, discovery, and shutdown are all owned. Graceful shutdown 
 up to five seconds and aborts an overdue supervisor rather than detaching it.
 
 Pairing progression is owned separately from conversation watches. The daemon sweeps
-sealed active pairings immediately and every second, reconciles exact prepared
-outbounds, processes one bounded replay page per operation, enforces both deadlines,
-and completes compensating removal before terminal cancellation. Transient transport,
-rate-limit, server, and stale-epoch failures retry with bounded backoff and
-device-stable jitter. Permanent authorization, protocol, cryptographic, and
-persistence-integrity failures stop the daemon. Profiles admit at most 32 active
-pairings, so one sweep remains bounded.
+sealed active pairings and short-code verifications immediately and every second,
+reconciles exact prepared outbounds, processes bounded relay state per operation,
+enforces every deadline, and completes compensating removal before terminal
+cancellation. Transient transport, rate-limit, server, and stale-epoch failures retry
+with bounded backoff and device-stable jitter. A wrong code or modified short-code
+record cancels only that attempt without stopping the profile; permanent local
+authorization, protocol, cryptographic-state, and persistence-integrity failures stop
+the daemon. Profiles admit at most 32 active pairings and 16 active short-code
+verifications, so one sweep remains bounded.
 
 ## MCP application and pairing tools
 
@@ -525,14 +559,30 @@ Stdio is the local process capability boundary, and every handler also passes an
 explicit method allowlist before parsing or side effects. Identifiers and bounded
 protocol values use canonical lowercase hex.
 
-The paved pairing surface is `create_pairing_capability`,
+The paved pairing surface adds `create_pairing_rendezvous` and
+`redeem_pairing_rendezvous` to `create_pairing_capability`,
 `redeem_pairing_capability`, `get_pairing_status`, `authorize_pairing_joiner`,
-`authorize_pairing_inviter`, `sync_pairing`, and `cancel_pairing`. Only the
-short-lived capability crosses between sessions. Invitation, JoinProof, Welcome,
-relay cursor/route, peer bindings, directional keys, and sealed operation state stay
-behind the daemon boundary. Capability request and response buffers are not
+`authorize_pairing_inviter`, `sync_pairing`, and `cancel_pairing`. Compact creation
+always requests `member`; redemption rejects any encrypted capability requesting
+another role. The relay sees only bounded encrypted rendezvous data, while the
+26-character token crosses between sessions. The full capability remains available
+through the explicit recovery operations. Invitation, JoinProof, Welcome, relay
+cursor/route, peer bindings, directional keys, and sealed operation state stay behind
+the daemon boundary. Capability and token request/response buffers are not
 debug-formatted and are zeroized after use. `sync_pairing` is available for explicit
 diagnosis; ordinary progress is automatic and does not depend on an agent polling.
+
+The short-code surface adds `create_short_code_pairing`,
+`claim_short_code_pairing`, `get_short_code_pairing_status`,
+`confirm_short_code_pairing`, `sync_short_code_pairing`, and
+`cancel_short_code_pairing`. Six decimal digits are only an OPAQUE locator/password.
+Both endpoints receive the same transcript-derived SAS and encrypted peer identity,
+and confirmation requires the exact attempt, peer, and SAS. The daemon creates and
+releases a standard `member` capability only after both authenticated confirmations.
+Capability retrieval uses a sealed caller-stable take identifier, so response loss can
+replay one logical retrieval without allowing a different take. Confirmation is a
+deterministic local-service command operation and is intentionally omitted from the
+agent tool router; a model cannot invoke it through the paved tool surface.
 
 `send_message` requires a caller-stable 16-byte `message_id`. Repeating the same
 conversation/message ID resumes or returns the exact durable operation; changing its
@@ -548,8 +598,9 @@ publishing the joined profile.
 
 MCP starts read-only. `KONCLAVE_MCP_ALLOW_WRITE=true` (or `1`) must be set in the
 long-lived daemon environment to authorize conversation creation, invitation/join,
-pairing creation/redemption/authorization/sync/cancellation, membership mutation,
-send, sync, and watch operations. Pairing status remains read-authorized. Invalid
+pairing and short-code creation/redemption/authorization/sync/cancellation,
+membership mutation, send, sync, and watch operations. Pairing and short-code status
+remain read-authorized. Invalid
 values fail startup; the daemon never infers write permission from a model request.
 
 `watch_messages` owns one cancellable WebSocket session and returns after one replay

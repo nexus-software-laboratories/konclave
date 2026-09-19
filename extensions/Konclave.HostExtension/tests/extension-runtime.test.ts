@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   bootExtension,
   connectInstalledService,
+  createDegradedExtensionJoinConfig,
   createExtensionJoinConfig,
   createProcessController,
   createStderrDiagnostics,
@@ -181,16 +182,25 @@ class FakeProcessController implements ProcessController {
   }
 }
 
-function createSessionMock() {
+function createSessionMock(options: { deferToolInitialization?: boolean } = {}) {
   const handlers = new Map<keyof EventHandlerMap, unknown>();
   const unsubscribeMocks: Partial<Record<keyof EventHandlerMap, ReturnType<typeof vi.fn>>> = {};
   const send = vi.fn().mockResolvedValue('message-1');
+  const rpcSend = vi.fn().mockResolvedValue({ messageId: 'message-1' });
+  let releaseToolInitialization = () => {};
+  const toolInitialization = options.deferToolInitialization
+    ? new Promise<void>((resolve) => {
+        releaseToolInitialization = resolve;
+      })
+    : Promise.resolve();
+  const initializeTools = vi.fn(() => toolInitialization);
   const log = vi.fn().mockResolvedValue(undefined);
   const disconnect = vi.fn().mockResolvedValue(undefined);
 
   const session: ExtensionSession = {
     disconnect,
     log,
+    rpc: { send: rpcSend, tools: { initializeAndValidate: initializeTools } },
     send,
     on(eventType, handler) {
       handlers.set(eventType as keyof EventHandlerMap, handler);
@@ -205,9 +215,13 @@ function createSessionMock() {
   return {
     handlers,
     disconnect,
+    initializeTools,
     log,
+    releaseToolInitialization,
+    rpcSend,
     send,
     session,
+    toolInitialization,
     unsubscribeMocks,
     emit<K extends keyof EventHandlerMap>(eventType: K, event: Parameters<EventHandlerMap[K]>[0]) {
       const handler = handlers.get(eventType) as
@@ -283,10 +297,11 @@ describe('bootExtension', () => {
     expect(() => deriveProfileId({})).toThrow();
   });
 
-  it('fails visibly when the shared service is unavailable', async () => {
+  it('registers only repair guidance when the shared service is unavailable', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
-    const joinSession = vi.fn();
+    const sessionMock = createSessionMock();
+    const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
 
     const controller = await bootExtension({
       diagnostics: diagnostics.diagnostics,
@@ -298,11 +313,58 @@ describe('bootExtension', () => {
       },
     });
 
-    // No fallback exists: the extension reports and exits rather than spawning.
+    expect(controller).not.toBeNull();
+    expect(joinSession).toHaveBeenCalledTimes(1);
+    expect(processController.exitCode).toBeNull();
+    const joined = joinSession.mock.calls[0]?.[0];
+    if (!joined) {
+      throw new Error('degraded extension did not join the session');
+    }
+    expect(joined.tools).toEqual([]);
+    expect(joined.hooks).toEqual({});
+    expect(joined.mcpServers).toEqual({});
+    expect(joined.commands.map((command) => command.name)).toEqual(['konclave']);
+    await joined.commands[0]?.handler({
+      sessionId: 'session-a',
+      command: '/konclave status',
+      commandName: 'konclave',
+      args: 'status',
+    });
+    expect(sessionMock.log).toHaveBeenCalledWith(
+      'Konclave native service is unavailable. Run the installed ' +
+        '`Install-Konclave.ps1 -Action Status`, repair or update the native runtime, ' +
+        'then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
+      { level: 'info' },
+    );
+    expect(diagnostics.stderr).toHaveBeenCalledWith(
+      'Konclave shared service unavailable: endpoint unavailable ' +
+        'Install or repair the native runtime, then restart Copilot. See ' +
+        'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
+    );
+    controller?.dispose();
+  });
+
+  it('fails when the degraded command session cannot join', async () => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession: vi.fn().mockRejectedValue(new Error('degraded join failed')),
+      processController,
+      environment: { SESSION_ID: 'session-a' },
+      connect: async () => {
+        throw new Error('endpoint unavailable');
+      },
+    });
+
     expect(controller).toBeNull();
-    expect(joinSession).not.toHaveBeenCalled();
     expect(processController.exitCode).toBe(1);
-    expect(diagnostics.stderr.mock.calls.flat().join(' ')).toContain('shared service unavailable');
+    expect(diagnostics.stderr).toHaveBeenNthCalledWith(
+      2,
+      'Konclave extension startup failed: degraded join failed',
+    );
   });
 
   it('fails before joining when the host session identity is unavailable', async () => {
@@ -323,8 +385,18 @@ describe('bootExtension', () => {
     expect(joinSession).not.toHaveBeenCalled();
     expect(processController.exitCode).toBe(1);
     expect(diagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: SESSION_ID is required to derive the Konclave profile.',
+      'Konclave extension startup failed: SESSION_ID is required to derive the Konclave profile.',
     );
+  });
+
+  it('builds a degraded session with no authority-bearing surfaces', () => {
+    const output = { write: vi.fn() };
+    const config = createDegradedExtensionJoinConfig(output);
+
+    expect(config.tools).toEqual([]);
+    expect(config.hooks).toEqual({});
+    expect(config.mcpServers).toEqual({});
+    expect(config.commands.map((command) => command.name)).toEqual(['konclave']);
   });
 
   it('joins the foreground session with the safe default config and cleans up handlers', async () => {
@@ -496,7 +568,7 @@ describe('bootExtension', () => {
   it('settles an authorized directed request only after the model turn becomes idle', async () => {
     const diagnostics = createDiagnosticsRecorder();
     const processController = new FakeProcessController();
-    const sessionMock = createSessionMock();
+    const sessionMock = createSessionMock({ deferToolInitialization: true });
     const client = queuedDirectedRequestClient();
 
     const controller = await bootExtension({
@@ -512,9 +584,22 @@ describe('bootExtension', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(sessionMock.send).toHaveBeenCalledTimes(1);
-    const prompt = sessionMock.send.mock.calls[0]?.[0];
-    expect(prompt).toMatchObject({ mode: 'enqueue' });
+    expect(sessionMock.send).not.toHaveBeenCalled();
+    expect(sessionMock.initializeTools).toHaveBeenCalledTimes(1);
+    expect(sessionMock.rpcSend).not.toHaveBeenCalled();
+
+    sessionMock.releaseToolInitialization();
+    await sessionMock.toolInitialization;
+
+    expect(sessionMock.rpcSend).toHaveBeenCalledTimes(1);
+    const initializeOrder = sessionMock.initializeTools.mock.invocationCallOrder[0];
+    const sendOrder = sessionMock.rpcSend.mock.invocationCallOrder[0];
+    if (initializeOrder === undefined || sendOrder === undefined) {
+      throw new Error('required-tool admission calls were not observed');
+    }
+    expect(initializeOrder).toBeLessThan(sendOrder);
+    const prompt = sessionMock.rpcSend.mock.calls[0]?.[0];
+    expect(prompt).toMatchObject({ mode: 'enqueue', requiredTool: 'send_message' });
     expect(prompt).toHaveProperty('prompt', expect.stringContaining('confirm the contract'));
     expect(requestCount(client, 'collaboration.turn.authorize')).toBe(1);
     expect(requestCount(client, 'delivery.acknowledge')).toBe(0);
@@ -782,7 +867,7 @@ describe('bootExtension', () => {
     expect(controller).toBeNull();
     expect(processController.exitCode).toBe(1);
     expect(diagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: join failed',
+      'Konclave extension startup failed: join failed',
     );
     expect(diagnostics.stdout).not.toHaveBeenCalled();
   });
@@ -818,7 +903,7 @@ describe('bootExtension', () => {
 
     expect(failedController).toBeNull();
     expect(failingDiagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: Unknown error',
+      'Konclave extension startup failed: Unknown error',
     );
 
     const stringDiagnostics = createDiagnosticsRecorder();
@@ -831,7 +916,7 @@ describe('bootExtension', () => {
 
     expect(stringFailedController).toBeNull();
     expect(stringDiagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: string failure',
+      'Konclave extension startup failed: string failure',
     );
   });
 

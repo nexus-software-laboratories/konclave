@@ -4,6 +4,10 @@ import type { Tool, ToolInvocation } from '@github/copilot-sdk';
 
 import generatedToolContracts from '../../../../fixtures/local-service/v1/copilot-tools.json';
 
+import {
+  collaborationAuthorizationArgument,
+  collaborationReplyToolName,
+} from '../collaboration-contract.js';
 import type { LocalServiceClient } from './client.js';
 import type { ToolOperation } from './operations.js';
 
@@ -25,6 +29,36 @@ interface GeneratedToolContract {
 }
 
 const toolContracts = generatedToolContracts as readonly GeneratedToolContract[];
+const hookInjectedArguments: Partial<Record<ToolOperation, ReadonlySet<string>>> = {
+  send_message: new Set([collaborationAuthorizationArgument]),
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function agentVisibleInputSchema(contract: GeneratedToolContract): Record<string, unknown> {
+  const injected = hookInjectedArguments[contract.name];
+  if (!injected) {
+    return contract.inputSchema;
+  }
+  const properties = contract.inputSchema.properties;
+  const required = contract.inputSchema.required;
+  if (!isRecord(properties) || (required !== undefined && !isStringArray(required))) {
+    throw new Error(`Generated ${contract.name} tool schema is malformed.`);
+  }
+  return {
+    ...contract.inputSchema,
+    properties: Object.fromEntries(
+      Object.entries(properties).filter(([name]) => !injected.has(name)),
+    ),
+    ...(required === undefined ? {} : { required: required.filter((name) => !injected.has(name)) }),
+  };
+}
 
 export interface KonclaveToolDefinition {
   readonly name: ToolOperation;
@@ -36,7 +70,7 @@ export interface KonclaveToolDefinition {
 export const konclaveTools: readonly KonclaveToolDefinition[] = toolContracts.map((contract) => ({
   name: contract.name,
   description: contract.description,
-  parameters: contract.inputSchema,
+  parameters: agentVisibleInputSchema(contract),
 }));
 
 /** The exact SDK tool shape this extension registers. */
@@ -49,11 +83,13 @@ export interface RegisteredTool extends Tool<unknown> {
 export interface ToolRegistrationOptions {
   readonly client: LocalServiceClient;
   readonly toolDeadlineMs?: number;
+  readonly prepareArguments?: (operation: ToolOperation, args: unknown) => unknown;
 }
 
 const defaultToolDeadlineMs = 90_000;
 const toolRequestIdDomain = 'konclave:copilot-tool-request:1\0';
 const maxInvocationIdentifierBytes = 1_024;
+const alwaysLoadedTools = new Set<ToolOperation>([collaborationReplyToolName]);
 
 function toolRequestId(invocation: ToolInvocation): Buffer {
   const sessionBytes = Buffer.byteLength(invocation.sessionId, 'utf8');
@@ -91,10 +127,12 @@ export function createKonclaveTools(options: ToolRegistrationOptions): Registere
     name: definition.name,
     description: definition.description,
     parameters: definition.parameters,
+    defer: alwaysLoadedTools.has(definition.name) ? 'never' : 'auto',
     async handler(args: unknown, invocation?: ToolInvocation) {
+      const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
       return options.client.request(
         definition.name,
-        args ?? {},
+        preparedArgs,
         invocation ? { deadlineMs: deadline, requestId: toolRequestId(invocation) } : deadline,
       );
     },
