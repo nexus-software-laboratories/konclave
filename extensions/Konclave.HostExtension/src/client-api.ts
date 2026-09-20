@@ -13,6 +13,11 @@ export { createCopilotPolicyGate } from './service/policy-enforcement.js';
 export { createLocalServiceDeliveryChannel } from './service/delivery.js';
 export { frameDelivery } from './adapter/framing.js';
 export {
+  getMessageDeliveryStatus,
+  type MessageDeliveryDiagnostic,
+  type MessageDeliveryState,
+} from './service/delivery-diagnostics.js';
+export {
   LocalServiceError,
   LocalServiceProtocolError,
   LocalServiceUpgradeRequiredError,
