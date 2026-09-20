@@ -162,6 +162,49 @@ Every publication is compiled eagerly. A returned catalog therefore contains no
 deferred source validation or partial entry set. Configuration changes require an
 explicit reload or process restart.
 
+## Alternative publication sources
+
+`A2AAgentCatalog::try_from_publications` builds the same immutable catalog from a
+fallible iterator of `CompiledA2AAgentPublication` values. The existing
+`FileA2AAgentCatalog` name is a compatible alias; its `open` constructor still owns
+explicit file selection, path confinement, and eager source compilation.
+
+An alternative storage adapter reads bounded source documents and passes each to
+`compile_a2a_agent_publication_source`. It supplies those results to the snapshot
+constructor rather than writing temporary files, building generated Agent Cards
+directly, or copying the catalog's visibility and authorization rules.
+
+The complete snapshot has at most 64 unique publication identifiers. Construction
+stops at the first producer error, duplicate identifier, or excess entry and returns
+no partial catalog. An explicitly empty successful iterator produces an empty
+catalog; an unavailable source must return an error, never an empty iterator.
+Retrieval must itself be bounded before the adapter materializes its documents.
+
+The deployment owns tenant selection, storage access, refresh scheduling, and
+freshness policy. It publishes a newly completed snapshot atomically and does not
+substitute another tenant, an empty catalog, or a stale snapshot when freshness
+policy requires denial. Each private operation still invokes the request-bound
+authorizer before lookup. A snapshot is not permission to publish its contents.
+
+All read paths remain the same bounded in-memory map operations. No discovery read
+calls a storage provider, scans a directory, performs a network request, or changes
+message delivery. The Agent Card compiler and protected-profile negotiation are
+unchanged.
+
+### Integration decision
+
+The existing source compiler already accepts memory-resident strict JSON, and
+compiled publications retain their bounded public, extended, OASF, and protected
+views. The missing capability was constructing the shared catalog without a file
+descriptor. A complete compiled snapshot supplies that capability.
+
+An asynchronous per-lookup registry trait would add storage errors, freshness,
+pagination, cancellation, and tenant policy to the discovery library without a
+consumer that needs those semantics. A separate implementation per backend would
+duplicate security decisions. Neither is necessary for the supported bounded
+catalog. This choice implements ADR 0015's provider-independent publication model
+and does not change its architecture or introduce another registry protocol.
+
 ## Bounds
 
 | Value | Bound |
@@ -218,6 +261,9 @@ Focused suites cover:
 - extended public/private skill composition;
 - explicit no-scan catalog loading and path confinement;
 - eager invalid-source, duplicate, and name-mismatch refusal;
+- identical visibility and authorization behavior for file and compiled snapshots;
+- producer-error propagation, exact snapshot capacity, and bounded iterator consumption;
+- preservation of protected-required negotiation through compiled snapshots;
 - explicit OASF taxonomy selection;
 - deterministic OASF bytes and embedded-card digest/size; and
 - absence of OASF runtime-endpoint locators.

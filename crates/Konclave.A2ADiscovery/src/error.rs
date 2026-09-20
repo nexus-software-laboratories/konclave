@@ -56,6 +56,12 @@ pub enum A2ADiscoveryError {
         /// Stable duplicate field.
         field: &'static str,
     },
+    /// A complete catalog snapshot contains too many publications.
+    #[error("A2A discovery catalog exceeds {maximum} publications")]
+    CatalogCapacityExceeded {
+        /// Largest accepted publication count.
+        maximum: usize,
+    },
     /// A catalog entry name differs from its compiled source identity.
     #[error("A2A discovery catalog name does not match its source")]
     CatalogNameMismatch,

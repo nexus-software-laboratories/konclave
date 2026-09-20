@@ -16,16 +16,73 @@ use crate::{
 
 /// Maximum byte length of one file-catalog descriptor.
 pub const MAX_A2A_AGENT_CATALOG_BYTES: usize = 64 * 1024;
-/// Maximum number of publications in one self-hosted file catalog.
+/// Maximum number of publications in one complete catalog snapshot.
 pub const MAX_A2A_AGENT_CATALOG_ENTRIES: usize = 64;
 const CATALOG_SCHEMA_VERSION: u32 = 1;
 
-/// Eagerly validated private-by-default self-hosted Agent Card catalog.
-pub struct FileA2AAgentCatalog {
+/// Immutable, eagerly validated, private-by-default Agent Card snapshot.
+///
+/// A deployment supplies one tenant-scoped snapshot and request-bound authorization.
+/// Catalog reads perform no provider, filesystem, or network operations.
+pub struct A2AAgentCatalog {
     entries: BTreeMap<A2AAgentId, CompiledA2AAgentPublication>,
 }
 
-impl FileA2AAgentCatalog {
+/// Compatible name for an [`A2AAgentCatalog`] opened from an explicit file descriptor.
+pub type FileA2AAgentCatalog = A2AAgentCatalog;
+
+impl A2AAgentCatalog {
+    /// Builds one complete snapshot from a fallible stream of compiled publications.
+    ///
+    /// Publications are moved into the snapshot. Only the source compiler can create
+    /// their validated values. Iteration stops at the first failure or excess entry;
+    /// no partial catalog escapes. An empty successful stream is an explicitly empty
+    /// snapshot, not a replacement for a failed provider.
+    ///
+    /// The caller bounds retrieval before materialization and owns tenant selection,
+    /// refresh, and freshness policy. This constructor never fetches a publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first producer error, a duplicate-name error, or a capacity error
+    /// when the stream exceeds [`MAX_A2A_AGENT_CATALOG_ENTRIES`].
+    ///
+    /// ```
+    /// use KonclaveA2AContracts::InitialA2AInterfaceEnvironment;
+    /// use KonclaveA2ADiscovery::{
+    ///     A2AAgentCatalog, A2ADiscoveryError, compile_a2a_agent_publication_source,
+    /// };
+    ///
+    /// fn compile_snapshot(sources: &[Vec<u8>]) -> Result<A2AAgentCatalog, A2ADiscoveryError> {
+    ///     A2AAgentCatalog::try_from_publications(sources.iter().map(|source| {
+    ///         compile_a2a_agent_publication_source(
+    ///             source,
+    ///             InitialA2AInterfaceEnvironment::Production,
+    ///         )
+    ///     }))
+    /// }
+    /// ```
+    pub fn try_from_publications(
+        publications: impl IntoIterator<Item = Result<CompiledA2AAgentPublication, A2ADiscoveryError>>,
+    ) -> Result<Self, A2ADiscoveryError> {
+        let mut entries = BTreeMap::new();
+        for publication in publications {
+            if entries.len() == MAX_A2A_AGENT_CATALOG_ENTRIES {
+                return Err(A2ADiscoveryError::CatalogCapacityExceeded {
+                    maximum: MAX_A2A_AGENT_CATALOG_ENTRIES,
+                });
+            }
+            let publication = publication?;
+            if entries
+                .insert(publication.id().clone(), publication)
+                .is_some()
+            {
+                return Err(A2ADiscoveryError::DuplicateCatalogEntry { field: "name" });
+            }
+        }
+        Ok(Self { entries })
+    }
+
     /// Opens an explicit descriptor and eagerly compiles every listed publication.
     ///
     /// The catalog never scans its directory. Each source must be a unique regular
@@ -48,9 +105,8 @@ impl FileA2AAgentCatalog {
         }
         let root = JsonFileCatalogRoot::from_descriptor(path)
             .map_err(|_| A2ADiscoveryError::UnsafeCatalogPath)?;
-        let mut entries = BTreeMap::new();
         let mut sources = BTreeSet::new();
-        for entry in descriptor.entries.into_inner() {
+        let publications = descriptor.entries.into_inner().into_iter().map(|entry| {
             let id =
                 A2AAgentId::parse(entry.name).map_err(|_| A2ADiscoveryError::InvalidAgentId)?;
             if !sources.insert(entry.source.clone()) {
@@ -63,11 +119,9 @@ impl FileA2AAgentCatalog {
             if publication.id() != &id {
                 return Err(A2ADiscoveryError::CatalogNameMismatch);
             }
-            if entries.insert(id, publication).is_some() {
-                return Err(A2ADiscoveryError::DuplicateCatalogEntry { field: "name" });
-            }
-        }
-        Ok(Self { entries })
+            Ok(publication)
+        });
+        Self::try_from_publications(publications)
     }
 
     /// Resolves an explicitly public card without revealing private or absent entries.
