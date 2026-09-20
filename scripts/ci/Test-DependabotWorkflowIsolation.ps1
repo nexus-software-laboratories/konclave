@@ -21,6 +21,7 @@ $expectations = [ordered]@{
         'distribution-lifecycle-acceptance'
     )
     'extension-startup-conformance.yml' = @('extension-startup-conformance')
+    'recipe-conformance.yml' = @('recipe-conformance')
     'generic-client-conformance.yml' = @('generic-client-conformance')
     'installer-lifecycle-conformance.yml' = @(
         'installer-platform-conformance',

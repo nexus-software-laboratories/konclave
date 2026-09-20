@@ -11,6 +11,7 @@ $contracts = Get-ComponentValidationContracts
 $expectedContracts = @(
     'a2a-discovery'
     'client-runtime-config'
+    'external-recipes'
     'generic-client'
     'installer-lifecycle'
     'pairing-rendezvous'
@@ -25,6 +26,7 @@ if (($contracts.Keys -join ',') -cne ($expectedContracts -join ',')) {
 $workflowByContract = [ordered]@{
     'a2a-discovery' = 'a2a-discovery-conformance.yml'
     'client-runtime-config' = 'client-runtime-config-conformance.yml'
+    'external-recipes' = 'recipe-conformance.yml'
     'generic-client' = 'generic-client-conformance.yml'
     'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
@@ -75,6 +77,8 @@ $ownedCases = [ordered]@{
         'crates/Konclave.A2ADiscovery/src/catalog.rs'
     'client-runtime-config' =
         'extensions/Konclave.HostExtension/src/service/config.ts'
+    'external-recipes' =
+        'extensions/Konclave.HostExtension/src/recipes/definition.ts'
     'generic-client' =
         'extensions/Konclave.HostExtension/src/generic-command.ts'
     'installer-lifecycle' =
@@ -124,8 +128,8 @@ foreach ($contract in $expectedContracts) {
         throw "Fail-closed selection is incomplete for '$contract'."
     }
     if (
-        ($contract -ceq 'installer-lifecycle' -and $cargoSelected) -or
-        ($contract -cne 'installer-lifecycle' -and -not $cargoSelected)
+        ($contract -cin @('installer-lifecycle', 'external-recipes') -and $cargoSelected) -or
+        ($contract -cnotin @('installer-lifecycle', 'external-recipes') -and -not $cargoSelected)
     ) {
         throw "Cargo ownership is incorrect for '$contract'."
     }

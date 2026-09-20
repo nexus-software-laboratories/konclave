@@ -123,6 +123,12 @@ changes. It also runs the focused local-service authorization-loss regression an
 Clippy over the service library, and type-checks the TypeScript fixture consumer
 before running its focused Vitest case.
 
+`Recipe conformance` is a draft-capable Node-only boundary check for inert recipe
+definitions and their external consumers. It shares component ownership selection
+and the npm download cache, requires no model credentials, and rejects any formatting
+diff after emitting it as diagnostic evidence. Rust dependency changes do not select
+this independent Node boundary.
+
 ## Native package validation
 
 `.github/workflows/package-validation.yml` builds Linux x64, Windows x64, macOS
