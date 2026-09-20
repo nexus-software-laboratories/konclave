@@ -194,6 +194,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0027-lan-service-discovery.md",
+        "title": "ADR 0027: Explicit service trust and LAN discovery",
+        "section": "Architecture",
+        "order": 270,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/adr/adr-0028-external-recipe-composition.md",
         "title": "ADR 0028: External recipe composition",
         "section": "Architecture",
