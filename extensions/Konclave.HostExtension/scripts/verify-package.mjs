@@ -157,6 +157,54 @@ check(
   !compiledClient.includes('console.log(') && !compiledClient.includes('process.stdout'),
   'Compiled client bundle must not write to stdout.',
 );
+const recipeExports = [
+  'createRecipeDefinition',
+  'decodeRecipeDefinition',
+  'createRecipeRun',
+  'decodeRecipeRun',
+  'recipeMessageId',
+  'createRecipeMessaging',
+  'RecipeDefinitionError',
+  'RecipeRunError',
+];
+const hasRecipeExports = recipeExports.every((name) => typeof clientApi[name] === 'function');
+check(hasRecipeExports, 'Compiled client bundle is missing an external recipe contract.');
+if (hasRecipeExports) {
+  const definition = clientApi.createRecipeDefinition({
+    name: 'package-fixture',
+    provider: 'example.fan-out',
+    configuration: '',
+  });
+  const decoded = clientApi.decodeRecipeDefinition(
+    Buffer.from(definition.canonicalJson),
+    definition.digest,
+  );
+  const run = clientApi.createRecipeRun(Buffer.from(decoded.canonicalJson), decoded.digest, {
+    profile: 'package-fixture',
+    nonce: '01'.repeat(16),
+    bindings: [{ name: 'peer', conversationId: '02'.repeat(32), targetDeviceId: '03'.repeat(32) }],
+    input: 'Public package fixture.',
+  });
+  const restored = clientApi.decodeRecipeRun(Buffer.from(run.canonicalJson), run.runId);
+  const adapter = clientApi.createRecipeMessaging(
+    {
+      profile: run.profile,
+      connected: true,
+      async request() {
+        throw new Error('Package verification must not invoke a service operation.');
+      },
+      retire: async () => undefined,
+      close: () => undefined,
+    },
+    Buffer.from(restored.canonicalJson),
+    restored.runId,
+  );
+  check(
+    adapter.run.runId === run.runId &&
+      clientApi.recipeMessageId(restored, 'peer') === clientApi.recipeMessageId(run, 'peer'),
+    'Compiled recipe definitions and selections must round-trip without service access.',
+  );
+}
 check(
   compiledGeneric.includes('connectInstalledGenericService') &&
     compiledGeneric.includes('request.cancel') &&

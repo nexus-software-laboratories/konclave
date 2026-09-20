@@ -1,0 +1,84 @@
+name: Recipe conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: recipes-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recipe-conformance:
+    name: Recipe conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout component validation scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: .ci-scope
+          sparse-checkout: |
+            scripts/ci/ComponentValidationScope.Functions.ps1
+            scripts/ci/Resolve-ComponentValidationScope.ps1
+          sparse-checkout-cone-mode: false
+      - name: Resolve recipe validation scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          ./.ci-scope/scripts/ci/Resolve-ComponentValidationScope.ps1 `
+            -Contract 'external-recipes' `
+            -EventName $env:EVENT_NAME `
+            -PullRequestNumber ([int]$env:PULL_REQUEST_NUMBER)
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          # Preserve the scope checkout for its post-step cleanup.
+          clean: false
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - name: Install Node
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: recipe-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Verify bounded recipe definition foundation
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run format
+          git diff
+          npm run lint
+          npm run typecheck
+          npm exec -- vitest run tests/recipe-definition.test.ts tests/recipe-run.test.ts tests/recipe-reply.test.ts tests/recipe-client.test.ts tests/recipe-examples.test.ts
+          npm run compile
+          npm run package
+          npm run verify:package
+          git diff --exit-code

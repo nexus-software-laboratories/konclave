@@ -29,6 +29,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0025: Bootstrap repeat pairing through an existing authenticated conversation](../adr/adr-0025-trusted-device-alias-bootstrap.md)
 - [ADR 0026: Explain message delivery through authenticated local metadata](../adr/adr-0026-local-delivery-diagnostics.md)
 - [ADR 0027: Retain explicit service trust and defer automatic LAN discovery](../adr/adr-0027-lan-service-discovery.md)
+- [ADR 0028: Keep recipe composition in explicitly selected external providers](../adr/adr-0028-external-recipe-composition.md)
 
 ## Superseded records
 

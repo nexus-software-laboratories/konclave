@@ -14,6 +14,7 @@
     "Agent plugin conformance",
     "Authorization reload conformance",
     "Extension startup conformance",
+    "Recipe conformance",
     "Authorization store conformance",
     "Client runtime config conformance",
     "Distribution lifecycle acceptance",
@@ -70,6 +71,7 @@
         "agent-plugin-conformance",
         "authorization-reload-conformance",
         "extension-startup-conformance",
+        "recipe-conformance",
         "resolve-package-scope",
         "package-plugin",
         "publish",
@@ -186,6 +188,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Extension startup conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/recipe-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Recipe conformance"
       ]
     },
     {

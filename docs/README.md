@@ -32,6 +32,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0025: Trusted device alias bootstrap](adr/adr-0025-trusted-device-alias-bootstrap.md)
 - [ADR 0026: Local delivery diagnostics](adr/adr-0026-local-delivery-diagnostics.md)
 - [ADR 0027: Explicit service trust and LAN discovery](adr/adr-0027-lan-service-discovery.md)
+- [ADR 0028: External recipe composition](adr/adr-0028-external-recipe-composition.md)
 
 ## Protocol
 
@@ -84,5 +85,6 @@ This map lists the documentation contributed by the selected project shape.
 - [Local Copilot demo](distribution/local-demo.md)
 - [Generic harness client](integrations/generic-client.md)
 - [Harness-neutral adapter SDK](integrations/adapter-sdk.md)
+- [External recipe composition](integrations/recipes.md)
 - [UX and design resilience](ux-design.md)
 - [Impeccable design workflow](impeccable-design.md)
