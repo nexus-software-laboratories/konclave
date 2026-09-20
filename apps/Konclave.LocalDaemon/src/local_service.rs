@@ -2682,6 +2682,7 @@ fn is_command_operation(operation: &str) -> bool {
     matches!(
         operation,
         "confirm_short_code_pairing"
+            | "get_message_delivery_status"
             | "list_trusted_devices"
             | "set_trusted_device_alias"
             | "start_repeat_pairing"
@@ -3666,6 +3667,16 @@ mod collaboration_policy_tests {
     use crate::adapter::DeliveryAttachment;
     use crate::conversation::tests::open_coordinator;
     use crate::persistence::DirectedRequestClaim;
+
+    #[test]
+    fn message_delivery_diagnostics_are_command_only_and_profile_authorized() {
+        assert!(!is_tool_operation("get_message_delivery_status"));
+        assert!(is_command_operation("get_message_delivery_status"));
+        assert_eq!(
+            required_capability("get_message_delivery_status"),
+            Some(SessionCapabilities::PROFILE_OPERATIONS)
+        );
+    }
 
     fn grant(harness: HarnessKind) -> SessionGrant {
         grant_with_identity(harness, [1; 16], [3; 32])

@@ -58,6 +58,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Opaque relay storage](development/relay-storage.md)
 - [Outbound relay client](development/relay-client.md)
 - [Daemon profiles and recovery](development/daemon-profiles.md)
+- [Local message delivery diagnostics](development/local-delivery-diagnostics.md)
 - [Harness-neutral adapter transport spike](development/adapter-transport-spike.md)
 - [Adapter channel authentication](development/adapter-channel-authentication.md)
 - [Shared local service transport](development/local-service-transport.md)

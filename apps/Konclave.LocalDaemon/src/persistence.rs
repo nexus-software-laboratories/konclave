@@ -42,6 +42,7 @@ use crate::clock::{SystemUnixClock, UnixClock};
 
 mod collaboration_policy_exchange;
 mod collaboration_policy_operation;
+mod delivery_diagnostics;
 mod directed_request_handling;
 mod relay_migration;
 pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
@@ -14396,6 +14397,409 @@ mod tests {
             fixture
                 .store
                 .load_inbox_envelope(stored.envelope().envelope_id())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+    }
+
+    fn assert_message_delivery(
+        fixture: &ConversationFixture,
+        message_id: MessageId,
+        now: u64,
+        expected: &str,
+    ) {
+        let changes = || {
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = changes();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .pragma_update(None, "query_only", true)
+            .unwrap();
+        let result =
+            fixture
+                .store
+                .message_delivery_status(fixture.conversation_id, message_id, now);
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .pragma_update(None, "query_only", false)
+            .unwrap();
+        assert_eq!(result.unwrap().as_str(), expected);
+        assert_eq!(changes(), before);
+    }
+
+    #[test]
+    fn message_delivery_distinguishes_preparation_readiness_and_relay_receipt() {
+        let fixture = conversation_fixture("diagnostic-outbound");
+        let message = application_message(71, 1, "diagnostic content sentinel");
+        assert_message_delivery(&fixture, message.message_id(), 1_000, "not_observed");
+        let reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                message.message_id(),
+                EnvelopeId::from_bytes([72; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        assert_message_delivery(&fixture, message.message_id(), 1_000, "not_observed");
+        fixture
+            .store
+            .store_outbound_message(
+                reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &message,
+            )
+            .unwrap();
+        assert_message_delivery(&fixture, message.message_id(), 1_000, "outbound_prepared");
+        let envelope = relay_envelope(fixture.routing_id, 72, b"diagnostic ciphertext");
+        fixture
+            .store
+            .store_outbound_envelope(reservation, &envelope)
+            .unwrap();
+        assert_message_delivery(
+            &fixture,
+            message.message_id(),
+            1_000,
+            "awaiting_relay_acceptance",
+        );
+        fixture
+            .store
+            .expire_outbound_application(&envelope)
+            .unwrap();
+        assert_message_delivery(
+            &fixture,
+            message.message_id(),
+            1_900_000_000_000,
+            "outbound_expired",
+        );
+        assert_eq!(
+            fixture
+                .store
+                .message_delivery_status(fixture.conversation_id, message.message_id(), 1_000)
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
+        fixture
+            .store
+            .mark_outbox_accepted(&StoredRelayEnvelope::new(envelope, 2).unwrap())
+            .unwrap();
+        assert_message_delivery(&fixture, message.message_id(), 1_000, "relay_accepted");
+        assert!(
+            fixture
+                .store
+                .load_history(fixture.conversation_id, 0, 1)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn message_delivery_observes_verified_membership_removal() {
+        let (fixture, administrator) = remote_membership_fixture("diagnostic-removal");
+        let message = application_message(71, 1, "local content");
+        let reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                message.message_id(),
+                EnvelopeId::from_bytes([72; EnvelopeId::LENGTH]),
+            )
+            .unwrap();
+        fixture
+            .store
+            .store_outbound_message(
+                reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &message,
+            )
+            .unwrap();
+        fixture
+            .store
+            .store_outbound_envelope(
+                reservation,
+                &relay_envelope(fixture.routing_id, 72, b"ciphertext"),
+            )
+            .unwrap();
+        complete_remote_membership_event(
+            &fixture,
+            administrator,
+            73,
+            MembershipChange::RemoveMember(KonclaveDomainCore::RemoveMember::new(
+                fixture.device_id,
+            )),
+        );
+        fixture
+            .store
+            .terminalize_removed_outbox(fixture.conversation_id)
+            .unwrap();
+        assert_message_delivery(&fixture, message.message_id(), 1_000, "outbound_removed");
+    }
+
+    #[test]
+    fn message_delivery_tracks_notifications_without_inference_or_writes() {
+        let fixture = conversation_fixture("diagnostic-notifications");
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        let message = stage_remote_inbox_message(
+            &fixture,
+            1,
+            1,
+            DeviceId::from_bytes([44; DeviceId::LENGTH]),
+            1,
+        );
+        assert_message_delivery(&fixture, message.message_id(), 1_000, "inbound_prepared");
+        let notification = NotificationId::from_bytes([45; NotificationId::LENGTH]);
+        fixture
+            .store
+            .complete_inbox_with_notification(fixture.conversation_id, 1, notification)
+            .unwrap();
+        assert_message_delivery(
+            &fixture,
+            message.message_id(),
+            1_000,
+            "awaiting_harness_delivery",
+        );
+        let consumer = AdapterConsumerId::from_bytes([46; AdapterConsumerId::LENGTH]);
+        let lease = AdapterLeaseId::from_bytes([47; AdapterLeaseId::LENGTH]);
+        fixture
+            .store
+            .acquire_adapter_consumer(consumer, lease, 1_000, 2_000)
+            .unwrap();
+        let claimed = fixture
+            .store
+            .claim_remote_events(consumer, lease, 1_000, 1_500, 1)
+            .unwrap();
+        assert_message_delivery(
+            &fixture,
+            message.message_id(),
+            1_000,
+            "claimed_for_delivery",
+        );
+        fixture
+            .store
+            .acknowledge_remote_event(
+                notification,
+                consumer,
+                lease,
+                claimed[0].lease_generation,
+                1_100,
+            )
+            .unwrap();
+        assert_message_delivery(
+            &fixture,
+            message.message_id(),
+            1_100,
+            "acknowledged_by_harness",
+        );
+        fixture.store.prune_terminal_remote_events(1).unwrap();
+        assert_message_delivery(&fixture, message.message_id(), 1_100, "persisted_inbound");
+    }
+
+    #[test]
+    fn message_delivery_preserves_suppression_and_hides_internal_content() {
+        let fixture = conversation_fixture("diagnostic-hidden");
+        let sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
+        let text = stage_remote_inbox_message(&fixture, 1, 1, sender, 1);
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([45; NotificationId::LENGTH]),
+            )
+            .unwrap();
+        assert_message_delivery(&fixture, text.message_id(), 1_000, "delivery_suppressed");
+        fixture
+            .store
+            .set_adapter_delivery_enabled(fixture.conversation_id, true)
+            .unwrap();
+        assert_message_delivery(&fixture, text.message_id(), 1_000, "delivery_suppressed");
+        let internal = stage_policy_exchange_message(
+            &fixture,
+            2,
+            2,
+            sender,
+            2,
+            ApplicationContent::RepeatPairingRequest(
+                KonclaveDomainCore::RepeatPairingRequest::new(
+                    KonclaveDomainCore::RepeatPairingOperationId::from_bytes([48; 16]),
+                    fixture.device_id,
+                    ConversationId::from_bytes([49; ConversationId::LENGTH]),
+                    2_000,
+                )
+                .unwrap(),
+            ),
+        );
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, 2)
+            .unwrap();
+        assert_message_delivery(&fixture, internal.message_id(), 1_000, "not_observed");
+    }
+
+    #[test]
+    fn message_delivery_reports_claims_and_terminal_no_response_exactly() {
+        let fixture = conversation_fixture("diagnostic-handling");
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer = AdapterConsumerId::from_bytes([51; AdapterConsumerId::LENGTH]);
+        let lease = AdapterLeaseId::from_bytes([52; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer, lease);
+        assert_message_delivery(
+            &fixture,
+            claim.request_message_id,
+            1_000,
+            "request_claim_recorded",
+        );
+        assert_message_delivery(
+            &fixture,
+            claim.request_message_id,
+            claim.claim_expires_at_unix_milliseconds,
+            "request_claim_expired",
+        );
+        fixture
+            .store
+            .complete_directed_request_without_response(CompleteDirectedRequest {
+                conversation_id: claim.conversation_id,
+                request_message_id: claim.request_message_id,
+                responder_device_id: claim.responder_device_id,
+                consumer_id: claim.consumer_id,
+                attempt: claim.attempt,
+                policy_digest: claim.policy_digest,
+            })
+            .unwrap();
+        assert_message_delivery(
+            &fixture,
+            claim.request_message_id,
+            1_100,
+            "completed_without_response",
+        );
+    }
+
+    #[test]
+    fn message_delivery_reservation_does_not_claim_response_submission() {
+        let (fixture, reservation) = reserve_directed_response_fixture("diagnostic-response");
+        assert_message_delivery(
+            &fixture,
+            MessageId::from_bytes([101; MessageId::LENGTH]),
+            1_000,
+            "response_reserved",
+        );
+        assert_message_delivery(&fixture, reservation.message_id, 1_000, "not_observed");
+    }
+
+    #[test]
+    fn message_delivery_rejects_tampered_cursor_and_notification_state() {
+        for tamper_cursor in [true, false] {
+            let fixture = conversation_fixture("diagnostic-tampering");
+            let message = stage_remote_inbox_message(
+                &fixture,
+                1,
+                1,
+                DeviceId::from_bytes([44; DeviceId::LENGTH]),
+                1,
+            );
+            fixture
+                .store
+                .complete_inbox_with_notification(
+                    fixture.conversation_id,
+                    1,
+                    NotificationId::from_bytes([45; NotificationId::LENGTH]),
+                )
+                .unwrap();
+            let statement = if tamper_cursor {
+                "UPDATE daemon_message_history SET cursor = 2"
+            } else {
+                "UPDATE daemon_remote_event SET status = 3"
+            };
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .execute(statement, [])
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .message_delivery_status(fixture.conversation_id, message.message_id(), 1_000)
+                    .err(),
+                Some(ProfileStoreError::CorruptData)
+            );
+        }
+    }
+
+    #[test]
+    fn message_delivery_preserves_real_sqlite_failure_and_profile_isolation() {
+        let fixture = conversation_fixture("diagnostic-storage");
+        let absent = MessageId::from_bytes([71; MessageId::LENGTH]);
+        let other = conversation_fixture("diagnostic-other");
+        assert_eq!(
+            fixture
+                .store
+                .message_delivery_status(other.conversation_id, absent, 1_000)
+                .err(),
+            Some(ProfileStoreError::ConversationNotFound)
+        );
+        {
+            let connection = fixture.store.lock().unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+            // Rollback journaling lets an exclusive fixture lock block reads deterministically.
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+        }
+        let lock = Connection::open(fixture.store.locked_profile.profile_database_path()).unwrap();
+        lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .message_delivery_status(fixture.conversation_id, absent, 1_000)
+                .err(),
+            Some(ProfileStoreError::Storage)
+        );
+        lock.execute_batch("ROLLBACK").unwrap();
+        assert_message_delivery(&fixture, absent, 1_000, "not_observed");
+    }
+
+    #[test]
+    fn message_delivery_rejects_changed_handling_metadata() {
+        let fixture = conversation_fixture("diagnostic-handling-seal");
+        let digest = activate_request_reply_policy(&fixture);
+        let claim = claim_directed_request_for(
+            &fixture,
+            digest,
+            AdapterConsumerId::from_bytes([51; AdapterConsumerId::LENGTH]),
+            AdapterLeaseId::from_bytes([52; AdapterLeaseId::LENGTH]),
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_directed_request_handling
+                 SET claim_expires_at_unix_milliseconds = 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .message_delivery_status(fixture.conversation_id, claim.request_message_id, 1_000)
                 .err(),
             Some(ProfileStoreError::CorruptData)
         );

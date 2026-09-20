@@ -306,6 +306,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/local-delivery-diagnostics.md",
+        "title": "Local message delivery diagnostics",
+        "section": "Development",
+        "order": 30,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/adapter-transport-spike.md",
         "title": "Harness-neutral adapter transport spike",
         "section": "Development",

@@ -11,7 +11,11 @@ import {
 import { serviceOperations, toolOperations } from './service/operations.js';
 
 const requestDeadlineMs = 90_000;
-const allowedOperations = new Set<string>([...toolOperations, serviceOperations.status]);
+const allowedOperations = new Set<string>([
+  ...toolOperations,
+  serviceOperations.status,
+  serviceOperations.messageDeliveryStatus,
+]);
 
 export interface GenericCommandArguments extends GenericClientIdentity {
   readonly operation: string;
