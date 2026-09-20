@@ -112,6 +112,8 @@ publication compilation and catalog authorization. It uses the shared ownership
 resolver, runs only the discovery crate's format, tests, doc tests, and all-target
 Clippy, and does not invoke the external A2A suite, a model, or a gateway process.
 The gate restores existing dependency caches without creating another cache producer.
+Its release-profile comparison records lookup cost for file and compiled snapshots
+without a separate runner job or a wall-clock correctness threshold.
 
 The adapter-conformance workflow follows the same hosted-only boundary. Its stable
 check validates the persistent shared-local-service client, harness-neutral adapter

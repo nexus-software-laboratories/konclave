@@ -570,6 +570,82 @@ fn compiled_snapshot_preserves_protected_required_negotiation() {
 }
 
 #[test]
+#[ignore = "explicit hosted release-profile performance evidence"]
+fn compiled_snapshot_lookup_performance_evidence() {
+    struct CountingAuthorizer(Cell<u64>);
+
+    impl A2ADiscoveryAuthorizer for CountingAuthorizer {
+        fn authorize(
+            &self,
+            _action: A2ADiscoveryAction,
+            _agent_id: Option<&A2AAgentId>,
+        ) -> A2ADiscoveryAuthorizationDecision {
+            self.0.set(self.0.get() + 1);
+            A2ADiscoveryAuthorizationDecision::Allow
+        }
+    }
+
+    const BATCHES: usize = 12;
+    const LOOKUPS_PER_BATCH: u64 = 20_000;
+    let root = tempfile::tempdir().unwrap();
+    let mut sources = Vec::with_capacity(MAX_A2A_AGENT_CATALOG_ENTRIES);
+    let mut entries = Vec::with_capacity(MAX_A2A_AGENT_CATALOG_ENTRIES);
+    for index in 0..MAX_A2A_AGENT_CATALOG_ENTRIES {
+        let id = format!("agent-{index}");
+        let file = format!("{id}.json");
+        let source = publication(&id, false, true, true);
+        std::fs::write(root.path().join(&file), &source).unwrap();
+        entries.push(json!({"name": id, "source": file}));
+        sources.push(source);
+    }
+    let descriptor = root.path().join("catalog.json");
+    std::fs::write(
+        &descriptor,
+        serde_json::to_vec(&json!({"schemaVersion": 1, "entries": entries})).unwrap(),
+    )
+    .unwrap();
+    let file =
+        FileA2AAgentCatalog::open(&descriptor, InitialA2AInterfaceEnvironment::Production).unwrap();
+    let compiled = A2AAgentCatalog::try_from_publications(sources.iter().map(|source| {
+        compile_a2a_agent_publication_source(source, InitialA2AInterfaceEnvironment::Production)
+    }))
+    .unwrap();
+    let catalogs = [&file, &compiled];
+    let identifier = A2AAgentId::parse("agent-63").unwrap();
+    let authorizer = CountingAuthorizer(Cell::new(0));
+    let mut samples = [Vec::with_capacity(BATCHES), Vec::with_capacity(BATCHES)];
+    for batch in 0..BATCHES {
+        let order = if batch % 2 == 0 { [0, 1] } else { [1, 0] };
+        for index in order {
+            let start = std::time::Instant::now();
+            for _ in 0..LOOKUPS_PER_BATCH {
+                std::hint::black_box(
+                    catalogs[index]
+                        .private_card(std::hint::black_box(&identifier), &authorizer)
+                        .unwrap(),
+                );
+            }
+            samples[index].push(start.elapsed().as_nanos() / u128::from(LOOKUPS_PER_BATCH));
+        }
+    }
+    assert_eq!(
+        authorizer.0.get(),
+        u64::try_from(BATCHES).unwrap() * LOOKUPS_PER_BATCH * 2
+    );
+    for (source, mut sample) in ["file-baseline", "compiled-snapshot"]
+        .into_iter()
+        .zip(samples)
+    {
+        sample.sort_unstable();
+        eprintln!(
+            "catalog_lookup source={source} publications={} batches={BATCHES} lookups_per_batch={LOOKUPS_PER_BATCH} median_nanoseconds={} authorizations_per_lookup=1",
+            MAX_A2A_AGENT_CATALOG_ENTRIES,
+            (sample[BATCHES / 2 - 1] + sample[BATCHES / 2]) / 2
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_unsafe_duplicate_mismatched_and_invalid_sources() {
     let root = tempfile::tempdir().unwrap();
     write_publication(root.path(), "agent.json", "agent-a", false);

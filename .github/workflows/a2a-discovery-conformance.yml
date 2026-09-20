@@ -69,3 +69,11 @@ jobs:
           cargo fmt --package KonclaveA2ADiscovery -- --check
           cargo test --locked --package KonclaveA2ADiscovery
           cargo clippy --locked --package KonclaveA2ADiscovery --all-targets -- -D warnings
+      - name: Measure catalog lookup parity
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --package KonclaveA2ADiscovery \
+            --test discovery compiled_snapshot_lookup_performance_evidence \
+            -- --ignored --exact --nocapture

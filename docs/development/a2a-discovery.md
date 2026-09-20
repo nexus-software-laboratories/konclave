@@ -205,6 +205,14 @@ duplicate security decisions. Neither is necessary for the supported bounded
 catalog. This choice implements ADR 0015's provider-independent publication model
 and does not change its architecture or introduce another registry protocol.
 
+The focused hosted gate records release-profile lookup timings against the existing
+file-catalog construction path at the 64-publication bound. Both use the same lookup
+and authorization implementation. Alternating batches and an exact authorization
+count make the comparison reproducible without a flaky wall-clock pass threshold.
+This is source-path parity evidence, not a historical speedup or an end-to-end
+encrypted-message latency claim. Construction and provider retrieval are excluded
+from the measured lookup interval.
+
 ## Bounds
 
 | Value | Bound |
