@@ -77,6 +77,29 @@ export function validateRecipeMessageText(value: unknown): string {
   return value;
 }
 
+export function readRecipePage(
+  value: unknown,
+  pageLimit: number,
+): { readonly messages: readonly unknown[]; readonly hasMore: boolean } {
+  requireRecipeRecord(value, ['messages', 'has_more']);
+  const messages = recipeDataProperty(value, 'messages');
+  const hasMore = recipeDataProperty(value, 'has_more');
+  if (
+    types.isProxy(messages) ||
+    !Array.isArray(messages) ||
+    messages.length > pageLimit ||
+    Reflect.ownKeys(messages).length !== messages.length + 1 ||
+    typeof hasMore !== 'boolean'
+  ) {
+    throw new RecipeRunError('invalid_response');
+  }
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    snapshot.push(recipeDataProperty(messages, String(index)));
+  }
+  return { messages: snapshot, hasMore };
+}
+
 /**
  * Selects the first exact authenticated target response in native history order.
  * Unlike display-only readers, this requires explicit content kind, conversation
@@ -102,24 +125,14 @@ export function selectRecipeReply(
   }
   try {
     const binding = parseRecipeBinding(selectedBinding);
-    requireRecipeRecord(value, ['messages', 'has_more']);
-    const messages = recipeDataProperty(value, 'messages');
-    const hasMore = recipeDataProperty(value, 'has_more');
-    if (
-      types.isProxy(messages) ||
-      !Array.isArray(messages) ||
-      messages.length > pageLimit ||
-      Reflect.ownKeys(messages).length !== messages.length + 1 ||
-      typeof hasMore !== 'boolean' ||
-      (hasMore && messages.length === 0)
-    ) {
+    const { messages, hasMore } = readRecipePage(value, pageLimit);
+    if (hasMore && messages.length === 0) {
       throw new RecipeRunError('invalid_response');
     }
     let cursor = afterCursor;
     let selected: RecipeReply | undefined;
     const identifiers = new Set<string>();
-    for (let index = 0; index < messages.length; index += 1) {
-      const message = recipeDataProperty(messages, String(index));
+    for (const message of messages) {
       if (typeof message !== 'object' || message === null || types.isProxy(message)) {
         throw new RecipeRunError('invalid_response');
       }

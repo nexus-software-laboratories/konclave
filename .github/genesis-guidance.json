@@ -425,6 +425,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/integrations/recipes.md",
+        "title": "External recipe composition",
+        "section": "Guides",
+        "order": 19,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/ux-design.md",
         "title": "UX and design resilience",
         "section": "Guides",

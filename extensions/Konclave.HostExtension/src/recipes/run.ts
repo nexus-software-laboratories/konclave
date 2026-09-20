@@ -35,7 +35,10 @@ export type RecipeRunErrorCode =
   | 'profile_mismatch'
   | 'invalid_response'
   | 'invalid_request'
-  | 'unsupported_provider';
+  | 'unsupported_provider'
+  | 'busy'
+  | 'slot_conflict'
+  | 'request_not_submitted';
 
 /** A bounded refusal, not evidence that a submitted remote effect was canceled. */
 export class RecipeRunError extends Error {

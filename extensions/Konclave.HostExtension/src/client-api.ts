@@ -13,6 +13,31 @@ export { createCopilotPolicyGate } from './service/policy-enforcement.js';
 export { createLocalServiceDeliveryChannel } from './service/delivery.js';
 export { frameDelivery } from './adapter/framing.js';
 export {
+  createRecipeDefinition,
+  decodeRecipeDefinition,
+  recipeDefinitionLimits,
+  RecipeDefinitionError,
+  type RecipeDefinition,
+  type RecipeDefinitionErrorCode,
+} from './recipes/definition.js';
+export {
+  createRecipeRun,
+  decodeRecipeRun,
+  recipeMessageId,
+  recipeRunLimits,
+  RecipeRunError,
+  type RecipeBinding,
+  type RecipeRun,
+  type RecipeRunErrorCode,
+} from './recipes/run.js';
+export {
+  createRecipeMessaging,
+  type RecipeCallOptions,
+  type RecipeMessaging,
+  type RecipeSubmission,
+} from './recipes/client.js';
+export type { RecipePending, RecipeReply, RecipeReplyPage } from './recipes/reply.js';
+export {
   getMessageDeliveryStatus,
   type MessageDeliveryDiagnostic,
   type MessageDeliveryState,

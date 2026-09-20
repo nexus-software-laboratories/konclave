@@ -170,6 +170,37 @@ describe('exact recipe reply attribution', () => {
     }
   });
 
+  it('rejects malformed directed and policy fields without treating them as replies', () => {
+    for (const content of [
+      { content_type: 'directed_request', target_device_id: 'bad', text: 'data' },
+      {
+        content_type: 'collaboration_policy_proposal',
+        proposal_id: 'bad',
+        policy_digest: '09'.repeat(32),
+        replaces_policy_digest: null,
+      },
+      {
+        content_type: 'collaboration_policy_proposal',
+        proposal_id: '08'.repeat(16),
+        policy_digest: '09'.repeat(32),
+        replaces_policy_digest: 'bad',
+      },
+      {
+        content_type: 'collaboration_policy_response',
+        proposal_id: '08'.repeat(16),
+        policy_digest: '09'.repeat(32),
+        outcome: 'unknown',
+      },
+    ]) {
+      expect(() =>
+        selectRecipeReply(page([message({}, content)]), binding, requestId, 1),
+      ).toThrow('invalid_response');
+    }
+    expect(() =>
+      selectRecipeReply(page([new Proxy(message(), {})]), binding, requestId, 1),
+    ).toThrow('invalid_response');
+  });
+
   it('bounds page shape, selectors, cursor progress and message text', () => {
     for (const invalid of [null, {}, page([], true), page([null]), page(Array(101))]) {
       expect(() => selectRecipeReply(invalid, binding, requestId, 1)).toThrow(RecipeRunError);
