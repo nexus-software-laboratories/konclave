@@ -67,23 +67,7 @@ const bufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffe
  * @throws {RecipeDefinitionError} For invalid shape, text, identifiers, or hard bounds.
  */
 export function createRecipeDefinition(input: unknown): RecipeDefinition {
-  if (typeof input !== 'object' || input === null || types.isProxy(input)) {
-    throw new RecipeDefinitionError('invalid_object');
-  }
-  const prototype: unknown = Object.getPrototypeOf(input);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new RecipeDefinitionError('invalid_object');
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.length !== 3 ||
-    !keys.includes('name') ||
-    !keys.includes('provider') ||
-    !keys.includes('configuration')
-  ) {
-    throw new RecipeDefinitionError('invalid_fields');
-  }
-
+  requireRecipeRecord(input, ['name', 'provider', 'configuration']);
   const name = stringProperty(input, 'name', 'invalid_name');
   const provider = stringProperty(input, 'provider', 'invalid_provider');
   const configuration = stringProperty(input, 'configuration', 'invalid_configuration');
@@ -97,7 +81,7 @@ export function createRecipeDefinition(input: unknown): RecipeDefinition {
     throw new RecipeDefinitionError('invalid_provider');
   }
 
-  const configurationJsonBytes = measureConfiguration(configuration);
+  const configurationJsonBytes = measureRecipeText(configuration);
   const emptyJson = JSON.stringify({ name, provider, configuration: '' });
   if (
     Buffer.byteLength(emptyJson, 'utf8') + configurationJsonBytes - 2 >
@@ -113,6 +97,27 @@ export function createRecipeDefinition(input: unknown): RecipeDefinition {
   return Object.freeze({ name, provider, configuration, canonicalJson, digest });
 }
 
+export function requireRecipeRecord(
+  input: unknown,
+  fields: readonly string[],
+): asserts input is object {
+  if (typeof input !== 'object' || input === null || types.isProxy(input)) {
+    throw new RecipeDefinitionError('invalid_object');
+  }
+  const prototype: unknown = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new RecipeDefinitionError('invalid_object');
+  }
+  const keys = Reflect.ownKeys(input);
+  if (
+    keys.length !== fields.length ||
+    !fields.every((field) => keys.includes(field))
+  ) {
+    throw new RecipeDefinitionError('invalid_fields');
+  }
+
+}
+
 /**
  * Decodes only the exact canonical bytes selected by an expected lowercase hexadecimal digest.
  * A bounded private snapshot is taken before content validation. Shared memory is rejected.
@@ -124,28 +129,13 @@ export function createRecipeDefinition(input: unknown): RecipeDefinition {
  * @throws {RecipeDefinitionError} For invalid bytes, encoding, shape, bounds, or digest.
  */
 export function decodeRecipeDefinition(input: unknown, expectedDigest: unknown): RecipeDefinition {
-  const bytes = copyBoundedBytes(input);
+  const { bytes, value } = decodeRecipeData(input, recipeDefinitionLimits.encodedBytes);
   if (
-    typeof expectedDigest !== 'string' ||
-    expectedDigest.length !== 64 ||
-    !/^[0-9a-f]{64}$/u.test(expectedDigest)
+    !isRecipeHex(expectedDigest, 64)
   ) {
     throw new RecipeDefinitionError('invalid_digest');
   }
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    throw new RecipeDefinitionError('invalid_utf8');
-  }
-  rejectNestedContainers(text);
-  let inputValue: unknown;
-  try {
-    inputValue = JSON.parse(text);
-  } catch {
-    throw new RecipeDefinitionError('invalid_json');
-  }
-  const definition = createRecipeDefinition(inputValue);
+  const definition = createRecipeDefinition(value);
   if (!Buffer.from(definition.canonicalJson, 'utf8').equals(bytes)) {
     throw new RecipeDefinitionError('noncanonical_definition');
   }
@@ -155,20 +145,59 @@ export function decodeRecipeDefinition(input: unknown, expectedDigest: unknown):
   return definition;
 }
 
-function stringProperty(input: object, key: string, code: RecipeDefinitionErrorCode): string {
-  const descriptor = Object.getOwnPropertyDescriptor(input, key);
-  if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
-    throw new RecipeDefinitionError('invalid_fields');
+export function isRecipeHex(value: unknown, characters: number): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length === characters &&
+    /^[0-9a-f]+$/u.test(value)
+  );
+}
+
+export function decodeRecipeData(
+  input: unknown,
+  maximumBytes: number,
+  maximumDepth = 1,
+  maximumContainers = 1,
+  maximumSeparators = 1_024,
+): { readonly bytes: Uint8Array; readonly value: unknown } {
+  const bytes = copyBoundedBytes(input, maximumBytes);
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new RecipeDefinitionError('invalid_utf8');
   }
-  const value: unknown = descriptor.value;
+  boundRecipeContainers(text, maximumDepth, maximumContainers, maximumSeparators);
+  let inputValue: unknown;
+  try {
+    inputValue = JSON.parse(text);
+  } catch {
+    throw new RecipeDefinitionError('invalid_json');
+  }
+  return { bytes, value: inputValue };
+}
+
+function stringProperty(input: object, key: string, code: RecipeDefinitionErrorCode): string {
+  const value = recipeDataProperty(input, key);
   if (typeof value !== 'string') {
     throw new RecipeDefinitionError(code);
   }
   return value;
 }
 
-function measureConfiguration(value: string): number {
-  if (value.length > recipeDefinitionLimits.configurationBytes) {
+export function recipeDataProperty(input: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(input, key);
+  if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+    throw new RecipeDefinitionError('invalid_fields');
+  }
+  return descriptor.value;
+}
+
+export function measureRecipeText(
+  value: string,
+  maximumBytes = recipeDefinitionLimits.configurationBytes,
+): number {
+  if (value.length > maximumBytes) {
     throw new RecipeDefinitionError('configuration_too_large');
   }
   let utf8Bytes = 0;
@@ -193,13 +222,13 @@ function measureConfiguration(value: string): number {
       }
     }
   }
-  if (utf8Bytes > recipeDefinitionLimits.configurationBytes) {
+  if (utf8Bytes > maximumBytes) {
     throw new RecipeDefinitionError('configuration_too_large');
   }
   return utf8Bytes + escapingBytes + 2;
 }
 
-function copyBoundedBytes(input: unknown): Uint8Array {
+function copyBoundedBytes(input: unknown, maximumBytes: number): Uint8Array {
   if (types.isProxy(input) || !types.isUint8Array(input)) {
     throw new RecipeDefinitionError('invalid_bytes');
   }
@@ -209,7 +238,7 @@ function copyBoundedBytes(input: unknown): Uint8Array {
   if (typeof length !== 'number' || length === 0 || types.isSharedArrayBuffer(buffer)) {
     throw new RecipeDefinitionError('invalid_bytes');
   }
-  if (length > recipeDefinitionLimits.encodedBytes) {
+  if (length > maximumBytes) {
     throw new RecipeDefinitionError('definition_too_large');
   }
   const bytes = new Uint8Array(length);
@@ -221,10 +250,17 @@ function copyBoundedBytes(input: unknown): Uint8Array {
   return bytes;
 }
 
-function rejectNestedContainers(text: string): void {
+function boundRecipeContainers(
+  text: string,
+  maximumDepth: number,
+  maximumContainers: number,
+  maximumSeparators: number,
+): void {
   let quoted = false;
   let escaped = false;
   let depth = 0;
+  let containers = 0;
+  let separators = 0;
   for (const character of text) {
     if (quoted) {
       if (escaped) {
@@ -236,15 +272,21 @@ function rejectNestedContainers(text: string): void {
       }
     } else if (character === '"') {
       quoted = true;
-    } else if (character === '[' || character === ']') {
+    } else if (character === '[' && maximumDepth === 1) {
       throw new RecipeDefinitionError('invalid_fields');
-    } else if (character === '{') {
+    } else if (character === '{' || character === '[') {
       depth += 1;
-      if (depth > 1) {
+      containers += 1;
+      if (depth > maximumDepth || containers > maximumContainers) {
         throw new RecipeDefinitionError('invalid_fields');
       }
-    } else if (character === '}') {
+    } else if (character === '}' || character === ']') {
       depth -= 1;
+    } else if (character === ',') {
+      separators += 1;
+      if (separators > maximumSeparators) {
+        throw new RecipeDefinitionError('invalid_fields');
+      }
     }
   }
 }
