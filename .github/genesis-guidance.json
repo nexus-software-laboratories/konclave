@@ -187,6 +187,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0026-local-delivery-diagnostics.md",
+        "title": "ADR 0026: Local delivery diagnostics",
+        "section": "Architecture",
+        "order": 260,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
