@@ -1,11 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { LocalServiceClient, LocalServiceRequestOptions } from '../service/client.js';
-import {
-  recipeDataProperty,
-  RecipeDefinitionError,
-  requireRecipeRecord,
-} from './definition.js';
+import { recipeDataProperty, RecipeDefinitionError, requireRecipeRecord } from './definition.js';
 import {
   isRecipeCursor,
   readRecipePage,
@@ -40,11 +36,7 @@ export interface RecipeSubmission {
  */
 export interface RecipeMessaging {
   readonly run: RecipeRun;
-  send(
-    bindingName: string,
-    text: string,
-    options?: RecipeCallOptions,
-  ): Promise<RecipeSubmission>;
+  send(bindingName: string, text: string, options?: RecipeCallOptions): Promise<RecipeSubmission>;
   poll(bindingName: string, options?: RecipeCallOptions): Promise<RecipeReplyPage>;
 }
 
@@ -70,18 +62,9 @@ function readOptions(options: RecipeCallOptions | undefined): LocalServiceReques
   return { signal: options?.signal, deadlineMs: options?.deadlineMs };
 }
 
-function submission(
-  value: unknown,
-  binding: RecipeBinding,
-  messageId: string,
-): RecipeSubmission {
+function submission(value: unknown, binding: RecipeBinding, messageId: string): RecipeSubmission {
   return response(() => {
-    requireRecipeRecord(value, [
-      'conversation_id',
-      'message_id',
-      'sender_counter',
-      'cursor',
-    ]);
+    requireRecipeRecord(value, ['conversation_id', 'message_id', 'sender_counter', 'cursor']);
     const cursor = recipeDataProperty(value, 'cursor');
     const counter = recipeDataProperty(value, 'sender_counter');
     if (
@@ -159,13 +142,7 @@ export function createRecipeMessaging(
       },
       readOptions(options),
     );
-    const page = selectRecipeReply(
-      value,
-      binding,
-      slot.submission.messageId,
-      slot.cursor,
-      1,
-    );
+    const page = selectRecipeReply(value, binding, slot.submission.messageId, slot.cursor, 1);
     if (page.kind === 'reply') {
       slot.reply = page;
     } else {

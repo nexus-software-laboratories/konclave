@@ -192,9 +192,9 @@ describe('exact recipe reply attribution', () => {
         outcome: 'unknown',
       },
     ]) {
-      expect(() =>
-        selectRecipeReply(page([message({}, content)]), binding, requestId, 1),
-      ).toThrow('invalid_response');
+      expect(() => selectRecipeReply(page([message({}, content)]), binding, requestId, 1)).toThrow(
+        'invalid_response',
+      );
     }
     expect(() =>
       selectRecipeReply(page([new Proxy(message(), {})]), binding, requestId, 1),

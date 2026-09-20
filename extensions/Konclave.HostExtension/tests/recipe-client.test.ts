@@ -3,10 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRecipeMessaging } from '../src/recipes/client.js';
 import { createRecipeDefinition } from '../src/recipes/definition.js';
 import { createRecipeRun, recipeMessageId } from '../src/recipes/run.js';
-import {
-  LocalServiceError,
-  type LocalServiceClient,
-} from '../src/service/client.js';
+import { LocalServiceError, type LocalServiceClient } from '../src/service/client.js';
 import { isRecord } from '../src/service/validation.js';
 
 const definition = createRecipeDefinition({
@@ -102,7 +99,8 @@ describe('explicit external recipe messaging', () => {
       ) {
         throw new Error('fixture received an unexpected operation');
       }
-      const requestId = typeof options === 'object' ? options.requestId?.toString('hex') : undefined;
+      const requestId =
+        typeof options === 'object' ? options.requestId?.toString('hex') : undefined;
       calls.push({ operation, payload, requestId });
       const previous = effects.get(payload.message_id);
       if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(payload)) {
@@ -192,24 +190,25 @@ describe('explicit external recipe messaging', () => {
       hasMore: false,
     });
 
-    it('does not confuse membership-only relay continuation with history progress', async () => {
-      const request = vi
-        .fn<LocalServiceClient['request']>()
-        .mockResolvedValueOnce(receipt)
-        .mockResolvedValueOnce({ messages: [], has_more: false })
-        .mockResolvedValueOnce({ messages: [], has_more: true })
-        .mockResolvedValueOnce({ messages: [reply()], has_more: false });
-      const adapter = createRecipeMessaging(client(request), descriptor, run.runId);
-      await adapter.send('peer', 'question');
-      await expect(adapter.poll('peer')).resolves.toMatchObject({ kind: 'reply' });
-      expect(request).toHaveBeenCalledTimes(4);
-    });
     expect(request.mock.calls.map((call) => call[0])).toEqual([
       'send_directed_request',
       'read_messages',
       'watch_messages',
       'read_messages',
     ]);
+  });
+
+  it('does not confuse membership-only relay continuation with history progress', async () => {
+    const request = vi
+      .fn<LocalServiceClient['request']>()
+      .mockResolvedValueOnce(receipt)
+      .mockResolvedValueOnce({ messages: [], has_more: false })
+      .mockResolvedValueOnce({ messages: [], has_more: true })
+      .mockResolvedValueOnce({ messages: [reply()], has_more: false });
+    const adapter = createRecipeMessaging(client(request), descriptor, run.runId);
+    await adapter.send('peer', 'question');
+    await expect(adapter.poll('peer')).resolves.toMatchObject({ kind: 'reply' });
+    expect(request).toHaveBeenCalledTimes(4);
   });
 
   it('advances bounded history without treating another member as the responder', async () => {
@@ -251,8 +250,12 @@ describe('explicit external recipe messaging', () => {
   });
 
   it('bounds concurrent work on one slot without timing assumptions', async () => {
-    let release: (value: unknown) => void = () => { throw new Error('not initialized'); };
-    const held = new Promise<unknown>((resolve) => { release = resolve; });
+    let release: (value: unknown) => void = () => {
+      throw new Error('not initialized');
+    };
+    const held = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
     const request = vi.fn<LocalServiceClient['request']>().mockReturnValueOnce(held);
     const adapter = createRecipeMessaging(client(request), descriptor, run.runId);
     const sending = adapter.send('peer', 'question');
@@ -260,8 +263,12 @@ describe('explicit external recipe messaging', () => {
     release(receipt);
     await sending;
 
-    let releaseRead: (value: unknown) => void = () => { throw new Error('not initialized'); };
-    const read = new Promise<unknown>((resolve) => { releaseRead = resolve; });
+    let releaseRead: (value: unknown) => void = () => {
+      throw new Error('not initialized');
+    };
+    const read = new Promise<unknown>((resolve) => {
+      releaseRead = resolve;
+    });
     request.mockReturnValueOnce(read);
     const polling = adapter.poll('peer');
     await expect(adapter.poll('peer')).rejects.toThrow('busy');

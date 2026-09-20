@@ -69,8 +69,12 @@ describe('external recipe examples', () => {
   it('settles all launched requests before surfacing an error', async () => {
     const { messaging, send, poll } = fixture('example.fan-out');
     const failure = new Error('bounded fixture failure');
-    let release: () => void = () => { throw new Error('not initialized'); };
-    const held = new Promise<void>((resolve) => { release = resolve; });
+    let release: () => void = () => {
+      throw new Error('not initialized');
+    };
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let settled = false;
     send.mockRejectedValueOnce(failure).mockImplementationOnce(async (name) => {
       await held;
@@ -132,10 +136,16 @@ describe('external recipe examples', () => {
       const selected = fixture(provider).messaging.run;
       const effects = new Map<
         string,
-        { readonly conversation: string; readonly message: string; readonly target: string; readonly text: string }
+        {
+          readonly conversation: string;
+          readonly message: string;
+          readonly target: string;
+          readonly text: string;
+        }
       >();
-      const request = vi.fn<LocalServiceClient['request']>().mockImplementation(
-        async (operation, payload) => {
+      const request = vi
+        .fn<LocalServiceClient['request']>()
+        .mockImplementation(async (operation, payload) => {
           if (!isRecord(payload) || typeof payload.conversation_id !== 'string') {
             throw new Error('fixture received an invalid operation');
           }
@@ -175,25 +185,26 @@ describe('external recipe examples', () => {
             throw new Error('fixture has no accepted request');
           }
           return {
-            messages: [{
-              conversation_id: conversation,
-              message_id: '08'.repeat(16),
-              envelope_id: '09'.repeat(16),
-              sender_device_id: effect.target,
-              epoch: 0,
-              sender_counter: 1,
-              sent_at_unix_milliseconds: 1_000,
-              reply_to_message_id: effect.message,
-              cursor: 2,
-              direction: 'inbound',
-              content_type: 'text',
-              text: 'Exact peer result.',
-              duplicate: false,
-            }],
+            messages: [
+              {
+                conversation_id: conversation,
+                message_id: '08'.repeat(16),
+                envelope_id: '09'.repeat(16),
+                sender_device_id: effect.target,
+                epoch: 0,
+                sender_counter: 1,
+                sent_at_unix_milliseconds: 1_000,
+                reply_to_message_id: effect.message,
+                cursor: 2,
+                direction: 'inbound',
+                content_type: 'text',
+                text: 'Exact peer result.',
+                duplicate: false,
+              },
+            ],
             has_more: false,
           };
-        },
-      );
+        });
       const client: LocalServiceClient = {
         profile: selected.profile,
         request,
