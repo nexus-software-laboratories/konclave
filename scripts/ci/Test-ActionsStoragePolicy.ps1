@@ -6,8 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $workflowRoot = Join-Path $root '.github' 'workflows'
-$mainOnlySave =
-    "          save-if: `${{ github.ref == 'refs/heads/main' }}"
+. (Join-Path $PSScriptRoot 'ActionsStoragePolicy.Functions.ps1')
 
 function Get-StepBlock {
     param(
@@ -56,8 +55,8 @@ foreach ($workflow in $workflows) {
         if ($lines[$index] -cmatch '^\s+(?:- )?uses: Swatinem/rust-cache@') {
             $rustCacheCount++
             $block = Get-StepBlock -Lines $lines -Line $index
-            if ($mainOnlySave -cnotin $block) {
-                throw "$($workflow.Name) contains a Rust cache that can persist outside main."
+            if (-not (Test-ActionsRustCacheSavePolicy -Lines $block)) {
+                throw "$($workflow.Name) must configure exactly one main-only or disabled Rust cache save condition."
             }
         }
     }
