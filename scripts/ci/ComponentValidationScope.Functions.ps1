@@ -32,6 +32,7 @@ function Get-ComponentValidationContracts {
             '^docs/adr/adr-0028-external-recipe-composition\.md$'
             '^docs/integrations/recipes\.md$'
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/recipes/|src/client-api\.ts|src/service/(?:client|operations|transcript|validation)\.ts|tests/recipe[^/]*\.test\.ts|examples/recipes/)'
+            '^extensions/Konclave\.HostExtension/scripts/(?:build-extension|package-contract|verify-package|test-package-contract)\.mjs$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
         'generic-client' = @(

@@ -78,4 +78,7 @@ jobs:
           npm run lint
           npm run typecheck
           npm exec -- vitest run tests/recipe-definition.test.ts tests/recipe-run.test.ts tests/recipe-reply.test.ts tests/recipe-client.test.ts tests/recipe-examples.test.ts
+          npm run compile
+          npm run package
+          npm run verify:package
           git diff --exit-code
