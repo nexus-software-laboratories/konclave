@@ -182,9 +182,7 @@ if (hasRecipeExports) {
   const run = clientApi.createRecipeRun(Buffer.from(decoded.canonicalJson), decoded.digest, {
     profile: 'package-fixture',
     nonce: '01'.repeat(16),
-    bindings: [
-      { name: 'peer', conversationId: '02'.repeat(32), targetDeviceId: '03'.repeat(32) },
-    ],
+    bindings: [{ name: 'peer', conversationId: '02'.repeat(32), targetDeviceId: '03'.repeat(32) }],
     input: 'Public package fixture.',
   });
   const restored = clientApi.decodeRecipeRun(Buffer.from(run.canonicalJson), run.runId);
