@@ -142,6 +142,12 @@ For ongoing conversations, invoke `sync_messages`, then `read_messages` or
 `watch_messages` with an explicit conversation identifier. Let each bounded wait
 complete instead of busy-polling.
 
+For read-only troubleshooting, `get_message_delivery_status` accepts one explicit
+`conversation_id` and `message_id`. It returns only finite local evidence, the
+current mute setting, profile-wide degradation, and an unknown remote outcome. It
+does not expose content or retry the message. See
+[local delivery diagnostics](../development/local-delivery-diagnostics.md).
+
 ## Reference pairing flow
 
 The Generic client uses the same durable pairing state machine as paved clients:

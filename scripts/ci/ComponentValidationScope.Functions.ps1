@@ -44,6 +44,17 @@ function Get-ComponentValidationContracts {
             '^scripts/installation/'
             '^scripts/packaging/'
         )
+        'local-delivery-diagnostics' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/local-delivery-diagnostics-conformance\.yml$'
+            '^crates/Konclave\.DomainCore/'
+            '^docs/adr/adr-0026-local-delivery-diagnostics\.md$'
+            '^docs/development/local-delivery-diagnostics\.md$'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:conversation|local_service|mcp|persistence)\.rs|src/persistence/(?:delivery_diagnostics|directed_request_handling)\.rs)$'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-command)\.ts|src/service/(?:commands|delivery-diagnostics|operations|validation)\.ts|tests/(?:delivery-diagnostics|generic-command)\.test\.ts)$'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'pairing-rendezvous' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
@@ -54,7 +65,7 @@ function Get-ComponentValidationContracts {
             '^fixtures/local-service/v1/copilot-tools\.json$'
             '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$'
             '^apps/Konclave\.(?:CommunityRelay|LocalDaemon)/(?:Cargo\.toml|src/.*|tests/.*)$'
-            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff|validation)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
             '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
         )
         'short-code-pairing' = @(
@@ -68,7 +79,7 @@ function Get-ComponentValidationContracts {
             '^fixtures/local-service/v1/copilot-tools\.json$'
             '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|DomainCore|ProtocolContracts|RelayCore|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$'
             '^apps/Konclave\.(?:CommunityRelay|LocalDaemon)/(?:Cargo\.toml|src/.*|tests/.*)$'
-            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff|validation)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
             '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
         )
         'trusted-device-alias' = @(
@@ -79,7 +90,7 @@ function Get-ComponentValidationContracts {
             '^proto/konclave/protocol/v1/(?:application|common)\.proto$'
             '^crates/Konclave\.(?:CryptographicCore|DomainCore|ProtocolContracts|SecretStorage)/(?:Cargo\.toml|build\.rs|src/.*|tests/.*)$'
             '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/.*|tests/.*)$'
-            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff|validation)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
             '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
         )
         'user-presence' = @(

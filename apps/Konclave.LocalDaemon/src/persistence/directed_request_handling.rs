@@ -2,6 +2,7 @@ use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveDomainCore::{
     AdapterConsumerId, AdapterLeaseId, ApplicationContent, CollaborationPolicyDigest,
     ConversationId, DeviceId, EnvelopeId, MAX_TEXT_BODY_BYTES, MessageId, NotificationId,
+    RequestHandlingObservation,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use zeroize::Zeroizing;
@@ -228,6 +229,38 @@ fn initialize_schema(
 }
 
 impl ProfileStore {
+    /// Opens handling metadata after the caller verifies the exact local request.
+    pub(super) fn request_handling_observation_in(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+        request_message_id: MessageId,
+        responder_device_id: DeviceId,
+    ) -> Result<RequestHandlingObservation, ProfileStoreError> {
+        let Some(metadata) = load_handling_metadata(
+            connection,
+            conversation_id,
+            request_message_id,
+            responder_device_id,
+        )?
+        else {
+            return Ok(RequestHandlingObservation::NotRecorded);
+        };
+        let handling = self.open_directed_request_handling(connection, metadata)?;
+        match handling.state {
+            HandlingState::Claimed => Ok(RequestHandlingObservation::Claimed {
+                expires_at_unix_milliseconds: handling.claim.claim_expires_at_unix_milliseconds,
+            }),
+            HandlingState::CompletedResponse => {
+                self.verify_completed_directed_request_response(connection, &handling)?;
+                Ok(RequestHandlingObservation::ResponseReserved)
+            }
+            HandlingState::CompletedNoResponse => {
+                Ok(RequestHandlingObservation::CompletedWithoutResponse)
+            }
+        }
+    }
+
     pub(super) fn initialize_directed_request_handling_schema(
         &self,
     ) -> Result<(), ProfileStoreError> {

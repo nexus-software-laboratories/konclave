@@ -53,6 +53,7 @@ describe('generic harness command', () => {
       operation: 'get_identity',
     });
     for (const operation of [
+      'get_message_delivery_status',
       'get_collaboration_policy_status',
       'inspect_collaboration_policy_proposal',
       'propose_collaboration_policy_source',
