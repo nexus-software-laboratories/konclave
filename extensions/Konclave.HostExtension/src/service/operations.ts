@@ -70,6 +70,7 @@ export const collaborationOperations = {
 /** Operations that report bounded service state for deterministic commands. */
 export const serviceOperations = {
   status: 'service.status',
+  messageDeliveryStatus: 'get_message_delivery_status',
 } as const;
 
 /** Human-entered deterministic commands intentionally absent from the agent tool surface. */

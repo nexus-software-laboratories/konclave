@@ -14,6 +14,7 @@ $expectedContracts = @(
     'external-recipes'
     'generic-client'
     'installer-lifecycle'
+    'local-delivery-diagnostics'
     'pairing-rendezvous'
     'short-code-pairing'
     'trusted-device-alias'
@@ -29,6 +30,7 @@ $workflowByContract = [ordered]@{
     'external-recipes' = 'recipe-conformance.yml'
     'generic-client' = 'generic-client-conformance.yml'
     'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
+    'local-delivery-diagnostics' = 'local-delivery-diagnostics-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
     'short-code-pairing' = 'short-code-pairing-conformance.yml'
     'trusted-device-alias' = 'trusted-device-alias-conformance.yml'
@@ -83,6 +85,8 @@ $ownedCases = [ordered]@{
         'extensions/Konclave.HostExtension/src/generic-command.ts'
     'installer-lifecycle' =
         'scripts/installation/Install-Konclave.ps1'
+    'local-delivery-diagnostics' =
+        'crates/Konclave.DomainCore/src/delivery_diagnostics.rs'
     'pairing-rendezvous' =
         'extensions/Konclave.HostExtension/src/service/pairing-handoff.ts'
     'short-code-pairing' =

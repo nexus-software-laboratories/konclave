@@ -10,12 +10,12 @@ use KonclaveCryptographicCore::{
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
-    JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageId, NotificationId,
-    PairingControl, PairingId, PairingMessageId, PairingStage, ProtocolVersion, RelayEnvelope,
-    RepeatPairingOperationId, RoutingId, StoredRelayEnvelope, TrustedDeviceAlias,
-    TrustedDeviceAliasDecision, TrustedDeviceBinding, TrustedDeviceBindingStatus,
-    TrustedDeviceEvidence, TrustedDeviceResolution, resolve_trusted_device,
-    trusted_device_binding_status,
+    JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus,
+    MessageId, NotificationId, PairingControl, PairingId, PairingMessageId, PairingStage,
+    ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId, StoredRelayEnvelope,
+    TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
+    TrustedDeviceBindingStatus, TrustedDeviceEvidence, TrustedDeviceResolution,
+    resolve_trusted_device, trusted_device_binding_status,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_membership_commit_bundle, decode_membership_control,
@@ -179,6 +179,20 @@ impl ConversationCoordinator {
     /// Returns a profile-store error.
     pub(crate) fn remote_event_counts(&self) -> Result<(u32, u32), ConversationCoordinatorError> {
         Ok(self.store.remote_event_counts()?)
+    }
+
+    /// Returns body-free local evidence without sending, retrying, or renewing work.
+    pub(crate) fn message_delivery_status(
+        &self,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        now_unix_milliseconds: u64,
+    ) -> Result<MessageDeliveryStatus, ConversationCoordinatorError> {
+        Ok(self.store.message_delivery_status(
+            conversation_id,
+            message_id,
+            now_unix_milliseconds,
+        )?)
     }
 
     /// Reports whether automatic delivery is enabled for one conversation.

@@ -14,6 +14,8 @@ import {
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
+import { formatMessageDeliveryStatus, getMessageDeliveryStatus } from './delivery-diagnostics.js';
+import { isRecord, requireHexIdentifier } from './validation.js';
 import {
   serviceOperations,
   trustedDeviceOperations,
@@ -344,6 +346,7 @@ const helpLines = [
   '  /konclave help                                      Show this list.',
   '  /konclave output <normal|verbose>                   Set command detail for this session.',
   '  /konclave status                                    Show profile, delivery, and relay state.',
+  '  /konclave diagnose <conversation> <message>         Explain body-free local delivery evidence.',
   '  /konclave identity                                  Show this profile device identifier.',
   '  /konclave conversations                             List local conversation identifiers.',
   '  /konclave devices                                   List local trusted-device aliases.',
@@ -438,17 +441,6 @@ function requireNoArguments(raw: string, subcommand: string): void {
   }
 }
 
-function requireHexIdentifier(
-  value: string | undefined,
-  characters: number,
-  label: string,
-): string {
-  if (!value || value.length !== characters || !/^[0-9a-f]+$/u.test(value)) {
-    throw new Error(`a ${characters}-character hex ${label} is required`);
-  }
-  return value;
-}
-
 function isConversationRole(value: unknown): value is ConversationRole {
   return value === 'administrator' || value === 'member';
 }
@@ -491,10 +483,6 @@ function isTrustedDeviceStatus(value: string): value is TrustedDeviceStatus {
     value === 'root_mismatch' ||
     value === 'unsupported'
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function requiredString(
@@ -2622,6 +2610,17 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         await presentation.write(
           `delivery: ${status.deliveryDegraded ? 'degraded' : 'healthy'}, watching ${status.watchedConversations}, pending ${status.pendingEvents}, claimed ${status.claimedEvents}`,
         );
+        return;
+      }
+      case 'diagnose': {
+        const parts = parseCommandArguments(argumentsText);
+        requireArgumentCount(parts, 2, 2, '/konclave diagnose <conversation> <message>');
+        const conversation = requireHexIdentifier(parts[0], 64, 'conversation identifier');
+        const message = requireHexIdentifier(parts[1], 32, 'message identifier');
+        const diagnostic = await getMessageDeliveryStatus(client, conversation, message);
+        for (const line of formatMessageDeliveryStatus(diagnostic)) {
+          await presentation.write(line, { ephemeral: true });
+        }
         return;
       }
       case 'identity': {

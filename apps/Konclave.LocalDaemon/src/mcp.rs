@@ -33,6 +33,7 @@ use crate::application::{
     RevokeCollaborationPolicyRequest, SendApplicationRequest, SentCollaborationPolicyExchange,
     SentMembership,
 };
+use crate::clock::{SystemUnixClock, UnixClock};
 use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
     ProcessedApplication,
@@ -485,6 +486,21 @@ struct DeliveryStatusResult {
     auto_delivery_enabled: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageDeliveryStatusRequest {
+    conversation_id: String,
+    message_id: String,
+}
+
+#[derive(Serialize)]
+struct MessageDeliveryStatusResult {
+    message_status: &'static str,
+    auto_delivery_enabled: bool,
+    profile_delivery_degraded: bool,
+    remote_outcome: &'static str,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct PairingStatusResult {
     pairing_id: String,
@@ -785,6 +801,10 @@ impl StdioServer {
                 self.delivery_status(Self::parse_parameters(payload)?)
                     .await?,
             ),
+            "get_message_delivery_status" => Self::encode_json(
+                self.get_message_delivery_status(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             _ => Err("unknown_operation".to_string()),
         }
     }
@@ -1000,6 +1020,31 @@ impl StdioServer {
             watched_conversations: self.health.watched_conversations(),
             delivery_degraded: self.health.is_degraded(),
             auto_delivery_enabled: enabled,
+        }))
+    }
+
+    async fn get_message_delivery_status(
+        &self,
+        Parameters(request): Parameters<MessageDeliveryStatusRequest>,
+    ) -> Result<Json<MessageDeliveryStatusResult>, String> {
+        self.authorize("get_message_delivery_status")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let message_id = parse_message_id(&request.message_id)?;
+        let conversations = self.conversations.clone();
+        let now = SystemUnixClock.now_unix_milliseconds();
+        let (status, enabled) = tokio::task::spawn_blocking(move || {
+            let status = conversations.message_delivery_status(conversation_id, message_id, now)?;
+            let enabled = conversations.adapter_delivery_enabled(conversation_id)?;
+            Ok::<_, ConversationCoordinatorError>((status, enabled))
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+        Ok(Json(MessageDeliveryStatusResult {
+            message_status: status.as_str(),
+            auto_delivery_enabled: enabled,
+            profile_delivery_degraded: self.health.is_degraded(),
+            remote_outcome: "unknown",
         }))
     }
 
@@ -2177,6 +2222,7 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "list_conversations"
         | "read_messages"
         | "delivery_status"
+        | "get_message_delivery_status"
         | "get_pairing_status"
         | "get_short_code_pairing_status"
         | "list_trusted_devices"
@@ -3066,6 +3112,10 @@ mod tests {
             method: "delivery_status",
         })
         .unwrap();
+        read_only(AuthorizationContext {
+            method: "get_message_delivery_status",
+        })
+        .unwrap();
         assert!(
             read_only(AuthorizationContext {
                 method: "set_auto_delivery",
@@ -3160,6 +3210,86 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.direction, "outbound");
+    }
+
+    #[tokio::test]
+    async fn message_delivery_json_is_body_free_and_rejects_extra_selectors() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "diagnostic-json");
+        let conversation = coordinator.create().unwrap();
+        let health = DeliveryHealth::default();
+        health.set_degraded(true);
+        let server = StdioServer::new(
+            coordinator,
+            None,
+            None,
+            health,
+            local_stdio_authorization(false),
+        );
+        let mut request = json!({
+            "conversation_id": super::encode_hex(conversation.conversation_id.as_bytes()),
+            "message_id": "01".repeat(16)
+        });
+        let result: serde_json::Value = serde_json::from_slice(
+            &server
+                .dispatch_json(
+                    "get_message_delivery_status",
+                    &serde_json::to_vec(&request).unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "message_status": "not_observed",
+                "auto_delivery_enabled": true,
+                "profile_delivery_degraded": true,
+                "remote_outcome": "unknown"
+            })
+        );
+        request["profile"] = json!("other-profile");
+        assert_eq!(
+            server
+                .dispatch_json(
+                    "get_message_delivery_status",
+                    &serde_json::to_vec(&request).unwrap(),
+                )
+                .await
+                .err(),
+            Some("invalid_request".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn message_delivery_authorizes_before_conversation_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "diagnostic-denied");
+        let server = StdioServer::new(
+            coordinator,
+            None,
+            None,
+            DeliveryHealth::default(),
+            Arc::new(|context| {
+                assert_eq!(context.method, "get_message_delivery_status");
+                anyhow::bail!("local_service_not_authorized")
+            }),
+        );
+        assert_eq!(
+            server
+                .dispatch_json(
+                    "get_message_delivery_status",
+                    &serde_json::to_vec(&json!({
+                        "conversation_id": "01".repeat(32),
+                        "message_id": "02".repeat(16)
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .err(),
+            Some("local_service_not_authorized".to_string())
+        );
     }
 
     #[tokio::test]

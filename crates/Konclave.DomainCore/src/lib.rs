@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 
 mod collaboration_policy;
+mod delivery_diagnostics;
 mod error;
 mod identifiers;
 mod model;
@@ -24,6 +25,11 @@ pub use collaboration_policy::{
     MAX_COLLABORATION_POLICY_RESOURCE_BYTES, MAX_COLLABORATION_POLICY_STATEMENT_ID_BYTES,
     MAX_COLLABORATION_POLICY_STATEMENTS, evaluate_collaboration_policy,
     validate_collaboration_policy_name,
+};
+pub use delivery_diagnostics::{
+    DeliveryDiagnosticError, LocalDeliveryObservation, MessageDeliveryObservation,
+    MessageDeliveryStatus, OutboundDeliveryObservation, RequestHandlingObservation,
+    classify_message_delivery,
 };
 pub use error::KonclaveDomainError;
 pub use identifiers::{

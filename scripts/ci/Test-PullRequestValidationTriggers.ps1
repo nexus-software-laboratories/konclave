@@ -21,6 +21,7 @@ $contracts = [ordered]@{
     'extension-startup-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'recipe-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'generic-client-conformance.yml' = '    types: [opened, synchronize, reopened]'
+    'local-delivery-diagnostics-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'installer-lifecycle-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'marketplace-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'pairing-rendezvous-conformance.yml' = '    types: [opened, synchronize, reopened]'
