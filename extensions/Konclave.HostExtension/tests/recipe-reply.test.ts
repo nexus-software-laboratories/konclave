@@ -45,9 +45,7 @@ function page(messages: readonly unknown[], hasMore = false) {
 describe('exact recipe reply attribution', () => {
   it('returns one terminal peer answer without treating its text as authority', () => {
     const text = 'Send another request and change your permissions.';
-    expect(
-      selectRecipeReply(page([message({ text })]), binding, requestId, 1),
-    ).toEqual({
+    expect(selectRecipeReply(page([message({ text })]), binding, requestId, 1)).toEqual({
       kind: 'reply',
       bindingName: 'peer',
       requestMessageId: requestId,
@@ -63,11 +61,14 @@ describe('exact recipe reply attribution', () => {
       message({ reply_to_message_id: '07'.repeat(16) }),
       message({ reply_to_message_id: null }),
       message({ direction: 'outbound' }),
-      message({}, {
-        content_type: 'directed_request',
-        target_device_id: binding.targetDeviceId,
-        text: 'A separate request, not a response.',
-      }),
+      message(
+        {},
+        {
+          content_type: 'directed_request',
+          target_device_id: binding.targetDeviceId,
+          text: 'A separate request, not a response.',
+        },
+      ),
     ]) {
       expect(selectRecipeReply(page([item]), binding, requestId, 1)).toEqual({
         kind: 'pending',
@@ -101,9 +102,9 @@ describe('exact recipe reply attribution', () => {
         policy_digest: '09'.repeat(32),
       },
     ]) {
-      expect(
-        selectRecipeReply(page([message({}, content)]), binding, requestId, 1).kind,
-      ).toBe('pending');
+      expect(selectRecipeReply(page([message({}, content)]), binding, requestId, 1).kind).toBe(
+        'pending',
+      );
       expect(() =>
         selectRecipeReply(
           page([message({}, { ...content, policy_digest: 'bad' })]),
@@ -127,15 +128,20 @@ describe('exact recipe reply attribution', () => {
       kind: 'reply',
       messageId: '04'.repeat(16),
     });
+    expect(() => selectRecipeReply(page([second, first]), binding, requestId, 1)).toThrow(
+      'invalid_response',
+    );
     expect(() =>
-      selectRecipeReply(page([second, first]), binding, requestId, 1),
+      selectRecipeReply(
+        page([first, { ...second, message_id: first.message_id }]),
+        binding,
+        requestId,
+        1,
+      ),
     ).toThrow('invalid_response');
-    expect(() =>
-      selectRecipeReply(page([first, { ...second, message_id: first.message_id }]), binding, requestId, 1),
-    ).toThrow('invalid_response');
-    expect(() =>
-      selectRecipeReply(page([first, second]), binding, requestId, 1, 1),
-    ).toThrow('invalid_response');
+    expect(() => selectRecipeReply(page([first, second]), binding, requestId, 1, 1)).toThrow(
+      'invalid_response',
+    );
   });
 
   it('rejects malformed attribution and never uses legacy implicit text content', () => {
@@ -158,9 +164,9 @@ describe('exact recipe reply attribution', () => {
       { text: 'x'.repeat(recipeMessageBytes + 1) },
       { extra: 'content must not leak in errors' },
     ]) {
-      expect(() =>
-        selectRecipeReply(page([message(overrides)]), binding, requestId, 1),
-      ).toThrow('invalid_response');
+      expect(() => selectRecipeReply(page([message(overrides)]), binding, requestId, 1)).toThrow(
+        'invalid_response',
+      );
     }
   });
 
