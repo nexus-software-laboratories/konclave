@@ -14538,9 +14538,7 @@ mod tests {
             &fixture,
             administrator,
             73,
-            MembershipChange::RemoveMember(KonclaveDomainCore::RemoveMember::new(
-                fixture.device_id,
-            )),
+            MembershipChange::Remove(KonclaveDomainCore::RemoveMember::new(fixture.device_id)),
         );
         fixture
             .store
@@ -14636,7 +14634,7 @@ mod tests {
             2,
             sender,
             2,
-            ApplicationContent::RepeatPairingRequest(
+            ApplicationContent::RepeatPairingRequest(Box::new(
                 KonclaveDomainCore::RepeatPairingRequest::new(
                     KonclaveDomainCore::RepeatPairingOperationId::from_bytes([48; 16]),
                     fixture.device_id,
@@ -14644,7 +14642,7 @@ mod tests {
                     2_000,
                 )
                 .unwrap(),
-            ),
+            )),
         );
         fixture
             .store

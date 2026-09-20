@@ -64,14 +64,6 @@ jobs:
           cargo fmt --package KonclaveDomainCore -- --check
           cargo test --locked --package KonclaveDomainCore delivery_diagnostics::tests
           cargo clippy --locked --package KonclaveDomainCore --all-targets -- -D warnings
-      - name: Verify authenticated persistence and service projections
-        if: steps.scope.outputs.run == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --package KonclaveLocalDaemon -- --check
-          cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
-          cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
       - name: Resolve pinned Node version
         if: steps.scope.outputs.run == 'true'
         id: toolchains
@@ -87,7 +79,7 @@ jobs:
           node-version: ${{ steps.toolchains.outputs.node }}
           npm-cache-scope: local-delivery-diagnostics-conformance
           npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
-      - name: Verify deterministic client diagnostics
+      - name: Prepare client formatting evidence
         if: steps.scope.outputs.run == 'true'
         working-directory: extensions/Konclave.HostExtension
         shell: bash
@@ -95,7 +87,25 @@ jobs:
           set -euo pipefail
           npm ci
           npm run format
-          git diff --exit-code
+          git diff
+      - name: Verify deterministic client diagnostics
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        shell: bash
+        run: |
+          set -euo pipefail
           npm run lint
           npm run typecheck
           npm exec -- vitest run tests/delivery-diagnostics.test.ts tests/generic-command.test.ts
+      - name: Verify authenticated persistence and service projections
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
+          cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
+      - name: Require unchanged submitted formatting
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: git diff --exit-code
