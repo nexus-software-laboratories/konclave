@@ -295,7 +295,8 @@ describe('external recipe definition', () => {
     { text: canonicalJson.replace('""}', 'null}'), code: 'invalid_configuration' },
   ] satisfies readonly { text: string; code: RecipeDefinitionErrorCode }[])(
     'validates decoded root shape and every field',
-    ({ text, code }) => rejects(() => decodeRecipeDefinition(Buffer.from(text), digest(text)), code),
+    ({ text, code }) =>
+      rejects(() => decodeRecipeDefinition(Buffer.from(text), digest(text)), code),
   );
 
   it('rejects shared, detached, and proxied byte storage', () => {
