@@ -10,6 +10,7 @@ $contracts = [ordered]@{
     'ci.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]'
     'workflow-syntax.yml' = '    types: [opened, synchronize, reopened]'
     'a2a-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]'
+    'a2a-discovery-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'adapter-conformance.yml' = '    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]'
     'actions-storage-conformance.yml' = '    types: [opened, synchronize, reopened]'
     'agent-plugin-conformance.yml' = '    types: [opened, synchronize, reopened]'

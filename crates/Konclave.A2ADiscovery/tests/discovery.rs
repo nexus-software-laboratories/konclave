@@ -1,14 +1,14 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 
 use KonclaveA2AContracts::{
     InitialA2AInterfaceEnvironment, InitialA2ANegotiatedTrust, InitialA2ATrustRequirement,
 };
 use KonclaveA2ADiscovery::{
-    A2ADiscoveryAction, A2ADiscoveryAuthorizationDecision, A2ADiscoveryAuthorizer,
-    A2ADiscoveryError, FileA2AAgentCatalog, MAX_A2A_AGENT_PUBLICATION_SOURCE_BYTES,
-    OASF_LANGUAGE_GENERATION_SKILL, OASF_RELEASE_COMMIT, OASF_SCHEMA_VERSION,
-    compile_a2a_agent_publication_source,
+    A2AAgentCatalog, A2ADiscoveryAction, A2ADiscoveryAuthorizationDecision, A2ADiscoveryAuthorizer,
+    A2ADiscoveryError, FileA2AAgentCatalog, MAX_A2A_AGENT_CATALOG_ENTRIES,
+    MAX_A2A_AGENT_PUBLICATION_SOURCE_BYTES, OASF_LANGUAGE_GENERATION_SKILL, OASF_RELEASE_COMMIT,
+    OASF_SCHEMA_VERSION, compile_a2a_agent_publication_source,
 };
 use KonclaveA2ADomain::A2AAgentId;
 use serde_json::{Value, json};
@@ -331,6 +331,10 @@ fn file_catalog_is_explicit_eager_and_private_by_default() {
     let catalog =
         FileA2AAgentCatalog::open(&catalog_path, InitialA2AInterfaceEnvironment::Production)
             .unwrap();
+    assert_catalog_views(&catalog);
+}
+
+fn assert_catalog_views(catalog: &A2AAgentCatalog) {
     let private = A2AAgentId::parse("agent-a").unwrap();
     let public = A2AAgentId::parse("agent-b").unwrap();
     let absent = A2AAgentId::parse("agent-c").unwrap();
@@ -380,6 +384,10 @@ fn authorization_runs_before_private_lookup_and_never_falls_back() {
     let catalog =
         FileA2AAgentCatalog::open(&catalog_path, InitialA2AInterfaceEnvironment::Production)
             .unwrap();
+    assert_authorization_boundaries(&catalog);
+}
+
+fn assert_authorization_boundaries(catalog: &A2AAgentCatalog) {
     let existing = A2AAgentId::parse("agent-a").unwrap();
     let missing = A2AAgentId::parse("agent-z").unwrap();
     let deny = RecordingAuthorizer::new(A2ADiscoveryAuthorizationDecision::Deny);
@@ -415,6 +423,226 @@ fn authorization_runs_before_private_lookup_and_never_falls_back() {
         catalog.private_card(&missing, &allow).err(),
         Some(A2ADiscoveryError::PublicationNotFound)
     );
+    for decision in [
+        A2ADiscoveryAuthorizationDecision::Deny,
+        A2ADiscoveryAuthorizationDecision::Unavailable,
+    ] {
+        let expected = match decision {
+            A2ADiscoveryAuthorizationDecision::Deny => A2ADiscoveryError::Unauthorized,
+            A2ADiscoveryAuthorizationDecision::Unavailable => {
+                A2ADiscoveryError::AuthorizationUnavailable
+            }
+            A2ADiscoveryAuthorizationDecision::Allow => unreachable!(),
+        };
+        let authorizer = RecordingAuthorizer::new(decision);
+        for identifier in [&existing, &missing] {
+            assert_eq!(
+                catalog.private_card(identifier, &authorizer).err().as_ref(),
+                Some(&expected)
+            );
+            assert_eq!(
+                catalog
+                    .extended_card(identifier, &authorizer)
+                    .err()
+                    .as_ref(),
+                Some(&expected)
+            );
+            assert_eq!(
+                catalog.oasf_record(identifier, &authorizer).err().as_ref(),
+                Some(&expected)
+            );
+        }
+        assert_eq!(catalog.list(&authorizer).err().as_ref(), Some(&expected));
+        assert_eq!(authorizer.calls.borrow().len(), 7);
+    }
+}
+
+#[test]
+fn compiled_snapshot_shares_file_catalog_visibility_and_authorization() {
+    let sources = [
+        publication("agent-b", true, false, false),
+        publication("agent-a", false, true, true),
+    ];
+    let catalog = A2AAgentCatalog::try_from_publications(sources.iter().map(|source| {
+        compile_a2a_agent_publication_source(source, InitialA2AInterfaceEnvironment::Production)
+    }))
+    .unwrap();
+    assert_catalog_views(&catalog);
+    assert_authorization_boundaries(&catalog);
+}
+
+#[test]
+fn compiled_snapshot_rejects_duplicate_names_and_producer_failure() {
+    let duplicate = A2AAgentCatalog::try_from_publications((0..2).map(|_| {
+        compile_a2a_agent_publication_source(
+            &publication("agent-a", false, false, false),
+            InitialA2AInterfaceEnvironment::Production,
+        )
+    }));
+    assert_eq!(
+        duplicate.err(),
+        Some(A2ADiscoveryError::DuplicateCatalogEntry { field: "name" })
+    );
+
+    let consumed = Cell::new(0);
+    let failed = A2AAgentCatalog::try_from_publications((0..3).map(|index| {
+        consumed.set(consumed.get() + 1);
+        if index == 1 {
+            return Err(A2ADiscoveryError::DocumentUnavailable {
+                document: "publication",
+            });
+        }
+        compile_a2a_agent_publication_source(
+            &publication(&format!("agent-{index}"), false, false, false),
+            InitialA2AInterfaceEnvironment::Production,
+        )
+    }));
+    assert_eq!(
+        failed.err(),
+        Some(A2ADiscoveryError::DocumentUnavailable {
+            document: "publication"
+        })
+    );
+    assert_eq!(consumed.get(), 2);
+}
+
+#[test]
+fn compiled_snapshot_has_exact_capacity_and_bounded_consumption() {
+    let allow = RecordingAuthorizer::new(A2ADiscoveryAuthorizationDecision::Allow);
+    let empty = A2AAgentCatalog::try_from_publications(std::iter::empty()).unwrap();
+    assert!(empty.list(&allow).unwrap().is_empty());
+
+    for count in [
+        MAX_A2A_AGENT_CATALOG_ENTRIES,
+        MAX_A2A_AGENT_CATALOG_ENTRIES + 2,
+    ] {
+        let consumed = Cell::new(0);
+        let result = A2AAgentCatalog::try_from_publications((0..count).map(|index| {
+            consumed.set(consumed.get() + 1);
+            compile_a2a_agent_publication_source(
+                &publication(&format!("agent-{index}"), false, false, false),
+                InitialA2AInterfaceEnvironment::Production,
+            )
+        }));
+        if count == MAX_A2A_AGENT_CATALOG_ENTRIES {
+            assert_eq!(result.unwrap().list(&allow).unwrap().len(), count);
+            assert_eq!(consumed.get(), count);
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(A2ADiscoveryError::CatalogCapacityExceeded {
+                    maximum: MAX_A2A_AGENT_CATALOG_ENTRIES
+                })
+            );
+            assert_eq!(consumed.get(), MAX_A2A_AGENT_CATALOG_ENTRIES + 1);
+        }
+    }
+}
+
+#[test]
+fn compiled_snapshot_preserves_protected_required_negotiation() {
+    let mut source: Value =
+        serde_json::from_slice(&publication("agent-a", false, false, false)).unwrap();
+    source["spec"]["protectedProfile"] = json!({
+        "required": true,
+        "relayEndpoint": "https://relay.example.com/"
+    });
+    let compiled = compile_a2a_agent_publication_source(
+        &serde_json::to_vec(&source).unwrap(),
+        InitialA2AInterfaceEnvironment::Production,
+    );
+    let catalog = A2AAgentCatalog::try_from_publications([compiled]).unwrap();
+    let allow = RecordingAuthorizer::new(A2ADiscoveryAuthorizationDecision::Allow);
+    let agent_id = A2AAgentId::parse("agent-a").unwrap();
+    let card = catalog.private_card(&agent_id, &allow).unwrap();
+    assert!(card.protected_profile().unwrap().required());
+    assert!(!card.streaming());
+    assert!(matches!(
+        card.negotiate_trust(InitialA2ATrustRequirement::RequireKonclaveProtected)
+            .unwrap(),
+        InitialA2ANegotiatedTrust::KonclaveProtected(_)
+    ));
+    assert!(
+        card.negotiate_trust(InitialA2ATrustRequirement::AllowStandardBridge)
+            .is_err()
+    );
+    assert!(catalog.public_card(&agent_id).is_none());
+}
+
+#[test]
+#[ignore = "explicit hosted release-profile performance evidence"]
+fn compiled_snapshot_lookup_performance_evidence() {
+    struct CountingAuthorizer(Cell<u64>);
+
+    impl A2ADiscoveryAuthorizer for CountingAuthorizer {
+        fn authorize(
+            &self,
+            _action: A2ADiscoveryAction,
+            _agent_id: Option<&A2AAgentId>,
+        ) -> A2ADiscoveryAuthorizationDecision {
+            self.0.set(self.0.get() + 1);
+            A2ADiscoveryAuthorizationDecision::Allow
+        }
+    }
+
+    const BATCHES: usize = 12;
+    const LOOKUPS_PER_BATCH: u64 = 20_000;
+    let root = tempfile::tempdir().unwrap();
+    let mut sources = Vec::with_capacity(MAX_A2A_AGENT_CATALOG_ENTRIES);
+    let mut entries = Vec::with_capacity(MAX_A2A_AGENT_CATALOG_ENTRIES);
+    for index in 0..MAX_A2A_AGENT_CATALOG_ENTRIES {
+        let id = format!("agent-{index}");
+        let file = format!("{id}.json");
+        let source = publication(&id, false, true, true);
+        std::fs::write(root.path().join(&file), &source).unwrap();
+        entries.push(json!({"name": id, "source": file}));
+        sources.push(source);
+    }
+    let descriptor = root.path().join("catalog.json");
+    std::fs::write(
+        &descriptor,
+        serde_json::to_vec(&json!({"schemaVersion": 1, "entries": entries})).unwrap(),
+    )
+    .unwrap();
+    let file =
+        FileA2AAgentCatalog::open(&descriptor, InitialA2AInterfaceEnvironment::Production).unwrap();
+    let compiled = A2AAgentCatalog::try_from_publications(sources.iter().map(|source| {
+        compile_a2a_agent_publication_source(source, InitialA2AInterfaceEnvironment::Production)
+    }))
+    .unwrap();
+    let catalogs = [&file, &compiled];
+    let identifier = A2AAgentId::parse("agent-63").unwrap();
+    let authorizer = CountingAuthorizer(Cell::new(0));
+    let mut samples = [Vec::with_capacity(BATCHES), Vec::with_capacity(BATCHES)];
+    for batch in 0..BATCHES {
+        let order = if batch % 2 == 0 { [0, 1] } else { [1, 0] };
+        for index in order {
+            let start = std::time::Instant::now();
+            for _ in 0..LOOKUPS_PER_BATCH {
+                std::hint::black_box(
+                    catalogs[index]
+                        .private_card(std::hint::black_box(&identifier), &authorizer)
+                        .unwrap(),
+                );
+            }
+            samples[index].push(start.elapsed().as_nanos() / u128::from(LOOKUPS_PER_BATCH));
+        }
+    }
+    assert_eq!(
+        authorizer.0.get(),
+        u64::try_from(BATCHES).unwrap() * LOOKUPS_PER_BATCH * 2
+    );
+    for (source, mut sample) in ["file-baseline", "compiled-snapshot"]
+        .into_iter()
+        .zip(samples)
+    {
+        sample.sort_unstable();
+        eprintln!(
+            "catalog_lookup source={source} publications={} batches={BATCHES} lookups_per_batch={LOOKUPS_PER_BATCH} median_nanoseconds={} authorizations_per_lookup=1",
+            MAX_A2A_AGENT_CATALOG_ENTRIES,
+            (sample[BATCHES / 2 - 1] + sample[BATCHES / 2]) / 2
+        );
+    }
 }
 
 #[test]

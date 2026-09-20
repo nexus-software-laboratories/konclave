@@ -2,6 +2,23 @@
 
 Set-StrictMode -Version Latest
 
+function Test-ActionsRustCacheSavePolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Lines
+    )
+
+    $declarations = @($Lines | Where-Object { $_ -cmatch '^\s+save-if:' })
+    $allowed = @(
+        "          save-if: `${{ github.ref == 'refs/heads/main' }}"
+        '          save-if: false'
+    )
+    return $declarations.Count -eq 1 -and $declarations[0] -cin $allowed
+}
+
 function Get-ActionsArtifactWorkflowRunIds {
     [CmdletBinding()]
     param(

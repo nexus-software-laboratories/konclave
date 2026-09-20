@@ -6,6 +6,37 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ActionsStoragePolicy.Functions.ps1')
 
+$mainOnlySave = "          save-if: `${{ github.ref == 'refs/heads/main' }}"
+$disabledSave = '          save-if: false'
+$savePolicyCases = @(
+    @{ name = 'main only'; lines = @($mainOnlySave); allowed = $true },
+    @{ name = 'restore only'; lines = @($disabledSave); allowed = $true },
+    @{ name = 'missing'; lines = @(); allowed = $false },
+    @{ name = 'unconditional'; lines = @('          save-if: true'); allowed = $false },
+    @{ name = 'empty'; lines = @('          save-if:'); allowed = $false },
+    @{
+        name = 'pull request'
+        lines = @("          save-if: `${{ github.event_name == 'pull_request' }}")
+        allowed = $false
+    },
+    @{
+        name = 'overridden main guard'
+        lines = @($mainOnlySave, '          save-if: true')
+        allowed = $false
+    },
+    @{
+        name = 'duplicate disabled guard'
+        lines = @($disabledSave, $disabledSave)
+        allowed = $false
+    }
+)
+foreach ($case in $savePolicyCases) {
+    if ((Test-ActionsRustCacheSavePolicy -Lines $case.lines) -ne $case.allowed) {
+        throw "Rust cache save policy failed: $($case.name)"
+    }
+}
+Write-Output "Rust cache save policy tests passed: $($savePolicyCases.Count) cases."
+
 function New-Artifact {
     param(
         [long]$Id,

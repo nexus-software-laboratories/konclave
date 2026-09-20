@@ -107,6 +107,14 @@ harness before executing external code. Ready and draft transitions still rerun
 validation because execution scope depends on that state. Metadata edits retain the
 existing exact-head result instead of scheduling another scope-only runner.
 
+`A2A discovery conformance` is the draft-capable foundation gate for bounded
+publication compilation and catalog authorization. It uses the shared ownership
+resolver, runs only the discovery crate's format, tests, doc tests, and all-target
+Clippy, and does not invoke the external A2A suite, a model, or a gateway process.
+The gate restores existing dependency caches without creating another cache producer.
+Its release-profile comparison records lookup cost for file and compiled snapshots
+without a separate runner job or a wall-clock correctness threshold.
+
 The adapter-conformance workflow follows the same hosted-only boundary. Its stable
 check validates the persistent shared-local-service client, harness-neutral adapter
 SDK, immutable delivery fixture, and fake-harness claim/crash/reclaim lifecycle. It

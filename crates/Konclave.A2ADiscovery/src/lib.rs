@@ -8,7 +8,8 @@ mod oasf;
 mod source;
 
 pub use catalog::{
-    FileA2AAgentCatalog, MAX_A2A_AGENT_CATALOG_BYTES, MAX_A2A_AGENT_CATALOG_ENTRIES,
+    A2AAgentCatalog, FileA2AAgentCatalog, MAX_A2A_AGENT_CATALOG_BYTES,
+    MAX_A2A_AGENT_CATALOG_ENTRIES,
 };
 pub use error::A2ADiscoveryError;
 pub use model::{
