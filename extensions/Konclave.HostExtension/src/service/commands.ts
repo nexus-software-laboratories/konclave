@@ -14,10 +14,7 @@ import {
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
 import { parseServiceStatus } from './delivery.js';
-import {
-  formatMessageDeliveryStatus,
-  getMessageDeliveryStatus,
-} from './delivery-diagnostics.js';
+import { formatMessageDeliveryStatus, getMessageDeliveryStatus } from './delivery-diagnostics.js';
 import { isRecord, requireHexIdentifier } from './validation.js';
 import {
   serviceOperations,

@@ -15,15 +15,19 @@ const descriptions = {
   outbound_expired: 'The local outbound operation expired without observed acceptance.',
   outbound_removed: 'Authenticated membership removal stopped the local outbound operation.',
   inbound_prepared: 'Inbound content is sealed; contiguous local completion was not observed.',
-  persisted_inbound: 'Inbound completion is verified; no notification remains in the local journal.',
+  persisted_inbound:
+    'Inbound completion is verified; no notification remains in the local journal.',
   awaiting_harness_delivery: 'The local notification is waiting for an eligible harness consumer.',
-  claimed_for_delivery: 'A local consumer claimed the notification; acknowledgment is not recorded.',
-  acknowledged_by_harness: 'The harness acknowledged the notification. This does not prove model execution.',
+  claimed_for_delivery:
+    'A local consumer claimed the notification; acknowledgment is not recorded.',
+  acknowledged_by_harness:
+    'The harness acknowledged the notification. This does not prove model execution.',
   delivery_suppressed: 'Local delivery policy suppressed this notification.',
   request_claim_recorded:
     'A request claim has a future recorded expiry. Its consumer is not proven live by this observation.',
   request_claim_expired: 'The recorded request claim expired. This is not permission to retry.',
-  response_reserved: 'One correlated response is reserved, but submission or delivery is not proven.',
+  response_reserved:
+    'One correlated response is reserved, but submission or delivery is not proven.',
   completed_without_response: 'Local request handling ended without reserving a response.',
 } as const;
 

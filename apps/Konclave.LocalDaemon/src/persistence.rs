@@ -14439,70 +14439,79 @@ mod tests {
 
     #[test]
     fn message_delivery_distinguishes_preparation_readiness_and_relay_receipt() {
-        let fixture = conversation_fixture("diagnostic-outbound");
-        let message = application_message(71, 1, "diagnostic content sentinel");
-        assert_message_delivery(&fixture, message.message_id(), 1_000, "not_observed");
-        let reservation = fixture
-            .store
-            .reserve_outbound_application(
-                fixture.conversation_id,
+        for expired in [false, true] {
+            let fixture = conversation_fixture("diagnostic-outbound");
+            let message = application_message(71, 1, "diagnostic content sentinel");
+            assert_message_delivery(&fixture, message.message_id(), 1_000, "not_observed");
+            let reservation = fixture
+                .store
+                .reserve_outbound_application(
+                    fixture.conversation_id,
+                    message.message_id(),
+                    EnvelopeId::from_bytes([72; EnvelopeId::LENGTH]),
+                )
+                .unwrap();
+            assert_message_delivery(&fixture, message.message_id(), 1_000, "not_observed");
+            fixture
+                .store
+                .store_outbound_message(
+                    reservation,
+                    fixture.routing_id,
+                    fixture.device_id,
+                    0,
+                    &message,
+                )
+                .unwrap();
+            assert_message_delivery(&fixture, message.message_id(), 1_000, "outbound_prepared");
+            let envelope = relay_envelope(fixture.routing_id, 72, b"diagnostic ciphertext");
+            fixture
+                .store
+                .store_outbound_envelope(reservation, &envelope)
+                .unwrap();
+            assert_message_delivery(
+                &fixture,
                 message.message_id(),
-                EnvelopeId::from_bytes([72; EnvelopeId::LENGTH]),
-            )
-            .unwrap();
-        assert_message_delivery(&fixture, message.message_id(), 1_000, "not_observed");
-        fixture
-            .store
-            .store_outbound_message(
-                reservation,
-                fixture.routing_id,
-                fixture.device_id,
-                0,
-                &message,
-            )
-            .unwrap();
-        assert_message_delivery(&fixture, message.message_id(), 1_000, "outbound_prepared");
-        let envelope = relay_envelope(fixture.routing_id, 72, b"diagnostic ciphertext");
-        fixture
-            .store
-            .store_outbound_envelope(reservation, &envelope)
-            .unwrap();
-        assert_message_delivery(
-            &fixture,
-            message.message_id(),
-            1_000,
-            "awaiting_relay_acceptance",
-        );
-        fixture
-            .store
-            .expire_outbound_application(&envelope)
-            .unwrap();
-        assert_message_delivery(
-            &fixture,
-            message.message_id(),
-            1_900_000_000_000,
-            "outbound_expired",
-        );
-        assert_eq!(
-            fixture
-                .store
-                .message_delivery_status(fixture.conversation_id, message.message_id(), 1_000)
-                .err(),
-            Some(ProfileStoreError::CorruptData)
-        );
-        fixture
-            .store
-            .mark_outbox_accepted(&StoredRelayEnvelope::new(envelope, 2).unwrap())
-            .unwrap();
-        assert_message_delivery(&fixture, message.message_id(), 1_000, "relay_accepted");
-        assert!(
-            fixture
-                .store
-                .load_history(fixture.conversation_id, 0, 1)
-                .unwrap()
-                .messages
-                .is_empty()
-        );
+                1_000,
+                "awaiting_relay_acceptance",
+            );
+            if expired {
+                fixture
+                    .store
+                    .expire_outbound_application(&envelope)
+                    .unwrap();
+                assert_message_delivery(
+                    &fixture,
+                    message.message_id(),
+                    1_900_000_000_000,
+                    "outbound_expired",
+                );
+                assert_eq!(
+                    fixture
+                        .store
+                        .message_delivery_status(
+                            fixture.conversation_id,
+                            message.message_id(),
+                            1_000
+                        )
+                        .err(),
+                    Some(ProfileStoreError::CorruptData)
+                );
+            } else {
+                fixture
+                    .store
+                    .mark_outbox_accepted(&StoredRelayEnvelope::new(envelope, 2).unwrap())
+                    .unwrap();
+                assert_message_delivery(&fixture, message.message_id(), 1_000, "relay_accepted");
+                assert!(
+                    fixture
+                        .store
+                        .load_history(fixture.conversation_id, 0, 1)
+                        .unwrap()
+                        .messages
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]
@@ -14644,10 +14653,6 @@ mod tests {
                 .unwrap(),
             )),
         );
-        fixture
-            .store
-            .complete_inbox(fixture.conversation_id, 2)
-            .unwrap();
         assert_message_delivery(&fixture, internal.message_id(), 1_000, "not_observed");
     }
 

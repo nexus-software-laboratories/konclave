@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createKonclaveCommands } from '../src/service/commands.js';
-import {
-  LocalServiceError,
-  type LocalServiceClient,
-} from '../src/service/client.js';
+import { LocalServiceError, type LocalServiceClient } from '../src/service/client.js';
 import {
   formatMessageDeliveryStatus,
   getMessageDeliveryStatus,
@@ -133,11 +130,7 @@ describe('local delivery diagnostics', () => {
     ];
     for (const [selectedConversation, selectedMessage] of invalidSelectors) {
       await expect(
-        getMessageDeliveryStatus(
-          client(request),
-          selectedConversation,
-          selectedMessage,
-        ),
+        getMessageDeliveryStatus(client(request), selectedConversation, selectedMessage),
       ).rejects.toThrow('hex');
     }
     expect(request).not.toHaveBeenCalled();
@@ -151,9 +144,9 @@ describe('local delivery diagnostics', () => {
   it('does not fallback or fabricate an outcome when the service rejects the operation', async () => {
     const error = new LocalServiceError('get_message_delivery_status', 'unknown_operation');
     const request = vi.fn<LocalServiceClient['request']>().mockRejectedValue(error);
-    await expect(
-      getMessageDeliveryStatus(client(request), conversation, message),
-    ).rejects.toBe(error);
+    await expect(getMessageDeliveryStatus(client(request), conversation, message)).rejects.toBe(
+      error,
+    );
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -220,9 +213,7 @@ describe('local delivery diagnostics', () => {
       commandName: 'konclave',
       sessionId: 'diagnostic-test',
     });
-    expect(lines.at(-1)).toBe(
-      'konclave: get_message_delivery_status failed (unknown_operation)',
-    );
+    expect(lines.at(-1)).toBe('konclave: get_message_delivery_status failed (unknown_operation)');
     expect(request).toHaveBeenCalledTimes(1);
   });
 });
