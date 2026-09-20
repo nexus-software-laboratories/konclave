@@ -109,13 +109,9 @@ export function requireRecipeRecord(
     throw new RecipeDefinitionError('invalid_object');
   }
   const keys = Reflect.ownKeys(input);
-  if (
-    keys.length !== fields.length ||
-    !fields.every((field) => keys.includes(field))
-  ) {
+  if (keys.length !== fields.length || !fields.every((field) => keys.includes(field))) {
     throw new RecipeDefinitionError('invalid_fields');
   }
-
 }
 
 /**
@@ -130,9 +126,7 @@ export function requireRecipeRecord(
  */
 export function decodeRecipeDefinition(input: unknown, expectedDigest: unknown): RecipeDefinition {
   const { bytes, value } = decodeRecipeData(input, recipeDefinitionLimits.encodedBytes);
-  if (
-    !isRecipeHex(expectedDigest, 64)
-  ) {
+  if (!isRecipeHex(expectedDigest, 64)) {
     throw new RecipeDefinitionError('invalid_digest');
   }
   const definition = createRecipeDefinition(value);
@@ -146,11 +140,7 @@ export function decodeRecipeDefinition(input: unknown, expectedDigest: unknown):
 }
 
 export function isRecipeHex(value: unknown, characters: number): value is string {
-  return (
-    typeof value === 'string' &&
-    value.length === characters &&
-    /^[0-9a-f]+$/u.test(value)
-  );
+  return typeof value === 'string' && value.length === characters && /^[0-9a-f]+$/u.test(value);
 }
 
 export function decodeRecipeData(

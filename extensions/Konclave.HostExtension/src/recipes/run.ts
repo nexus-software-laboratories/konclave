@@ -86,7 +86,7 @@ function data<T>(operation: () => T): T {
   }
 }
 
-function binding(value: unknown): RecipeBinding {
+export function parseRecipeBinding(value: unknown): RecipeBinding {
   requireRecipeRecord(value, bindingFields);
   const name = recipeDataProperty(value, 'name');
   const conversationId = recipeDataProperty(value, 'conversationId');
@@ -148,7 +148,7 @@ export function createRecipeRun(
     const names = new Set<string>();
     const bindings: RecipeBinding[] = [];
     for (let index = 0; index < selectedBindings.length; index += 1) {
-      const selected = binding(recipeDataProperty(selectedBindings, String(index)));
+      const selected = parseRecipeBinding(recipeDataProperty(selectedBindings, String(index)));
       if (names.has(selected.name)) {
         throw new RecipeRunError('duplicate_binding');
       }
@@ -193,7 +193,10 @@ export function createRecipeRun(
       bindings,
       input,
     });
-    const runId = createHash('sha256').update(runDomain).update(canonicalJson, 'utf8').digest('hex');
+    const runId = createHash('sha256')
+      .update(runDomain)
+      .update(canonicalJson, 'utf8')
+      .digest('hex');
     return Object.freeze({
       definition,
       profile,
