@@ -4,6 +4,16 @@ Set-StrictMode -Version Latest
 
 function Get-ComponentValidationContracts {
     return [ordered]@{
+        'a2a-discovery' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/a2a-discovery-conformance\.yml$'
+            '^crates/Konclave\.(?:A2AContracts|A2ADiscovery|A2ADomain|BoundedDocuments|DomainCore)/'
+            '^docs/development/a2a-discovery\.md$'
+            '^fixtures/a2a/'
+            '^third_party/a2a/'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'client-runtime-config' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'

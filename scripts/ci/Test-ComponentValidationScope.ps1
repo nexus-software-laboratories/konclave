@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $contracts = Get-ComponentValidationContracts
 $expectedContracts = @(
+    'a2a-discovery'
     'client-runtime-config'
     'generic-client'
     'installer-lifecycle'
@@ -23,6 +24,7 @@ if (($contracts.Keys -join ',') -cne ($expectedContracts -join ',')) {
 }
 
 $workflowByContract = [ordered]@{
+    'a2a-discovery' = 'a2a-discovery-conformance.yml'
     'client-runtime-config' = 'client-runtime-config-conformance.yml'
     'generic-client' = 'generic-client-conformance.yml'
     'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
@@ -71,6 +73,8 @@ foreach ($contract in $expectedContracts) {
 }
 
 $ownedCases = [ordered]@{
+    'a2a-discovery' =
+        'crates/Konclave.A2ADiscovery/src/catalog.rs'
     'client-runtime-config' =
         'extensions/Konclave.HostExtension/src/service/config.ts'
     'generic-client' =

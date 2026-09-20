@@ -8,6 +8,7 @@
     "CI",
     "Workflow syntax",
     "A2A conformance",
+    "A2A discovery conformance",
     "Adapter conformance",
     "Actions storage conformance",
     "Agent plugin conformance",
@@ -63,6 +64,7 @@
         "release-publication-conformance",
         "authorize-storage-cleanup",
         "a2a-conformance",
+        "a2a-discovery-conformance",
         "adapter-conformance",
         "actions-storage-conformance",
         "agent-plugin-conformance",
@@ -129,6 +131,17 @@
       "draftBehavior": "ready-only",
       "requiredChecks": [
         "A2A conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/a2a-discovery-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "A2A discovery conformance"
       ]
     },
     {

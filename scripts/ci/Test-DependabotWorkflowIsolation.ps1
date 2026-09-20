@@ -9,6 +9,7 @@ $workflows = Join-Path $repositoryRoot '.github' 'workflows'
 $expectations = [ordered]@{
     'ci.yml' = @('validation-plan')
     'a2a-conformance.yml' = @('a2a-conformance')
+    'a2a-discovery-conformance.yml' = @('a2a-discovery-conformance')
     'actions-storage-conformance.yml' = @('actions-storage-conformance')
     'adapter-conformance.yml' = @('adapter-conformance')
     'agent-plugin-conformance.yml' = @('agent-plugin-conformance')
