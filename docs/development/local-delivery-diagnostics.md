@@ -94,3 +94,12 @@ inside the existing trusted daemon; only the finite projection crosses local IPC
 
 Output is not automatically exported. Even body-free status can disclose activity;
 any saved output or support handoff remains an explicit operator disclosure.
+
+## Performance evidence
+
+The focused hosted gate compares release-profile inspection against the existing
+single-history-row read in the same sealed 64-message profile. Alternating batches
+record median per-call cost and assert zero database writes under SQLite query-only
+mode. It measures small-message, on-demand storage work, not a production latency
+percentile or an end-to-end messaging speedup. No timing threshold decides
+correctness, and no recurring diagnostic work is added to the message hot path.

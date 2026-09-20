@@ -105,6 +105,14 @@ jobs:
           cargo fmt --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
           cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
+      - name: Measure on-demand inspection overhead
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --package KonclaveLocalDaemon --lib \
+            persistence::tests::message_delivery_inspection_performance_evidence \
+            -- --ignored --exact --nocapture
       - name: Require unchanged submitted formatting
         if: steps.scope.outputs.run == 'true'
         shell: bash

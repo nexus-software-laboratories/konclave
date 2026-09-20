@@ -14809,6 +14809,85 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "explicit hosted release-profile inspection overhead evidence"]
+    fn message_delivery_inspection_performance_evidence() {
+        const BATCHES: usize = 10;
+        const READS: u64 = 100;
+        let fixture = conversation_fixture("diagnostic-performance");
+        let sender = DeviceId::from_bytes([44; DeviceId::LENGTH]);
+        let mut message_id = MessageId::from_bytes([0; MessageId::LENGTH]);
+        for identifier in 1..=64_u8 {
+            let message = stage_remote_inbox_message(
+                &fixture,
+                u64::from(identifier),
+                identifier,
+                sender,
+                u64::from(identifier),
+            );
+            message_id = message.message_id();
+            fixture
+                .store
+                .complete_inbox_with_notification(
+                    fixture.conversation_id,
+                    u64::from(identifier),
+                    NotificationId::from_bytes([identifier; NotificationId::LENGTH]),
+                )
+                .unwrap();
+        }
+        let changes = || {
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = changes();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .pragma_update(None, "query_only", true)
+            .unwrap();
+        let mut samples = [Vec::with_capacity(BATCHES), Vec::with_capacity(BATCHES)];
+        for batch in 0..BATCHES {
+            let order = if batch % 2 == 0 { [0, 1] } else { [1, 0] };
+            for index in order {
+                let start = std::time::Instant::now();
+                for _ in 0..READS {
+                    if index == 0 {
+                        std::hint::black_box(
+                            fixture
+                                .store
+                                .load_history(fixture.conversation_id, 63, 1)
+                                .unwrap(),
+                        );
+                    } else {
+                        std::hint::black_box(
+                            fixture
+                                .store
+                                .message_delivery_status(fixture.conversation_id, message_id, 1_000)
+                                .unwrap(),
+                        );
+                    }
+                }
+                samples[index].push(start.elapsed().as_nanos() / u128::from(READS));
+            }
+        }
+        assert_eq!(changes(), before);
+        for (operation, mut sample) in ["single-history-row", "message-diagnostic"]
+            .into_iter()
+            .zip(samples)
+        {
+            sample.sort_unstable();
+            eprintln!(
+                "local_inspection operation={operation} history_rows=64 batches={BATCHES} reads_per_batch={READS} median_nanoseconds={} database_writes=0",
+                (sample[BATCHES / 2 - 1] + sample[BATCHES / 2]) / 2
+            );
+        }
+    }
+
+    #[test]
     fn history_hides_accepted_outbound_until_contiguous_echo_completion() {
         let fixture = conversation_fixture("history-contiguous-frontier");
         let message_id = MessageId::from_bytes([71; MessageId::LENGTH]);
