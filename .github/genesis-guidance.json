@@ -187,6 +187,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0028-external-recipe-composition.md",
+        "title": "ADR 0028: External recipe composition",
+        "section": "Architecture",
+        "order": 280,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

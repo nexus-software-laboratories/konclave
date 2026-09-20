@@ -27,6 +27,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0023: Encrypt compact pairing rendezvous at the endpoints](../adr/adr-0023-encrypted-pairing-rendezvous.md)
 - [ADR 0024: Require OPAQUE mutual verification for six-digit pairing codes](../adr/adr-0024-opaque-short-code-mutual-verification.md)
 - [ADR 0025: Bootstrap repeat pairing through an existing authenticated conversation](../adr/adr-0025-trusted-device-alias-bootstrap.md)
+- [ADR 0028: Keep recipe composition in explicitly selected external providers](../adr/adr-0028-external-recipe-composition.md)
 
 ## Superseded records
 
