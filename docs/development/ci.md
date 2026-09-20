@@ -115,6 +115,10 @@ changes. It also runs the focused local-service authorization-loss regression an
 Clippy over the service library, and type-checks the TypeScript fixture consumer
 before running its focused Vitest case.
 
+`Local delivery diagnostics conformance` runs the pure diagnostic classifier's
+finite-state and expiry-boundary cases while a pull request is draft. It uses the
+shared ownership resolver and does not require a live agent or model credentials.
+
 ## Native package validation
 
 `.github/workflows/package-validation.yml` builds Linux x64, Windows x64, macOS
