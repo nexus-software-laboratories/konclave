@@ -26,6 +26,32 @@ function Assert-PublicationCheckFails {
 }
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+function Assert-PackageValidationCallerPermissions {
+    param([string]$Workflow)
+
+    $job = [regex]::Match(
+        $Workflow,
+        '(?ms)^  package-validation:\r?\n(?<body>.*?)(?=^  [a-z][a-z0-9-]*:|\z)'
+    )
+    if (
+        -not $job.Success -or
+        $job.Groups['body'].Value -cnotmatch '(?m)^    uses: \./\.github/workflows/package-validation\.yml\r?$' -or
+        $job.Groups['body'].Value -cnotmatch '(?m)^    permissions:\r?\n      contents: read\r?\n      pull-requests: read\r?$'
+    ) {
+        throw 'Prerelease caller must grant the reusable package workflow both read permissions.'
+    }
+}
+
+$publicationWorkflow = Get-Content -LiteralPath (
+    Join-Path $projectRoot '.github' 'workflows' 'publish-prerelease.yml'
+) -Raw
+Assert-PackageValidationCallerPermissions -Workflow $publicationWorkflow
+Assert-PublicationCheckFails {
+    Assert-PackageValidationCallerPermissions -Workflow (
+        $publicationWorkflow.Replace('      pull-requests: read', '      pull-requests: none')
+    )
+} 'insufficient reusable workflow permissions'
+
 $sourceManifest = Read-PrereleaseContract -ProjectRoot $projectRoot
 $expectedTag = Get-PrereleaseTag -Manifest $sourceManifest
 $manifest = Assert-PrereleaseSourceVersions `
