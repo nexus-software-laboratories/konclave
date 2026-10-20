@@ -4,6 +4,12 @@ This repository is public. Every pull-request build, lint, test, packaging,
 conformance, policy, and container job runs on GitHub-hosted capacity. Pull-request
 validation never consumes PitCrew or another self-hosted runner.
 
+Rust validation uses `.github/actions/setup-rust` to resolve the exact compiler
+from `distribution/release-artifacts.json`, matching release packaging. Updating
+the compiler is an explicit manifest change, not a side effect of a new stable
+release. This keeps validation and shipped binaries on the same toolchain without
+suppressing compiler warnings or changing the supported source API.
+
 ## Runner lanes
 
 - `ubuntu-latest` runs Rust and Node builds, linting, tests, daemon packaging,

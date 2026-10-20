@@ -108,6 +108,23 @@ foreach ($entry in $ownedCases.GetEnumerator()) {
 }
 
 foreach ($contract in $expectedContracts) {
+    foreach ($toolchainPath in @(
+        '.github/actions/setup-rust/action.yml'
+        'distribution/release-artifacts.json'
+    )) {
+        $selected = Get-ComponentValidationDecision `
+            -Contract $contract `
+            -EventName pull_request `
+            -ChangedFiles @($toolchainPath)
+        $expected = $contract -cne 'external-recipes' -and
+            $contract -cne 'installer-lifecycle'
+        if ($toolchainPath -ceq 'distribution/release-artifacts.json') {
+            $expected = $true
+        }
+        if ($selected -ne $expected) {
+            throw "Release toolchain ownership is incorrect for '$contract': $toolchainPath"
+        }
+    }
     $workflowSelected = Get-ComponentValidationDecision `
         -Contract $contract `
         -EventName pull_request `

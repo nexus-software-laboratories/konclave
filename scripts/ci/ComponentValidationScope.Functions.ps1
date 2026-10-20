@@ -161,6 +161,16 @@ function Get-ComponentValidationDecision {
         return $true
     }
 
+    if (
+        $Contract -cnotin @('external-recipes', 'installer-lifecycle') -and
+        @($normalizedFiles | Where-Object {
+            $_ -cmatch '^\.github/actions/setup-rust/' -or
+            $_ -ceq 'distribution/release-artifacts.json'
+        }).Count -ne 0
+    ) {
+        return $true
+    }
+
     foreach ($pattern in @($contracts[$Contract])) {
         [void][regex]::new($pattern)
         if (@($normalizedFiles | Where-Object { $_ -cmatch $pattern }).Count -ne 0) {
