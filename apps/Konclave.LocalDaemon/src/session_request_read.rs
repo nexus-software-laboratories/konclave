@@ -1,4 +1,6 @@
-use KonclaveLocalServiceTransport::{LocalServiceRequest, LocalServiceTransportError, read_request};
+use KonclaveLocalServiceTransport::{
+    LocalServiceRequest, LocalServiceTransportError, read_request,
+};
 use tokio::io::AsyncRead;
 use tokio::sync::watch;
 
@@ -53,7 +55,9 @@ mod tests {
     use std::rc::Rc;
     use std::task::{Context, Poll};
 
-    use KonclaveLocalServiceTransport::{MAX_RPC_FRAME_BYTES, OperationName, RequestId, write_request};
+    use KonclaveLocalServiceTransport::{
+        MAX_RPC_FRAME_BYTES, OperationName, RequestId, write_request,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadBuf, duplex};
 
     use super::*;
@@ -203,12 +207,9 @@ mod tests {
             let (_stop_tx, mut stop) = watch::channel(stopping);
             let (_authorization_tx, mut authorization_changes) = watch::channel(());
             assert_eq!(
-                read_authorized_request(
-                    &mut reader,
-                    &mut stop,
-                    &mut authorization_changes,
-                    || authorized,
-                )
+                read_authorized_request(&mut reader, &mut stop, &mut authorization_changes, || {
+                    authorized
+                },)
                 .await
                 .unwrap(),
                 None
@@ -234,12 +235,9 @@ mod tests {
             let (_stop_tx, mut stop) = watch::channel(false);
             let (_authorization_tx, mut authorization_changes) = watch::channel(());
             assert_eq!(
-                read_authorized_request(
-                    &mut reader,
-                    &mut stop,
-                    &mut authorization_changes,
-                    || true,
-                )
+                read_authorized_request(&mut reader, &mut stop, &mut authorization_changes, || {
+                    true
+                },)
                 .await
                 .unwrap_err(),
                 expected
