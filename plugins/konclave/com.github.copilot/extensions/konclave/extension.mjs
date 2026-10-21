@@ -1911,10 +1911,12 @@ async function connectLocalService(options) {
       key: sessionKey,
       grant
     }),
+    grantExpiresAtUnixMilliseconds: grant.expiresAtUnixMilliseconds,
     inFlight: Promise.resolve()
   };
   const deliveryLane = {
     connection: null,
+    grantExpiresAtUnixMilliseconds: 0n,
     inFlight: Promise.resolve()
   };
   let closed = false;
@@ -1932,18 +1934,26 @@ async function connectLocalService(options) {
     if (closed) {
       throw new Error("the local service client is closed");
     }
-    if (lane.connection?.connected) {
+    if (lane.connection?.connected && lane.grantExpiresAtUnixMilliseconds > BigInt(Date.now())) {
       return lane.connection;
     }
+    lane.connection?.close();
+    lane.connection = null;
     if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
       grant = await refreshGrant();
     }
-    try {
-      lane.connection = await openConnection(options, remainingMs, {
+    const openLane = async () => {
+      const connectionGrant = grant;
+      const connection = await openConnection(options, remainingMs, {
         kind: "session",
         key: sessionKey,
-        grant
+        grant: connectionGrant
       });
+      lane.grantExpiresAtUnixMilliseconds = connectionGrant.expiresAtUnixMilliseconds;
+      return connection;
+    };
+    try {
+      lane.connection = await openLane();
     } catch (error) {
       if (error instanceof LocalServiceAuthorizationError) {
         grant = await refreshGrant();
@@ -1952,11 +1962,7 @@ async function connectLocalService(options) {
       } else if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
         grant = await refreshGrant();
       }
-      lane.connection = await openConnection(options, remainingMs, {
-        kind: "session",
-        key: sessionKey,
-        grant
-      });
+      lane.connection = await openLane();
     }
     if (closed) {
       lane.connection.close();
