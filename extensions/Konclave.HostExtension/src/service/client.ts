@@ -485,6 +485,7 @@ interface AuthenticatedConnection {
 
 interface ConnectionLane {
   connection: AuthenticatedConnection | null;
+  grantExpiresAtUnixMilliseconds: bigint;
   inFlight: Promise<unknown>;
 }
 
@@ -1136,10 +1137,12 @@ export async function connectLocalService(
       key: sessionKey,
       grant,
     }),
+    grantExpiresAtUnixMilliseconds: grant.expiresAtUnixMilliseconds,
     inFlight: Promise.resolve(),
   };
   const deliveryLane: ConnectionLane = {
     connection: null,
+    grantExpiresAtUnixMilliseconds: 0n,
     inFlight: Promise.resolve(),
   };
   let closed = false;
@@ -1162,18 +1165,26 @@ export async function connectLocalService(
     if (closed) {
       throw new Error('the local service client is closed');
     }
-    if (lane.connection?.connected) {
+    if (lane.connection?.connected && lane.grantExpiresAtUnixMilliseconds > BigInt(Date.now())) {
       return lane.connection;
     }
+    lane.connection?.close();
+    lane.connection = null;
     if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
       grant = await refreshGrant();
     }
-    try {
-      lane.connection = await openConnection(options, remainingMs, {
+    const openLane = async (): Promise<AuthenticatedConnection> => {
+      const connectionGrant = grant;
+      const connection = await openConnection(options, remainingMs, {
         kind: 'session',
         key: sessionKey,
-        grant,
+        grant: connectionGrant,
       });
+      lane.grantExpiresAtUnixMilliseconds = connectionGrant.expiresAtUnixMilliseconds;
+      return connection;
+    };
+    try {
+      lane.connection = await openLane();
     } catch (error) {
       if (error instanceof LocalServiceAuthorizationError) {
         grant = await refreshGrant();
@@ -1182,11 +1193,7 @@ export async function connectLocalService(
       } else if (grant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
         grant = await refreshGrant();
       }
-      lane.connection = await openConnection(options, remainingMs, {
-        kind: 'session',
-        key: sessionKey,
-        grant,
-      });
+      lane.connection = await openLane();
     }
     if (closed) {
       lane.connection.close();

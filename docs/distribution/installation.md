@@ -338,6 +338,12 @@ command is idempotent and does not repeat enrollment when the credential is alre
 valid; a conflicting endpoint, policy, custody source, or existing file fails without
 replacement.
 
+The Copilot client checks the grant bound to each command and delivery connection
+before reusing it. An expired connection is replaced through the configured evidence
+flow, even when the other connection already renewed its grant. Renewal does not
+change the profile or extend the old grant; issuer refusal remains an error rather
+than falling back to another authorization policy.
+
 The first UserPresence delivery supports fresh setup only. It does not expose an
 in-place enrollment or downgrade-authorized administration flow for an existing
 AccountTrusted installation.
