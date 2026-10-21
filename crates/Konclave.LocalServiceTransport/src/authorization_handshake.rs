@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -198,6 +199,36 @@ pub async fn complete_authorization_service_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    complete_authorization_service_handshake_with_authorizer(
+        stream,
+        service_identity,
+        move |binding| async move {
+            registry.authorizes_binding(&binding, now_unix_milliseconds)
+        },
+    )
+    .await
+}
+
+/// Completes a service handshake with an asynchronous authorization decision.
+///
+/// The authorizer receives a proof-verified binding and may wait for a current
+/// verified registry before deciding. That wait shares the existing handshake
+/// deadline; it grants no authority and sends no acceptance while pending.
+/// A false decision retains the same uniform signed rejection as a registry lookup.
+///
+/// # Errors
+///
+/// Returns a bounded uniform authentication, protocol, or timeout failure.
+pub async fn complete_authorization_service_handshake_with_authorizer<S, A, D>(
+    stream: &mut S,
+    service_identity: &LocalServiceIdentity,
+    authorize: A,
+) -> Result<AuthenticatedAuthorizationChannel, LocalServiceTransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+    A: FnOnce(AuthorizationBinding) -> D + Send,
+    D: Future<Output = bool> + Send,
+{
     tokio::time::timeout(AUTHORIZATION_HANDSHAKE_TIMEOUT, async {
         let hello = read_message(stream).await?;
         let (binding, client_challenge, presented_key) = match hello {
@@ -258,24 +289,7 @@ where
             return Err(LocalServiceTransportError::UnexpectedMessage);
         };
         transcript.verify_client_signature(presented_key, &signature)?;
-        let authorized = match &binding {
-            AuthorizationBinding::Issuer {
-                issuer_key_id,
-                issuer_key_version,
-                issuer_public_key,
-                harness,
-                ..
-            } => registry
-                .active_issuer(*issuer_key_id, *issuer_key_version)
-                .is_some_and(|registration| {
-                    registration.public_key() == *issuer_public_key
-                        && (registration.harness() == *harness
-                            || registration.harness() == HarnessKind::Generic)
-                }),
-            AuthorizationBinding::Session { grant, .. } => registry
-                .active_grant(grant.grant_id(), now_unix_milliseconds)
-                .is_some_and(|active| active == grant.clone()),
-        };
+        let authorized = authorize(binding).await;
         if !authorized {
             write_message(
                 stream,
