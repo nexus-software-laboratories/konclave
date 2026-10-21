@@ -2916,7 +2916,14 @@ async fn delivery_claim(
             tokio::task::spawn_blocking(move || DeliveryAttachment::acquire(consumer, &store, now))
                 .await
                 .map_err(|_| "profile_unavailable".to_string())?
-                .map_err(|_| "profile_unavailable".to_string())?,
+                .map_err(|error| {
+                    tracing::warn!(
+                        outcome = "delivery_consumer_acquire_failed",
+                        reason = ?error.downcast_ref::<crate::persistence::ProfileStoreError>(),
+                        "local delivery consumer could not attach"
+                    );
+                    "profile_unavailable".to_string()
+                })?,
         );
     }
     let outcome = delivery
@@ -2930,7 +2937,14 @@ async fn delivery_claim(
             || session_grant_is_active(authorization, grant),
         )
         .await
-        .map_err(|_| "profile_unavailable".to_string())?;
+        .map_err(|error| {
+            tracing::warn!(
+                outcome = "delivery_claim_failed",
+                reason = %error,
+                "local delivery claim failed"
+            );
+            "profile_unavailable".to_string()
+        })?;
     let events = match outcome {
         DeliveryWaitOutcome::Events(events) => events,
         DeliveryWaitOutcome::AuthorizationLost => {
