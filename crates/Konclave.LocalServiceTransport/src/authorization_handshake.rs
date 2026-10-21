@@ -202,9 +202,7 @@ where
     complete_authorization_service_handshake_with_authorizer(
         stream,
         service_identity,
-        move |binding| async move {
-            registry.authorizes_binding(&binding, now_unix_milliseconds)
-        },
+        move |binding| async move { registry.authorizes_binding(&binding, now_unix_milliseconds) },
     )
     .await
 }

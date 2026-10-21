@@ -53,8 +53,8 @@ pub use authorization_binding::AuthorizationBinding;
 pub use authorization_handshake::{
     AUTHORIZATION_HANDSHAKE_TIMEOUT, AuthenticatedAuthorizationChannel, IssuerHandshakeRequest,
     SessionHandshakeRequest, complete_authorization_service_handshake,
-    complete_authorization_service_handshake_with_authorizer,
-    complete_issuer_client_handshake, complete_session_client_handshake,
+    complete_authorization_service_handshake_with_authorizer, complete_issuer_client_handshake,
+    complete_session_client_handshake,
 };
 pub use authorization_message::{
     AuthorizationHandshakeMessage, MAX_AUTHORIZATION_HANDSHAKE_FRAME_BYTES,

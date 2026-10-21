@@ -3,14 +3,14 @@
 use KonclaveCryptographicCore::LocalServiceIdentity;
 use KonclaveLocalServiceTransport::{
     AUTHORIZATION_HANDSHAKE_TIMEOUT, AdapterKeyId, AdapterKeyVersion, AdapterRegistration,
-    AuthorizationBinding, AuthorizationEvidenceKind,
-    AuthorizationEvidenceSet, AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet,
+    AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     InMemorySessionAuthorizationRegistry, IssuerHandshakeRequest, LocalServiceTransportError,
     ProfileAuthorization, ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities,
-    SessionGrant, SessionGrantClaims,
-    SessionGrantId, SessionHandshakeRequest, complete_authorization_service_handshake,
-    complete_authorization_service_handshake_with_authorizer,
-    complete_issuer_client_handshake, complete_session_client_handshake,
+    SessionGrant, SessionGrantClaims, SessionGrantId, SessionHandshakeRequest,
+    complete_authorization_service_handshake,
+    complete_authorization_service_handshake_with_authorizer, complete_issuer_client_handshake,
+    complete_session_client_handshake,
 };
 use tokio::io::AsyncReadExt as _;
 
@@ -248,10 +248,7 @@ fn issuer_binding_checks_every_registration_claim() {
                 ),
             )
             .unwrap();
-        for (harness, authorized) in [
-            (HarnessKind::Copilot, true),
-            (HarnessKind::Generic, false),
-        ] {
+        for (harness, authorized) in [(HarnessKind::Copilot, true), (HarnessKind::Generic, false)] {
             let binding = AuthorizationBinding::Issuer {
                 issuer_key_id: AdapterKeyId::from_bytes([1; 16]),
                 issuer_key_version: AdapterKeyVersion::new(1).unwrap(),
@@ -269,7 +266,10 @@ fn issuer_binding_checks_every_registration_claim() {
             client_instance: ClientInstanceId::from_bytes([8; 16]),
         };
         for (now, authorized) in [(1, true), (u64::MAX, false)] {
-            assert_eq!(fixture.registry.authorizes_binding(&binding, now), authorized);
+            assert_eq!(
+                fixture.registry.authorizes_binding(&binding, now),
+                authorized
+            );
         }
         assert!(fixture.registry.revoke_grant(grant.grant_id()));
         assert!(!fixture.registry.authorizes_binding(&binding, 1));
@@ -307,6 +307,7 @@ async fn pending_authorization_waits_for_a_fresh_allow_or_uniform_denial() {
             () = async { entered_rx.await.unwrap() } => {}
             result = &mut service => panic!("service completed before observation: {result:?}"),
         }
+        tokio::time::advance(std::time::Duration::from_millis(1500)).await;
         tokio::select! {
             biased;
             result = &mut client => panic!("client accepted an unobserved registry: {result:?}"),
@@ -320,8 +321,14 @@ async fn pending_authorization_waits_for_a_fresh_allow_or_uniform_denial() {
         if remains_registered {
             assert_eq!(client.unwrap().binding(), service.unwrap().binding());
         } else {
-            assert_eq!(client.unwrap_err(), LocalServiceTransportError::UnauthenticClient);
-            assert_eq!(service.unwrap_err(), LocalServiceTransportError::UnauthenticClient);
+            assert_eq!(
+                client.unwrap_err(),
+                LocalServiceTransportError::UnauthenticClient
+            );
+            assert_eq!(
+                service.unwrap_err(),
+                LocalServiceTransportError::UnauthenticClient
+            );
         }
     }
 }
@@ -355,6 +362,12 @@ async fn pending_authorization_cannot_extend_the_handshake_deadline() {
     }
     tokio::time::advance(AUTHORIZATION_HANDSHAKE_TIMEOUT).await;
     let (client, service) = tokio::join!(client, service);
-    assert_eq!(client.unwrap_err(), LocalServiceTransportError::HandshakeTimeout);
-    assert_eq!(service.unwrap_err(), LocalServiceTransportError::HandshakeTimeout);
+    assert_eq!(
+        client.unwrap_err(),
+        LocalServiceTransportError::HandshakeTimeout
+    );
+    assert_eq!(
+        service.unwrap_err(),
+        LocalServiceTransportError::HandshakeTimeout
+    );
 }
