@@ -15,6 +15,7 @@ KonclaveSecretStorage = { path = "../Konclave.SecretStorage", default-features =
 async-trait.workspace = true
 base64.workspace = true
 futures-util.workspace = true
+hyper-util.workspace = true
 log.workspace = true
 reqwest.workspace = true
 rustix = { workspace = true, features = ["fs"] }
@@ -22,6 +23,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["net", "time"] }
 tokio-tungstenite.workspace = true
+tower-service.workspace = true
 url.workspace = true
 zeroize.workspace = true
 

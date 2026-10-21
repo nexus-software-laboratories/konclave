@@ -451,7 +451,10 @@ impl LockedProfile {
         profile_open_step("trusted_devices", store.verify_trusted_device_bindings())?;
         profile_open_step("repeat_pairings", store.verify_repeat_pairings())?;
         profile_open_step("active_conversation", store.active_conversation_id())?;
-        profile_open_step("collaboration_policies", store.verify_collaboration_policies())?;
+        profile_open_step(
+            "collaboration_policies",
+            store.verify_collaboration_policies(),
+        )?;
         profile_open_step(
             "collaboration_exchange_backfill",
             store.backfill_collaboration_policy_exchange_records(),
@@ -464,7 +467,10 @@ impl LockedProfile {
             "collaboration_operations",
             store.verify_collaboration_policy_operations(),
         )?;
-        profile_open_step("directed_requests", store.verify_directed_request_handlings())?;
+        profile_open_step(
+            "directed_requests",
+            store.verify_directed_request_handlings(),
+        )?;
         profile_open_step("remote_events", store.verify_remote_event_journal())?;
         profile_open_step("request_outcomes", store.verify_local_request_outcomes())?;
         profile_open_step(

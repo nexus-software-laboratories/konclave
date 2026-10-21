@@ -30,6 +30,12 @@ shutdown. Native wrapping-key load-or-create occurs only while that lock is held
 `profile.sqlite` belongs to the daemon store. `mls.sqlite` belongs to
 `SealedSqliteMlsStorage`; their schema versions and migrations are independent.
 
+Startup validation failures identify the failing stage and finite error category,
+without logging sealed records, credentials, or private error context. SQLite
+structural integrity alone does not establish that the authenticated journals are
+consistent. A failed check leaves the profile closed; startup never deletes or
+reinitializes its protected state to recover availability.
+
 ## Profile store
 
 Schema version 15 stores:

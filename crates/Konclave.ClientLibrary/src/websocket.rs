@@ -6,13 +6,17 @@ use KonclaveDomainCore::{
 };
 use KonclaveProtocolContracts::v1::{decode_replay_page, encode_replay_request};
 use futures_util::{SinkExt, StreamExt};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::dns::GaiResolver;
 use reqwest::header::AUTHORIZATION;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, client_async_tls_with_config};
+use tower_service::Service;
 
 use crate::error::stable_relay_code;
 use crate::{KonclaveClientError, RelayAccessCredential, RelayEndpoint};
@@ -85,6 +89,11 @@ pub(crate) async fn connect_watch(
     operation_timeout: Duration,
     watch_read_timeout: Duration,
 ) -> Result<RelayWatchSession, KonclaveClientError> {
+    let tcp_uri = endpoint
+        .http_url("ws")?
+        .as_str()
+        .parse::<Uri>()
+        .map_err(|_| KonclaveClientError::InvalidEndpoint)?;
     let url = endpoint.websocket_url()?;
     let mut handshake = url
         .as_str()
@@ -99,13 +108,18 @@ pub(crate) async fn connect_watch(
         .max_write_buffer_size(2 * MAX_RELAY_CONTROL_MESSAGE_BYTES)
         .max_message_size(Some(MAX_REPLAY_PAGE_BYTES))
         .max_frame_size(Some(MAX_REPLAY_PAGE_BYTES));
-    let (mut socket, _) = timeout(
-        operation_timeout,
-        connect_async_with_config(handshake, Some(config), false),
-    )
+    let (mut socket, _) = timeout(operation_timeout, async {
+        let stream = watch_tcp_connector(GaiResolver::new())
+            .call(tcp_uri)
+            .await
+            .map_err(|_| KonclaveClientError::TransportUnavailable)?
+            .into_inner();
+        client_async_tls_with_config(handshake, stream, Some(config), None)
+            .await
+            .map_err(map_connect_error)
+    })
     .await
-    .map_err(|_| KonclaveClientError::Timeout)?
-    .map_err(map_connect_error)?;
+    .map_err(|_| KonclaveClientError::Timeout)??;
     let request = encode_replay_request(request)?;
     timeout(
         operation_timeout,
@@ -119,6 +133,13 @@ pub(crate) async fn connect_watch(
         read_timeout: watch_read_timeout,
         write_timeout: operation_timeout,
     })
+}
+
+fn watch_tcp_connector<R>(resolver: R) -> HttpConnector<R> {
+    let mut connector = HttpConnector::new_with_resolver(resolver);
+    // This selects TCP addresses only; tungstenite still verifies TLS against the original hostname.
+    connector.enforce_http(false);
+    connector
 }
 
 fn map_connect_error(error: tokio_tungstenite::tungstenite::Error) -> KonclaveClientError {
@@ -136,5 +157,67 @@ fn map_connect_error(error: tokio_tungstenite::tungstenite::Error) -> KonclaveCl
             }
         }
         _ => KonclaveClientError::TransportUnavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::future::{Ready, ready};
+    use std::net::{Ipv6Addr, SocketAddr};
+    use std::task::{Context, Poll};
+
+    use hyper_util::client::legacy::connect::dns::Name;
+    use tokio::net::{TcpListener, TcpSocket};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct FixedResolver(Vec<SocketAddr>);
+
+    impl Service<Name> for FixedResolver {
+        type Response = std::vec::IntoIter<SocketAddr>;
+        type Error = Infallible;
+        type Future = Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: Name) -> Self::Future {
+            ready(Ok(self.0.clone().into_iter()))
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_connector_falls_back_from_unreachable_ipv6_to_ipv4() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let unavailable = TcpSocket::new_v6().unwrap();
+        let unavailable_address = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), address.port());
+        unavailable.bind(unavailable_address).unwrap();
+        let mut connector = watch_tcp_connector(FixedResolver(vec![unavailable_address, address]));
+        let uri = format!("https://relay.invalid:{}", address.port())
+            .parse()
+            .unwrap();
+        let stream = timeout(Duration::from_secs(5), connector.call(uri))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        assert_eq!(stream.peer_addr().unwrap(), address);
+        let (_, accepted_peer) = listener.accept().await.unwrap();
+        assert_eq!(accepted_peer, stream.local_addr().unwrap());
+    }
+
+    #[tokio::test]
+    async fn watch_connector_rejects_empty_resolution() {
+        let mut connector = watch_tcp_connector(FixedResolver(Vec::new()));
+        assert!(
+            connector
+                .call("https://relay.invalid".parse().unwrap())
+                .await
+                .is_err()
+        );
     }
 }

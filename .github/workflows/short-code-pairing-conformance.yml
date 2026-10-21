@@ -87,6 +87,16 @@ jobs:
             --check
           cargo test \
             --locked \
+            --package KonclaveClientLibrary \
+            --lib \
+            websocket::tests
+          cargo test \
+            --locked \
+            --package KonclaveClientLibrary \
+            --test relay_integration \
+            client_watch
+          cargo test \
+            --locked \
             --package KonclaveDomainCore \
             short_code
           cargo test \

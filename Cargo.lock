@@ -242,6 +242,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "futures-util",
+ "hyper-util",
  "log",
  "reqwest",
  "rustix",
@@ -251,6 +252,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tower-service",
  "url",
  "zeroize",
 ]
