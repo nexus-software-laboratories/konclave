@@ -35,6 +35,8 @@ mod relay_migration;
 mod repeat_pairing;
 mod runtime;
 mod service;
+#[cfg(all(test, feature = "rust-service-mcp"))]
+mod session_request_read;
 #[cfg(feature = "rust-service-mcp")]
 mod shared_runtime;
 #[cfg(feature = "rust-service-mcp")]
