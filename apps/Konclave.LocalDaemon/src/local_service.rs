@@ -18,9 +18,8 @@ use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
     LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
     LocalServiceResponse, LocalServiceTransportError, MAX_GRANTS_PER_ISSUER,
-    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId,
-    ServiceProfileId, SessionCapabilities, SessionGrant,
-    complete_authorization_service_handshake, write_response,
+    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId, ServiceProfileId,
+    SessionCapabilities, SessionGrant, complete_authorization_service_handshake, write_response,
 };
 use KonclaveUserPresence::{
     MAX_USER_PRESENCE_CHALLENGE_MILLISECONDS, MAX_USER_PRESENCE_GRANT_MILLISECONDS,

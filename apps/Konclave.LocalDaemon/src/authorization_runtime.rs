@@ -963,7 +963,9 @@ impl SessionAuthorizationRegistry for LiveAuthorizationRuntime {
             );
             return None;
         }
-        let registration = self.registry.active_issuer(issuer_key_id, issuer_key_version);
+        let registration = self
+            .registry
+            .active_issuer(issuer_key_id, issuer_key_version);
         tracing::debug!(
             outcome = "issuer_lookup_completed",
             registered = registration.is_some(),
