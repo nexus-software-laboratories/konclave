@@ -6,6 +6,7 @@ use tokio::sync::watch;
 
 /// Reads one bounded request while the connection's existing authority remains valid.
 ///
+/// Non-revoking control updates preserve the in-progress frame.
 /// Control-channel closure, shutdown, revoked authority, and peer closure end the
 /// connection. Other frame errors remain visible to the connection owner.
 pub(crate) async fn read_authorized_request<S, T, Authorized>(
@@ -22,6 +23,8 @@ where
     if *stop.borrow() || !authorized() {
         return Ok(None);
     }
+    let reading = read_request(stream);
+    tokio::pin!(reading);
     loop {
         tokio::select! {
             biased;
@@ -35,7 +38,7 @@ where
                     return Ok(None);
                 }
             }
-            result = read_request(stream) => {
+            result = &mut reading => {
                 return match result {
                     Ok(request) => Ok(Some(request)),
                     Err(LocalServiceTransportError::ChannelClosed) => Ok(None),
@@ -209,6 +212,26 @@ mod tests {
             assert_eq!(
                 read_authorized_request(&mut reader, &mut stop, &mut authorization_changes, || {
                     authorized
+                },)
+                .await
+                .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_closure_ends_complete_and_partial_frame_reads() {
+        let frame = encoded_request(&request(1)).await;
+        for prefix in 0..frame.len() {
+            let (mut writer, mut reader) = duplex(1024);
+            writer.write_all(&frame[..prefix]).await.unwrap();
+            writer.shutdown().await.unwrap();
+            let (_stop_tx, mut stop) = watch::channel(false);
+            let (_authorization_tx, mut authorization_changes) = watch::channel(());
+            assert_eq!(
+                read_authorized_request(&mut reader, &mut stop, &mut authorization_changes, || {
+                    true
                 },)
                 .await
                 .unwrap(),
