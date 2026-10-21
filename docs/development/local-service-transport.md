@@ -105,9 +105,13 @@ unusable, and closes clients without terminating the service or retaining stale
 authority. A read that misses the 500-millisecond observation deadline remains the
 only in-flight read; its late result is discarded, and access reopens only after a
 subsequent fresh verified snapshot. Blocking-worker failure or unexpected reload-task
-termination remains fatal. If authorization changes while another request is
-running, the transport closes immediately; already-committed work remains owned until
-reconciliation, but its result is not written to the revoked connection.
+termination remains fatal. Authorization updates that leave the authenticated
+principal valid preserve the connection's in-progress framed request read. Restarting
+that decoder after consuming a partial header or payload would lose frame alignment.
+Shutdown, closed control channels, and authority loss end the connection instead.
+If a running request loses authority, the transport closes immediately;
+already-committed work remains owned until reconciliation, but its result is not
+written to the revoked connection.
 
 Disabling an issuer always denies new issuance. `retain_until_expiry` keeps its
 already-issued grants active until expiry or another terminal transition, while
