@@ -952,6 +952,16 @@ impl ProfileSupervisor {
                 tracing::error!(
                     profile = open.key.as_str(),
                     outcome = refusal.code(),
+                    profile_error = ?refusal.open_source().and_then(|source| {
+                        source
+                            .chain()
+                            .find_map(|error| error.downcast_ref::<ProfileStoreError>())
+                    }),
+                    conversation_error = ?refusal.open_source().and_then(|source| {
+                        source.chain().find_map(|error| {
+                            error.downcast_ref::<crate::conversation::ConversationCoordinatorError>()
+                        })
+                    }),
                     "opening a profile failed"
                 );
                 open.outcome = Some(Err(refusal));
