@@ -18288,10 +18288,11 @@ mod tests {
             }
             let closed = fixture.close();
             for _ in 0..2 {
-                let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
-                    .unwrap()
-                    .open_store(sealer())
-                    .unwrap();
+                let reopened =
+                    LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
+                        .unwrap()
+                        .open_store(sealer())
+                        .unwrap();
                 assert_eq!(
                     reopened.load_or_create_device().unwrap().device_id(),
                     device_id
