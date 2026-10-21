@@ -104,9 +104,12 @@ mod tests {
         frame
     }
 
-    async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
+    async fn assert_pending<F: Future>(future: Pin<&mut F>) {
+        // A cooperative-budget yield does not prove that the frame is blocked.
+        let polling = tokio::task::unconstrained(future);
+        tokio::pin!(polling);
         assert!(
-            poll_fn(|context| Poll::Ready(future.as_mut().poll(context)))
+            poll_fn(|context| Poll::Ready(polling.as_mut().poll(context)))
                 .await
                 .is_pending()
         );
