@@ -19,7 +19,7 @@ use KonclaveLocalServiceTransport::{
     LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
     LocalServiceResponse, MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES,
     MAX_SESSION_GRANTS, RequestId, ServiceProfileId, SessionCapabilities, SessionGrant,
-    complete_authorization_service_handshake, read_request, write_response,
+    complete_authorization_service_handshake, write_response,
 };
 use KonclaveUserPresence::{
     MAX_USER_PRESENCE_CHALLENGE_MILLISECONDS, MAX_USER_PRESENCE_GRANT_MILLISECONDS,
@@ -53,6 +53,7 @@ use crate::persistence::{
 use crate::profile_runtime::ProfileServices;
 use crate::profile_supervisor::{ProfileSupervisor, ProfileSupervisorConfig};
 use crate::runtime::ProfileSource;
+use crate::session_request_read::read_authorized_request;
 
 const MAX_LEDGER_ENTRIES: usize = 256;
 const MAX_LEDGER_BYTES: usize = 64 * 1024 * 1024;
@@ -367,28 +368,14 @@ async fn serve_session_client(
             let request_state = state
                 .as_ref()
                 .context("shared local session state is unavailable")?;
-            let request = tokio::select! {
-                biased;
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        None
-                    } else {
-                        continue;
-                    }
-                }
-                changed = authorization_status.changed() => {
-                    if changed.is_err() || !request_state.authorization_is_active() {
-                        None
-                    } else {
-                        continue;
-                    }
-                }
-                request = read_request(active_stream) => match request {
-                    Ok(request) => Some(request),
-                    Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => None,
-                    Err(error) => return Err(error).context("reading a shared local request"),
-                }
-            };
+            let request = read_authorized_request(
+                active_stream,
+                &mut stop,
+                &mut authorization_status,
+                || request_state.authorization_is_active(),
+            )
+            .await
+            .context("reading a shared local request")?;
             let Some(request) = request else {
                 drop(stream.take());
                 break;
@@ -397,15 +384,13 @@ async fn serve_session_client(
             let retirement = operation == "authorization.grant.retire";
             // Retirement is idempotent in the authorization store; the profile
             // request journal intentionally correlates replacement grants by key.
-            let direct_dispatch =
-                retirement || is_fresh_collaboration_policy_request(operation);
+            let direct_dispatch = retirement || is_fresh_collaboration_policy_request(operation);
             let uses_ledger = !direct_dispatch;
             let mut request_state = state
                 .take()
                 .context("shared local session state is unavailable")?;
-            let request_key = uses_ledger.then(|| {
-                LedgerKey::for_grant(&request_state.grant, request.request_id())
-            });
+            let request_key = uses_ledger
+                .then(|| LedgerKey::for_grant(&request_state.grant, request.request_id()));
             let cancellation_ledger = Arc::clone(&request_state.ledger);
             let active_grant = request_state.grant.clone();
             let mut execution = tokio::spawn(async move {
@@ -633,25 +618,14 @@ async fn serve_issuer_client(
         let active_stream = stream
             .as_mut()
             .context("shared local issuer stream is unavailable")?;
-        let request = tokio::select! {
-            biased;
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() {
-                    break;
-                }
-                continue;
-            }
-            changed = authorization_status.changed() => {
-                if changed.is_err() || !issuer.registration_is_present(&authorization) {
-                    break;
-                }
-                continue;
-            }
-            request = read_request(active_stream) => match request {
-                Ok(request) => request,
-                Err(KonclaveLocalServiceTransport::LocalServiceTransportError::ChannelClosed) => break,
-                Err(error) => return Err(error).context("reading a shared local issuer request"),
-            }
+        let request =
+            read_authorized_request(active_stream, &mut stop, &mut authorization_status, || {
+                issuer.registration_is_present(&authorization)
+            })
+            .await
+            .context("reading a shared local issuer request")?;
+        let Some(request) = request else {
+            break;
         };
         let key = LedgerKey::for_issuer(&issuer, request.request_id());
         let execution_authorization = Arc::clone(&authorization);
