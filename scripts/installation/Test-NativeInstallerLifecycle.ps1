@@ -4,7 +4,7 @@
 param(
     [string]$Repository = 'nexus-software-laboratories/konclave',
     [string]$BaselineTag = 'v0.1.0',
-    [string]$CandidateTag = 'v0.1.16',
+    [string]$CandidateTag = 'v0.1.17',
     [switch]$UseCandidateInstaller
 )
 
