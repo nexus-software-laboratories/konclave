@@ -29,5 +29,5 @@ KonclaveDomainCore = { path = "../Konclave.DomainCore" }
 axum = "0.8.9"
 futures-util.workspace = true
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
