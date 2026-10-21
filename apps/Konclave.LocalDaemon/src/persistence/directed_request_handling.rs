@@ -957,30 +957,33 @@ impl ProfileStore {
             .response_text
             .as_deref()
             .ok_or(ProfileStoreError::CorruptData)?;
-        let outbox: Option<(Vec<u8>, i64, i64)> = connection
+        let outbox: Option<(Vec<u8>, i64, i64, Option<i64>)> = connection
             .query_row(
                 "SELECT
                     CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
                     sender_counter,
-                    status
+                    status,
+                    accepted_cursor
                  FROM daemon_outbox
                  WHERE conversation_id = ?1 AND message_id = ?2",
                 params![
                     handling.claim.conversation_id.as_bytes().as_slice(),
                     response_message_id.as_bytes().as_slice()
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|_| ProfileStoreError::Storage)?;
-        let (envelope_id, sender_counter, outbox_status) =
+        let (envelope_id, sender_counter, outbox_status, accepted_cursor) =
             outbox.ok_or(ProfileStoreError::CorruptData)?;
         let envelope_id =
             EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let sender_counter = from_sql_integer(sender_counter)?;
+        let accepted_cursor = accepted_cursor.map(from_sql_integer).transpose()?;
         if handling.response_envelope_id != Some(envelope_id)
             || handling.response_sender_counter != Some(sender_counter)
             || !(1..=4).contains(&outbox_status)
+            || (outbox_status == 3) != accepted_cursor.is_some()
         {
             return Err(ProfileStoreError::CorruptData);
         }
@@ -1001,11 +1004,12 @@ impl ProfileStore {
             routing_id,
             response_message_id,
         )?;
+        // The outbox owns outbound progress, independently of the history completion flag.
         match (outbox_status, history.as_ref()) {
             (1, None) | (4, None) => return Ok(()),
             (1, Some(history)) if !history.complete && history.cursor.is_none() => {}
-            (2, Some(history)) if history.complete && history.cursor.is_none() => {}
-            (3, Some(history)) if history.complete && history.cursor.is_some() => {}
+            (2, Some(history)) if history.cursor.is_none() => {}
+            (3, Some(history)) if history.cursor == accepted_cursor => {}
             _ => return Err(ProfileStoreError::CorruptData),
         }
         let history = history.ok_or(ProfileStoreError::CorruptData)?;

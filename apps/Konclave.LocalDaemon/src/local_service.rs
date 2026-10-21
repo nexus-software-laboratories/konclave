@@ -2604,7 +2604,7 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "directed_request_unsupported"
         | "directed_request_target_required" => LocalServiceErrorCode::InvalidRequest,
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
-        "relay_not_configured" => LocalServiceErrorCode::ProfileUnavailable,
+        "relay_not_configured" | "profile_unavailable" => LocalServiceErrorCode::ProfileUnavailable,
         "local_service_not_authorized" | "invalid_collaboration_authorization" => {
             LocalServiceErrorCode::NotAuthorized
         }
@@ -3491,6 +3491,27 @@ mod delivery_contract_tests {
         operation_error_code,
     };
     use crate::persistence::{ClaimedRemoteEvent, RemoteEvent, RemoteEventPayload};
+
+    #[test]
+    fn profile_unavailability_remains_distinct_from_authorization_and_internal_errors() {
+        for (code, expected) in [
+            (
+                "relay_not_configured",
+                LocalServiceErrorCode::ProfileUnavailable,
+            ),
+            (
+                "profile_unavailable",
+                LocalServiceErrorCode::ProfileUnavailable,
+            ),
+            (
+                "local_service_not_authorized",
+                LocalServiceErrorCode::NotAuthorized,
+            ),
+            ("unknown_failure", LocalServiceErrorCode::Internal),
+        ] {
+            assert_eq!(operation_error_code(code), expected, "{code}");
+        }
+    }
 
     #[test]
     fn policy_delivery_fields_use_the_shared_camel_case_contract() {

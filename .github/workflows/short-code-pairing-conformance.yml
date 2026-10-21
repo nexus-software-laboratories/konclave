@@ -97,6 +97,16 @@ jobs:
             client_watch
           cargo test \
             --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            completed_response
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            delivery_contract_tests
+          cargo test \
+            --locked \
             --package KonclaveDomainCore \
             short_code
           cargo test \
