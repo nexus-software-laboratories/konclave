@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,6 +43,9 @@ const EXACT_MODE: u8 = 1;
 const WRONG_THEN_EXACT_MODE: u8 = 2;
 const HANGING_WATCH_MODE: u8 = 3;
 const ENDLESS_HISTORY_MODE: u8 = 4;
+const QUICK_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(40);
+const QUICK_RESPONSE_TIMEOUT: Duration = Duration::from_millis(100);
+const RETRY_DELAY: Duration = Duration::from_millis(5);
 const BEARER_TOKEN: &str = "bridge-test-bearer-credential-0001";
 
 #[test]
@@ -65,7 +68,7 @@ fn concrete_client_failures_narrow_to_the_bridge_error_contract() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_response_completes_once_after_adversarial_messages() {
     let fixture = Fixture::new(WRONG_THEN_EXACT_MODE, &[]);
     let response = fixture
@@ -140,7 +143,7 @@ fn local_message_page_shape_is_accepted() {
     assert!(page.messages.as_slice()[0].valid_shape());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_retry_after_temporary_failure_reuses_the_send_identity() {
     let fixture = Fixture::new(EXACT_MODE, &[A2AKonclaveLocalServiceError::Unavailable]);
     let first_error = fixture
@@ -176,37 +179,51 @@ async fn exact_retry_after_temporary_failure_reuses_the_send_identity() {
     assert_eq!(sends[0].payload, sends[1].payload);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_hanging_watch_is_cancelled_by_the_observation_deadline() {
     let fixture = Fixture::new(HANGING_WATCH_MODE, &[]);
+    let bridge = fixture.bridge(true);
+    let observer_capacity = bridge.observer_slots.available_permits();
+    let application = fixture.application_with_bridge(bridge.clone(), true);
     let started = tokio::time::Instant::now();
-    let error = fixture
-        .application(true)
+    let error = application
         .send_message(request("request", false))
         .await
         .err()
         .unwrap();
 
     assert_eq!(error, A2AGatewayError::ResponseWaitExpired);
+    assert!(started.elapsed() >= QUICK_RESPONSE_TIMEOUT);
     assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(bridge.observer_slots.available_permits(), observer_capacity);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_endless_ready_history_page_still_yields_to_the_observation_deadline() {
     let fixture = Fixture::new(ENDLESS_HISTORY_MODE, &[]);
+    let bridge = fixture.bridge(true);
+    let observer_capacity = bridge.observer_slots.available_permits();
     let started = tokio::time::Instant::now();
-    let error = fixture
-        .application(true)
-        .send_message(request("request", false))
-        .await
-        .err()
-        .unwrap();
+    let application = fixture.application_with_bridge(bridge.clone(), true);
+    let send = application.send_message(request("request", false));
+    tokio::pin!(send);
+    tokio::select! {
+        _ = &mut send => panic!("submission finished before history observation started"),
+        _ = fixture.local.history_started.notified() => {}
+    }
+
+    // An always-ready observer prevents idle auto-advance, even when it yields.
+    tokio::time::advance(QUICK_OBSERVATION_TIMEOUT + RETRY_DELAY).await;
+    assert!(started.elapsed() < QUICK_RESPONSE_TIMEOUT);
+    let error = send.await.err().unwrap();
 
     assert_eq!(error, A2AGatewayError::ResponseWaitExpired);
+    assert!(started.elapsed() >= QUICK_RESPONSE_TIMEOUT);
     assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(bridge.observer_slots.available_permits(), observer_capacity);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_oversized_exact_response_fails_instead_of_remaining_working() {
     let fixture = Fixture::new(EXACT_MODE, &[]);
     *fixture.local.response_text.lock().unwrap() = "x".repeat(MAX_A2A_TEXT_BYTES + 1);
@@ -227,7 +244,7 @@ async fn an_oversized_exact_response_fails_instead_of_remaining_working() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn authenticated_http_send_uses_the_real_bridge_submitter() {
     let fixture = Fixture::new(EXACT_MODE, &[]);
     let access =
@@ -260,7 +277,7 @@ async fn authenticated_http_send_uses_the_real_bridge_submitter() {
     assert!(task.state() == TaskState::Completed);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn streaming_submission_uses_the_real_bridge_and_durable_statuses() {
     let fixture = Fixture::new(EMPTY_MODE, &[]);
     let mut stream = fixture
@@ -290,7 +307,7 @@ async fn streaming_submission_uses_the_real_bridge_and_durable_statuses() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn concurrent_exact_submissions_share_one_send_and_observer() {
     let fixture = Fixture::new(EXACT_MODE, &[]);
     let application = fixture.application(false);
@@ -314,7 +331,7 @@ async fn concurrent_exact_submissions_share_one_send_and_observer() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn local_policy_rejection_becomes_a_terminal_rejected_task() {
     let fixture = Fixture::new(EMPTY_MODE, &[A2AKonclaveLocalServiceError::RequestRejected]);
     let response = fixture
@@ -334,7 +351,7 @@ async fn local_policy_rejection_becomes_a_terminal_rejected_task() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_working_task_resumes_observation_after_bridge_restart() {
     let fixture = Fixture::new(EMPTY_MODE, &[]);
     let first_bridge = fixture.bridge(true);
@@ -367,7 +384,7 @@ async fn a_working_task_resumes_observation_after_bridge_restart() {
     assert_eq!(sends[0].request_id, sends[1].request_id);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_rejected_resubmission_does_not_overwrite_an_accepted_working_task() {
     let fixture = Fixture::new(EMPTY_MODE, &[]);
     let first_bridge = fixture.bridge(true);
@@ -405,7 +422,7 @@ async fn a_rejected_resubmission_does_not_overwrite_an_accepted_working_task() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn shutdown_cancels_and_joins_a_blocked_observer() {
     let fixture = Fixture::new(HANGING_WATCH_MODE, &[]);
     let bridge = fixture.bridge(false);
@@ -431,7 +448,7 @@ async fn shutdown_cancels_and_joins_a_blocked_observer() {
     assert_eq!(retry, A2AGatewayError::SubmissionUnavailable);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn observer_capacity_is_reserved_before_the_directed_send() {
     let fixture = Fixture::new(HANGING_WATCH_MODE, &[]);
     let bridge = fixture.bridge_with_limit(false, 1);
@@ -515,8 +532,12 @@ impl Fixture {
         max_concurrent_observers: usize,
     ) -> Arc<A2AKonclaveBridge> {
         let config = A2AKonclaveBridgeConfig::new(
-            Duration::from_millis(if return_quickly { 40 } else { 500 }),
-            Duration::from_millis(5),
+            if return_quickly {
+                QUICK_OBSERVATION_TIMEOUT
+            } else {
+                Duration::from_millis(500)
+            },
+            RETRY_DELAY,
             100,
             max_concurrent_observers,
         )
@@ -546,8 +567,12 @@ impl Fixture {
             bridge,
             self.clock.clone(),
             A2AGatewayWaitConfig::new(
-                Duration::from_millis(if return_quickly { 100 } else { 750 }),
-                Duration::from_millis(5),
+                if return_quickly {
+                    QUICK_RESPONSE_TIMEOUT
+                } else {
+                    Duration::from_millis(750)
+                },
+                RETRY_DELAY,
             )
             .unwrap(),
         )
@@ -563,17 +588,32 @@ impl Fixture {
     }
 }
 
-struct TestClock(AtomicU64);
+#[tokio::test(start_paused = true)]
+async fn business_clock_advances_only_with_tokio_time() {
+    let clock = TestClock::new(1_700_000_000_000);
+    assert_eq!(clock.now_unix_milliseconds().unwrap(), 1_700_000_000_000);
+    assert_eq!(clock.now_unix_milliseconds().unwrap(), 1_700_000_000_000);
+    tokio::time::advance(RETRY_DELAY).await;
+    assert_eq!(clock.now_unix_milliseconds().unwrap(), 1_700_000_000_005);
+}
+
+struct TestClock {
+    epoch: u64,
+    started: tokio::time::Instant,
+}
 
 impl TestClock {
     fn new(value: u64) -> Self {
-        Self(AtomicU64::new(value))
+        Self {
+            epoch: value,
+            started: tokio::time::Instant::now(),
+        }
     }
 }
 
 impl A2AGatewayClock for TestClock {
     fn now_unix_milliseconds(&self) -> Result<u64, A2AGatewayClockError> {
-        Ok(self.0.fetch_add(1, Ordering::SeqCst))
+        Ok(self.epoch + u64::try_from(self.started.elapsed().as_millis()).unwrap())
     }
 }
 
@@ -596,6 +636,7 @@ struct FakeLocalService {
     calls: Mutex<Vec<CapturedCall>>,
     read_calls: AtomicUsize,
     response_text: Mutex<String>,
+    history_started: Notify,
     watch_started: Notify,
 }
 
@@ -608,6 +649,7 @@ impl FakeLocalService {
             calls: Mutex::new(Vec::new()),
             read_calls: AtomicUsize::new(0),
             response_text: Mutex::new("response".to_string()),
+            history_started: Notify::new(),
             watch_started: Notify::new(),
         }
     }
@@ -714,6 +756,7 @@ impl A2AKonclaveLocalService for FakeLocalService {
             }
             "read_messages" => {
                 let read = self.read_calls.fetch_add(1, Ordering::SeqCst);
+                self.history_started.notify_one();
                 match self.mode.load(Ordering::SeqCst) {
                     EXACT_MODE => Ok(self.response_page(false)),
                     WRONG_THEN_EXACT_MODE if read == 0 => Ok(self.response_page(true)),

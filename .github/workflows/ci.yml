@@ -81,6 +81,9 @@ jobs:
       - name: Verify CI work deduplication
         shell: pwsh
         run: ./scripts/ci/Test-CiWorkDeduplication.ps1
+      - name: Verify deterministic bridge test timing
+        shell: pwsh
+        run: ./scripts/ci/Test-BridgeTestTiming.ps1
 
   dependabot-validation:
     needs: source-policy

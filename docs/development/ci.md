@@ -26,6 +26,35 @@ command instead of receiving an earlier duplicate `cargo check`.
 `scripts/ci/Test-CiWorkDeduplication.ps1` keeps these responsibilities separate so a
 future workflow edit cannot silently restore duplicate compilation.
 
+## Deterministic bridge deadlines
+
+The A2A Konclave bridge fixture uses paused, current-thread Tokio time for every
+async test. Its short observation and gateway deadlines measure simulated time,
+not runner scheduling or SQLite latency. Business timestamps derive from that same
+simulated elapsed time instead of advancing on each clock read.
+
+Tokio inhibits paused-time auto-advance while a blocking task is running, so the
+production `spawn_blocking` persistence boundary remains intact. See
+[Tokio paused-time semantics](https://docs.rs/tokio/1.53.1/tokio/time/fn.pause.html).
+The endless-ready-history test waits for a history-read signal and explicitly
+advances past the observation deadline: an always-ready loop prevents idle
+auto-advance even if it yields. Hanging-watch and restart tests retain their
+original timeout, completion, and send-identity assertions without longer budgets.
+
+`scripts/ci/Test-BridgeTestTiming.ps1` runs in the delivery-policy job and rejects
+unpaused bridge tests or removal of the development-only `test-util` feature.
+Negative source mutations prove those checks reject the corresponding regressions.
+Focused hosted qualification uses:
+
+```sh
+pwsh -NoProfile -File scripts/ci/Test-BridgeTestTiming.ps1
+cargo test --locked -p KonclaveA2AKonclaveBridge
+cargo clippy --locked -p KonclaveA2AKonclaveBridge --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Validation scheduling
+
 Validation is grouped per pull request. A new head revision cancels the prior run for
 that pull request, while each manual dispatch uses its unique run identifier. Stale
 commits therefore cannot consume runner capacity or report after the current head.
