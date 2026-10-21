@@ -18308,10 +18308,10 @@ mod tests {
                     .unwrap();
                 assert!(!history.complete);
                 assert_eq!(history.cursor, (outbox_status == 3).then_some(2));
-                assert_eq!(
+                assert!(matches!(
                     history.message.content(),
-                    &ApplicationContent::text("bounded response").unwrap()
-                );
+                    ApplicationContent::Text(text) if text.as_str() == "bounded response"
+                ));
                 assert_eq!(
                     reopened.ready_outbox().unwrap().len(),
                     usize::from(outbox_status == 2)
