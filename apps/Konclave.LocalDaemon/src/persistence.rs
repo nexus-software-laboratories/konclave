@@ -427,26 +427,66 @@ impl LockedProfile {
             locked_profile: self,
             clock,
         };
-        store.initialize_collaboration_policy_operation_schema(source_version)?;
-        store.initialize_directed_request_handling_schema()?;
-        store.initialize_short_code_pairing_schema()?;
-        store.initialize_trusted_device_schema()?;
-        store.initialize_repeat_pairing_schema()?;
-        store.verify_short_code_pairings()?;
-        store.verify_trusted_device_bindings()?;
-        store.verify_repeat_pairings()?;
-        store.active_conversation_id()?;
-        store.verify_collaboration_policies()?;
-        store.backfill_collaboration_policy_exchange_records()?;
-        store.verify_collaboration_policy_exchange_records()?;
-        store.verify_collaboration_policy_operations()?;
-        store.verify_directed_request_handlings()?;
-        store.verify_remote_event_journal()?;
-        store.verify_local_request_outcomes()?;
-        store.invalidate_remote_event_leases()?;
-        store.migrate_legacy_history()?;
+        profile_open_step(
+            "collaboration_policy_schema",
+            store.initialize_collaboration_policy_operation_schema(source_version),
+        )?;
+        profile_open_step(
+            "directed_request_schema",
+            store.initialize_directed_request_handling_schema(),
+        )?;
+        profile_open_step(
+            "short_code_schema",
+            store.initialize_short_code_pairing_schema(),
+        )?;
+        profile_open_step(
+            "trusted_device_schema",
+            store.initialize_trusted_device_schema(),
+        )?;
+        profile_open_step(
+            "repeat_pairing_schema",
+            store.initialize_repeat_pairing_schema(),
+        )?;
+        profile_open_step("short_code_pairings", store.verify_short_code_pairings())?;
+        profile_open_step("trusted_devices", store.verify_trusted_device_bindings())?;
+        profile_open_step("repeat_pairings", store.verify_repeat_pairings())?;
+        profile_open_step("active_conversation", store.active_conversation_id())?;
+        profile_open_step("collaboration_policies", store.verify_collaboration_policies())?;
+        profile_open_step(
+            "collaboration_exchange_backfill",
+            store.backfill_collaboration_policy_exchange_records(),
+        )?;
+        profile_open_step(
+            "collaboration_exchange",
+            store.verify_collaboration_policy_exchange_records(),
+        )?;
+        profile_open_step(
+            "collaboration_operations",
+            store.verify_collaboration_policy_operations(),
+        )?;
+        profile_open_step("directed_requests", store.verify_directed_request_handlings())?;
+        profile_open_step("remote_events", store.verify_remote_event_journal())?;
+        profile_open_step("request_outcomes", store.verify_local_request_outcomes())?;
+        profile_open_step(
+            "invalidate_delivery_leases",
+            store.invalidate_remote_event_leases(),
+        )?;
+        profile_open_step("legacy_history", store.migrate_legacy_history())?;
         Ok(store)
     }
+}
+
+fn profile_open_step<T>(
+    stage: &'static str,
+    result: Result<T, ProfileStoreError>,
+) -> Result<T, ProfileStoreError> {
+    #[cfg(feature = "rust-service-observability")]
+    if let Err(error) = &result {
+        tracing::error!(stage, error = ?error, "profile startup validation failed");
+    }
+    #[cfg(not(feature = "rust-service-observability"))]
+    let _ = stage;
+    result
 }
 
 /// Sealed profile, relay, conversation-policy, and credential persistence.

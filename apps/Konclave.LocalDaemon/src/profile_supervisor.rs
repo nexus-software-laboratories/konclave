@@ -952,6 +952,17 @@ impl ProfileSupervisor {
                 tracing::error!(
                     profile = open.key.as_str(),
                     outcome = refusal.code(),
+                    stage = refusal.open_source().and_then(|source| {
+                        source
+                            .chain()
+                            .find_map(|error| match error.to_string().as_str() {
+                                "opening daemon profile store" => Some("profile_store"),
+                                "loading daemon device identity" => Some("device_identity"),
+                                "loading relay configuration" => Some("relay_configuration"),
+                                "recovering daemon conversations" => Some("conversation_recovery"),
+                                _ => None,
+                            })
+                    }),
                     profile_error = ?refusal.open_source().and_then(|source| {
                         source
                             .chain()
