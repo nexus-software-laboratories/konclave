@@ -17,8 +17,9 @@ use KonclaveLocalAuthorizationStore::{GrantIssuanceKey, UserPresenceCredentialRe
 use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
     LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
-    LocalServiceResponse, MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES,
-    MAX_SESSION_GRANTS, RequestId, ServiceProfileId, SessionCapabilities, SessionGrant,
+    LocalServiceResponse, LocalServiceTransportError, MAX_GRANTS_PER_ISSUER,
+    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId,
+    ServiceProfileId, SessionCapabilities, SessionGrant,
     complete_authorization_service_handshake, write_response,
 };
 use KonclaveUserPresence::{
@@ -167,10 +168,19 @@ where
             joined = clients.join_next(), if !clients.is_empty() => {
                 match joined {
                     Some(Ok(Ok(()))) | None => {}
-                    Some(Ok(Err(_))) => tracing::warn!(
-                        outcome = "client_closed_with_error",
-                        "shared local client connection ended"
-                    ),
+                    Some(Ok(Err(error))) => {
+                        let transport_code = error
+                            .downcast_ref::<LocalServiceTransportError>()
+                            .map_or(
+                                "local_service_non_transport_failure",
+                                LocalServiceTransportError::code,
+                            );
+                        tracing::warn!(
+                            outcome = "client_closed_with_error",
+                            transport_code,
+                            "shared local client connection ended"
+                        );
+                    }
                     Some(Err(error)) => {
                         tracing::error!(
                             outcome = "client_task_failed",

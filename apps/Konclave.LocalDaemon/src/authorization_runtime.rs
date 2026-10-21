@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::sync::{Condvar, Mutex as StdMutex};
@@ -708,12 +708,23 @@ impl LiveAuthorizationRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        let queued_at = Instant::now();
         let mut snapshot_task = tokio::task::spawn_blocking(move || {
+            let started_at = Instant::now();
+            let queue_wait = started_at.duration_since(queued_at);
             #[cfg(test)]
             if let Some(gate) = reload_gate {
                 gate.block();
             }
-            store.load_snapshot(now_unix_milliseconds, Some(high_water))
+            let snapshot = store.load_snapshot(now_unix_milliseconds, Some(high_water));
+            tracing::debug!(
+                outcome = "authorization_snapshot_observed",
+                queue_wait_milliseconds = queue_wait.as_secs_f64() * 1000.0,
+                snapshot_milliseconds = started_at.elapsed().as_secs_f64() * 1000.0,
+                verified = snapshot.is_ok(),
+                "local authorization snapshot observation completed"
+            );
+            snapshot
         });
         let snapshot =
             match tokio::time::timeout(AUTHORIZATION_RELOAD_DEADLINE, &mut snapshot_task).await {
@@ -944,11 +955,21 @@ impl SessionAuthorizationRegistry for LiveAuthorizationRuntime {
         issuer_key_version: IssuerKeyVersion,
     ) -> Option<KonclaveLocalServiceTransport::IssuerRegistration> {
         let projection = read(&self.projection);
-        if projection.failure.is_some() {
+        if let Some(error) = projection.failure {
+            tracing::debug!(
+                outcome = "issuer_lookup_unavailable",
+                reason = %error,
+                "local issuer authorization unavailable"
+            );
             return None;
         }
-        self.registry
-            .active_issuer(issuer_key_id, issuer_key_version)
+        let registration = self.registry.active_issuer(issuer_key_id, issuer_key_version);
+        tracing::debug!(
+            outcome = "issuer_lookup_completed",
+            registered = registration.is_some(),
+            "local issuer authorization lookup completed"
+        );
+        registration
     }
 
     fn active_grant(
