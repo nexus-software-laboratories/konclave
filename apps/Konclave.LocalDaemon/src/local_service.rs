@@ -384,15 +384,13 @@ async fn serve_session_client(
             let retirement = operation == "authorization.grant.retire";
             // Retirement is idempotent in the authorization store; the profile
             // request journal intentionally correlates replacement grants by key.
-            let direct_dispatch =
-                retirement || is_fresh_collaboration_policy_request(operation);
+            let direct_dispatch = retirement || is_fresh_collaboration_policy_request(operation);
             let uses_ledger = !direct_dispatch;
             let mut request_state = state
                 .take()
                 .context("shared local session state is unavailable")?;
-            let request_key = uses_ledger.then(|| {
-                LedgerKey::for_grant(&request_state.grant, request.request_id())
-            });
+            let request_key = uses_ledger
+                .then(|| LedgerKey::for_grant(&request_state.grant, request.request_id()));
             let cancellation_ledger = Arc::clone(&request_state.ledger);
             let active_grant = request_state.grant.clone();
             let mut execution = tokio::spawn(async move {
@@ -620,14 +618,12 @@ async fn serve_issuer_client(
         let active_stream = stream
             .as_mut()
             .context("shared local issuer stream is unavailable")?;
-        let request = read_authorized_request(
-            active_stream,
-            &mut stop,
-            &mut authorization_status,
-            || issuer.registration_is_present(&authorization),
-        )
-        .await
-        .context("reading a shared local issuer request")?;
+        let request =
+            read_authorized_request(active_stream, &mut stop, &mut authorization_status, || {
+                issuer.registration_is_present(&authorization)
+            })
+            .await
+            .context("reading a shared local issuer request")?;
         let Some(request) = request else {
             break;
         };
