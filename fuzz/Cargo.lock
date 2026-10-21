@@ -15,6 +15,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "futures-util",
+ "hyper-util",
  "log",
  "reqwest",
  "rustix",
@@ -22,6 +23,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "tower-service",
  "url",
  "zeroize",
 ]
