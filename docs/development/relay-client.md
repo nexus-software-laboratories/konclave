@@ -61,6 +61,12 @@ The local daemon will load that source from sealed profile storage.
 `connect_watch` opens one authenticated session and sends a bounded `ReplayRequest`.
 The returned `RelayWatchSession` is caller-owned and spawns no detached task.
 
+TCP establishment uses the same Happy Eyeballs connector as the HTTP transport:
+an unreachable preferred address family does not prevent connecting through the
+other family. The original hostname still controls TLS certificate verification,
+and the existing connection deadline, redirect refusal, and proxy policy remain
+unchanged.
+
 `next_page`:
 
 - accepts only bounded binary `ReplayPage` messages;

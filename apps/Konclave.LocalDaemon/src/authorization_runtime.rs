@@ -893,6 +893,11 @@ impl LiveAuthorizationRuntime {
         if projection.failure == Some(error) {
             return;
         }
+        tracing::warn!(
+            outcome = "authorization_observation_failed",
+            reason = %error,
+            "local authorization failed closed"
+        );
         projection.failure = Some(error);
         self.status
             .send_replace(AuthorizationRuntimeStatus::Failed(error));

@@ -2604,7 +2604,7 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "directed_request_unsupported"
         | "directed_request_target_required" => LocalServiceErrorCode::InvalidRequest,
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
-        "relay_not_configured" => LocalServiceErrorCode::ProfileUnavailable,
+        "relay_not_configured" | "profile_unavailable" => LocalServiceErrorCode::ProfileUnavailable,
         "local_service_not_authorized" | "invalid_collaboration_authorization" => {
             LocalServiceErrorCode::NotAuthorized
         }
@@ -2916,7 +2916,14 @@ async fn delivery_claim(
             tokio::task::spawn_blocking(move || DeliveryAttachment::acquire(consumer, &store, now))
                 .await
                 .map_err(|_| "profile_unavailable".to_string())?
-                .map_err(|_| "profile_unavailable".to_string())?,
+                .map_err(|error| {
+                    tracing::warn!(
+                        outcome = "delivery_consumer_acquire_failed",
+                        reason = ?error.downcast_ref::<crate::persistence::ProfileStoreError>(),
+                        "local delivery consumer could not attach"
+                    );
+                    "profile_unavailable".to_string()
+                })?,
         );
     }
     let outcome = delivery
@@ -2930,7 +2937,14 @@ async fn delivery_claim(
             || session_grant_is_active(authorization, grant),
         )
         .await
-        .map_err(|_| "profile_unavailable".to_string())?;
+        .map_err(|error| {
+            tracing::warn!(
+                outcome = "delivery_claim_failed",
+                reason = %error,
+                "local delivery claim failed"
+            );
+            "profile_unavailable".to_string()
+        })?;
     let events = match outcome {
         DeliveryWaitOutcome::Events(events) => events,
         DeliveryWaitOutcome::AuthorizationLost => {
@@ -3477,6 +3491,27 @@ mod delivery_contract_tests {
         operation_error_code,
     };
     use crate::persistence::{ClaimedRemoteEvent, RemoteEvent, RemoteEventPayload};
+
+    #[test]
+    fn profile_unavailability_remains_distinct_from_authorization_and_internal_errors() {
+        for (code, expected) in [
+            (
+                "relay_not_configured",
+                LocalServiceErrorCode::ProfileUnavailable,
+            ),
+            (
+                "profile_unavailable",
+                LocalServiceErrorCode::ProfileUnavailable,
+            ),
+            (
+                "local_service_not_authorized",
+                LocalServiceErrorCode::NotAuthorized,
+            ),
+            ("unknown_failure", LocalServiceErrorCode::Internal),
+        ] {
+            assert_eq!(operation_error_code(code), expected, "{code}");
+        }
+    }
 
     #[test]
     fn policy_delivery_fields_use_the_shared_camel_case_contract() {

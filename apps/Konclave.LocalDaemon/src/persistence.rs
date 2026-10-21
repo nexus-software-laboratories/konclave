@@ -427,26 +427,72 @@ impl LockedProfile {
             locked_profile: self,
             clock,
         };
-        store.initialize_collaboration_policy_operation_schema(source_version)?;
-        store.initialize_directed_request_handling_schema()?;
-        store.initialize_short_code_pairing_schema()?;
-        store.initialize_trusted_device_schema()?;
-        store.initialize_repeat_pairing_schema()?;
-        store.verify_short_code_pairings()?;
-        store.verify_trusted_device_bindings()?;
-        store.verify_repeat_pairings()?;
-        store.active_conversation_id()?;
-        store.verify_collaboration_policies()?;
-        store.backfill_collaboration_policy_exchange_records()?;
-        store.verify_collaboration_policy_exchange_records()?;
-        store.verify_collaboration_policy_operations()?;
-        store.verify_directed_request_handlings()?;
-        store.verify_remote_event_journal()?;
-        store.verify_local_request_outcomes()?;
-        store.invalidate_remote_event_leases()?;
-        store.migrate_legacy_history()?;
+        profile_open_step(
+            "collaboration_policy_schema",
+            store.initialize_collaboration_policy_operation_schema(source_version),
+        )?;
+        profile_open_step(
+            "directed_request_schema",
+            store.initialize_directed_request_handling_schema(),
+        )?;
+        profile_open_step(
+            "short_code_schema",
+            store.initialize_short_code_pairing_schema(),
+        )?;
+        profile_open_step(
+            "trusted_device_schema",
+            store.initialize_trusted_device_schema(),
+        )?;
+        profile_open_step(
+            "repeat_pairing_schema",
+            store.initialize_repeat_pairing_schema(),
+        )?;
+        profile_open_step("short_code_pairings", store.verify_short_code_pairings())?;
+        profile_open_step("trusted_devices", store.verify_trusted_device_bindings())?;
+        profile_open_step("repeat_pairings", store.verify_repeat_pairings())?;
+        profile_open_step("active_conversation", store.active_conversation_id())?;
+        profile_open_step(
+            "collaboration_policies",
+            store.verify_collaboration_policies(),
+        )?;
+        profile_open_step(
+            "collaboration_exchange_backfill",
+            store.backfill_collaboration_policy_exchange_records(),
+        )?;
+        profile_open_step(
+            "collaboration_exchange",
+            store.verify_collaboration_policy_exchange_records(),
+        )?;
+        profile_open_step(
+            "collaboration_operations",
+            store.verify_collaboration_policy_operations(),
+        )?;
+        profile_open_step(
+            "directed_requests",
+            store.verify_directed_request_handlings(),
+        )?;
+        profile_open_step("remote_events", store.verify_remote_event_journal())?;
+        profile_open_step("request_outcomes", store.verify_local_request_outcomes())?;
+        profile_open_step(
+            "invalidate_delivery_leases",
+            store.invalidate_remote_event_leases(),
+        )?;
+        profile_open_step("legacy_history", store.migrate_legacy_history())?;
         Ok(store)
     }
+}
+
+fn profile_open_step<T>(
+    stage: &'static str,
+    result: Result<T, ProfileStoreError>,
+) -> Result<T, ProfileStoreError> {
+    #[cfg(feature = "rust-service-observability")]
+    if let Err(error) = &result {
+        tracing::error!(stage, error = ?error, "profile startup validation failed");
+    }
+    #[cfg(not(feature = "rust-service-observability"))]
+    let _ = stage;
+    result
 }
 
 /// Sealed profile, relay, conversation-policy, and credential persistence.
@@ -12267,6 +12313,49 @@ mod tests {
         (fixture, reservation)
     }
 
+    fn directed_response_message_fixture(
+        profile: &str,
+    ) -> (ConversationFixture, OutboundReservation, RelayEnvelope) {
+        let (fixture, reservation) = reserve_directed_response_fixture(profile);
+        let response = fixture
+            .store
+            .recoverable_directed_request_responses()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            reservation.message_id,
+            reservation.sender_counter,
+            response.sent_at_unix_milliseconds,
+            Some(response.request_message_id),
+            ApplicationContent::text(response.response_text.as_str()).unwrap(),
+        )
+        .unwrap();
+        fixture
+            .store
+            .store_outbound_message(
+                reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &message,
+            )
+            .unwrap();
+        let envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            fixture.routing_id,
+            reservation.envelope_id,
+            DeliveryClass::GroupApplication,
+            None,
+            response.expires_at_unix_seconds,
+            b"opaque response".to_vec(),
+        )
+        .unwrap();
+        (fixture, reservation, envelope)
+    }
+
     fn completed_policy_revocation_fixture(profile: &str) -> ConversationFixture {
         let fixture = conversation_fixture(profile);
         stage_policy_exchange_message(
@@ -18172,6 +18261,98 @@ mod tests {
             .unwrap()
             .open_store(sealer())
             .unwrap();
+    }
+
+    #[test]
+    fn completed_response_reopens_at_each_outbound_history_phase() {
+        for (profile, outbox_status) in [
+            ("response-plaintext-reopen", 1),
+            ("response-ready-reopen", 2),
+            ("response-accepted-reopen", 3),
+        ] {
+            let (fixture, reservation, envelope) = directed_response_message_fixture(profile);
+            let conversation_id = fixture.conversation_id;
+            let routing_id = fixture.routing_id;
+            let device_id = fixture.device_id;
+            if outbox_status >= 2 {
+                fixture
+                    .store
+                    .store_outbound_envelope(reservation, &envelope)
+                    .unwrap();
+            }
+            if outbox_status == 3 {
+                fixture
+                    .store
+                    .mark_outbox_accepted(&StoredRelayEnvelope::new(envelope, 2).unwrap())
+                    .unwrap();
+            }
+            let closed = fixture.close();
+            for _ in 0..2 {
+                let reopened =
+                    LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
+                        .unwrap()
+                        .open_store(sealer())
+                        .unwrap();
+                assert_eq!(
+                    reopened.load_or_create_device().unwrap().device_id(),
+                    device_id
+                );
+                let history = reopened
+                    .load_history_record(
+                        &reopened.lock().unwrap(),
+                        conversation_id,
+                        routing_id,
+                        reservation.message_id,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert!(!history.complete);
+                assert_eq!(history.cursor, (outbox_status == 3).then_some(2));
+                assert!(matches!(
+                    history.message.content(),
+                    ApplicationContent::Text(text) if text.as_str() == "bounded response"
+                ));
+                assert_eq!(
+                    reopened.ready_outbox().unwrap().len(),
+                    usize::from(outbox_status == 2)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completed_response_rejects_history_cursor_substitution() {
+        let (fixture, reservation, envelope) =
+            directed_response_message_fixture("response-cursor-substitution");
+        fixture
+            .store
+            .store_outbound_envelope(reservation, &envelope)
+            .unwrap();
+        fixture
+            .store
+            .mark_outbox_accepted(&StoredRelayEnvelope::new(envelope, 2).unwrap())
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_message_history SET cursor = 3
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    reservation.conversation_id.as_bytes().as_slice(),
+                    reservation.message_id.as_bytes().as_slice(),
+                ],
+            )
+            .unwrap();
+        let closed = fixture.close();
+        assert_eq!(
+            LockedProfile::acquire(closed.root.path(), closed.profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData)
+        );
     }
 
     #[test]
