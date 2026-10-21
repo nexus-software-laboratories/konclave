@@ -52,7 +52,8 @@ jobs:
                 $_ -match '^\.github/genesis-delivery\.json$' -or
                 $_ -match '^\.github/workflows/authorization-reload-conformance\.yml$' -or
                 $_ -match '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:authorization_reload|authorization_runtime|lib|local_service|session_request_read)\.rs)$' -or
-                $_ -match '^crates/Konclave\.LocalAuthorizationStore/'
+                $_ -match '^crates/Konclave\.LocalAuthorizationStore/' -or
+                $_ -match '^crates/Konclave\.LocalServiceTransport/'
               }
             ).Count -ne 0
           }
@@ -81,6 +82,18 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo fmt --package KonclaveLocalServiceTransport -- --check
+          cargo test \
+            --locked \
+            --package KonclaveLocalServiceTransport \
+            --tests
+          cargo clippy \
+            --locked \
+            --package KonclaveLocalServiceTransport \
+            --lib \
+            --tests \
+            -- \
+            -D warnings
           cargo test \
             --locked \
             --package KonclaveLocalDaemon \
