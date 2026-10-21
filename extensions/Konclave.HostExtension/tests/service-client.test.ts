@@ -4,7 +4,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   connectLocalService,
@@ -73,6 +73,7 @@ interface TestService {
 }
 
 interface TestServiceOptions {
+  readonly persistentSessions?: boolean;
   readonly grantLifetimeMs?: number;
   readonly maximumGrantIssues?: number;
   readonly grantResponsesToDrop?: number;
@@ -240,6 +241,7 @@ async function serveConnection(
   userPresenceBeginResult: ((value: Record<string, unknown>) => unknown) | undefined,
   pendingUserPresence: Map<string, PendingUserPresence>,
   completedUserPresence: Map<string, CompletedUserPresence>,
+  persistentSessions: boolean,
 ): Promise<void> {
   const reader = new FrameReader(socket, handshakeFrameLimit + 4);
   const helloFrame = await reader.read(handshakeFrameLimit);
@@ -254,6 +256,7 @@ async function serveConnection(
   let verificationKey = clientKey;
   let issuer = false;
   let accepted = true;
+  let sessionGrant: SessionGrantRecord | undefined;
   if (helloFrame.readUInt8(0) === 5) {
     const hello = decodeIssuerHello(helloFrame);
     observeIssuerClientInstance?.(hello.clientInstance);
@@ -265,6 +268,7 @@ async function serveConnection(
     issuer = true;
   } else {
     const hello = decodeSessionHello(helloFrame);
+    sessionGrant = hello.grant;
     const known = grants.get(hello.grant.grantId.toString('hex'));
     if (!known || JSON.stringify(grantJson(known)) !== JSON.stringify(grantJson(hello.grant))) {
       accepted = false;
@@ -475,64 +479,77 @@ async function serveConnection(
     );
     return;
   }
-  if (request.operation === 'request.cancel') {
-    observeControl?.(request);
-    await writeFrame(
-      socket,
-      success(request.requestId, Buffer.from('{"state":"reconciling"}', 'utf8')),
-      rpcFrameLimit,
-    );
-    return;
-  }
-  if (request.operation === 'authorization.grant.retire') {
-    observeControl?.(request);
-    await writeFrame(
-      socket,
-      success(request.requestId, Buffer.from('{"retired":true}', 'utf8')),
-      rpcFrameLimit,
-    );
-    return;
-  }
-  const next = action(request);
-  switch (next.kind) {
-    case 'respond':
+  const respond = async (current: ReceivedRequest): Promise<void> => {
+    if (current.operation === 'request.cancel') {
+      observeControl?.(current);
       await writeFrame(
         socket,
-        success(request.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+        success(current.requestId, Buffer.from('{"state":"reconciling"}', 'utf8')),
         rpcFrameLimit,
       );
       return;
-    case 'malformed-json':
-      await writeFrame(socket, success(request.requestId, Buffer.from('{')), rpcFrameLimit);
-      return;
-    case 'failure':
-      await writeFrame(socket, failure(request.requestId, next.wireCode), rpcFrameLimit);
-      return;
-    case 'failure-drop':
-      await writeFrame(socket, failure(request.requestId, next.wireCode), rpcFrameLimit);
-      socket.destroy();
-      return;
-    case 'drop':
-      socket.destroy();
-      return;
-    case 'delay':
-      await new Promise((resolve) => setTimeout(resolve, next.milliseconds));
+    }
+    if (current.operation === 'authorization.grant.retire') {
+      observeControl?.(current);
       await writeFrame(
         socket,
-        success(request.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+        success(current.requestId, Buffer.from('{"retired":true}', 'utf8')),
         rpcFrameLimit,
       );
       return;
-    case 'defer':
-      await next.release;
-      await writeFrame(
-        socket,
-        success(request.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
-        rpcFrameLimit,
-      );
+    }
+    const next = action(current);
+    switch (next.kind) {
+      case 'respond':
+        await writeFrame(
+          socket,
+          success(current.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+          rpcFrameLimit,
+        );
+        return;
+      case 'malformed-json':
+        await writeFrame(socket, success(current.requestId, Buffer.from('{')), rpcFrameLimit);
+        return;
+      case 'failure':
+        await writeFrame(socket, failure(current.requestId, next.wireCode), rpcFrameLimit);
+        return;
+      case 'failure-drop':
+        await writeFrame(socket, failure(current.requestId, next.wireCode), rpcFrameLimit);
+        socket.destroy();
+        return;
+      case 'drop':
+        socket.destroy();
+        return;
+      case 'delay':
+        await new Promise((resolve) => setTimeout(resolve, next.milliseconds));
+        await writeFrame(
+          socket,
+          success(current.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+          rpcFrameLimit,
+        );
+        return;
+      case 'defer':
+        await next.release;
+        await writeFrame(
+          socket,
+          success(current.requestId, Buffer.from(JSON.stringify(next.value), 'utf8')),
+          rpcFrameLimit,
+        );
+        return;
+      case 'silent':
+        await once(socket, 'close');
+    }
+  };
+  while (!socket.destroyed) {
+    if (sessionGrant && sessionGrant.expiresAtUnixMilliseconds <= BigInt(Date.now())) {
+      await writeFrame(socket, failure(request.requestId, 3), rpcFrameLimit);
       return;
-    case 'silent':
-      await once(socket, 'close');
+    }
+    await respond(request);
+    if (!persistentSessions || socket.destroyed) {
+      return;
+    }
+    request = decodeRequest(await reader.read(rpcFrameLimit));
   }
 
   function grantJson(grant: SessionGrantRecord): Record<string, string | number> {
@@ -607,6 +624,7 @@ async function startService(
         options.userPresenceBeginResult,
         pendingUserPresence,
         completedUserPresence,
+        options.persistentSessions ?? false,
       ).catch((error: unknown) => {
         if (error instanceof FrameError && error.failure === 'closed') {
           return;
@@ -748,6 +766,7 @@ function writeInstalledConfig(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (temporaryDirectories.length > 0) {
     const directory = temporaryDirectories.pop();
     if (directory) {
@@ -1278,6 +1297,75 @@ describe('shared local service client', () => {
     expect(service.issuedGrantCount()).toBe(1);
     client.close();
     await service.close();
+  });
+
+  it.each(['interactive', 'delivery', 'concurrent'] as const)(
+    'renews expired persistent connections when %s requests resume first',
+    async (firstLane) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+      const service = await startService(
+        (request) => ({
+          kind: 'respond',
+          value: request.operation === 'delivery.claim' ? { events: [] } : { device_id: 'ad' },
+        }),
+        undefined,
+        { persistentSessions: true, grantLifetimeMs: 30_000 },
+      );
+      const client = await connectLocalService(clientOptions(service));
+      try {
+        await client.request('get_identity', {});
+        await client.request('delivery.claim', { maxEvents: 16, waitMilliseconds: 0 });
+        expect(service.issuedGrantCount()).toBe(1);
+        clock.mockReturnValue(Date.now() + 30_000);
+
+        const interactive = () => client.request('get_identity', {});
+        const delivery = () =>
+          client.request('delivery.claim', { maxEvents: 16, waitMilliseconds: 0 });
+        if (firstLane === 'concurrent') {
+          await expect(Promise.all([interactive(), delivery()])).resolves.toEqual([
+            { device_id: 'ad' },
+            { events: [] },
+          ]);
+        } else if (firstLane === 'interactive') {
+          await expect(interactive()).resolves.toEqual({ device_id: 'ad' });
+          await expect(delivery()).resolves.toEqual({ events: [] });
+        } else {
+          await expect(delivery()).resolves.toEqual({ events: [] });
+          await expect(interactive()).resolves.toEqual({ device_id: 'ad' });
+        }
+        expect(service.issuedGrantCount()).toBe(2);
+      } finally {
+        client.close();
+        await service.close();
+      }
+    },
+  );
+
+  it('fails closed when an expired persistent session cannot obtain a new grant', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    const requests: ReceivedRequest[] = [];
+    const service = await startService(
+      (request) => {
+        requests.push(request);
+        return { kind: 'respond', value: { device_id: 'ad' } };
+      },
+      undefined,
+      { persistentSessions: true, grantLifetimeMs: 30_000, maximumGrantIssues: 1 },
+    );
+    const client = await connectLocalService(clientOptions(service));
+    try {
+      await client.request('get_identity', {});
+      clock.mockReturnValue(Date.now() + 30_000);
+
+      await expect(client.request('sync_short_code_pairing', {})).rejects.toMatchObject({
+        code: 'issuer_disabled',
+      });
+      expect(requests).toHaveLength(1);
+      expect(service.issuedGrantCount()).toBe(1);
+    } finally {
+      client.close();
+      await service.close();
+    }
   });
 
   it('waits for the actual terminal outcome after the response deadline', async () => {
