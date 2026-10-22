@@ -16,8 +16,8 @@ use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     InMemorySessionAuthorizationRegistry, InstalledIssuerRegistration, IssuerKeyId,
-    IssuerKeyVersion, LocalRequestInterruption, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
-    ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
+    IssuerKeyVersion, LocalRequestInterruption, LocalServiceErrorCode, LocalServiceTransportError,
+    RequestId, ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
     SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
 };
 use KonclaveUserPresence::NativeWebAuthnCredential;

@@ -13,16 +13,18 @@ use KonclaveDomainCore::{
     CollaborationPolicyTarget, CollaborationPolicyUsage, ConversationId, ConversationRole,
     DeviceId, Ed25519Signature, NotificationId, evaluate_collaboration_policy,
 };
-use KonclaveLocalAuthorizationStore::{AuthorizationGeneration, GrantIssuanceKey, UserPresenceCredentialRecord};
+use KonclaveLocalAuthorizationStore::{
+    AuthorizationGeneration, GrantIssuanceKey, UserPresenceCredentialRecord,
+};
 use KonclaveLocalServiceTransport::{
-    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy, HarnessKind,
-    LocalRequestExecutionState, LocalRequestInterruption as RequestCancellationReason,
-    LocalRequestInterruptionAction,
-    LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
-    LocalServiceResponse, LocalServiceTransportError, MAX_GRANTS_PER_ISSUER,
-    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId, ServiceProfileId,
-    SessionCapabilities, SessionGrant, SessionGrantCapacity, complete_authorization_service_handshake_with_authorizer,
-    resolve_local_request_interruption, write_response,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    HarnessKind, LocalRequestExecutionState, LocalRequestInterruption as RequestCancellationReason,
+    LocalRequestInterruptionAction, LocalServiceEndpoint, LocalServiceErrorCode,
+    LocalServiceListener, LocalServiceRequest, LocalServiceResponse, LocalServiceTransportError,
+    MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS,
+    RequestId, ServiceProfileId, SessionCapabilities, SessionGrant, SessionGrantCapacity,
+    complete_authorization_service_handshake_with_authorizer, resolve_local_request_interruption,
+    write_response,
 };
 use KonclaveUserPresence::{
     MAX_USER_PRESENCE_CHALLENGE_MILLISECONDS, MAX_USER_PRESENCE_GRANT_MILLISECONDS,
@@ -1393,9 +1395,9 @@ async fn execute_session_request(
             }
 
             tokio::task::yield_now().await;
-            let dispatched = await_operation_outcome(dispatch_authorized_request(
-                state, &request, Some(&key),
-            )).await;
+            let dispatched =
+                await_operation_outcome(dispatch_authorized_request(state, &request, Some(&key)))
+                    .await;
             let response = match dispatched {
                 Ok(response) => response,
                 Err(reason) => {
@@ -1412,7 +1414,8 @@ async fn execute_session_request(
                             LocalServiceErrorCode::Internal,
                         );
                     };
-                    let response = interrupted_session_response(state, request.request_id(), reason);
+                    let response =
+                        interrupted_session_response(state, request.request_id(), reason);
                     if reason == RequestCancellationReason::AuthorizationUnavailable {
                         return response;
                     }
@@ -1702,7 +1705,8 @@ async fn dispatch_authorized_request(
                 Arc::clone(&state.store),
                 state.grant.clone(),
                 snapshot,
-            ).await,
+            )
+            .await,
         ));
     }
     let result = match operation {
@@ -1732,7 +1736,10 @@ async fn dispatch_authorized_request(
             let local_device = match state.services.conversations().device_id() {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(response_from_result(request.request_id(), Err("internal".to_string())));
+                    return Ok(response_from_result(
+                        request.request_id(),
+                        Err("internal".to_string()),
+                    ));
                 }
             };
             delivery_heartbeat(
@@ -1752,7 +1759,10 @@ async fn dispatch_authorized_request(
             let local_device = match state.services.conversations().device_id() {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(response_from_result(request.request_id(), Err("internal".to_string())));
+                    return Ok(response_from_result(
+                        request.request_id(),
+                        Err("internal".to_string()),
+                    ));
                 }
             };
             let payload = request.payload().to_vec();
@@ -1775,7 +1785,10 @@ async fn dispatch_authorized_request(
             let local_device = match state.services.conversations().device_id() {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(response_from_result(request.request_id(), Err("internal".to_string())));
+                    return Ok(response_from_result(
+                        request.request_id(),
+                        Err("internal".to_string()),
+                    ));
                 }
             };
             let payload = request.payload().to_vec();
@@ -1791,7 +1804,10 @@ async fn dispatch_authorized_request(
             let local_device = match state.services.conversations().device_id() {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(response_from_result(request.request_id(), Err("internal".to_string())));
+                    return Ok(response_from_result(
+                        request.request_id(),
+                        Err("internal".to_string()),
+                    ));
                 }
             };
             let payload = request.payload().to_vec();
@@ -2772,7 +2788,11 @@ async fn service_status(
     services: ProfileServices,
     store: Arc<crate::persistence::ProfileStore>,
     grant: SessionGrant,
-    authorization_snapshot: (AuthorizationGeneration, SessionGrantCapacity, AuthorizationPolicy),
+    authorization_snapshot: (
+        AuthorizationGeneration,
+        SessionGrantCapacity,
+        AuthorizationPolicy,
+    ),
 ) -> Result<Vec<u8>, String> {
     let (authorization_generation, capacity, effective_policy) = authorization_snapshot;
     tokio::task::spawn_blocking(move || {
@@ -2941,10 +2961,7 @@ enum DeliveryPayloadResult {
     },
 }
 
-async fn delivery_claim(
-    state: &mut ClientRequestState,
-    payload: &[u8],
-) -> Result<Vec<u8>, String> {
+async fn delivery_claim(state: &mut ClientRequestState, payload: &[u8]) -> Result<Vec<u8>, String> {
     let request: DeliveryClaimRequest =
         serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
     if request.max_events == 0
@@ -3315,7 +3332,9 @@ fn begin_request(
                 entry.outcome.send_replace(None);
                 LedgerDecision::Execute
             }
-            Some(RequestOutcome::Settled(response)) => LedgerDecision::Cached(response, entry.durable),
+            Some(RequestOutcome::Settled(response)) => {
+                LedgerDecision::Cached(response, entry.durable)
+            }
             None => LedgerDecision::Wait(entry.outcome.subscribe()),
         };
     }
@@ -3410,7 +3429,10 @@ fn interrupt_ledger_entry(
     key: &LedgerKey,
     reason: RequestCancellationReason,
 ) -> RequestCancellationState {
-    let awaiting = matches!(*entry.outcome.borrow(), Some(RequestOutcome::AwaitingAuthorization));
+    let awaiting = matches!(
+        *entry.outcome.borrow(),
+        Some(RequestOutcome::AwaitingAuthorization)
+    );
     let execution = if matches!(*entry.outcome.borrow(), Some(RequestOutcome::Settled(_))) {
         LocalRequestExecutionState::Settled
     } else if entry.phase == RequestPhase::Committed {
@@ -3453,7 +3475,9 @@ fn interrupt_undispatched_request(
     if resolve_local_request_interruption(LocalRequestExecutionState::BeforeExecution, reason)
         == LocalRequestInterruptionAction::AwaitAuthorization
     {
-        entry.outcome.send_replace(Some(RequestOutcome::AwaitingAuthorization));
+        entry
+            .outcome
+            .send_replace(Some(RequestOutcome::AwaitingAuthorization));
     }
     Some(reason)
 }
@@ -3508,7 +3532,9 @@ fn complete_request_with_durability(
         let reserved_bytes = entry.stored_bytes;
         entry.stored_bytes = actual_bytes;
         entry.durable = durable;
-        entry.outcome.send_replace(Some(RequestOutcome::Settled(response)));
+        entry
+            .outcome
+            .send_replace(Some(RequestOutcome::Settled(response)));
         Some((reserved_bytes, actual_bytes))
     } else {
         None
@@ -5596,9 +5622,12 @@ mod tests {
         );
         assert!(matches!(
             *waiter.borrow(),
-            Some(super::RequestOutcome::Settled(LocalServiceResponse::Failure {
-                code: LocalServiceErrorCode::ProfileUnavailable, ..
-            }))
+            Some(super::RequestOutcome::Settled(
+                LocalServiceResponse::Failure {
+                    code: LocalServiceErrorCode::ProfileUnavailable,
+                    ..
+                }
+            ))
         ));
         assert!(matches!(
             super::begin_request(&ledger, key, &request),
@@ -5612,7 +5641,8 @@ mod tests {
         let grant = fixture.grant("session-rpc-recovery", 95);
         fixture.persist_grant(grant.clone()).await;
         let config = fixture.config();
-        let supervisor = super::ProfileSupervisor::new(config.profile_source, config.supervisor).unwrap();
+        let supervisor =
+            super::ProfileSupervisor::new(config.profile_source, config.supervisor).unwrap();
         let lease = supervisor.attach(grant.profile().as_str()).await.unwrap();
         let services = lease.services().unwrap();
         let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
@@ -5647,15 +5677,20 @@ mod tests {
             std::future::poll_fn(|context| {
                 assert!(std::future::Future::poll(waiter.as_mut(), context).is_pending());
                 std::task::Poll::Ready(())
-            }).await;
-            let reload = tokio::spawn(
-                Arc::clone(&fixture.authorization).run_reload_loop(stop_rx.clone())
-            );
+            })
+            .await;
+            let reload =
+                tokio::spawn(Arc::clone(&fixture.authorization).run_reload_loop(stop_rx.clone()));
             fixture.authorization.request_reload();
-            tokio::time::timeout(TEST_REQUEST_DEADLINE, gate.wait_until_entered()).await.unwrap();
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, gate.wait_until_entered())
+                .await
+                .unwrap();
             fixture.wait_for_authorization_failure().await;
             let unavailable = fixture.authorization.grant_interruption(&grant).unwrap();
-            assert_eq!(unavailable, super::RequestCancellationReason::AuthorizationUnavailable);
+            assert_eq!(
+                unavailable,
+                super::RequestCancellationReason::AuthorizationUnavailable
+            );
             for request in [&status, &create] {
                 let key = super::LedgerKey::for_grant(&grant, request.request_id());
                 super::cancel_request(&ledger, &key, unavailable);
@@ -5666,25 +5701,38 @@ mod tests {
                 );
                 assert!(matches!(
                     super::execute_session_request(&mut state, request.clone()).await,
-                    LocalServiceResponse::Failure { code: LocalServiceErrorCode::ReconciliationPending, .. }
+                    LocalServiceResponse::Failure {
+                        code: LocalServiceErrorCode::ReconciliationPending,
+                        ..
+                    }
                 ));
                 assert!(
                     super::load_persisted_request_outcome(
-                        Arc::clone(&state.store), grant.session_public_key(), request.request_id()
-                    ).await.unwrap().is_none()
+                        Arc::clone(&state.store),
+                        grant.session_public_key(),
+                        request.request_id()
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
                 );
             }
             assert!(matches!(
-                tokio::time::timeout(TEST_REQUEST_DEADLINE, waiter).await.unwrap(),
-                LocalServiceResponse::Failure { code: LocalServiceErrorCode::ReconciliationPending, .. }
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, waiter)
+                    .await
+                    .unwrap(),
+                LocalServiceResponse::Failure {
+                    code: LocalServiceErrorCode::ReconciliationPending,
+                    ..
+                }
             ));
             reload
         };
         assert!(waiter_state.authorization_interrupted);
         assert_eq!(
-            super::delivery_claim(
-                &mut state, br#"{"maxEvents":1,"waitMilliseconds":0}"#
-            ).await.unwrap_err(),
+            super::delivery_claim(&mut state, br#"{"maxEvents":1,"waitMilliseconds":0}"#)
+                .await
+                .unwrap_err(),
             "profile_unavailable"
         );
         assert!(state.delivery.is_none());
@@ -5695,14 +5743,22 @@ mod tests {
         fixture.authorization.request_reload();
         tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
             loop {
-                if matches!(*authorization_status.borrow_and_update(), AuthorizationRuntimeStatus::Active(_)) {
+                if matches!(
+                    *authorization_status.borrow_and_update(),
+                    AuthorizationRuntimeStatus::Active(_)
+                ) {
                     break;
                 }
                 authorization_status.changed().await.unwrap();
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(fixture.authorization.grant_interruption(&grant).is_none());
-        let mut recovered = super::ClientRequestState { authorization_interrupted: false, ..state };
+        let mut recovered = super::ClientRequestState {
+            authorization_interrupted: false,
+            ..state
+        };
         for request in [&status, &create] {
             let actual = super::execute_session_request(&mut recovered, request.clone()).await;
             assert!(matches!(actual, LocalServiceResponse::Success { .. }));
@@ -5711,21 +5767,35 @@ mod tests {
                 actual
             );
         }
-        let conversations = recovered.handler.dispatch_json("list_conversations", b"{}").await.unwrap();
+        let conversations = recovered
+            .handler
+            .dispatch_json("list_conversations", b"{}")
+            .await
+            .unwrap();
         let conversations: serde_json::Value = serde_json::from_slice(&conversations).unwrap();
-        assert_eq!(conversations["conversation_ids"].as_array().unwrap().len(), 1);
-        fixture.authorization.retire_grant(
-            grant.grant_id(), SystemUnixClock.now_unix_milliseconds()
-        ).await.unwrap();
+        assert_eq!(
+            conversations["conversation_ids"].as_array().unwrap().len(),
+            1
+        );
+        fixture
+            .authorization
+            .retire_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
+            .await
+            .unwrap();
         assert_eq!(
             fixture.authorization.grant_interruption(&grant),
             Some(super::RequestCancellationReason::AuthorizationLost)
         );
         assert!(matches!(
             super::execute_session_request(
-                &mut recovered, ledger_request(97, "get_identity", b"{}".to_vec())
-            ).await,
-            LocalServiceResponse::Failure { code: LocalServiceErrorCode::NotAuthorized, .. }
+                &mut recovered,
+                ledger_request(97, "get_identity", b"{}".to_vec())
+            )
+            .await,
+            LocalServiceResponse::Failure {
+                code: LocalServiceErrorCode::NotAuthorized,
+                ..
+            }
         ));
         stop_tx.send_replace(true);
         reload.await.unwrap().unwrap();
