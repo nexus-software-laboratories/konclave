@@ -297,7 +297,7 @@ async fn pending_authorization_waits_for_a_fresh_allow_or_uniform_denial() {
             move |binding| async move {
                 entered_tx.send(()).unwrap();
                 release_rx.await.unwrap();
-                registry.authorizes_binding(&binding, 1)
+                Ok(registry.authorizes_binding(&binding, 1))
             },
         );
         tokio::pin!(client, service);
@@ -370,4 +370,34 @@ async fn pending_authorization_cannot_extend_the_handshake_deadline() {
         service.unwrap_err(),
         LocalServiceTransportError::HandshakeTimeout
     );
+}
+
+#[tokio::test]
+async fn an_authorizer_failure_is_not_a_signed_denial_or_legacy_service() {
+    let fixture = Fixture::new();
+    let request = Fixture::issuer_request();
+    let (mut client_stream, mut service_stream) = tokio::io::duplex(4_096);
+    let service_identity = &fixture.service;
+    let service = async move {
+        complete_authorization_service_handshake_with_authorizer(
+            &mut service_stream,
+            service_identity,
+            |_| async { Err(LocalServiceTransportError::EndpointUnavailable) },
+        )
+        .await
+    };
+    let (client, service) = tokio::join!(
+        complete_issuer_client_handshake(
+            &mut client_stream,
+            &request,
+            &fixture.issuer,
+            fixture.service.public_key(),
+        ),
+        service,
+    );
+    assert_eq!(
+        service.unwrap_err(),
+        LocalServiceTransportError::EndpointUnavailable
+    );
+    assert_eq!(client.unwrap_err(), LocalServiceTransportError::ChannelClosed);
 }

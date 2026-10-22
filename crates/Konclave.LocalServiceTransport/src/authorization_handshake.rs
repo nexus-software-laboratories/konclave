@@ -163,7 +163,7 @@ where
             },
         )
         .await?;
-        match read_service_message(stream).await? {
+        match read_message(stream).await? {
             AuthorizationHandshakeMessage::ServiceAccept { signature } => {
                 transcript.verify_service_signature(&signature)?;
             }
@@ -202,7 +202,9 @@ where
     complete_authorization_service_handshake_with_authorizer(
         stream,
         service_identity,
-        move |binding| async move { registry.authorizes_binding(&binding, now_unix_milliseconds) },
+        move |binding| async move {
+            Ok(registry.authorizes_binding(&binding, now_unix_milliseconds))
+        },
     )
     .await
 }
@@ -213,6 +215,7 @@ where
 /// verified registry before deciding. That wait shares the existing handshake
 /// deadline; it grants no authority and sends no acceptance while pending.
 /// A false decision retains the same uniform signed rejection as a registry lookup.
+/// An operational error ends the exchange without fabricating an authorization denial.
 ///
 /// # Errors
 ///
@@ -225,7 +228,7 @@ pub async fn complete_authorization_service_handshake_with_authorizer<S, A, D>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
     A: FnOnce(AuthorizationBinding) -> D + Send,
-    D: Future<Output = bool> + Send,
+    D: Future<Output = Result<bool, LocalServiceTransportError>> + Send,
 {
     tokio::time::timeout(AUTHORIZATION_HANDSHAKE_TIMEOUT, async {
         let hello = read_message(stream).await?;
@@ -287,7 +290,7 @@ where
             return Err(LocalServiceTransportError::UnexpectedMessage);
         };
         transcript.verify_client_signature(presented_key, &signature)?;
-        let authorized = authorize(binding).await;
+        let authorized = authorize(binding).await?;
         if !authorized {
             write_message(
                 stream,
