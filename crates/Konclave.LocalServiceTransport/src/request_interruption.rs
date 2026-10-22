@@ -69,9 +69,7 @@ pub const fn resolve_local_request_interruption(
             }
             reason => LocalRequestInterruptionAction::Cancel(reason.error_code()),
         },
-        LocalRequestExecutionState::Executing => {
-            LocalRequestInterruptionAction::ReconcileExecution
-        }
+        LocalRequestExecutionState::Executing => LocalRequestInterruptionAction::ReconcileExecution,
         LocalRequestExecutionState::Settled => LocalRequestInterruptionAction::PreserveOutcome,
     }
 }
@@ -121,14 +119,16 @@ mod tests {
             LocalRequestInterruption::AuthorizationLost,
             LocalRequestInterruption::AuthorizationUnavailable,
         ] {
-            let before_execution =
-                if reason == LocalRequestInterruption::AuthorizationUnavailable {
-                    LocalRequestInterruptionAction::AwaitAuthorization
-                } else {
-                    LocalRequestInterruptionAction::Cancel(reason.error_code())
-                };
+            let before_execution = if reason == LocalRequestInterruption::AuthorizationUnavailable {
+                LocalRequestInterruptionAction::AwaitAuthorization
+            } else {
+                LocalRequestInterruptionAction::Cancel(reason.error_code())
+            };
             for (state, expected) in [
-                (LocalRequestExecutionState::BeforeExecution, before_execution),
+                (
+                    LocalRequestExecutionState::BeforeExecution,
+                    before_execution,
+                ),
                 (
                     LocalRequestExecutionState::Executing,
                     LocalRequestInterruptionAction::ReconcileExecution,
