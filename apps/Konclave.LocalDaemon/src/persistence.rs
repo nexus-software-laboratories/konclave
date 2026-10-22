@@ -123,16 +123,17 @@ type LocalRequestOutcomeReadGates = OnceLock<Mutex<BTreeMap<String, Arc<Blocking
 static LOCAL_REQUEST_OUTCOME_READ_GATES: LocalRequestOutcomeReadGates = OnceLock::new();
 
 #[cfg(test)]
-pub(crate) fn block_next_local_request_outcome_read(
-    profile_id: &str,
-) -> BlockingTestBlock {
+pub(crate) fn block_next_local_request_outcome_read(profile_id: &str) -> BlockingTestBlock {
     let gate = Arc::new(BlockingTestGate::new());
     let replaced = LOCAL_REQUEST_OUTCOME_READ_GATES
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .unwrap()
         .insert(profile_id.to_owned(), Arc::clone(&gate));
-    assert!(replaced.is_none(), "profile already has a blocked outcome read");
+    assert!(
+        replaced.is_none(),
+        "profile already has a blocked outcome read"
+    );
     BlockingTestBlock(gate)
 }
 

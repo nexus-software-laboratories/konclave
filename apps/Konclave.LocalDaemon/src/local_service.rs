@@ -1283,7 +1283,8 @@ async fn execute_session_request(
                 } else if durable {
                     response
                 } else {
-                    let reconciliation = reconcile_session_response(state, &request, response).await;
+                    let reconciliation =
+                        reconcile_session_response(state, &request, response).await;
                     if reconciliation.durable {
                         mark_request_durable(&ledger, &key);
                     }
@@ -1315,7 +1316,8 @@ async fn execute_session_request(
                         }
                     }
                     Some(RequestOutcome::Settled(response)) => {
-                        if let Some(failure) = detached_claim_replay_failure(state, &request, &response)
+                        if let Some(failure) =
+                            detached_claim_replay_failure(state, &request, &response)
                         {
                             failure
                         } else if request_is_durable(&ledger, &key) {
@@ -1358,20 +1360,21 @@ async fn execute_session_request(
                     }
                 };
                 if let Some(plaintext) = persisted {
-                    let (recorded_request, response) = match decode_local_request_outcome(&plaintext) {
-                        Ok(outcome) => outcome,
-                        Err(_) => {
-                            tracing::error!(
-                                outcome = "request_outcome_decode_failed",
-                                "shared local request outcome could not be decoded"
-                            );
-                            discard_request(&ledger, &key);
-                            return LocalServiceResponse::failure(
-                                request.request_id(),
-                                LocalServiceErrorCode::ProfileUnavailable,
-                            );
-                        }
-                    };
+                    let (recorded_request, response) =
+                        match decode_local_request_outcome(&plaintext) {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                tracing::error!(
+                                    outcome = "request_outcome_decode_failed",
+                                    "shared local request outcome could not be decoded"
+                                );
+                                discard_request(&ledger, &key);
+                                return LocalServiceResponse::failure(
+                                    request.request_id(),
+                                    LocalServiceErrorCode::ProfileUnavailable,
+                                );
+                            }
+                        };
                     let expected_request = Zeroizing::new(request.encode());
                     if recorded_request != expected_request.as_slice() {
                         discard_request(&ledger, &key);
@@ -1398,16 +1401,20 @@ async fn execute_session_request(
                 }
 
                 tokio::task::yield_now().await;
-                let dispatched =
-                    await_operation_outcome(dispatch_authorized_request(state, &request, Some(&key)))
-                        .await;
+                let dispatched = await_operation_outcome(dispatch_authorized_request(
+                    state,
+                    &request,
+                    Some(&key),
+                ))
+                .await;
                 let response = match dispatched {
                     Ok(response) => response,
                     Err(reason) => {
                         if reason == RequestCancellationReason::AuthorizationUnavailable {
                             state.authorization_interrupted = true;
                         }
-                        let Some(reason) = interrupt_undispatched_request(&ledger, &key, reason) else {
+                        let Some(reason) = interrupt_undispatched_request(&ledger, &key, reason)
+                        else {
                             tracing::error!(
                                 outcome = "request_admission_missing",
                                 "shared local request lost its execution reservation"
@@ -5783,14 +5790,19 @@ mod tests {
                 std::future::poll_fn(|context| {
                     assert!(std::future::Future::poll(execution.as_mut(), context).is_pending());
                     std::task::Poll::Ready(())
-                }).await;
+                })
+                .await;
                 assert_eq!(
                     super::interrupt_undispatched_request(
-                        &ledger, &key, super::RequestCancellationReason::AuthorizationUnavailable
+                        &ledger,
+                        &key,
+                        super::RequestCancellationReason::AuthorizationUnavailable
                     ),
                     Some(super::RequestCancellationReason::AuthorizationUnavailable)
                 );
-                tokio::time::timeout(TEST_REQUEST_DEADLINE, execution).await.unwrap()
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, execution)
+                    .await
+                    .unwrap()
             };
             assert!(matches!(actual, LocalServiceResponse::Success { .. }));
             assert_eq!(
@@ -7268,7 +7280,9 @@ mod tests {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let mut service = tokio::spawn(run_shared_local_service_until(
             fixture.config(),
-            async move { let _ = stop_rx.await; },
+            async move {
+                let _ = stop_rx.await;
+            },
         ));
         for (profile, operation, seed) in [
             ("session-rpc-framed-status", "service.status", 100),
@@ -7284,14 +7298,23 @@ mod tests {
             let original = ledger_request(seed, operation, b"{}".to_vec());
             write_request(&mut client, &original).await.unwrap();
             tokio::time::timeout(TEST_REQUEST_DEADLINE, read_gate.wait_until_entered())
-                .await.unwrap();
+                .await
+                .unwrap();
             let authorization_gate = fixture.authorization.block_next_reload_for_test();
             fixture.authorization.request_reload();
-            tokio::time::timeout(TEST_REQUEST_DEADLINE, authorization_gate.wait_until_entered())
-                .await.unwrap();
+            tokio::time::timeout(
+                TEST_REQUEST_DEADLINE,
+                authorization_gate.wait_until_entered(),
+            )
+            .await
+            .unwrap();
             fixture.wait_for_authorization_failure().await;
-            assert!(tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
-                .await.unwrap().is_err());
+            assert!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
             let reconnect = fixture.connect_grant(grant, seed + 10);
             tokio::pin!(reconnect);
             tokio::select! {
@@ -7301,16 +7324,21 @@ mod tests {
             authorization_gate.release();
             fixture.authorization.request_reload();
             let mut recovered = tokio::time::timeout(TEST_REQUEST_DEADLINE, reconnect)
-                .await.unwrap();
+                .await
+                .unwrap();
             write_request(&mut recovered, &original).await.unwrap();
             read_gate.release();
             let actual = tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             assert!(matches!(actual, LocalServiceResponse::Success { .. }));
             write_request(&mut recovered, &original).await.unwrap();
             assert_eq!(
                 tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
-                    .await.unwrap().unwrap(),
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 actual
             );
             if operation == "create_conversation" {
@@ -7325,7 +7353,10 @@ mod tests {
         }
         stop_tx.send(()).unwrap();
         tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
-            .await.unwrap().unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

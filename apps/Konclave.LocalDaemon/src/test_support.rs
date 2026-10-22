@@ -33,7 +33,11 @@ impl BlockingTestBlock {
     }
 
     pub(crate) fn release(&self) {
-        *self.0.released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        *self
+            .0
+            .released
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
         self.0.release.notify_all();
     }
 }
