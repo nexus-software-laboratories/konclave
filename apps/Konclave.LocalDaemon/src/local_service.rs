@@ -1275,92 +1275,80 @@ async fn execute_session_request(
     }
     let key = LedgerKey::for_grant(&state.grant, request.request_id());
     let ledger = Arc::clone(&state.ledger);
-    match begin_request(&ledger, key.clone(), &request) {
-        LedgerDecision::Cached(response, durable) => {
-            if let Some(failure) = detached_claim_replay_failure(state, &request, &response) {
-                failure
-            } else if durable {
-                response
-            } else {
-                let reconciliation = reconcile_session_response(state, &request, response).await;
-                if reconciliation.durable {
-                    mark_request_durable(&ledger, &key);
-                }
-                reconciliation.client_response
-            }
-        }
-        LedgerDecision::Conflict => {
-            LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Conflict)
-        }
-        LedgerDecision::Busy => {
-            LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Busy)
-        }
-        LedgerDecision::ShuttingDown => LocalServiceResponse::failure(
-            request.request_id(),
-            LocalServiceErrorCode::ProfileUnavailable,
-        ),
-        LedgerDecision::Wait(mut outcome) => {
-            match outcome
-                .wait_for(Option::is_some)
-                .await
-                .ok()
-                .and_then(|response| response.clone())
-            {
-                Some(RequestOutcome::AwaitingAuthorization) => interrupted_session_response(
-                    state,
-                    request.request_id(),
-                    RequestCancellationReason::AuthorizationUnavailable,
-                ),
-                Some(RequestOutcome::Settled(response)) => {
-                    if let Some(failure) = detached_claim_replay_failure(state, &request, &response)
-                    {
-                        failure
-                    } else if request_is_durable(&ledger, &key) {
-                        response
-                    } else {
-                        let reconciliation =
-                            reconcile_session_response(state, &request, response).await;
-                        if reconciliation.durable {
-                            mark_request_durable(&ledger, &key);
-                        }
-                        reconciliation.client_response
+    loop {
+        return match begin_request(&ledger, key.clone(), &request) {
+            LedgerDecision::Cached(response, durable) => {
+                if let Some(failure) = detached_claim_replay_failure(state, &request, &response) {
+                    failure
+                } else if durable {
+                    response
+                } else {
+                    let reconciliation = reconcile_session_response(state, &request, response).await;
+                    if reconciliation.durable {
+                        mark_request_durable(&ledger, &key);
                     }
+                    reconciliation.client_response
                 }
-                None => LocalServiceResponse::failure(
-                    request.request_id(),
-                    LocalServiceErrorCode::Internal,
-                ),
             }
-        }
-        LedgerDecision::Execute => {
-            let completion = RequestCompletion::new(Arc::clone(&ledger), key.clone());
-            let persisted = match load_persisted_request_outcome(
-                Arc::clone(&state.store),
-                state.grant.session_public_key(),
+            LedgerDecision::Conflict => {
+                LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Conflict)
+            }
+            LedgerDecision::Busy => {
+                LocalServiceResponse::failure(request.request_id(), LocalServiceErrorCode::Busy)
+            }
+            LedgerDecision::ShuttingDown => LocalServiceResponse::failure(
                 request.request_id(),
-            )
-            .await
-            {
-                Ok(persisted) => persisted,
-                Err(_) => {
-                    tracing::error!(
-                        outcome = "request_outcome_read_failed",
-                        "shared local request outcome could not be read"
-                    );
-                    discard_request(&ledger, &key);
-                    return LocalServiceResponse::failure(
+                LocalServiceErrorCode::ProfileUnavailable,
+            ),
+            LedgerDecision::Wait(mut outcome) => {
+                match outcome
+                    .wait_for(Option::is_some)
+                    .await
+                    .ok()
+                    .and_then(|response| response.clone())
+                {
+                    Some(RequestOutcome::AwaitingAuthorization) => {
+                        if let Some(reason) = state.authorization.grant_interruption(&state.grant) {
+                            interrupted_session_response(state, request.request_id(), reason)
+                        } else {
+                            continue;
+                        }
+                    }
+                    Some(RequestOutcome::Settled(response)) => {
+                        if let Some(failure) = detached_claim_replay_failure(state, &request, &response)
+                        {
+                            failure
+                        } else if request_is_durable(&ledger, &key) {
+                            response
+                        } else {
+                            let reconciliation =
+                                reconcile_session_response(state, &request, response).await;
+                            if reconciliation.durable {
+                                mark_request_durable(&ledger, &key);
+                            }
+                            reconciliation.client_response
+                        }
+                    }
+                    None => LocalServiceResponse::failure(
                         request.request_id(),
-                        LocalServiceErrorCode::ProfileUnavailable,
-                    );
+                        LocalServiceErrorCode::Internal,
+                    ),
                 }
-            };
-            if let Some(plaintext) = persisted {
-                let (recorded_request, response) = match decode_local_request_outcome(&plaintext) {
-                    Ok(outcome) => outcome,
+            }
+            LedgerDecision::Execute => {
+                let completion = RequestCompletion::new(Arc::clone(&ledger), key.clone());
+                let persisted = match load_persisted_request_outcome(
+                    Arc::clone(&state.store),
+                    state.grant.session_public_key(),
+                    request.request_id(),
+                )
+                .await
+                {
+                    Ok(persisted) => persisted,
                     Err(_) => {
                         tracing::error!(
-                            outcome = "request_outcome_decode_failed",
-                            "shared local request outcome could not be decoded"
+                            outcome = "request_outcome_read_failed",
+                            "shared local request outcome could not be read"
                         );
                         discard_request(&ledger, &key);
                         return LocalServiceResponse::failure(
@@ -1369,64 +1357,80 @@ async fn execute_session_request(
                         );
                     }
                 };
-                let expected_request = Zeroizing::new(request.encode());
-                if recorded_request != expected_request.as_slice() {
-                    discard_request(&ledger, &key);
-                    return LocalServiceResponse::failure(
-                        request.request_id(),
-                        LocalServiceErrorCode::Conflict,
-                    );
-                }
-                if response.request_id() != request.request_id() {
-                    tracing::error!(
-                        outcome = "request_outcome_mismatch",
-                        "shared local request outcome named another request"
-                    );
-                    discard_request(&ledger, &key);
-                    return LocalServiceResponse::failure(
-                        request.request_id(),
-                        LocalServiceErrorCode::ProfileUnavailable,
-                    );
-                }
-                let client_response = detached_claim_replay_failure(state, &request, &response)
-                    .unwrap_or_else(|| response.clone());
-                completion.complete(response, true);
-                return client_response;
-            }
-
-            tokio::task::yield_now().await;
-            let dispatched =
-                await_operation_outcome(dispatch_authorized_request(state, &request, Some(&key)))
-                    .await;
-            let response = match dispatched {
-                Ok(response) => response,
-                Err(reason) => {
-                    if reason == RequestCancellationReason::AuthorizationUnavailable {
-                        state.authorization_interrupted = true;
-                    }
-                    let Some(reason) = interrupt_undispatched_request(&ledger, &key, reason) else {
-                        tracing::error!(
-                            outcome = "request_admission_missing",
-                            "shared local request lost its execution reservation"
-                        );
+                if let Some(plaintext) = persisted {
+                    let (recorded_request, response) = match decode_local_request_outcome(&plaintext) {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            tracing::error!(
+                                outcome = "request_outcome_decode_failed",
+                                "shared local request outcome could not be decoded"
+                            );
+                            discard_request(&ledger, &key);
+                            return LocalServiceResponse::failure(
+                                request.request_id(),
+                                LocalServiceErrorCode::ProfileUnavailable,
+                            );
+                        }
+                    };
+                    let expected_request = Zeroizing::new(request.encode());
+                    if recorded_request != expected_request.as_slice() {
+                        discard_request(&ledger, &key);
                         return LocalServiceResponse::failure(
                             request.request_id(),
-                            LocalServiceErrorCode::Internal,
+                            LocalServiceErrorCode::Conflict,
                         );
-                    };
-                    let response =
-                        interrupted_session_response(state, request.request_id(), reason);
-                    if reason == RequestCancellationReason::AuthorizationUnavailable {
-                        return response;
                     }
-                    response
+                    if response.request_id() != request.request_id() {
+                        tracing::error!(
+                            outcome = "request_outcome_mismatch",
+                            "shared local request outcome named another request"
+                        );
+                        discard_request(&ledger, &key);
+                        return LocalServiceResponse::failure(
+                            request.request_id(),
+                            LocalServiceErrorCode::ProfileUnavailable,
+                        );
+                    }
+                    let client_response = detached_claim_replay_failure(state, &request, &response)
+                        .unwrap_or_else(|| response.clone());
+                    completion.complete(response, true);
+                    return client_response;
                 }
-            };
-            let reconciliation =
-                reconcile_session_response(state, &request, response.clone()).await;
-            completion.complete(response, reconciliation.durable);
-            reconciliation.client_response
-        }
+
+                tokio::task::yield_now().await;
+                let dispatched =
+                    await_operation_outcome(dispatch_authorized_request(state, &request, Some(&key)))
+                        .await;
+                let response = match dispatched {
+                    Ok(response) => response,
+                    Err(reason) => {
+                        if reason == RequestCancellationReason::AuthorizationUnavailable {
+                            state.authorization_interrupted = true;
+                        }
+                        let Some(reason) = interrupt_undispatched_request(&ledger, &key, reason) else {
+                            tracing::error!(
+                                outcome = "request_admission_missing",
+                                "shared local request lost its execution reservation"
+                            );
+                            return LocalServiceResponse::failure(
+                                request.request_id(),
+                                LocalServiceErrorCode::Internal,
+                            );
+                        };
+                        let response =
+                            interrupted_session_response(state, request.request_id(), reason);
+                        if reason == RequestCancellationReason::AuthorizationUnavailable {
+                            return response;
+                        }
+                        response
+                    }
+                };
+                let reconciliation =
+                    reconcile_session_response(state, &request, response.clone()).await;
+                completion.complete(response, reconciliation.durable);
+                reconciliation.client_response
+            }
+        };
     }
 }
 
@@ -5768,7 +5772,26 @@ mod tests {
             ..state
         };
         for request in [&status, &create] {
-            let actual = super::execute_session_request(&mut recovered, request.clone()).await;
+            let key = super::LedgerKey::for_grant(&grant, request.request_id());
+            assert!(matches!(
+                super::begin_request(&ledger, key.clone(), request),
+                super::LedgerDecision::Execute
+            ));
+            let actual = {
+                let execution = super::execute_session_request(&mut recovered, request.clone());
+                tokio::pin!(execution);
+                std::future::poll_fn(|context| {
+                    assert!(std::future::Future::poll(execution.as_mut(), context).is_pending());
+                    std::task::Poll::Ready(())
+                }).await;
+                assert_eq!(
+                    super::interrupt_undispatched_request(
+                        &ledger, &key, super::RequestCancellationReason::AuthorizationUnavailable
+                    ),
+                    Some(super::RequestCancellationReason::AuthorizationUnavailable)
+                );
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, execution).await.unwrap()
+            };
             assert!(matches!(actual, LocalServiceResponse::Success { .. }));
             assert_eq!(
                 super::execute_session_request(&mut recovered, request.clone()).await,
@@ -7237,6 +7260,72 @@ mod tests {
             .expect("shared service shutdown exceeded the test deadline")
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rpc_interruption_recovers_the_actual_framed_precommit_request() {
+        let fixture = Fixture::new().await;
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let mut service = tokio::spawn(run_shared_local_service_until(
+            fixture.config(),
+            async move { let _ = stop_rx.await; },
+        ));
+        for (profile, operation, seed) in [
+            ("session-rpc-framed-status", "service.status", 100),
+            ("session-rpc-framed-create", "create_conversation", 101),
+        ] {
+            let grant = fixture.grant(profile, seed);
+            fixture.persist_grant(grant.clone()).await;
+            let mut client = tokio::select! {
+                result = &mut service => panic!("service exited before connection: {result:?}"),
+                client = fixture.connect_grant(grant.clone(), seed) => client,
+            };
+            let read_gate = crate::persistence::block_next_local_request_outcome_read(profile);
+            let original = ledger_request(seed, operation, b"{}".to_vec());
+            write_request(&mut client, &original).await.unwrap();
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, read_gate.wait_until_entered())
+                .await.unwrap();
+            let authorization_gate = fixture.authorization.block_next_reload_for_test();
+            fixture.authorization.request_reload();
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, authorization_gate.wait_until_entered())
+                .await.unwrap();
+            fixture.wait_for_authorization_failure().await;
+            assert!(tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
+                .await.unwrap().is_err());
+            let reconnect = fixture.connect_grant(grant, seed + 10);
+            tokio::pin!(reconnect);
+            tokio::select! {
+                result = &mut reconnect => panic!("reconnect completed without authority: {result:?}"),
+                () = fixture.authorization.wait_for_pending_handshake_for_test() => {}
+            }
+            authorization_gate.release();
+            fixture.authorization.request_reload();
+            let mut recovered = tokio::time::timeout(TEST_REQUEST_DEADLINE, reconnect)
+                .await.unwrap();
+            write_request(&mut recovered, &original).await.unwrap();
+            read_gate.release();
+            let actual = tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
+                .await.unwrap().unwrap();
+            assert!(matches!(actual, LocalServiceResponse::Success { .. }));
+            write_request(&mut recovered, &original).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
+                    .await.unwrap().unwrap(),
+                actual
+            );
+            if operation == "create_conversation" {
+                let listed = request(&mut recovered, seed + 20, "list_conversations", b"{}").await;
+                let LocalServiceResponse::Success { payload, .. } = listed else {
+                    panic!("conversation listing failed");
+                };
+                let listed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(listed["conversation_ids"].as_array().unwrap().len(), 1);
+            }
+            drop((client, recovered));
+        }
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
+            .await.unwrap().unwrap().unwrap();
     }
 
     #[tokio::test]

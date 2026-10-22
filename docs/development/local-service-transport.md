@@ -125,6 +125,9 @@ profile, request identifier, operation, payload, and bounded ledger reservation.
 Its nonterminal authorization-wait marker is separate from actual handler outcomes
 and is never sealed as a terminal denial. After fresh authorization, only the
 byte-identical request may resume; changed operation or payload remains a conflict.
+An already-authorized replay waiting on the original executor also resumes if that
+executor publishes its wait marker after authority has recovered; it does not need
+another reconnect.
 Caller cancellation, deadline, shutdown, and verified authority loss terminalize
 suspended work instead. Pending reservations remain subject to the existing
 entry and byte limits and cannot be evicted to admit unrelated work.

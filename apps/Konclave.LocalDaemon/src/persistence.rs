@@ -39,6 +39,8 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::clock::{SystemUnixClock, UnixClock};
+#[cfg(test)]
+use crate::test_support::{BlockingTestBlock, BlockingTestGate};
 
 mod collaboration_policy_exchange;
 mod collaboration_policy_operation;
@@ -113,6 +115,38 @@ static LOCAL_REQUEST_OUTCOME_READ_FAILURES: LocalRequestOutcomeFailures = OnceLo
 
 #[cfg(test)]
 static LOCAL_REQUEST_OUTCOME_WRITE_FAILURES: LocalRequestOutcomeFailures = OnceLock::new();
+
+#[cfg(test)]
+type LocalRequestOutcomeReadGates = OnceLock<Mutex<BTreeMap<String, Arc<BlockingTestGate>>>>;
+
+#[cfg(test)]
+static LOCAL_REQUEST_OUTCOME_READ_GATES: LocalRequestOutcomeReadGates = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn block_next_local_request_outcome_read(
+    profile_id: &str,
+) -> BlockingTestBlock {
+    let gate = Arc::new(BlockingTestGate::new());
+    let replaced = LOCAL_REQUEST_OUTCOME_READ_GATES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap()
+        .insert(profile_id.to_owned(), Arc::clone(&gate));
+    assert!(replaced.is_none(), "profile already has a blocked outcome read");
+    BlockingTestBlock(gate)
+}
+
+#[cfg(test)]
+fn block_local_request_outcome_read(profile_id: &str) {
+    let gate = LOCAL_REQUEST_OUTCOME_READ_GATES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap()
+        .remove(profile_id);
+    if let Some(gate) = gate {
+        gate.block();
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn inject_local_request_outcome_read_failures(profile_id: &str, count: usize) {
@@ -525,6 +559,8 @@ impl ProfileStore {
         session_public_key: Ed25519PublicKey,
         request_id: &[u8; 16],
     ) -> Result<Option<Zeroizing<Vec<u8>>>, ProfileStoreError> {
+        #[cfg(test)]
+        block_local_request_outcome_read(self.locked_profile.profile_id.as_str());
         #[cfg(test)]
         if take_local_request_outcome_read_failure(self.locked_profile.profile_id.as_str()) {
             return Err(ProfileStoreError::Storage);
