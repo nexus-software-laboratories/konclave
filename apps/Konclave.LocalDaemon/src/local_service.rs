@@ -3380,6 +3380,12 @@ fn commit_request(
 ) -> Option<RequestCancellationReason> {
     let mut ledger = lock(ledger);
     let entry = ledger.entries.get_mut(key)?;
+    if matches!(
+        *entry.outcome.borrow(),
+        Some(RequestOutcome::AwaitingAuthorization)
+    ) {
+        return Some(RequestCancellationReason::AuthorizationUnavailable);
+    }
     if entry.outcome.borrow().is_some() {
         return None;
     }
@@ -3551,7 +3557,7 @@ fn complete_request_with_durability(
 fn mark_request_durable(ledger: &Arc<Mutex<RequestLedger>>, key: &LedgerKey) {
     let mut ledger = lock(ledger);
     if let Some(entry) = ledger.entries.get_mut(key)
-        && entry.outcome.borrow().is_some()
+        && matches!(*entry.outcome.borrow(), Some(RequestOutcome::Settled(_)))
     {
         entry.durable = true;
     }
@@ -3572,10 +3578,9 @@ fn evict_completed(ledger: &mut RequestLedger, required_entries: usize, required
         let Some(key) = ledger.order.pop_front() else {
             break;
         };
-        let completed = ledger
-            .entries
-            .get(&key)
-            .is_some_and(|entry| entry.durable && entry.outcome.borrow().is_some());
+        let completed = ledger.entries.get(&key).is_some_and(|entry| {
+            entry.durable && matches!(*entry.outcome.borrow(), Some(RequestOutcome::Settled(_)))
+        });
         if !completed {
             ledger.order.push_back(key);
             pending_seen += 1;
@@ -5406,6 +5411,9 @@ mod tests {
             *waiter.borrow(),
             Some(super::RequestOutcome::AwaitingAuthorization)
         ));
+        super::mark_request_durable(&ledger, &key);
+        assert!(!super::request_is_durable(&ledger, &key));
+        assert_eq!(super::commit_request(&ledger, &key), Some(unavailable));
         for changed in [
             ledger_request(91, "create_conversation", br#"{"changed":true}"#.to_vec()),
             ledger_request(91, "get_identity", b"{}".to_vec()),
