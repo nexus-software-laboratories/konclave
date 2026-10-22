@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::sync::{Condvar, Mutex as StdMutex};
@@ -13,7 +13,7 @@ use KonclaveLocalAuthorizationStore::{
     UserPresenceCredentialRecord,
 };
 use KonclaveLocalServiceTransport::{
-    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     InMemorySessionAuthorizationRegistry, InstalledIssuerRegistration, IssuerKeyId,
     IssuerKeyVersion, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
@@ -124,6 +124,27 @@ pub(crate) struct AuthorizationReloadTestGate {
 }
 
 #[cfg(test)]
+pub(crate) struct AuthorizationReloadTestBlock(Arc<AuthorizationReloadTestGate>);
+
+#[cfg(test)]
+impl AuthorizationReloadTestBlock {
+    pub(crate) async fn wait_until_entered(&self) {
+        self.0.wait_until_entered().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.0.release();
+    }
+}
+
+#[cfg(test)]
+impl Drop for AuthorizationReloadTestBlock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(test)]
 impl AuthorizationReloadTestGate {
     fn new() -> Self {
         Self {
@@ -163,9 +184,9 @@ pub(crate) struct LiveAuthorizationRuntime {
     status: watch::Sender<AuthorizationRuntimeStatus>,
     reload_requested: Notify,
     #[cfg(test)]
-    fail_next_reload: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
     block_next_reload: StdMutex<Option<Arc<AuthorizationReloadTestGate>>>,
+    #[cfg(test)]
+    handshake_pending: Notify,
 }
 
 impl LiveAuthorizationRuntime {
@@ -213,14 +234,43 @@ impl LiveAuthorizationRuntime {
             status,
             reload_requested: Notify::new(),
             #[cfg(test)]
-            fail_next_reload: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
             block_next_reload: StdMutex::new(None),
+            #[cfg(test)]
+            handshake_pending: Notify::new(),
         }))
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<AuthorizationRuntimeStatus> {
         self.status.subscribe()
+    }
+
+    pub(crate) async fn authorize_handshake_binding(
+        &self,
+        binding: AuthorizationBinding,
+        clock: &dyn UnixClock,
+    ) -> Result<bool, LocalServiceTransportError> {
+        let mut status = self.subscribe();
+        loop {
+            {
+                let projection = read(&self.projection);
+                if projection.failure.is_none() {
+                    return Ok(self
+                        .registry
+                        .authorizes_binding(&binding, clock.now_unix_milliseconds()));
+                }
+            }
+            #[cfg(test)]
+            self.handshake_pending.notify_one();
+            status
+                .changed()
+                .await
+                .map_err(|_| LocalServiceTransportError::ChannelClosed)?;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_pending_handshake_for_test(&self) {
+        self.handshake_pending.notified().await;
     }
 
     #[cfg(test)]
@@ -672,16 +722,6 @@ impl LiveAuthorizationRuntime {
     }
 
     async fn reload_once(&self) -> Result<(), AuthorizationRuntimeError> {
-        #[cfg(test)]
-        if self
-            .fail_next_reload
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            let error =
-                AuthorizationRuntimeError::Store(LocalAuthorizationStoreError::StorageUnavailable);
-            self.fail_closed(error);
-            return Err(error);
-        }
         let high_water = self.reload_generation();
         self.refresh_locked(SystemUnixClock.now_unix_milliseconds(), high_water)
             .await
@@ -708,12 +748,23 @@ impl LiveAuthorizationRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        let queued_at = Instant::now();
         let mut snapshot_task = tokio::task::spawn_blocking(move || {
+            let started_at = Instant::now();
+            let queue_wait = started_at.duration_since(queued_at);
             #[cfg(test)]
             if let Some(gate) = reload_gate {
                 gate.block();
             }
-            store.load_snapshot(now_unix_milliseconds, Some(high_water))
+            let snapshot = store.load_snapshot(now_unix_milliseconds, Some(high_water));
+            tracing::debug!(
+                outcome = "authorization_snapshot_observed",
+                queue_wait_milliseconds = queue_wait.as_secs_f64() * 1000.0,
+                snapshot_milliseconds = started_at.elapsed().as_secs_f64() * 1000.0,
+                verified = snapshot.is_ok(),
+                "local authorization snapshot observation completed"
+            );
+            snapshot
         });
         let snapshot =
             match tokio::time::timeout(AUTHORIZATION_RELOAD_DEADLINE, &mut snapshot_task).await {
@@ -921,19 +972,13 @@ impl LiveAuthorizationRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_reload_for_test(&self) {
-        self.fail_next_reload
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn block_next_reload_for_test(&self) -> Arc<AuthorizationReloadTestGate> {
+    pub(crate) fn block_next_reload_for_test(&self) -> AuthorizationReloadTestBlock {
         let gate = Arc::new(AuthorizationReloadTestGate::new());
         *self
             .block_next_reload
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
-        gate
+        AuthorizationReloadTestBlock(gate)
     }
 }
 
@@ -944,11 +989,23 @@ impl SessionAuthorizationRegistry for LiveAuthorizationRuntime {
         issuer_key_version: IssuerKeyVersion,
     ) -> Option<KonclaveLocalServiceTransport::IssuerRegistration> {
         let projection = read(&self.projection);
-        if projection.failure.is_some() {
+        if let Some(error) = projection.failure {
+            tracing::debug!(
+                outcome = "issuer_lookup_unavailable",
+                reason = %error,
+                "local issuer authorization unavailable"
+            );
             return None;
         }
-        self.registry
-            .active_issuer(issuer_key_id, issuer_key_version)
+        let registration = self
+            .registry
+            .active_issuer(issuer_key_id, issuer_key_version);
+        tracing::debug!(
+            outcome = "issuer_lookup_completed",
+            registered = registration.is_some(),
+            "local issuer authorization lookup completed"
+        );
+        registration
     }
 
     fn active_grant(

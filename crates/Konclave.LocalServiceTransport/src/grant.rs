@@ -433,6 +433,35 @@ impl SessionGrant {
 
 /// Resolves issuer registrations and active grants during a v2 handshake.
 pub trait SessionAuthorizationRegistry: Send + Sync {
+    /// Checks the complete binding against the current issuer or unexpired grant.
+    ///
+    /// An unavailable registration or grant denies authorization. A caller with an
+    /// asynchronously observed registry must await a verified projection first.
+    fn authorizes_binding(
+        &self,
+        binding: &crate::AuthorizationBinding,
+        now_unix_milliseconds: u64,
+    ) -> bool {
+        match binding {
+            crate::AuthorizationBinding::Issuer {
+                issuer_key_id,
+                issuer_key_version,
+                issuer_public_key,
+                harness,
+                ..
+            } => self
+                .active_issuer(*issuer_key_id, *issuer_key_version)
+                .is_some_and(|registration| {
+                    registration.public_key() == *issuer_public_key
+                        && (registration.harness() == *harness
+                            || registration.harness() == HarnessKind::Generic)
+                }),
+            crate::AuthorizationBinding::Session { grant, .. } => self
+                .active_grant(grant.grant_id(), now_unix_milliseconds)
+                .is_some_and(|active| active == grant.clone()),
+        }
+    }
+
     /// Resolves one exact active issuer key version.
     fn active_issuer(
         &self,

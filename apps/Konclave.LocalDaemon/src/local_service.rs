@@ -17,9 +17,10 @@ use KonclaveLocalAuthorizationStore::{GrantIssuanceKey, UserPresenceCredentialRe
 use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, HarnessKind,
     LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceListener, LocalServiceRequest,
-    LocalServiceResponse, MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES,
-    MAX_SESSION_GRANTS, RequestId, ServiceProfileId, SessionCapabilities, SessionGrant,
-    complete_authorization_service_handshake, write_response,
+    LocalServiceResponse, LocalServiceTransportError, MAX_GRANTS_PER_ISSUER,
+    MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS, RequestId, ServiceProfileId,
+    SessionCapabilities, SessionGrant, complete_authorization_service_handshake_with_authorizer,
+    write_response,
 };
 use KonclaveUserPresence::{
     MAX_USER_PRESENCE_CHALLENGE_MILLISECONDS, MAX_USER_PRESENCE_GRANT_MILLISECONDS,
@@ -167,10 +168,19 @@ where
             joined = clients.join_next(), if !clients.is_empty() => {
                 match joined {
                     Some(Ok(Ok(()))) | None => {}
-                    Some(Ok(Err(_))) => tracing::warn!(
-                        outcome = "client_closed_with_error",
-                        "shared local client connection ended"
-                    ),
+                    Some(Ok(Err(error))) => {
+                        let transport_code = error
+                            .downcast_ref::<LocalServiceTransportError>()
+                            .map_or(
+                                "local_service_non_transport_failure",
+                                LocalServiceTransportError::code,
+                            );
+                        tracing::warn!(
+                            outcome = "client_closed_with_error",
+                            transport_code,
+                            "shared local client connection ended"
+                        );
+                    }
                     Some(Err(error)) => {
                         tracing::error!(
                             outcome = "client_task_failed",
@@ -230,12 +240,10 @@ async fn serve_client(
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut authorization_status = authorization.subscribe();
-    let now = SystemUnixClock.now_unix_milliseconds();
-    let mut handshake = Box::pin(complete_authorization_service_handshake(
+    let mut handshake = Box::pin(complete_authorization_service_handshake_with_authorizer(
         &mut stream,
-        authorization.as_ref(),
         identity.as_ref(),
-        now,
+        |binding| authorization.authorize_handshake_binding(binding, &SystemUnixClock),
     ));
     let channel = loop {
         tokio::select! {
@@ -246,12 +254,7 @@ async fn serve_client(
                 }
             }
             changed = authorization_status.changed() => {
-                if changed.is_err()
-                    || matches!(
-                        *authorization_status.borrow(),
-                        crate::authorization_runtime::AuthorizationRuntimeStatus::Failed(_)
-                    )
-                {
+                if changed.is_err() {
                     return Ok(());
                 }
             }
@@ -4347,6 +4350,7 @@ mod collaboration_policy_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
@@ -4357,15 +4361,15 @@ mod tests {
         LocalAuthorizationStoreError, UserPresenceCredentialRecord,
     };
     use KonclaveLocalServiceTransport::{
-        AdapterKeyId, AdapterKeyVersion, AdapterRegistration, AuthorizationEvidenceKind,
-        AuthorizationEvidenceSet, AuthorizationPolicy, AuthorizationPolicyVersion,
-        ClientInstanceId, HarnessKind, InstalledIssuerRegistration, IssuerHandshakeRequest,
-        LOCAL_SERVICE_INSTALLATION_FILE, LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceBinding,
-        LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse,
-        MAX_RPC_PAYLOAD_BYTES, OperationName, ProfileAuthorization, RequestId, ServiceProfileId,
-        SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
-        complete_issuer_client_handshake, complete_session_client_handshake, connect_local_service,
-        read_response, write_request,
+        AdapterKeyId, AdapterKeyVersion, AdapterRegistration, AuthorizationBinding,
+        AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+        AuthorizationPolicyVersion, ClientInstanceId, HarnessKind, InstalledIssuerRegistration,
+        IssuerHandshakeRequest, LOCAL_SERVICE_INSTALLATION_FILE, LOCAL_SERVICE_PROTOCOL_VERSION,
+        LocalServiceBinding, LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest,
+        LocalServiceResponse, MAX_RPC_PAYLOAD_BYTES, OperationName, ProfileAuthorization,
+        RequestId, ServiceProfileId, SessionCapabilities, SessionGrant, SessionGrantClaims,
+        SessionGrantId, complete_issuer_client_handshake, complete_session_client_handshake,
+        connect_local_service, read_response, write_request,
     };
     use KonclaveSecretStorage::{
         create_or_verify_owner_protected_file, ensure_owner_protected_directory,
@@ -4394,6 +4398,14 @@ mod tests {
     const TEST_FLAG_USER_PRESENT: u8 = 1;
     const TEST_FLAG_USER_VERIFIED: u8 = 1 << 2;
     const TEST_FLAG_ATTESTED_DATA: u8 = 1 << 6;
+
+    struct HandshakeClock(AtomicU64);
+
+    impl UnixClock for HandshakeClock {
+        fn now_unix_milliseconds(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
 
     struct TestWebAuthnAuthenticator {
         signing_key: ed25519_dalek::SigningKey,
@@ -4826,6 +4838,23 @@ mod tests {
             })
             .await
             .expect("authorization generation was not published");
+        }
+
+        async fn wait_for_authorization_failure(&self) {
+            let mut status = self.authorization.subscribe();
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+                loop {
+                    if matches!(
+                        *status.borrow_and_update(),
+                        AuthorizationRuntimeStatus::Failed(_)
+                    ) {
+                        break;
+                    }
+                    status.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("authorization reload failure was not published");
         }
 
         async fn connect_issuer(
@@ -6571,23 +6600,12 @@ mod tests {
             }
             stream = fixture.connect_grant(grant.clone(), 81) => stream,
         };
-        let mut status = fixture.authorization.subscribe();
-        fixture.authorization.fail_next_reload_for_test();
+        let gate = fixture.authorization.block_next_reload_for_test();
         fixture.authorization.request_reload();
-
-        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
-            loop {
-                if matches!(
-                    *status.borrow_and_update(),
-                    AuthorizationRuntimeStatus::Failed(_)
-                ) {
-                    break;
-                }
-                status.changed().await.unwrap();
-            }
-        })
-        .await
-        .expect("authorization reload failure was not published");
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, gate.wait_until_entered())
+            .await
+            .expect("authorization reload did not enter the blocked observation");
+        fixture.wait_for_authorization_failure().await;
         assert!(
             tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
                 .await
@@ -6596,33 +6614,84 @@ mod tests {
         );
         assert!(!service.is_finished());
 
-        fixture.authorization.request_reload();
-        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
-            loop {
-                if matches!(
-                    *status.borrow_and_update(),
-                    AuthorizationRuntimeStatus::Active(_)
-                ) {
-                    break;
-                }
-                status.changed().await.unwrap();
+        let reconnect = fixture.connect_grant(grant, 82);
+        tokio::pin!(reconnect);
+        tokio::select! {
+            result = &mut reconnect => {
+                panic!("session reconnect completed without fresh authority: {result:?}");
             }
-        })
-        .await
-        .expect("authorization reload did not recover");
-        let mut recovered = fixture.connect_grant(grant, 82).await;
+            () = fixture.authorization.wait_for_pending_handshake_for_test() => {}
+        }
+        let issuer_reconnect = fixture.connect_issuer(83);
+        tokio::pin!(issuer_reconnect);
+        tokio::select! {
+            result = &mut issuer_reconnect => {
+                panic!("issuer reconnect completed without fresh authority: {result:?}");
+            }
+            () = fixture.authorization.wait_for_pending_handshake_for_test() => {}
+        }
+        gate.release();
+        fixture.authorization.request_reload();
+        let (mut recovered, recovered_issuer) = tokio::join!(reconnect, issuer_reconnect);
         assert!(matches!(
             request(&mut recovered, 82, "get_identity", b"{}").await,
             LocalServiceResponse::Success { .. }
         ));
 
-        drop((client, recovered));
+        drop((client, recovered, recovered_issuer));
         stop_tx.send(()).unwrap();
         tokio::time::timeout(TEST_SHUTDOWN_DEADLINE, service)
             .await
             .expect("shared service shutdown exceeded the test deadline")
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handshake_rechecks_expiry_after_authorization_recovers() {
+        let fixture = Fixture::new().await;
+        let grant = fixture.grant("session-handshake-expiry", 84);
+        fixture.persist_grant(grant.clone()).await;
+        let expires_at = grant.expires_at_unix_milliseconds();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let reload = tokio::spawn(Arc::clone(&fixture.authorization).run_reload_loop(stop_rx));
+        let gate = fixture.authorization.block_next_reload_for_test();
+        fixture.authorization.request_reload();
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, gate.wait_until_entered())
+            .await
+            .expect("authorization reload did not enter the blocked observation");
+        fixture.wait_for_authorization_failure().await;
+
+        let clock = HandshakeClock(AtomicU64::new(1));
+        let binding = AuthorizationBinding::Session {
+            grant,
+            client_instance: ClientInstanceId::from_bytes([84; 16]),
+        };
+        let decision = fixture
+            .authorization
+            .authorize_handshake_binding(binding, &clock);
+        tokio::pin!(decision);
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, async {
+            tokio::select! {
+                result = &mut decision => {
+                    panic!("grant decision completed without fresh authority: {result:?}");
+                }
+                () = fixture.authorization.wait_for_pending_handshake_for_test() => {}
+            }
+        })
+        .await
+        .expect("grant authorization did not wait for a fresh observation");
+        clock.0.store(expires_at, Ordering::SeqCst);
+        gate.release();
+        fixture.authorization.request_reload();
+        assert!(
+            !tokio::time::timeout(TEST_REQUEST_DEADLINE, decision)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        stop_tx.send_replace(true);
+        reload.await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
