@@ -16,7 +16,7 @@ use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     InMemorySessionAuthorizationRegistry, InstalledIssuerRegistration, IssuerKeyId,
-    IssuerKeyVersion, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
+    IssuerKeyVersion, LocalRequestInterruption, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
     ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
     SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
 };
@@ -355,8 +355,29 @@ impl LiveAuthorizationRuntime {
     }
 
     pub(crate) fn grant_is_active(&self, grant: &SessionGrant) -> bool {
-        self.active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
+        self.grant_interruption(grant).is_none()
+    }
+
+    /// Checks availability and the exact grant under one projection read boundary.
+    ///
+    /// An unavailable projection cannot establish either authority or revocation.
+    pub(crate) fn grant_interruption(
+        &self,
+        grant: &SessionGrant,
+    ) -> Option<LocalRequestInterruption> {
+        let projection = read(&self.projection);
+        if projection.failure.is_some() {
+            return Some(LocalRequestInterruption::AuthorizationUnavailable);
+        }
+        if self
+            .registry
+            .active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
             .is_some_and(|active| &active == grant)
+        {
+            None
+        } else {
+            Some(LocalRequestInterruption::AuthorizationLost)
+        }
     }
 
     pub(crate) fn status_snapshot(
