@@ -86,6 +86,11 @@ jobs:
           cargo test \
             --locked \
             --package KonclaveLocalServiceTransport \
+            --lib \
+            request_interruption::tests
+          cargo test \
+            --locked \
+            --package KonclaveLocalServiceTransport \
             --tests
           cargo clippy \
             --locked \
