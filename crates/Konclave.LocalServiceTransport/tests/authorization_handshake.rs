@@ -399,5 +399,8 @@ async fn an_authorizer_failure_is_not_a_signed_denial_or_legacy_service() {
         service.unwrap_err(),
         LocalServiceTransportError::EndpointUnavailable
     );
-    assert_eq!(client.unwrap_err(), LocalServiceTransportError::ChannelClosed);
+    assert_eq!(
+        client.unwrap_err(),
+        LocalServiceTransportError::ChannelClosed
+    );
 }
