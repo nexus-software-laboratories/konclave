@@ -46,6 +46,7 @@ mod identifiers;
 mod installation;
 mod message;
 mod registry;
+mod request_interruption;
 mod rpc;
 mod transcript;
 
@@ -93,6 +94,10 @@ pub use installation::{
 };
 pub use message::{HandshakeMessage, MAX_HANDSHAKE_FRAME_BYTES};
 pub use registry::{InMemoryAdapterRegistry, MAX_ADAPTER_REGISTRATIONS};
+pub use request_interruption::{
+    LocalRequestExecutionState, LocalRequestInterruption, LocalRequestInterruptionAction,
+    resolve_local_request_interruption,
+};
 pub use rpc::{
     LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse, MAX_OPERATION_LENGTH,
     MAX_RPC_FRAME_BYTES, MAX_RPC_PAYLOAD_BYTES, OperationName, REQUEST_ID_LENGTH, RequestId,
