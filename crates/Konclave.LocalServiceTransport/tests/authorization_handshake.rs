@@ -232,48 +232,48 @@ fn issuer_binding_checks_every_registration_claim() {
         };
         assert_eq!(fixture.registry.authorizes_binding(&binding, 1), authorized);
     }
+}
 
-    #[test]
-    fn binding_authorization_preserves_harness_and_grant_boundaries() {
-        let fixture = Fixture::new();
-        let restricted = InMemorySessionAuthorizationRegistry::new();
-        restricted
-            .register_issuer(
-                AdapterKeyId::from_bytes([1; 16]),
-                AdapterKeyVersion::new(1).unwrap(),
-                AdapterRegistration::new(
-                    fixture.issuer.public_key(),
-                    HarnessKind::Copilot,
-                    ProfileAuthorization::All,
-                ),
-            )
-            .unwrap();
-        for (harness, authorized) in [(HarnessKind::Copilot, true), (HarnessKind::Generic, false)] {
-            let binding = AuthorizationBinding::Issuer {
-                issuer_key_id: AdapterKeyId::from_bytes([1; 16]),
-                issuer_key_version: AdapterKeyVersion::new(1).unwrap(),
-                issuer_public_key: fixture.issuer.public_key(),
-                client_instance: ClientInstanceId::from_bytes([2; 16]),
-                harness,
-            };
-            assert_eq!(restricted.authorizes_binding(&binding, 1), authorized);
-        }
-        let session_identity = LocalServiceIdentity::generate().unwrap();
-        let grant = fixture.grant(&session_identity, 7);
-        fixture.registry.issue_grant(grant.clone(), 1).unwrap();
-        let binding = AuthorizationBinding::Session {
-            grant: grant.clone(),
-            client_instance: ClientInstanceId::from_bytes([8; 16]),
+#[test]
+fn binding_authorization_preserves_harness_and_grant_boundaries() {
+    let fixture = Fixture::new();
+    let restricted = InMemorySessionAuthorizationRegistry::new();
+    restricted
+        .register_issuer(
+            AdapterKeyId::from_bytes([1; 16]),
+            AdapterKeyVersion::new(1).unwrap(),
+            AdapterRegistration::new(
+                fixture.issuer.public_key(),
+                HarnessKind::Copilot,
+                ProfileAuthorization::All,
+            ),
+        )
+        .unwrap();
+    for (harness, authorized) in [(HarnessKind::Copilot, true), (HarnessKind::Generic, false)] {
+        let binding = AuthorizationBinding::Issuer {
+            issuer_key_id: AdapterKeyId::from_bytes([1; 16]),
+            issuer_key_version: AdapterKeyVersion::new(1).unwrap(),
+            issuer_public_key: fixture.issuer.public_key(),
+            client_instance: ClientInstanceId::from_bytes([2; 16]),
+            harness,
         };
-        for (now, authorized) in [(1, true), (u64::MAX, false)] {
-            assert_eq!(
-                fixture.registry.authorizes_binding(&binding, now),
-                authorized
-            );
-        }
-        assert!(fixture.registry.revoke_grant(grant.grant_id()));
-        assert!(!fixture.registry.authorizes_binding(&binding, 1));
+        assert_eq!(restricted.authorizes_binding(&binding, 1), authorized);
     }
+    let session_identity = LocalServiceIdentity::generate().unwrap();
+    let grant = fixture.grant(&session_identity, 7);
+    fixture.registry.issue_grant(grant.clone(), 1).unwrap();
+    let binding = AuthorizationBinding::Session {
+        grant: grant.clone(),
+        client_instance: ClientInstanceId::from_bytes([8; 16]),
+    };
+    for (now, authorized) in [(1, true), (u64::MAX, false)] {
+        assert_eq!(
+            fixture.registry.authorizes_binding(&binding, now),
+            authorized
+        );
+    }
+    assert!(fixture.registry.revoke_grant(grant.grant_id()));
+    assert!(!fixture.registry.authorizes_binding(&binding, 1));
 }
 
 #[tokio::test(start_paused = true)]
