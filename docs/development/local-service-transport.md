@@ -100,9 +100,15 @@ rechecks authorization on its 250-millisecond claim cadence. Therefore an exact
 revocation, profile suspension, policy invalidation, or revoke-on-disable transition
 is observed within one second of a successful durable commit, excluding an
 already-failing storage operation. A reload error, corruption finding, installation
-mismatch, or generation rollback stops admission, makes the current projection
-unusable, and closes clients without terminating the service or retaining stale
-authority. A read that misses the 500-millisecond observation deadline remains the
+mismatch, or generation rollback stops authorization, makes the current projection
+unusable, and closes authenticated clients without terminating the service or
+retaining stale authority. A new proof-verified handshake may wait for a fresh
+verified projection within its unchanged ten-second handshake deadline. Pending
+handshakes receive no authority or acceptance; recovery checks the exact original
+binding and current grant expiry under the projection boundary. A verified negative
+decision retains the uniform signed rejection, while an observation failure is not
+reported as a verified denial. Shutdown still ends pending handshakes immediately.
+A read that misses the 500-millisecond observation deadline remains the
 only in-flight read; its late result is discarded, and access reopens only after a
 subsequent fresh verified snapshot. Blocking-worker failure or unexpected reload-task
 termination remains fatal. Authorization updates that leave the authenticated

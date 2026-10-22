@@ -13,7 +13,7 @@ use KonclaveLocalAuthorizationStore::{
     UserPresenceCredentialRecord,
 };
 use KonclaveLocalServiceTransport::{
-    AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+    AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     InMemorySessionAuthorizationRegistry, InstalledIssuerRegistration, IssuerKeyId,
     IssuerKeyVersion, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
@@ -124,6 +124,27 @@ pub(crate) struct AuthorizationReloadTestGate {
 }
 
 #[cfg(test)]
+pub(crate) struct AuthorizationReloadTestBlock(Arc<AuthorizationReloadTestGate>);
+
+#[cfg(test)]
+impl AuthorizationReloadTestBlock {
+    pub(crate) async fn wait_until_entered(&self) {
+        self.0.wait_until_entered().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.0.release();
+    }
+}
+
+#[cfg(test)]
+impl Drop for AuthorizationReloadTestBlock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(test)]
 impl AuthorizationReloadTestGate {
     fn new() -> Self {
         Self {
@@ -166,6 +187,8 @@ pub(crate) struct LiveAuthorizationRuntime {
     fail_next_reload: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     block_next_reload: StdMutex<Option<Arc<AuthorizationReloadTestGate>>>,
+    #[cfg(test)]
+    handshake_pending: Notify,
 }
 
 impl LiveAuthorizationRuntime {
@@ -216,11 +239,42 @@ impl LiveAuthorizationRuntime {
             fail_next_reload: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             block_next_reload: StdMutex::new(None),
+            #[cfg(test)]
+            handshake_pending: Notify::new(),
         }))
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<AuthorizationRuntimeStatus> {
         self.status.subscribe()
+    }
+
+    pub(crate) async fn authorize_handshake_binding(
+        &self,
+        binding: AuthorizationBinding,
+        clock: &dyn UnixClock,
+    ) -> Result<bool, LocalServiceTransportError> {
+        let mut status = self.subscribe();
+        loop {
+            {
+                let projection = read(&self.projection);
+                if projection.failure.is_none() {
+                    return Ok(self
+                        .registry
+                        .authorizes_binding(&binding, clock.now_unix_milliseconds()));
+                }
+            }
+            #[cfg(test)]
+            self.handshake_pending.notify_one();
+            status
+                .changed()
+                .await
+                .map_err(|_| LocalServiceTransportError::ChannelClosed)?;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_pending_handshake_for_test(&self) {
+        self.handshake_pending.notified().await;
     }
 
     #[cfg(test)]
@@ -938,13 +992,13 @@ impl LiveAuthorizationRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn block_next_reload_for_test(&self) -> Arc<AuthorizationReloadTestGate> {
+    pub(crate) fn block_next_reload_for_test(&self) -> AuthorizationReloadTestBlock {
         let gate = Arc::new(AuthorizationReloadTestGate::new());
         *self
             .block_next_reload
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
-        gate
+        AuthorizationReloadTestBlock(gate)
     }
 }
 
