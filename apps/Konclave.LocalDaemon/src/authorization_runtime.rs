@@ -3,7 +3,10 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use std::sync::{Condvar, Mutex as StdMutex};
+use std::sync::Mutex as StdMutex;
+
+#[cfg(test)]
+use crate::test_support::{BlockingTestBlock, BlockingTestGate};
 
 use KonclaveDomainCore::Ed25519PublicKey;
 use KonclaveLocalAuthorizationStore::{
@@ -16,8 +19,8 @@ use KonclaveLocalServiceTransport::{
     AuthorizationBinding, AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
     AuthorizationPolicyVersion, ClientInstanceId, HarnessKind,
     InMemorySessionAuthorizationRegistry, InstalledIssuerRegistration, IssuerKeyId,
-    IssuerKeyVersion, LocalServiceErrorCode, LocalServiceTransportError, RequestId,
-    ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
+    IssuerKeyVersion, LocalRequestInterruption, LocalServiceErrorCode, LocalServiceTransportError,
+    RequestId, ServiceProfileId, SessionAuthorizationRegistry, SessionCapabilities, SessionGrant,
     SessionGrantCapacity, SessionGrantClaims, SessionGrantId,
 };
 use KonclaveUserPresence::NativeWebAuthnCredential;
@@ -116,65 +119,6 @@ struct GrantRequest {
     expires_at_unix_milliseconds: u64,
 }
 
-#[cfg(test)]
-pub(crate) struct AuthorizationReloadTestGate {
-    entered: Notify,
-    released: StdMutex<bool>,
-    release: Condvar,
-}
-
-#[cfg(test)]
-pub(crate) struct AuthorizationReloadTestBlock(Arc<AuthorizationReloadTestGate>);
-
-#[cfg(test)]
-impl AuthorizationReloadTestBlock {
-    pub(crate) async fn wait_until_entered(&self) {
-        self.0.wait_until_entered().await;
-    }
-
-    pub(crate) fn release(&self) {
-        self.0.release();
-    }
-}
-
-#[cfg(test)]
-impl Drop for AuthorizationReloadTestBlock {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-#[cfg(test)]
-impl AuthorizationReloadTestGate {
-    fn new() -> Self {
-        Self {
-            entered: Notify::new(),
-            released: StdMutex::new(false),
-            release: Condvar::new(),
-        }
-    }
-
-    fn block(&self) {
-        self.entered.notify_one();
-        let mut released = self.released.lock().unwrap_or_else(PoisonError::into_inner);
-        while !*released {
-            released = self
-                .release
-                .wait(released)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-    }
-
-    pub(crate) async fn wait_until_entered(&self) {
-        self.entered.notified().await;
-    }
-
-    pub(crate) fn release(&self) {
-        *self.released.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        self.release.notify_all();
-    }
-}
-
 pub(crate) struct LiveAuthorizationRuntime {
     store: Arc<LocalAuthorizationStore>,
     registry: InMemorySessionAuthorizationRegistry,
@@ -184,7 +128,7 @@ pub(crate) struct LiveAuthorizationRuntime {
     status: watch::Sender<AuthorizationRuntimeStatus>,
     reload_requested: Notify,
     #[cfg(test)]
-    block_next_reload: StdMutex<Option<Arc<AuthorizationReloadTestGate>>>,
+    block_next_reload: StdMutex<Option<Arc<BlockingTestGate>>>,
     #[cfg(test)]
     handshake_pending: Notify,
 }
@@ -355,8 +299,29 @@ impl LiveAuthorizationRuntime {
     }
 
     pub(crate) fn grant_is_active(&self, grant: &SessionGrant) -> bool {
-        self.active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
+        self.grant_interruption(grant).is_none()
+    }
+
+    /// Checks availability and the exact grant under one projection read boundary.
+    ///
+    /// An unavailable projection cannot establish either authority or revocation.
+    pub(crate) fn grant_interruption(
+        &self,
+        grant: &SessionGrant,
+    ) -> Option<LocalRequestInterruption> {
+        let projection = read(&self.projection);
+        if projection.failure.is_some() {
+            return Some(LocalRequestInterruption::AuthorizationUnavailable);
+        }
+        if self
+            .registry
+            .active_grant(grant.grant_id(), SystemUnixClock.now_unix_milliseconds())
             .is_some_and(|active| &active == grant)
+        {
+            None
+        } else {
+            Some(LocalRequestInterruption::AuthorizationLost)
+        }
     }
 
     pub(crate) fn status_snapshot(
@@ -972,13 +937,13 @@ impl LiveAuthorizationRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn block_next_reload_for_test(&self) -> AuthorizationReloadTestBlock {
-        let gate = Arc::new(AuthorizationReloadTestGate::new());
+    pub(crate) fn block_next_reload_for_test(&self) -> BlockingTestBlock {
+        let gate = Arc::new(BlockingTestGate::new());
         *self
             .block_next_reload
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
-        AuthorizationReloadTestBlock(gate)
+        BlockingTestBlock(gate)
     }
 }
 

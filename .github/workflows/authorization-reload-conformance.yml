@@ -86,6 +86,11 @@ jobs:
           cargo test \
             --locked \
             --package KonclaveLocalServiceTransport \
+            --lib \
+            request_interruption::tests
+          cargo test \
+            --locked \
+            --package KonclaveLocalServiceTransport \
             --tests
           cargo clippy \
             --locked \
@@ -128,12 +133,7 @@ jobs:
             --locked \
             --package KonclaveLocalDaemon \
             --lib \
-            reload_failure_closes_clients_and_service_recovers
-          cargo test \
-            --locked \
-            --package KonclaveLocalDaemon \
-            --lib \
-            handshake_rechecks_expiry_after_authorization_recovers
+            local_service::tests
           cargo clippy \
             --locked \
             --package KonclaveLocalDaemon \

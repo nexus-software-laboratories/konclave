@@ -119,6 +119,27 @@ If a running request loses authority, the transport closes immediately;
 already-committed work remains owned until reconciliation, but its result is not
 written to the revoked connection.
 
+Authorization unavailability is not proof that a grant was revoked. An interrupted
+request known not to have entered its handler retains its exact session key,
+profile, request identifier, operation, payload, and bounded ledger reservation.
+Its nonterminal authorization-wait marker is separate from actual handler outcomes
+and is never sealed as a terminal denial. After fresh authorization, only the
+byte-identical request may resume; changed operation or payload remains a conflict.
+An already-authorized replay waiting on the original executor also resumes if that
+executor publishes its wait marker after authority has recovered; it does not need
+another reconnect.
+Caller cancellation, deadline, shutdown, and verified authority loss terminalize
+suspended work instead. Pending reservations remain subject to the existing
+entry and byte limits and cannot be evicted to admit unrelated work.
+
+Requests that may have executed reconcile their actual outcomes and never resume
+from that marker. In particular, a handler's own `reconciliation_pending` response
+does not establish that execution never began. A delivery claim interrupted by an
+unavailable authorization projection releases its attachment and records an
+operational failure, not a verified authorization denial. Recovery never extends
+the observation or handshake deadlines, accepts stale authority, or blindly retries
+`not_authorized`.
+
 Disabling an issuer always denies new issuance. `retain_until_expiry` keeps its
 already-issued grants active until expiry or another terminal transition, while
 `revoke` terminalizes those grants in the same durable transaction. A disabled

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use KonclaveClientLibrary::RelayEnrollmentAuthorityId;
 use KonclaveCommunityRelay::access::StaticRelayAccess;
@@ -9,12 +10,64 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
 use crate::runtime::{ProfileConfig, ProfileCustody, ProfileSource, read_relay_installation};
+
+/// Synchronizes a blocking boundary without sleeping or abandoning its worker.
+pub(crate) struct BlockingTestGate {
+    entered: Notify,
+    released: Mutex<bool>,
+    release: Condvar,
+}
+
+/// Observes worker entry and guarantees release during assertion unwinding.
+pub(crate) struct BlockingTestBlock(pub(crate) Arc<BlockingTestGate>);
+
+impl BlockingTestBlock {
+    pub(crate) async fn wait_until_entered(&self) {
+        self.0.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        *self
+            .0
+            .released
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+        self.0.release.notify_all();
+    }
+}
+
+impl Drop for BlockingTestBlock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl BlockingTestGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: Notify::new(),
+            released: Mutex::new(false),
+            release: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn block(&self) {
+        self.entered.notify_one();
+        let mut released = self.released.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*released {
+            released = self
+                .release
+                .wait(released)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
 
 /// Domain separator for test wrapping keys.
 ///
