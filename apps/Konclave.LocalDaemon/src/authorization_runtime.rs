@@ -184,8 +184,6 @@ pub(crate) struct LiveAuthorizationRuntime {
     status: watch::Sender<AuthorizationRuntimeStatus>,
     reload_requested: Notify,
     #[cfg(test)]
-    fail_next_reload: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
     block_next_reload: StdMutex<Option<Arc<AuthorizationReloadTestGate>>>,
     #[cfg(test)]
     handshake_pending: Notify,
@@ -235,8 +233,6 @@ impl LiveAuthorizationRuntime {
             operations: Mutex::new(()),
             status,
             reload_requested: Notify::new(),
-            #[cfg(test)]
-            fail_next_reload: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             block_next_reload: StdMutex::new(None),
             #[cfg(test)]
@@ -726,16 +722,6 @@ impl LiveAuthorizationRuntime {
     }
 
     async fn reload_once(&self) -> Result<(), AuthorizationRuntimeError> {
-        #[cfg(test)]
-        if self
-            .fail_next_reload
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            let error =
-                AuthorizationRuntimeError::Store(LocalAuthorizationStoreError::StorageUnavailable);
-            self.fail_closed(error);
-            return Err(error);
-        }
         let high_water = self.reload_generation();
         self.refresh_locked(SystemUnixClock.now_unix_milliseconds(), high_water)
             .await
@@ -983,12 +969,6 @@ impl LiveAuthorizationRuntime {
                 .map_err(AuthorizationRuntimeError::Store)?;
         self.refresh_after_mutation(mutation, now_unix_milliseconds)
             .await
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_reload_for_test(&self) {
-        self.fail_next_reload
-            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]
