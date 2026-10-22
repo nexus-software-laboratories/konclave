@@ -4362,15 +4362,14 @@ mod tests {
     };
     use KonclaveLocalServiceTransport::{
         AdapterKeyId, AdapterKeyVersion, AdapterRegistration, AuthorizationBinding,
-        AuthorizationEvidenceKind,
-        AuthorizationEvidenceSet, AuthorizationPolicy, AuthorizationPolicyVersion,
-        ClientInstanceId, HarnessKind, InstalledIssuerRegistration, IssuerHandshakeRequest,
-        LOCAL_SERVICE_INSTALLATION_FILE, LOCAL_SERVICE_PROTOCOL_VERSION, LocalServiceBinding,
-        LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest, LocalServiceResponse,
-        MAX_RPC_PAYLOAD_BYTES, OperationName, ProfileAuthorization, RequestId, ServiceProfileId,
-        SessionCapabilities, SessionGrant, SessionGrantClaims, SessionGrantId,
-        complete_issuer_client_handshake, complete_session_client_handshake, connect_local_service,
-        read_response, write_request,
+        AuthorizationEvidenceKind, AuthorizationEvidenceSet, AuthorizationPolicy,
+        AuthorizationPolicyVersion, ClientInstanceId, HarnessKind, InstalledIssuerRegistration,
+        IssuerHandshakeRequest, LOCAL_SERVICE_INSTALLATION_FILE, LOCAL_SERVICE_PROTOCOL_VERSION,
+        LocalServiceBinding, LocalServiceEndpoint, LocalServiceErrorCode, LocalServiceRequest,
+        LocalServiceResponse, MAX_RPC_PAYLOAD_BYTES, OperationName, ProfileAuthorization,
+        RequestId, ServiceProfileId, SessionCapabilities, SessionGrant, SessionGrantClaims,
+        SessionGrantId, complete_issuer_client_handshake, complete_session_client_handshake,
+        connect_local_service, read_response, write_request,
     };
     use KonclaveSecretStorage::{
         create_or_verify_owner_protected_file, ensure_owner_protected_directory,
