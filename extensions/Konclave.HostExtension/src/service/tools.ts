@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { Tool, ToolInvocation } from '@github/copilot-sdk';
+import type { Tool, ToolInvocation, ToolResultObject } from '@github/copilot-sdk';
 
 import generatedToolContracts from '../../../../fixtures/local-service/v1/copilot-tools.json';
 
@@ -8,7 +8,8 @@ import {
   collaborationAuthorizationArgument,
   collaborationReplyToolName,
 } from '../collaboration-contract.js';
-import type { LocalServiceClient } from './client.js';
+import { formatLocalServiceFailure, type LocalServiceClient } from './client.js';
+import { attachLocalFailure, type LocalFailureStage } from './failure-diagnostics.js';
 import type { ToolOperation } from './operations.js';
 
 /**
@@ -92,6 +93,9 @@ const maxInvocationIdentifierBytes = 1_024;
 const alwaysLoadedTools = new Set<ToolOperation>([collaborationReplyToolName]);
 
 function toolRequestId(invocation: ToolInvocation): Buffer {
+  if (typeof invocation.sessionId !== 'string' || typeof invocation.toolCallId !== 'string') {
+    throw new Error('Copilot tool invocation identifiers are invalid.');
+  }
   const sessionBytes = Buffer.byteLength(invocation.sessionId, 'utf8');
   const toolCallBytes = Buffer.byteLength(invocation.toolCallId, 'utf8');
   if (
@@ -118,7 +122,8 @@ function toolRequestId(invocation: ToolInvocation): Buffer {
  * A handler forwards the SDK-validated arguments to the operation of the same name
  * and returns the service's structured result. The SDK session/tool-call identity is
  * domain-hashed into a stable idempotency key when available. No handler interprets
- * the result, so the agent-visible contract remains the service contract.
+ * a successful result. Failures use the SDK's explicit failure contract with finite
+ * diagnostic metadata instead of serializing the original exception.
  */
 export function createKonclaveTools(options: ToolRegistrationOptions): RegisteredTool[] {
   const deadline = options.toolDeadlineMs ?? defaultToolDeadlineMs;
@@ -129,12 +134,26 @@ export function createKonclaveTools(options: ToolRegistrationOptions): Registere
     parameters: definition.parameters,
     defer: alwaysLoadedTools.has(definition.name) ? 'never' : 'auto',
     async handler(args: unknown, invocation?: ToolInvocation) {
-      const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
-      return options.client.request(
-        definition.name,
-        preparedArgs,
-        invocation ? { deadlineMs: deadline, requestId: toolRequestId(invocation) } : deadline,
-      );
+      let stage: LocalFailureStage = 'tool_arguments';
+      try {
+        const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
+        stage = 'tool_invocation';
+        const requestOptions = invocation
+          ? { deadlineMs: deadline, requestId: toolRequestId(invocation) }
+          : deadline;
+        stage = 'tool_dispatch';
+        return await options.client.request(definition.name, preparedArgs, requestOptions);
+      } catch (error) {
+        if (stage === 'tool_invocation') {
+          attachLocalFailure(error, { stage, code: 'invalid_request' });
+        }
+        const failure = formatLocalServiceFailure(error, stage);
+        return {
+          resultType: 'failure',
+          textResultForLlm: failure,
+          error: failure,
+        } satisfies ToolResultObject;
+      }
     },
   }));
 }

@@ -23,7 +23,7 @@ use KonclaveLocalServiceTransport::{
     LocalServiceListener, LocalServiceRequest, LocalServiceResponse, LocalServiceTransportError,
     MAX_GRANTS_PER_ISSUER, MAX_GRANTS_PER_PROFILE, MAX_RPC_FRAME_BYTES, MAX_SESSION_GRANTS,
     RequestId, ServiceProfileId, SessionCapabilities, SessionGrant, SessionGrantCapacity,
-    complete_authorization_service_handshake_with_authorizer, resolve_local_request_interruption,
+    complete_observed_authorization_service_handshake, resolve_local_request_interruption,
     write_response,
 };
 use KonclaveUserPresence::{
@@ -49,6 +49,10 @@ use crate::authorization_runtime::{
     UserPresenceGrantRequest,
 };
 use crate::clock::{SystemUnixClock, UnixClock};
+use crate::local_failure_diagnostics::{
+    ConnectionReference, FailureContext, FailureStage, record_code, record_failure,
+    record_failure_at,
+};
 use crate::mcp::{AuthorizationContext, AuthorizationHook, StdioServer};
 use crate::persistence::{
     ActiveDirectedRequestClaim, ClaimDirectedRequest, ClaimedRemoteEvent,
@@ -158,8 +162,8 @@ where
                         });
                     }
                     Err(
-                        KonclaveLocalServiceTransport::LocalServiceTransportError::UnauthorizedPeer
-                        | KonclaveLocalServiceTransport::LocalServiceTransportError::PeerVerificationUnavailable,
+                        LocalServiceTransportError::UnauthorizedPeer
+                        | LocalServiceTransportError::PeerVerificationUnavailable,
                     ) => {}
                     Err(error) => {
                         service_error = Some(
@@ -173,24 +177,10 @@ where
                 match joined {
                     Some(Ok(Ok(()))) | None => {}
                     Some(Ok(Err(error))) => {
-                        let transport_code = error
-                            .downcast_ref::<LocalServiceTransportError>()
-                            .map_or(
-                                "local_service_non_transport_failure",
-                                LocalServiceTransportError::code,
-                            );
-                        tracing::warn!(
-                            outcome = "client_closed_with_error",
-                            transport_code,
-                            "shared local client connection ended"
-                        );
+                        record_failure(&error);
                     }
                     Some(Err(error)) => {
-                        tracing::error!(
-                            outcome = "client_task_failed",
-                            panic = error.is_panic(),
-                            "shared local client task ended unexpectedly"
-                        );
+                        record_failure(&anyhow::Error::new(error));
                         service_error = Some(anyhow::anyhow!("shared local client task failed"));
                         break;
                     }
@@ -228,6 +218,14 @@ where
     }
     let supervisor_shutdown = supervisor.shutdown().await;
     if let Some(error) = service_error {
+        record_failure_at(
+            &error,
+            Some(&FailureContext {
+                stage: FailureStage::ServiceLifecycle,
+                connection: None,
+                sequence: 0,
+            }),
+        );
         return Err(error);
     }
     supervisor_shutdown?;
@@ -244,10 +242,14 @@ async fn serve_client(
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut authorization_status = authorization.subscribe();
-    let mut handshake = Box::pin(complete_authorization_service_handshake_with_authorizer(
+    let mut connection = None;
+    let mut handshake = Box::pin(complete_observed_authorization_service_handshake(
         &mut stream,
         identity.as_ref(),
         |binding| authorization.authorize_handshake_binding(binding, &SystemUnixClock),
+        |challenge| {
+            connection = Some(ConnectionReference::new(challenge.as_bytes()));
+        },
     ));
     let channel = loop {
         tokio::select! {
@@ -263,11 +265,17 @@ async fn serve_client(
                 }
             }
             result = &mut handshake => {
-                break result.context("authenticating a shared local client")?;
+                break result;
             }
         }
     };
     drop(handshake);
+    let channel = channel.with_context(|| FailureContext {
+        stage: FailureStage::Handshake,
+        connection: connection.clone(),
+        sequence: 0,
+    })?;
+    let reference = connection.context("shared local service omitted its challenge")?;
     match channel.binding().clone() {
         AuthorizationBinding::Issuer {
             issuer_key_id,
@@ -283,6 +291,7 @@ async fn serve_client(
                     ledger,
                     user_presence,
                     service_public_key: identity.public_key(),
+                    reference,
                 },
                 IssuerConnection {
                     issuer_key_id,
@@ -303,7 +312,7 @@ async fn serve_client(
                 authorization,
                 supervisor,
                 ledger,
-                grant,
+                SessionConnection { grant, reference },
                 stop,
                 authorization_status,
             )
@@ -312,17 +321,23 @@ async fn serve_client(
     }
 }
 
+struct SessionConnection {
+    grant: SessionGrant,
+    reference: ConnectionReference,
+}
+
 async fn serve_session_client(
     stream: KonclaveLocalServiceTransport::LocalServiceServerStream,
     authorization: Arc<LiveAuthorizationRuntime>,
     supervisor: Arc<ProfileSupervisor>,
     ledger: Arc<Mutex<RequestLedger>>,
-    grant: SessionGrant,
+    connection: SessionConnection,
     mut stop: watch::Receiver<bool>,
     mut authorization_status: watch::Receiver<
         crate::authorization_runtime::AuthorizationRuntimeStatus,
     >,
 ) -> anyhow::Result<()> {
+    let SessionConnection { grant, reference } = connection;
     if !authorization.grant_is_active(&grant) {
         return Ok(());
     }
@@ -342,22 +357,27 @@ async fn serve_session_client(
                 }
             }
             result = &mut attach => {
-                break result.context("attaching a shared local client profile")?;
+                break result.with_context(|| reference.context(FailureStage::ProfileAttach, 0))?;
             }
         }
     };
     if *stop.borrow() || !authorization.grant_is_active(&grant) {
         return Ok(());
     }
-    let services = lease.services().context("loading bound profile services")?;
-    let mut state = Some(ClientRequestState::new(
+    let services = lease
+        .services()
+        .with_context(|| reference.context(FailureStage::ProfileServices, 0))?;
+    let mut request_state = ClientRequestState::new(
         ledger,
         Arc::clone(&authorization),
         grant,
         services,
         stop.clone(),
-    ));
+    );
+    request_state.diagnostics = Some(reference.context(FailureStage::RequestExecution, 0));
+    let mut state = Some(request_state);
     let mut stream = Some(stream);
+    let mut sequence = 0_u64;
 
     let result = async {
         loop {
@@ -367,6 +387,7 @@ async fn serve_session_client(
             let request_state = state
                 .as_ref()
                 .context("shared local session state is unavailable")?;
+            let next_sequence = sequence.saturating_add(1);
             let request = read_authorized_request(
                 active_stream,
                 &mut stop,
@@ -374,11 +395,12 @@ async fn serve_session_client(
                 || request_state.authorization_is_active(),
             )
             .await
-            .context("reading a shared local request")?;
+            .with_context(|| reference.context(FailureStage::RequestRead, next_sequence))?;
             let Some(request) = request else {
                 drop(stream.take());
                 break;
             };
+            sequence = next_sequence;
             let operation = request.operation().as_str();
             let retirement = operation == "authorization.grant.retire";
             // Retirement is idempotent in the authorization store; the profile
@@ -388,6 +410,10 @@ async fn serve_session_client(
             let mut request_state = state
                 .take()
                 .context("shared local session state is unavailable")?;
+            if let Some(diagnostics) = request_state.diagnostics.as_mut() {
+                diagnostics.sequence = sequence;
+            }
+            request_state.diagnostic_failure = false;
             let request_key = uses_ledger
                 .then(|| LedgerKey::for_grant(&request_state.grant, request.request_id()));
             let cancellation_ledger = Arc::clone(&request_state.ledger);
@@ -427,20 +453,29 @@ async fn serve_session_client(
                 }
             };
             let (next_state, response) = match completed {
-                Ok(result) => result.context("joining a shared local request")?,
+                Ok(result) => result
+                    .with_context(|| reference.context(FailureStage::RequestExecution, sequence))?,
                 Err(reason) => {
                     if let Some(key) = request_key.as_ref() {
                         cancel_request(&cancellation_ledger, key, reason);
                     }
                     drop(stream.take());
-                    let (next_state, response) = execution
-                        .await
-                        .context("joining a revoked shared local request")?;
+                    let (next_state, response) = execution.await.with_context(|| {
+                        reference.context(FailureStage::RequestExecution, sequence)
+                    })?;
                     state = Some(next_state);
                     let _ = response;
                     break;
                 }
             };
+            if let LocalServiceResponse::Failure { code, .. } = &response
+                && !next_state.diagnostic_failure
+            {
+                record_code(
+                    Some(&reference.context(FailureStage::RequestExecution, sequence)),
+                    code.as_str(),
+                );
+            }
             state = Some(next_state);
             let request_state = state
                 .as_ref()
@@ -461,7 +496,7 @@ async fn serve_session_client(
                 .context("shared local session stream is unavailable")?;
             write_response(active_stream, &response)
                 .await
-                .context("writing a shared local response")?;
+                .with_context(|| reference.context(FailureStage::ResponseWrite, sequence))?;
             if retirement {
                 drop(stream.take());
                 break;
@@ -475,10 +510,18 @@ async fn serve_session_client(
         && let Some(delivery) = state.delivery.take()
     {
         let store = Arc::clone(&state.store);
-        tokio::task::spawn_blocking(move || delivery.release(&store))
+        let release = tokio::task::spawn_blocking(move || delivery.release(&store))
             .await
-            .context("joining shared local delivery lease release")?
-            .context("releasing a shared local delivery lease")?;
+            .context("joining shared local delivery lease release")
+            .and_then(|release| release.context("releasing a shared local delivery lease"))
+            .with_context(|| reference.context(FailureStage::DeliveryRelease, sequence));
+        if result.is_err() {
+            if let Err(error) = release {
+                record_failure(&error);
+            }
+        } else {
+            release?;
+        }
     }
     result
 }
@@ -593,6 +636,7 @@ struct IssuerClientDependencies {
     ledger: Arc<Mutex<RequestLedger>>,
     user_presence: Arc<Mutex<UserPresenceRegistry>>,
     service_public_key: KonclaveDomainCore::Ed25519PublicKey,
+    reference: ConnectionReference,
 }
 
 async fn serve_issuer_client(
@@ -609,6 +653,7 @@ async fn serve_issuer_client(
         ledger,
         user_presence,
         service_public_key,
+        reference,
     } = dependencies;
     if !issuer.registration_is_present(&authorization) {
         return Ok(());
@@ -618,19 +663,22 @@ async fn serve_issuer_client(
         connection_id: issuer.presence_connection_id,
     };
     let mut stream = Some(stream);
+    let mut sequence = 0_u64;
     loop {
         let active_stream = stream
             .as_mut()
             .context("shared local issuer stream is unavailable")?;
+        let next_sequence = sequence.saturating_add(1);
         let request =
             read_authorized_request(active_stream, &mut stop, &mut authorization_status, || {
                 issuer.registration_is_present(&authorization)
             })
             .await
-            .context("reading a shared local issuer request")?;
+            .with_context(|| reference.context(FailureStage::RequestRead, next_sequence))?;
         let Some(request) = request else {
             break;
         };
+        sequence = next_sequence;
         let key = LedgerKey::for_issuer(&issuer, request.request_id());
         let execution_authorization = Arc::clone(&authorization);
         let execution_issuer = issuer.clone();
@@ -670,22 +718,28 @@ async fn serve_issuer_client(
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
                         drop(stream.take());
-                        execution.await.context("joining a stopped issuer request")?;
+                        execution.await.with_context(|| reference.context(FailureStage::RequestExecution, sequence))?;
                         return Ok(());
                     }
                 }
                 changed = authorization_status.changed() => {
                     if changed.is_err() || !issuer.registration_is_present(&authorization) {
                         drop(stream.take());
-                        execution.await.context("joining a revoked issuer request")?;
+                        execution.await.with_context(|| reference.context(FailureStage::RequestExecution, sequence))?;
                         return Ok(());
                     }
                 }
                 result = &mut execution => {
-                    break result.context("joining a shared local issuer request")?;
+                    break result.with_context(|| reference.context(FailureStage::RequestExecution, sequence))?;
                 }
             }
         };
+        if let LocalServiceResponse::Failure { code, .. } = &response {
+            record_code(
+                Some(&reference.context(FailureStage::RequestExecution, sequence)),
+                code.as_str(),
+            );
+        }
         if *stop.borrow() || !issuer.registration_is_present(&authorization) {
             drop(stream.take());
             break;
@@ -695,7 +749,7 @@ async fn serve_issuer_client(
             .context("shared local issuer stream is unavailable")?;
         write_response(active_stream, &response)
             .await
-            .context("writing a shared local issuer response")?;
+            .with_context(|| reference.context(FailureStage::ResponseWrite, sequence))?;
     }
     Ok(())
 }
@@ -1218,6 +1272,8 @@ struct ClientRequestState {
     collaboration_send_authorizations: HashMap<[u8; 16], CollaborationSendAuthorization>,
     shutdown: watch::Receiver<bool>,
     authorization_interrupted: bool,
+    diagnostics: Option<FailureContext>,
+    diagnostic_failure: bool,
 }
 
 impl ClientRequestState {
@@ -1240,6 +1296,8 @@ impl ClientRequestState {
             collaboration_send_authorizations: HashMap::new(),
             shutdown,
             authorization_interrupted: false,
+            diagnostics: None,
+            diagnostic_failure: false,
         }
     }
 
@@ -2989,6 +3047,8 @@ async fn delivery_claim(state: &mut ClientRequestState, payload: &[u8]) -> Resul
         authorization,
         grant,
         authorization_interrupted,
+        diagnostics,
+        diagnostic_failure,
         ..
     } = state;
     if delivery.is_none() {
@@ -3000,11 +3060,8 @@ async fn delivery_claim(state: &mut ClientRequestState, payload: &[u8]) -> Resul
                 .await
                 .map_err(|_| "profile_unavailable".to_string())?
                 .map_err(|error| {
-                    tracing::warn!(
-                        outcome = "delivery_consumer_acquire_failed",
-                        reason = ?error.downcast_ref::<crate::persistence::ProfileStoreError>(),
-                        "local delivery consumer could not attach"
-                    );
+                    record_failure_at(&error, diagnostics.as_ref());
+                    *diagnostic_failure = true;
                     "profile_unavailable".to_string()
                 })?,
         );

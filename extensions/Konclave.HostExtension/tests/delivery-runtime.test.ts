@@ -155,7 +155,8 @@ describe('delivery runtime loop', () => {
 
     expect(attempts).toBe(50_001);
     expect(errors).toHaveLength(16);
-    expect(errors[0]).toBe('Konclave claim transport failed.');
+    expect(errors[0]).toContain('Konclave claim transport failed.');
+    expect(errors[0]).toContain('stage=response_read code=unclassified_failure');
     expect(errors.at(-1)).toContain('outage failure 32768');
   });
 
@@ -224,8 +225,8 @@ describe('delivery runtime loop', () => {
     await runtime.completed;
 
     expect(errors).toEqual([
-      'Konclave claim transport failed.',
-      'Konclave claim transport failed.',
+      expect.stringContaining('Konclave claim transport failed.'),
+      expect.stringContaining('Konclave claim transport failed.'),
     ]);
   });
 

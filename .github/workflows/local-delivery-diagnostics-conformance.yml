@@ -51,6 +51,17 @@ jobs:
           persist-credentials: false
           # Preserve the scope checkout for its post-step cleanup.
           clean: false
+      - name: Verify staged release container contract
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/Test-A2AGatewayContainerContract.sh
+          if bash ./scripts/ci/Test-A2AGatewayContainerContract.sh \
+            'konclave-a2a-gateway:invalid-contract-version' >/dev/null 2>&1; then
+            echo '::error::Gateway contract accepted an incorrect release image.'
+            exit 1
+          fi
       - name: Install Rust
         if: steps.scope.outputs.run == 'true'
         uses: ./.github/actions/setup-rust
@@ -87,6 +98,8 @@ jobs:
           set -euo pipefail
           npm ci
           npm run format
+          cargo fmt --manifest-path ../../Cargo.toml --package KonclaveLocalDaemon
+          cargo fmt --manifest-path ../../Cargo.toml --package KonclaveLocalServiceTransport
           git diff
       - name: Verify deterministic client diagnostics
         if: steps.scope.outputs.run == 'true'
@@ -96,15 +109,19 @@ jobs:
           set -euo pipefail
           npm run lint
           npm run typecheck
-          npm exec -- vitest run tests/delivery-diagnostics.test.ts tests/generic-command.test.ts
+          npm run test:coverage
       - name: Verify authenticated persistence and service projections
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo fmt --package KonclaveLocalServiceTransport -- --check
+          cargo test --locked --package KonclaveLocalServiceTransport --test authorization_handshake
           cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
+          cargo test --locked --package KonclaveLocalDaemon --lib local_
           cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
+          cargo clippy --locked --package KonclaveLocalServiceTransport --all-targets -- -D warnings
       - name: Measure on-demand inspection overhead
         if: steps.scope.outputs.run == 'true'
         shell: bash

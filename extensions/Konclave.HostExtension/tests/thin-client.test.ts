@@ -33,6 +33,7 @@ import {
 import { createLocalServiceDeliveryChannel } from '../src/service/delivery.js';
 import { createExtensionJoinConfig, deriveProfileId } from '../src/runtime.js';
 import { LocalServiceError, type LocalServiceClient } from '../src/service/client.js';
+import { attachLocalFailure } from '../src/service/failure-diagnostics.js';
 
 function createKonclaveCommands(dependencies: CommandDependencies) {
   return createCommands({ ...dependencies, outputMode: 'verbose' });
@@ -406,16 +407,79 @@ describe('agent tool surface', () => {
         { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
         { ...invocation, toolCallId: '' },
       ),
-    ).rejects.toThrow('invocation identifiers are invalid');
+    ).resolves.toMatchObject({
+      resultType: 'failure',
+      textResultForLlm: expect.stringContaining('stage=tool_invocation code=invalid_request'),
+    });
 
     const identity = tools.find((tool) => tool.name === 'get_identity');
     await identity?.handler(undefined);
     expect(prepareArguments).toHaveBeenCalledWith('get_identity', {});
     expect(request).toHaveBeenCalledWith('get_identity', {}, expect.any(Number));
   });
+
+  it('returns explicit opaque SDK failures for preparation and dispatch errors', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LocalServiceError('PRIVATE-OPERATION-AND-CREDENTIAL', 'profile_unavailable'),
+      );
+    const tools = createKonclaveTools({ client: stubClient(request) });
+    const identity = tools.find((tool) => tool.name === 'get_identity');
+    const failure = await identity?.handler({});
+    expect(failure).toEqual({
+      resultType: 'failure',
+      textResultForLlm: expect.stringContaining('stage=tool_dispatch code=profile_unavailable'),
+      error: expect.stringContaining('stage=tool_dispatch code=profile_unavailable'),
+    });
+    expect(JSON.stringify(failure)).not.toContain('PRIVATE');
+
+    request.mockClear();
+    const rejected = createKonclaveTools({
+      client: stubClient(request),
+      prepareArguments() {
+        throw new Error('PRIVATE-POLICY-ARGUMENTS');
+      },
+    }).find((tool) => tool.name === 'get_identity');
+    const preparationFailure = await rejected?.handler({});
+    expect(preparationFailure).toMatchObject({
+      resultType: 'failure',
+      textResultForLlm: expect.stringContaining('stage=tool_arguments code=unclassified_failure'),
+    });
+    expect(JSON.stringify(preparationFailure)).not.toContain('PRIVATE');
+    expect(request).not.toHaveBeenCalled();
+  });
 });
 
 describe('deterministic commands', () => {
+  it('renders correlated client failures without operation names or exception text', async () => {
+    const failure = new LocalServiceError('PRIVATE-OPERATION', 'profile_unavailable');
+    attachLocalFailure(failure, {
+      stage: 'response_decode',
+      code: 'profile_unavailable',
+      connectionReference: '0123456789abcdef',
+      requestSequence: 3,
+    });
+    const lines: string[] = [];
+    const command = createCommands({
+      client: stubClient(vi.fn().mockRejectedValue(failure)),
+      output: {
+        write(line) {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('identity'));
+
+    expect(lines).toEqual([
+      'Konclave local failure: stage=response_decode code=profile_unavailable ' +
+        'connection=0123456789abcdef request=3. ' +
+        'An interrupted request may have committed; reconcile using its original identifiers.',
+    ]);
+    expect(lines.join('\n')).not.toContain('PRIVATE');
+  });
+
   it('bounds parsed arguments', () => {
     expect(parseCommandArguments('  status  ')).toEqual(['status']);
     expect(parseCommandArguments('')).toEqual([]);

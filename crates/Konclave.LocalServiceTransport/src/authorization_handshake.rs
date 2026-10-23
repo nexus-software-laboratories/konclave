@@ -230,6 +230,33 @@ where
     A: FnOnce(AuthorizationBinding) -> D + Send,
     D: Future<Output = Result<bool, LocalServiceTransportError>> + Send,
 {
+    complete_observed_authorization_service_handshake(stream, service_identity, authorize, |_| {})
+        .await
+}
+
+/// Observes the service's fresh public challenge without changing authorization.
+///
+/// The observer runs once after a valid hello and before challenge publication.
+/// It receives no binding, credential, request, or authorization result, and its
+/// output cannot affect the signed decision. Existing proof verification,
+/// authorization ordering, uniform rejection and handshake deadline are unchanged.
+///
+/// # Errors
+///
+/// Returns the same bounded authentication, protocol, or timeout failures as the
+/// unobserved asynchronous authorization handshake.
+pub async fn complete_observed_authorization_service_handshake<S, A, D, O>(
+    stream: &mut S,
+    service_identity: &LocalServiceIdentity,
+    authorize: A,
+    observe: O,
+) -> Result<AuthenticatedAuthorizationChannel, LocalServiceTransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+    A: FnOnce(AuthorizationBinding) -> D + Send,
+    D: Future<Output = Result<bool, LocalServiceTransportError>> + Send,
+    O: FnOnce(LocalServiceChallenge) + Send,
+{
     tokio::time::timeout(AUTHORIZATION_HANDSHAKE_TIMEOUT, async {
         let hello = read_message(stream).await?;
         let (binding, client_challenge, presented_key) = match hello {
@@ -271,6 +298,7 @@ where
             _ => return Err(LocalServiceTransportError::UnexpectedMessage),
         };
         let service_challenge = LocalServiceChallenge::from_bytes(next_challenge()?);
+        observe(service_challenge);
         write_message(
             stream,
             &AuthorizationHandshakeMessage::ServiceChallenge {
