@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-    echo 'Usage: Test-A2AGatewayContainerContract.sh <expected-image>' >&2
+if [ "$#" -gt 1 ]; then
+    echo 'Usage: Test-A2AGatewayContainerContract.sh [expected-image]' >&2
     exit 2
 fi
 
-expected_image="$1"
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+expected_image="${1:-}"
+if [ "$#" -eq 0 ]; then
+    expected_image="$(
+        jq -er '
+            [.artifacts[] | select(.id == "konclave-a2a-gateway-container-linux-amd64")]
+            | if length == 1
+              then .[0].image | select(type == "string" and length > 0)
+              else error("expected exactly one gateway release image")
+              end
+        ' "$project_root/distribution/release-artifacts.json"
+    )"
+fi
 application_root="$project_root/apps/Konclave.A2AGateway"
 compose_file="$application_root/compose.example.yaml"
 config_file="$application_root/gateway-config.container.json"

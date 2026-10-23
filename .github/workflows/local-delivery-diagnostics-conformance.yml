@@ -51,6 +51,17 @@ jobs:
           persist-credentials: false
           # Preserve the scope checkout for its post-step cleanup.
           clean: false
+      - name: Verify staged release container contract
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/Test-A2AGatewayContainerContract.sh
+          if bash ./scripts/ci/Test-A2AGatewayContainerContract.sh \
+            'konclave-a2a-gateway:invalid-contract-version' >/dev/null 2>&1; then
+            echo '::error::Gateway contract accepted an incorrect release image.'
+            exit 1
+          fi
       - name: Install Rust
         if: steps.scope.outputs.run == 'true'
         uses: ./.github/actions/setup-rust
