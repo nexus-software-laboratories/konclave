@@ -39,9 +39,7 @@ export const localServiceErrorCodes = {
 export type LocalServiceErrorCode =
   (typeof localServiceErrorCodes)[keyof typeof localServiceErrorCodes];
 
-export type LocalFailureCode =
-  | LocalServiceErrorCode
-  | (typeof transportFailureCodes)[number];
+export type LocalFailureCode = LocalServiceErrorCode | (typeof transportFailureCodes)[number];
 
 const transportFailureCodes = [
   'channel_closed',

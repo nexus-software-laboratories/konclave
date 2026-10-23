@@ -22,27 +22,28 @@ describe('local failure diagnostic contract', () => {
       requestSequence: Number.POSITIVE_INFINITY,
     });
 
-    it('rejects unknown labels and never coerces arbitrary diagnostic objects', () => {
-      const unsafe = {
-        toString: () => {
-          throw new Error('PRIVATE-CREDENTIAL-AND-PAYLOAD');
-        },
-      };
-      for (const value of ['PRIVATE-CREDENTIAL\nforged-log', unsafe]) {
-        const rendered = formatLocalFailure({
-          stage: value,
-          code: value,
-          connectionReference: unsafe,
-          requestSequence: unsafe,
-        });
-        expect(rendered).toContain('stage=unknown_boundary code=unclassified_failure');
-        expect(rendered).not.toMatch(/PRIVATE|forged-log|connection=|request=/);
-      }
-    });
     expect(rendered).not.toContain('PRIVATE');
     expect(rendered).not.toContain('forged-log');
     expect(rendered).not.toContain('request=');
     expect(rendered).toContain('may have committed');
+  });
+
+  it('rejects unknown labels and never coerces arbitrary diagnostic objects', () => {
+    const unsafe = {
+      toString: () => {
+        throw new Error('PRIVATE-CREDENTIAL-AND-PAYLOAD');
+      },
+    };
+    for (const value of ['PRIVATE-CREDENTIAL\nforged-log', unsafe]) {
+      const rendered = formatLocalFailure({
+        stage: value,
+        code: value,
+        connectionReference: unsafe,
+        requestSequence: unsafe,
+      });
+      expect(rendered).toContain('stage=unknown_boundary code=unclassified_failure');
+      expect(rendered).not.toMatch(/PRIVATE|forged-log|connection=|request=/);
+    }
   });
 
   it('renders stage, finite code, and connection-local ordering', () => {
