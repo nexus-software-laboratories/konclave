@@ -34,8 +34,9 @@ pub(crate) struct RecordWriter {
     oversized: bool,
 }
 
-fn report_failure(failed: &AtomicBool) {
-    if !failed.swap(true, Ordering::AcqRel) {
+fn report_failure(failed: &AtomicBool, reported: &mut bool) {
+    if failed.load(Ordering::Acquire) && !*reported {
+        *reported = true;
         eprintln!("konclave: local failure diagnostic log is unavailable");
     }
 }
@@ -76,7 +77,9 @@ impl LocalFailureLog {
             .spawn(move || {
                 let _lock = lock;
                 let mut drained = 0;
+                let mut reported = false;
                 loop {
+                    report_failure(&worker_failed, &mut reported);
                     let record = if worker_stopping.load(Ordering::Acquire) {
                         if drained == MAX_PENDING_RECORDS {
                             break;
@@ -94,10 +97,12 @@ impl LocalFailureLog {
                         }
                     };
                     if append_record(&mut file, &record).is_err() {
-                        report_failure(&worker_failed);
+                        worker_failed.store(true, Ordering::Release);
+                        report_failure(&worker_failed, &mut reported);
                         break;
                     }
                 }
+                report_failure(&worker_failed, &mut reported);
             })?;
         Ok((
             Self {
@@ -166,7 +171,7 @@ impl Drop for RecordWriter {
                     .try_send(std::mem::take(&mut self.bytes))
                     .is_err())
         {
-            report_failure(&self.log.failed);
+            self.log.failed.store(true, Ordering::Release);
         }
     }
 }
@@ -176,6 +181,23 @@ mod tests {
     use std::io::Read as _;
 
     use super::*;
+
+    #[test]
+    fn saturation_marks_failure_without_waiting_for_a_worker() {
+        let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_RECORDS);
+        let failed = Arc::new(AtomicBool::new(false));
+        let log = LocalFailureLog {
+            sender,
+            failed: Arc::clone(&failed),
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+        for _ in 0..=MAX_PENDING_RECORDS {
+            let mut writer = log.make_writer();
+            writer.write_all(b"finite record\n").unwrap();
+        }
+        assert!(failed.load(Ordering::Acquire));
+        assert_eq!(receiver.try_iter().count(), MAX_PENDING_RECORDS);
+    }
 
     #[test]
     fn log_is_owner_protected_and_drained_on_shutdown() {
