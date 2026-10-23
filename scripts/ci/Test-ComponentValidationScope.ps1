@@ -68,10 +68,11 @@ foreach ($contract in $expectedContracts) {
         -Contract $contract `
         -EventName pull_request `
         -ChangedFiles $authorizationHistoryFiles
-    if ($selected) {
+    $expected = $contract -ceq 'local-delivery-diagnostics'
+    if ($selected -ne $expected) {
         throw "Authorization history changes over-select '$contract'."
     }
-    Write-Output "authorization history: contract=$contract, run=False"
+    Write-Output "authorization history: contract=$contract, run=$expected"
 }
 
 $ownedCases = [ordered]@{

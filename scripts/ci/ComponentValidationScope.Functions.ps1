@@ -61,8 +61,8 @@ function Get-ComponentValidationContracts {
             '^crates/Konclave\.DomainCore/'
             '^docs/adr/adr-0026-local-delivery-diagnostics\.md$'
             '^docs/development/local-delivery-diagnostics\.md$'
-            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:conversation|local_service|mcp|persistence)\.rs|src/persistence/(?:delivery_diagnostics|directed_request_handling)\.rs)$'
-            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-command)\.ts|src/service/(?:commands|delivery-diagnostics|operations|validation)\.ts|tests/(?:delivery-diagnostics|generic-command)\.test\.ts)$'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:conversation|local_service|local_failure_diagnostics|local_failure_log|observability|shared_runtime|mcp|persistence)\.rs|src/persistence/(?:delivery_diagnostics|directed_request_handling)\.rs)$'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-command)\.ts|src/adapter/runtime\.ts|src/service/(?:client|tools|commands|failure-diagnostics|delivery-diagnostics|operations|validation)\.ts|tests/(?:delivery-diagnostics|failure-diagnostics|generic-command|service-client|thin-client|delivery-runtime)\.test\.ts)$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
         'pairing-rendezvous' = @(

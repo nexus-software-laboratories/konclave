@@ -87,6 +87,7 @@ jobs:
           set -euo pipefail
           npm ci
           npm run format
+          cargo fmt --manifest-path ../../Cargo.toml --package KonclaveLocalDaemon
           git diff
       - name: Verify deterministic client diagnostics
         if: steps.scope.outputs.run == 'true'
@@ -96,7 +97,7 @@ jobs:
           set -euo pipefail
           npm run lint
           npm run typecheck
-          npm exec -- vitest run tests/delivery-diagnostics.test.ts tests/generic-command.test.ts
+          npm exec -- vitest run tests/delivery-diagnostics.test.ts tests/generic-command.test.ts tests/failure-diagnostics.test.ts tests/service-client.test.ts tests/thin-client.test.ts tests/delivery-runtime.test.ts
       - name: Verify authenticated persistence and service projections
         if: steps.scope.outputs.run == 'true'
         shell: bash
@@ -104,6 +105,7 @@ jobs:
           set -euo pipefail
           cargo fmt --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
+          cargo test --locked --package KonclaveLocalDaemon --lib local_
           cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
       - name: Measure on-demand inspection overhead
         if: steps.scope.outputs.run == 'true'
