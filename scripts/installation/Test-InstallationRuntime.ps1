@@ -497,6 +497,7 @@ try {
         [string]$rendered.taskName -cne 'KonclaveLocalService' -or
         [string]$rendered.logonType -cne 'Interactive' -or
         [string]$rendered.runLevel -cne 'Limited' -or
+        [int]$rendered.priority -ne 4 -or
         -not [bool]$rendered.startWhenAvailable -or
         [bool]$rendered.stopOnIdleEnd -or
         [int]$rendered.restartCount -ne 999 -or
@@ -520,6 +521,28 @@ try {
                 -Action Install `
                 -InstallRoot $windowsInstall `
                 -ConfigPath $windowsConfig
+            $installedTask = Get-ScheduledTask -TaskName $rendered.taskName
+            if ([int]$installedTask.Settings.Priority -ne 4) {
+                throw 'Windows user-service task did not use Normal priority.'
+            }
+            $installedTask.Settings.Priority = 7
+            Set-ScheduledTask `
+                -TaskName $rendered.taskName `
+                -Settings $installedTask.Settings | Out-Null
+            Assert-RuntimeCheckFails {
+                & $manager `
+                    -Action Status `
+                    -InstallRoot $windowsInstall `
+                    -ConfigPath $windowsConfig
+            } 'a background-priority Windows service task'
+            & $manager `
+                -Action Install `
+                -InstallRoot $windowsInstall `
+                -ConfigPath $windowsConfig
+            $repairedTask = Get-ScheduledTask -TaskName $rendered.taskName
+            if ([int]$repairedTask.Settings.Priority -ne 4) {
+                throw 'Windows user-service task did not repair background priority.'
+            }
             $taskStatus = & $manager `
                 -Action Status `
                 -InstallRoot $windowsInstall `

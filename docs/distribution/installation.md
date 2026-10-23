@@ -376,11 +376,15 @@ bash <install-root>/share/konclave/service/launchd/manage-agent.sh install <inst
 ```
 
 On Windows, `manage-user-service.ps1` registers one limited scheduled task for the
-current interactive user, launches the shared service without a visible console
-window, continues across workstation idle transitions, retries failed service
-processes at one-minute intervals, and requires no password in command history. The
-existing `install-service.ps1` remains an optional elevated SCM integration. All
-managers support install, start, stop, status, and uninstall actions and reject a
+current interactive user, launches the shared service at Normal process priority
+without a visible console window, continues across workstation idle transitions,
+retries failed service processes at one-minute intervals, and requires no password
+in command history. Normal priority avoids Task Scheduler's default BelowNormal
+priority competing poorly with foreground work. Running install again repairs an
+owned task with outdated execution settings; it does not replace another
+installation's task. The existing `install-service.ps1` remains an optional elevated
+SCM integration. All managers support install, start, stop, status, and uninstall
+actions and reject a
 definition that points to another binary, user, or configuration.
 
 ## Profile schema compatibility
