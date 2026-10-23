@@ -4,6 +4,7 @@ use KonclaveLocalServiceTransport::LocalServiceTransportError;
 use sha2::{Digest as _, Sha256};
 
 use crate::authorization_runtime::AuthorizationRuntimeError;
+use crate::persistence::ProfileStoreError;
 use crate::profile_supervisor::ProfileSupervisorError;
 
 const CONNECTION_REFERENCE_DOMAIN: &[u8] = b"konclave:local-connection\0";
@@ -79,10 +80,39 @@ pub(crate) fn failure_code(error: &anyhow::Error) -> &'static str {
         return error.code();
     }
     if let Some(error) = error.downcast_ref::<ProfileSupervisorError>() {
+        if let Some(source) = error.open_source() {
+            let code = failure_code(source);
+            if code != "unclassified_failure" {
+                return code;
+            }
+        }
         return error.code();
     }
-    if error.downcast_ref::<AuthorizationRuntimeError>().is_some() {
-        return "authorization_unavailable";
+    if let Some(error) = error.downcast_ref::<AuthorizationRuntimeError>() {
+        return match error {
+            AuthorizationRuntimeError::Store(_) => "authorization_store_failure",
+            AuthorizationRuntimeError::InvalidProjection => "authorization_invalid_projection",
+            AuthorizationRuntimeError::ObservationDeadlineExceeded => {
+                "authorization_observation_deadline"
+            }
+            AuthorizationRuntimeError::BlockingOperationFailed => "authorization_worker_failure",
+            AuthorizationRuntimeError::UnexpectedStop => "authorization_stopped",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<ProfileStoreError>() {
+        return match error {
+            ProfileStoreError::ProfileLocked => "profile_locked",
+            ProfileStoreError::Io => "profile_io_failure",
+            ProfileStoreError::Storage => "profile_storage_failure",
+            ProfileStoreError::UnsupportedSchema => "profile_schema_unsupported",
+            ProfileStoreError::ProfileMismatch => "profile_mismatch",
+            ProfileStoreError::CorruptData => "profile_integrity_failure",
+            ProfileStoreError::Credential => "profile_credential_unavailable",
+            _ => "profile_store_failure",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<KonclaveSecretStorage::SecretStorageError>() {
+        return error.code();
     }
     if let Some(error) = error.downcast_ref::<std::io::Error>() {
         return match error.kind() {
@@ -110,6 +140,7 @@ mod tests {
     #[test]
     fn references_are_bounded_ephemeral_and_domain_separated() {
         let first = ConnectionReference::new(&[0x42; 16]);
+        assert_eq!(first.as_str(), "5deed3fe8eee37ab");
         assert_eq!(first.as_str().len(), 16);
         assert!(first.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first, ConnectionReference::new(&[0x43; 16]));
@@ -124,8 +155,30 @@ mod tests {
                 anyhow::Error::new(LocalServiceTransportError::ChannelClosed),
                 "local_service_channel_closed",
             ),
-            (anyhow::Error::new(ProfileSupervisorError::ClientLimit), "client_limit"),
-            (anyhow::Error::new(ProfileSupervisorError::ProfileLocked), "profile_locked"),
+            (
+                anyhow::Error::new(ProfileSupervisorError::ClientLimit),
+                "client_limit",
+            ),
+            (
+                anyhow::Error::new(ProfileSupervisorError::ProfileLocked),
+                "profile_locked",
+            ),
+            (
+                anyhow::Error::new(ProfileSupervisorError::Open(std::sync::Arc::new(
+                    anyhow::Error::new(ProfileStoreError::Storage),
+                ))),
+                "profile_storage_failure",
+            ),
+            (
+                anyhow::Error::new(AuthorizationRuntimeError::ObservationDeadlineExceeded),
+                "authorization_observation_deadline",
+            ),
+            (
+                anyhow::Error::new(
+                    KonclaveSecretStorage::SecretStorageError::OwnerProtectedStorageUnsafe,
+                ),
+                "owner_protected_storage_unsafe",
+            ),
             (
                 anyhow::Error::new(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -133,7 +186,10 @@ mod tests {
                 )),
                 "permission_denied",
             ),
-            (anyhow::anyhow!("PRIVATE-CREDENTIAL-AND-PAYLOAD"), "unclassified_failure"),
+            (
+                anyhow::anyhow!("PRIVATE-CREDENTIAL-AND-PAYLOAD"),
+                "unclassified_failure",
+            ),
         ];
         for (error, expected) in cases {
             let error = error.context(FailureContext {

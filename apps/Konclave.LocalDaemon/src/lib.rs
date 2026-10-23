@@ -15,13 +15,13 @@ mod conversation;
 mod health;
 #[allow(dead_code)]
 #[cfg(feature = "rust-service-mcp")]
-mod local_service;
-#[allow(dead_code)]
-#[cfg(feature = "rust-service-mcp")]
 mod local_failure_diagnostics;
 #[allow(dead_code)]
 #[cfg(feature = "rust-service-mcp")]
 mod local_failure_log;
+#[allow(dead_code)]
+#[cfg(feature = "rust-service-mcp")]
+mod local_service;
 #[allow(dead_code)]
 mod mcp;
 #[allow(dead_code)]

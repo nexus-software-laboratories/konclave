@@ -41,7 +41,9 @@ fn report_failure(failed: &AtomicBool) {
 
 fn append_record(file: &mut File, record: &[u8]) -> io::Result<()> {
     if record.len() > MAX_RECORD_BYTES {
-        return Err(io::Error::other("local diagnostic record exceeded its bound"));
+        return Err(io::Error::other(
+            "local diagnostic record exceeded its bound",
+        ));
     }
     if file.metadata()?.len() + record.len() as u64 > MAX_LOG_BYTES {
         file.set_len(0)?;
@@ -137,7 +139,9 @@ impl io::Write for RecordWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.bytes.len().saturating_add(bytes.len()) > MAX_RECORD_BYTES {
             self.oversized = true;
-            return Err(io::Error::other("local diagnostic record exceeded its bound"));
+            return Err(io::Error::other(
+                "local diagnostic record exceeded its bound",
+            ));
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -153,10 +157,13 @@ impl Drop for RecordWriter {
         if self.log.stopping.load(Ordering::Acquire) {
             return;
         }
-        if self.oversized {
-            report_failure(&self.log.failed);
-        } else if !self.bytes.is_empty()
-            && self.log.sender.try_send(std::mem::take(&mut self.bytes)).is_err()
+        if self.oversized
+            || (!self.bytes.is_empty()
+                && self
+                    .log
+                    .sender
+                    .try_send(std::mem::take(&mut self.bytes))
+                    .is_err())
         {
             report_failure(&self.log.failed);
         }
@@ -165,7 +172,7 @@ impl Drop for RecordWriter {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
+    use std::io::Read as _;
 
     use super::*;
 
@@ -178,7 +185,9 @@ mod tests {
         let (log, guard) = LocalFailureLog::open(&path).unwrap();
         {
             let mut writer = log.make_writer();
-            writer.write_all(b"{\"code\":\"profile_locked\"}\n").unwrap();
+            writer
+                .write_all(b"{\"code\":\"profile_locked\"}\n")
+                .unwrap();
         }
         drop(guard);
         let mut contents = String::new();
@@ -203,6 +212,37 @@ mod tests {
         }
         assert_eq!(file.metadata().unwrap().len() % MAX_RECORD_BYTES as u64, 0);
         assert!(append_record(&mut file, &vec![0; MAX_RECORD_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn one_writer_owns_the_file_and_shutdown_releases_its_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private");
+        KonclaveSecretStorage::ensure_owner_protected_directory(&directory).unwrap();
+        let path = directory.join("diagnostics.log");
+        let (_log, guard) = LocalFailureLog::open(&path).unwrap();
+        assert!(LocalFailureLog::open(&path).is_err());
+        drop(guard);
+        let (_, guard) = LocalFailureLog::open(&path).unwrap();
+        drop(guard);
+    }
+
+    #[test]
+    fn oversized_records_and_writers_outliving_shutdown_are_not_persisted() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private");
+        KonclaveSecretStorage::ensure_owner_protected_directory(&directory).unwrap();
+        let path = directory.join("diagnostics.log");
+        let (log, guard) = LocalFailureLog::open(&path).unwrap();
+        let mut oversized = log.make_writer();
+        oversized.write_all(&vec![b'x'; MAX_RECORD_BYTES]).unwrap();
+        assert!(oversized.write_all(b"x").is_err());
+        drop(oversized);
+        let mut late = log.make_writer();
+        late.write_all(b"late record").unwrap();
+        drop(guard);
+        drop(late);
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
     }
 
     #[cfg(unix)]
