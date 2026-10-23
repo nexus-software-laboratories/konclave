@@ -2,12 +2,89 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 
 // src/runtime.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/adapter/runtime.ts
 import { performance } from "node:perf_hooks";
+
+// src/service/failure-diagnostics.ts
+import { createHash } from "node:crypto";
+var localFailureStages = [
+  "client_validation",
+  "connect",
+  "service_challenge",
+  "service_identity",
+  "service_decision",
+  "request_admission",
+  "request_write",
+  "response_read",
+  "response_decode",
+  "tool_dispatch",
+  "tool_arguments",
+  "tool_invocation",
+  "startup",
+  "unknown_boundary"
+];
+var localServiceErrorCodes = {
+  1: "invalid_request",
+  2: "unknown_operation",
+  3: "not_authorized",
+  4: "profile_unavailable",
+  5: "busy",
+  6: "deadline_exceeded",
+  7: "payload_too_large",
+  8: "conflict",
+  9: "internal",
+  10: "cancelled",
+  11: "reconciliation_pending",
+  12: "profile_suspended",
+  13: "issuer_disabled",
+  14: "required_evidence_unavailable",
+  15: "capacity"
+};
+var transportFailureCodes = [
+  "channel_closed",
+  "frame_invalid",
+  "protocol_invalid",
+  "service_upgrade_required",
+  "connection_unavailable",
+  "client_closed",
+  "unclassified_failure"
+];
+var allowedStages = new Set(localFailureStages);
+var allowedCodes = /* @__PURE__ */ new Set([
+  ...Object.values(localServiceErrorCodes),
+  ...transportFailureCodes
+]);
+var failureDiagnostics = /* @__PURE__ */ new WeakMap();
+function attachLocalFailure(error, diagnostic) {
+  if (error instanceof Error && !failureDiagnostics.has(error)) {
+    failureDiagnostics.set(error, diagnostic);
+  }
+}
+function localFailureDiagnostic(error) {
+  return error instanceof Error ? failureDiagnostics.get(error) : void 0;
+}
+function formatLocalFailureError(error, fallbackStage, fallbackCode = "unclassified_failure") {
+  return formatLocalFailure(
+    localFailureDiagnostic(error) ?? { stage: fallbackStage, code: fallbackCode }
+  );
+}
+function connectionReference(serviceChallenge) {
+  if (serviceChallenge.byteLength !== 32) {
+    throw new Error("local diagnostic nonce length is invalid");
+  }
+  return createHash("sha256").update("konclave:local-connection\0").update(serviceChallenge).digest("hex").slice(0, 16);
+}
+function formatLocalFailure(diagnostic) {
+  const stage = typeof diagnostic.stage === "string" && allowedStages.has(diagnostic.stage) ? diagnostic.stage : "unknown_boundary";
+  const code = typeof diagnostic.code === "string" && allowedCodes.has(diagnostic.code) ? diagnostic.code : "unclassified_failure";
+  const reference = typeof diagnostic.connectionReference === "string" && diagnostic.connectionReference.length === 16 && /^[a-f0-9]{16}$/.test(diagnostic.connectionReference) ? ` connection=${diagnostic.connectionReference}` : "";
+  const sequence = typeof diagnostic.requestSequence === "number" && Number.isSafeInteger(diagnostic.requestSequence) && diagnostic.requestSequence > 0 ? ` request=${diagnostic.requestSequence}` : "";
+  return `Konclave local failure: stage=${stage} code=${code}${reference}${sequence}. An interrupted request may have committed; reconcile using its original identifiers.`;
+}
 
 // src/collaboration-contract.ts
 var collaborationAuthorizationArgument = "collaboration_authorization";
@@ -483,11 +560,14 @@ function startDeliveryRuntime(options) {
             }
             lastHeartbeatAt = now;
             resetFailures();
-          } catch {
+          } catch (error) {
             if (!running) {
               return;
             }
-            reportFailure2("heartbeat-transport", "Konclave heartbeat transport failed.");
+            reportFailure2(
+              "heartbeat-transport",
+              `Konclave heartbeat transport failed. ${formatLocalFailureError(error, "response_read")}`
+            );
             await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
             continue;
           }
@@ -502,11 +582,14 @@ function startDeliveryRuntime(options) {
           maxEvents: maxClaimBatch,
           waitMilliseconds: claimWaitMilliseconds
         });
-      } catch {
+      } catch (error) {
         if (!running) {
           return;
         }
-        reportFailure2("claim-transport", "Konclave claim transport failed.");
+        reportFailure2(
+          "claim-transport",
+          `Konclave claim transport failed. ${formatLocalFailureError(error, "response_read")}`
+        );
         await sleep(retryDelay());
         continue;
       }
@@ -542,297 +625,6 @@ function enqueue(coordinator, events, diagnostics) {
   } catch {
     diagnostics.error("Konclave could not queue a delivery.");
   }
-}
-
-// src/service/operations.ts
-var toolOperations = [
-  "set_active_conversation",
-  "set_auto_delivery",
-  "delivery_status",
-  "get_identity",
-  "create_pairing_capability",
-  "create_pairing_rendezvous",
-  "create_short_code_pairing",
-  "claim_short_code_pairing",
-  "get_short_code_pairing_status",
-  "sync_short_code_pairing",
-  "cancel_short_code_pairing",
-  "redeem_pairing_capability",
-  "redeem_pairing_rendezvous",
-  "get_pairing_status",
-  "authorize_pairing_joiner",
-  "authorize_pairing_inviter",
-  "sync_pairing",
-  "cancel_pairing",
-  "create_conversation",
-  "list_conversations",
-  "create_invitation",
-  "create_join_proof",
-  "send_message",
-  "send_directed_request",
-  "propose_collaboration_policy",
-  "propose_collaboration_policy_source",
-  "resume_collaboration_policy_proposal",
-  "get_collaboration_policy_status",
-  "inspect_collaboration_policy_proposal",
-  "accept_collaboration_policy",
-  "reject_collaboration_policy",
-  "revoke_collaboration_policy",
-  "add_member",
-  "accept_welcome",
-  "remove_member",
-  "change_member_role",
-  "read_messages",
-  "sync_messages",
-  "watch_messages"
-];
-var deliveryOperations = {
-  claim: "delivery.claim",
-  acknowledge: "delivery.acknowledge",
-  release: "delivery.release",
-  heartbeat: "delivery.heartbeat"
-};
-var collaborationOperations = {
-  authorizeTurn: "collaboration.turn.authorize",
-  completeTurn: "collaboration.turn.complete",
-  evaluateAction: "collaboration.action.evaluate"
-};
-var serviceOperations = {
-  status: "service.status",
-  messageDeliveryStatus: "get_message_delivery_status"
-};
-var verificationOperations = {
-  confirmShortCodePairing: "confirm_short_code_pairing"
-};
-var trustedDeviceOperations = {
-  list: "list_trusted_devices",
-  setAlias: "set_trusted_device_alias",
-  startRepeatPairing: "start_repeat_pairing",
-  getRepeatPairingStatus: "get_repeat_pairing_status",
-  syncRepeatPairing: "sync_repeat_pairing",
-  cancelRepeatPairing: "cancel_repeat_pairing"
-};
-var allOperations = [
-  ...toolOperations,
-  ...Object.values(deliveryOperations),
-  ...Object.values(collaborationOperations),
-  ...Object.values(serviceOperations),
-  ...Object.values(verificationOperations),
-  ...Object.values(trustedDeviceOperations)
-];
-
-// src/service/delivery.ts
-var hex16 = /^[0-9a-f]{32}$/u;
-var hex32 = /^[0-9a-f]{64}$/u;
-var deliveryDeadlineMarginMs = 5e3;
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function integer(value) {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return value;
-}
-function text(value) {
-  if (typeof value !== "string") {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return value;
-}
-function hex(value, pattern) {
-  const decoded = text(value);
-  if (!pattern.test(decoded)) {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return decoded;
-}
-function role(value) {
-  if (value !== "administrator" && value !== "member") {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return value;
-}
-function policyResponseOutcome(value) {
-  if (value !== "accepted" && value !== "rejected") {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return value;
-}
-function payload(value) {
-  if (!isRecord(value)) {
-    throw new Error("the local service delivery response is malformed");
-  }
-  switch (value.kind) {
-    case "application_text": {
-      const message = text(value.text);
-      if (message.length === 0 || Buffer.byteLength(message, "utf8") > maxEventTextBytes) {
-        throw new Error("the local service delivery response is malformed");
-      }
-      return {
-        kind: "application-text",
-        messageId: Buffer.from(hex(value.messageId, hex16), "hex"),
-        text: message
-      };
-    }
-    case "directed_request": {
-      const message = text(value.text);
-      if (message.length === 0 || Buffer.byteLength(message, "utf8") > maxEventTextBytes) {
-        throw new Error("the local service delivery response is malformed");
-      }
-      return {
-        kind: "directed-request",
-        messageId: Buffer.from(hex(value.messageId, hex16), "hex"),
-        target: Buffer.from(hex(value.targetDeviceId, hex32), "hex"),
-        text: message
-      };
-    }
-    case "collaboration_policy_proposal":
-      return {
-        kind: "collaboration-policy-proposal",
-        proposalId: Buffer.from(hex(value.proposalId, hex16), "hex"),
-        policyDigest: Buffer.from(hex(value.policyDigest, hex32), "hex"),
-        replacesPolicyDigest: value.replacesPolicyDigest === null ? void 0 : Buffer.from(hex(value.replacesPolicyDigest, hex32), "hex")
-      };
-    case "collaboration_policy_response":
-      return {
-        kind: "collaboration-policy-response",
-        proposalId: Buffer.from(hex(value.proposalId, hex16), "hex"),
-        policyDigest: Buffer.from(hex(value.policyDigest, hex32), "hex"),
-        outcome: policyResponseOutcome(value.outcome)
-      };
-    case "collaboration_policy_revocation":
-      return {
-        kind: "collaboration-policy-revocation",
-        policyDigest: Buffer.from(hex(value.policyDigest, hex32), "hex")
-      };
-    case "member_added":
-      return {
-        kind: "member-added",
-        device: Buffer.from(hex(value.device, hex32), "hex"),
-        role: role(value.role)
-      };
-    case "member_removed":
-      return { kind: "member-removed", device: Buffer.from(hex(value.device, hex32), "hex") };
-    case "member_role_changed":
-      return {
-        kind: "member-role-changed",
-        device: Buffer.from(hex(value.device, hex32), "hex"),
-        role: role(value.role)
-      };
-    case "local_access_removed":
-      return {
-        kind: "local-access-removed",
-        device: Buffer.from(hex(value.device, hex32), "hex")
-      };
-    default:
-      throw new Error("the local service delivery response is malformed");
-  }
-}
-function event(value) {
-  if (!isRecord(value)) {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return {
-    notificationId: Buffer.from(hex(value.notificationId, hex16), "hex"),
-    leaseGeneration: integer(value.leaseGeneration),
-    sequence: integer(value.sequence),
-    conversation: Buffer.from(hex(value.conversation, hex32), "hex"),
-    sender: Buffer.from(hex(value.sender, hex32), "hex"),
-    relayCursor: integer(value.relayCursor),
-    payload: payload(value.payload)
-  };
-}
-function batch(value) {
-  if (!isRecord(value) || !Array.isArray(value.events) || value.events.length > maxClaimBatch) {
-    throw new Error("the local service delivery response is malformed");
-  }
-  return value.events.map(event);
-}
-function parseServiceStatus(value) {
-  if (!isRecord(value) || typeof value.profile !== "string" || typeof value.deviceId !== "string" || typeof value.relayConfigured !== "boolean" || typeof value.deliveryDegraded !== "boolean" || typeof value.authorizationPolicy !== "string" || typeof value.authorizationProvider !== "string" || !Array.isArray(value.authorizationEvidence) || !value.authorizationEvidence.every((item) => typeof item === "string")) {
-    throw new Error("the local service status response is malformed");
-  }
-  return {
-    profile: value.profile,
-    deviceId: value.deviceId,
-    relayConfigured: value.relayConfigured,
-    watchedConversations: integer(value.watchedConversations),
-    pendingEvents: integer(value.pendingEvents),
-    claimedEvents: integer(value.claimedEvents),
-    deliveryDegraded: value.deliveryDegraded,
-    authorizationPolicy: value.authorizationPolicy,
-    authorizationProvider: value.authorizationProvider,
-    authorizationEvidence: value.authorizationEvidence,
-    authorizationGeneration: integer(value.authorizationGeneration),
-    authorizationPolicyVersion: integer(value.authorizationPolicyVersion),
-    grantExpiresAtUnixMilliseconds: integer(value.grantExpiresAtUnixMilliseconds),
-    grantCapabilities: integer(value.grantCapabilities),
-    activeGrants: integer(value.activeGrants),
-    activeGrantsForIssuer: integer(value.activeGrantsForIssuer),
-    activeGrantsForProfile: integer(value.activeGrantsForProfile),
-    grantLimit: integer(value.grantLimit),
-    grantLimitPerIssuer: integer(value.grantLimitPerIssuer),
-    grantLimitPerProfile: integer(value.grantLimitPerProfile)
-  };
-}
-function createLocalServiceDeliveryChannel(client) {
-  return {
-    profile: client.profile,
-    async request(request) {
-      switch (request.kind) {
-        case "wait-and-claim": {
-          const events = batch(
-            await client.request(
-              deliveryOperations.claim,
-              {
-                maxEvents: request.maxEvents,
-                waitMilliseconds: request.waitMilliseconds
-              },
-              request.waitMilliseconds + deliveryDeadlineMarginMs
-            )
-          );
-          return { kind: "batch", events };
-        }
-        case "acknowledge":
-        case "release":
-          await client.request(
-            request.kind === "acknowledge" ? deliveryOperations.acknowledge : deliveryOperations.release,
-            {
-              notificationId: request.notificationId.toString("hex"),
-              leaseGeneration: request.leaseGeneration
-            }
-          );
-          return { kind: "accepted" };
-        case "heartbeat":
-          await client.request(deliveryOperations.heartbeat, {
-            turn: request.turn === void 0 ? null : {
-              conversationId: request.turn.conversation,
-              policyDigest: request.turn.policyDigest,
-              requestMessageId: request.turn.requestMessageId,
-              attempt: request.turn.attempt
-            }
-          });
-          return { kind: "accepted" };
-        case "status": {
-          const result = parseServiceStatus(await client.request(serviceOperations.status, {}));
-          return {
-            kind: "status",
-            status: {
-              authorizationGeneration: result.authorizationGeneration,
-              pendingEvents: result.pendingEvents,
-              claimedEvents: result.claimedEvents,
-              watchedConversations: result.watchedConversations,
-              deliveryDegraded: result.deliveryDegraded
-            }
-          };
-        }
-      }
-    },
-    close() {
-      client.close();
-    }
-  };
 }
 
 // src/service/client.ts
@@ -1178,23 +970,6 @@ var kindServiceReject = 7;
 var kindRequest = 16;
 var kindSuccess = 32;
 var kindFailure = 33;
-var localServiceErrorCodes = {
-  1: "invalid_request",
-  2: "unknown_operation",
-  3: "not_authorized",
-  4: "profile_unavailable",
-  5: "busy",
-  6: "deadline_exceeded",
-  7: "payload_too_large",
-  8: "conflict",
-  9: "internal",
-  10: "cancelled",
-  11: "reconciliation_pending",
-  12: "profile_suspended",
-  13: "issuer_disabled",
-  14: "required_evidence_unavailable",
-  15: "capacity"
-};
 var LocalServiceError = class extends Error {
   code;
   operation;
@@ -1230,6 +1005,43 @@ var LocalServiceAuthorizationError = class extends Error {
     this.name = "LocalServiceAuthorizationError";
   }
 };
+function classifyLocalFailure(error) {
+  if (error instanceof LocalServiceError) {
+    return error.code;
+  }
+  if (error instanceof LocalServiceAuthorizationError) {
+    return "not_authorized";
+  }
+  if (error instanceof LocalServiceUpgradeRequiredError) {
+    return "service_upgrade_required";
+  }
+  if (error instanceof LocalServiceProtocolError) {
+    return "protocol_invalid";
+  }
+  if (error instanceof LocalServiceConnectionError) {
+    return "connection_unavailable";
+  }
+  if (error instanceof FrameError) {
+    return error.failure === "closed" ? "channel_closed" : "frame_invalid";
+  }
+  return "unclassified_failure";
+}
+function rememberLocalFailure(error, stage, reference, sequence, code = classifyLocalFailure(error)) {
+  attachLocalFailure(error, {
+    stage,
+    code,
+    ...reference === void 0 ? {} : { connectionReference: reference },
+    ...sequence === void 0 ? {} : { requestSequence: sequence }
+  });
+}
+function formatLocalServiceFailure(error, fallbackStage = "client_validation") {
+  return formatLocalFailureError(error, fallbackStage, classifyLocalFailure(error));
+}
+function closedClientError() {
+  const error = new Error("the local service client is closed");
+  rememberLocalFailure(error, "request_admission", void 0, void 0, "client_closed");
+  return error;
+}
 var defaultDeadlineMs = 3e4;
 var defaultReconnectAttempts = 1;
 var defaultReconnectDelayMs = 50;
@@ -1496,10 +1308,19 @@ async function readServiceHandshakeFrame(reader) {
 }
 async function openConnection(options, deadlineMs, credential) {
   const createSocket = options.createSocket ?? defaultCreateSocket;
+  let stage = "connect";
+  let reference;
   if (credential.kind === "session") {
     assertCanonicalProfile(credential.grant.profile);
   }
-  const socket = createSocket(options.endpoint);
+  let socket;
+  try {
+    socket = createSocket(options.endpoint);
+  } catch (error) {
+    const failure = sanitizeTransportError(error);
+    rememberLocalFailure(failure, stage);
+    throw failure;
+  }
   const reader = new FrameReader(socket, maxHandshakeFrameBytes + frameHeaderLength);
   let connected = true;
   socket.on("close", () => {
@@ -1530,8 +1351,11 @@ async function openConnection(options, deadlineMs, credential) {
           ) : encodeSessionHello(credential.grant, clientInstance, clientChallenge),
           maxHandshakeFrameBytes
         );
+        stage = "service_challenge";
         const challengeFrame = await readServiceHandshakeFrame(reader);
         const challenge = decodeServiceChallenge(challengeFrame);
+        reference = connectionReference(challenge.challenge);
+        stage = "service_identity";
         if (!challenge.serviceKey.equals(options.serviceKey)) {
           throw new LocalServiceProtocolError("the local service presented an unexpected key");
         }
@@ -1557,6 +1381,7 @@ async function openConnection(options, deadlineMs, credential) {
           Buffer.concat([Buffer.from([kindClientAuth]), signature]),
           maxHandshakeFrameBytes
         );
+        stage = "service_decision";
         const acceptFrame = await readServiceHandshakeFrame(reader);
         const decision = decodeServiceDecision(acceptFrame);
         const serviceKey = publicKeyFromRaw(challenge.serviceKey);
@@ -1574,28 +1399,38 @@ async function openConnection(options, deadlineMs, credential) {
     reader.setBufferLimit(maxRpcFrameBytes + frameHeaderLength);
   } catch (error) {
     close();
-    throw sanitizeTransportError(error);
+    const failure = sanitizeTransportError(error);
+    rememberLocalFailure(failure, stage, reference);
+    throw failure;
   }
+  let requestSequence = 0;
   return {
     get connected() {
       return connected;
     },
     close,
     async invoke(requestId, operation, payload2, onWritten) {
-      if (!connected) {
-        throw new FrameError("closed");
-      }
+      requestSequence = Math.min(Number.MAX_SAFE_INTEGER, requestSequence + 1);
+      const sequence = requestSequence;
+      let stage2 = "request_write";
       try {
+        if (!connected) {
+          throw new FrameError("closed");
+        }
         await writeFrame(socket, encodeRequest(requestId, operation, payload2), maxRpcFrameBytes);
         onWritten?.();
+        stage2 = "response_read";
         const frame = await reader.read(maxRpcFrameBytes);
+        stage2 = "response_decode";
         const response = decodeResponse(frame, requestId, operation);
         return parseResponse(response.payload);
       } catch (error) {
         if (!(error instanceof LocalServiceError)) {
           close();
         }
-        throw sanitizeTransportError(error);
+        const failure = sanitizeTransportError(error);
+        rememberLocalFailure(failure, stage2, reference, sequence);
+        throw failure;
       }
     }
   };
@@ -1932,7 +1767,7 @@ async function connectLocalService(options) {
   };
   const getConnection = async (lane, remainingMs) => {
     if (closed) {
-      throw new Error("the local service client is closed");
+      throw closedClientError();
     }
     if (lane.connection?.connected && lane.grantExpiresAtUnixMilliseconds > BigInt(Date.now())) {
       return lane.connection;
@@ -1967,7 +1802,7 @@ async function connectLocalService(options) {
     if (closed) {
       lane.connection.close();
       lane.connection = null;
-      throw new Error("the local service client is closed");
+      throw closedClientError();
     }
     return lane.connection;
   };
@@ -2063,11 +1898,18 @@ async function connectLocalService(options) {
       try {
         normalized = normalizeRequestOptions(requestOptions, deadlineMs);
       } catch (error) {
+        rememberLocalFailure(error, "client_validation", void 0, void 0, "invalid_request");
         return Promise.reject(error);
       }
       const requestId = normalized.requestId ?? randomBytes(requestIdLength);
-      const encoded = encodeRequestPayload(operation, payload2 ?? {});
-      encodeRequest(requestId, operation, encoded);
+      let encoded;
+      try {
+        encoded = encodeRequestPayload(operation, payload2 ?? {});
+        encodeRequest(requestId, operation, encoded);
+      } catch (error) {
+        rememberLocalFailure(error, "client_validation", void 0, void 0, "invalid_request");
+        throw error;
+      }
       const deliveryOperation = isDeliveryLaneOperation(operation);
       const lane = deliveryOperation ? deliveryLane : interactiveLane;
       const allowedReconnects = deliveryOperation ? 0 : reconnectAttempts;
@@ -2087,7 +1929,10 @@ async function connectLocalService(options) {
         };
         const abort = () => sendCancellation("caller");
         normalized.signal?.addEventListener("abort", abort, { once: true });
-        const deadlineTimer = setTimeout(() => sendCancellation("deadline"), normalized.deadlineMs);
+        const deadlineTimer = setTimeout(
+          () => sendCancellation("deadline"),
+          normalized.deadlineMs
+        );
         let attempt = 0;
         let reconciliationAttempt = 0;
         try {
@@ -2134,12 +1979,306 @@ async function connectLocalService(options) {
           clearTimeout(deadlineTimer);
           normalized.signal?.removeEventListener("abort", abort);
         }
+      }).catch((error) => {
+        rememberLocalFailure(error, "request_admission");
+        throw error;
       });
       lane.inFlight = run.then(
         () => void 0,
         () => void 0
       );
       return run;
+    }
+  };
+}
+
+// src/service/operations.ts
+var toolOperations = [
+  "set_active_conversation",
+  "set_auto_delivery",
+  "delivery_status",
+  "get_identity",
+  "create_pairing_capability",
+  "create_pairing_rendezvous",
+  "create_short_code_pairing",
+  "claim_short_code_pairing",
+  "get_short_code_pairing_status",
+  "sync_short_code_pairing",
+  "cancel_short_code_pairing",
+  "redeem_pairing_capability",
+  "redeem_pairing_rendezvous",
+  "get_pairing_status",
+  "authorize_pairing_joiner",
+  "authorize_pairing_inviter",
+  "sync_pairing",
+  "cancel_pairing",
+  "create_conversation",
+  "list_conversations",
+  "create_invitation",
+  "create_join_proof",
+  "send_message",
+  "send_directed_request",
+  "propose_collaboration_policy",
+  "propose_collaboration_policy_source",
+  "resume_collaboration_policy_proposal",
+  "get_collaboration_policy_status",
+  "inspect_collaboration_policy_proposal",
+  "accept_collaboration_policy",
+  "reject_collaboration_policy",
+  "revoke_collaboration_policy",
+  "add_member",
+  "accept_welcome",
+  "remove_member",
+  "change_member_role",
+  "read_messages",
+  "sync_messages",
+  "watch_messages"
+];
+var deliveryOperations = {
+  claim: "delivery.claim",
+  acknowledge: "delivery.acknowledge",
+  release: "delivery.release",
+  heartbeat: "delivery.heartbeat"
+};
+var collaborationOperations = {
+  authorizeTurn: "collaboration.turn.authorize",
+  completeTurn: "collaboration.turn.complete",
+  evaluateAction: "collaboration.action.evaluate"
+};
+var serviceOperations = {
+  status: "service.status",
+  messageDeliveryStatus: "get_message_delivery_status"
+};
+var verificationOperations = {
+  confirmShortCodePairing: "confirm_short_code_pairing"
+};
+var trustedDeviceOperations = {
+  list: "list_trusted_devices",
+  setAlias: "set_trusted_device_alias",
+  startRepeatPairing: "start_repeat_pairing",
+  getRepeatPairingStatus: "get_repeat_pairing_status",
+  syncRepeatPairing: "sync_repeat_pairing",
+  cancelRepeatPairing: "cancel_repeat_pairing"
+};
+var allOperations = [
+  ...toolOperations,
+  ...Object.values(deliveryOperations),
+  ...Object.values(collaborationOperations),
+  ...Object.values(serviceOperations),
+  ...Object.values(verificationOperations),
+  ...Object.values(trustedDeviceOperations)
+];
+
+// src/service/delivery.ts
+var hex16 = /^[0-9a-f]{32}$/u;
+var hex32 = /^[0-9a-f]{64}$/u;
+var deliveryDeadlineMarginMs = 5e3;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function integer(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return value;
+}
+function text(value) {
+  if (typeof value !== "string") {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return value;
+}
+function hex(value, pattern) {
+  const decoded = text(value);
+  if (!pattern.test(decoded)) {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return decoded;
+}
+function role(value) {
+  if (value !== "administrator" && value !== "member") {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return value;
+}
+function policyResponseOutcome(value) {
+  if (value !== "accepted" && value !== "rejected") {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return value;
+}
+function payload(value) {
+  if (!isRecord(value)) {
+    throw new Error("the local service delivery response is malformed");
+  }
+  switch (value.kind) {
+    case "application_text": {
+      const message = text(value.text);
+      if (message.length === 0 || Buffer.byteLength(message, "utf8") > maxEventTextBytes) {
+        throw new Error("the local service delivery response is malformed");
+      }
+      return {
+        kind: "application-text",
+        messageId: Buffer.from(hex(value.messageId, hex16), "hex"),
+        text: message
+      };
+    }
+    case "directed_request": {
+      const message = text(value.text);
+      if (message.length === 0 || Buffer.byteLength(message, "utf8") > maxEventTextBytes) {
+        throw new Error("the local service delivery response is malformed");
+      }
+      return {
+        kind: "directed-request",
+        messageId: Buffer.from(hex(value.messageId, hex16), "hex"),
+        target: Buffer.from(hex(value.targetDeviceId, hex32), "hex"),
+        text: message
+      };
+    }
+    case "collaboration_policy_proposal":
+      return {
+        kind: "collaboration-policy-proposal",
+        proposalId: Buffer.from(hex(value.proposalId, hex16), "hex"),
+        policyDigest: Buffer.from(hex(value.policyDigest, hex32), "hex"),
+        replacesPolicyDigest: value.replacesPolicyDigest === null ? void 0 : Buffer.from(hex(value.replacesPolicyDigest, hex32), "hex")
+      };
+    case "collaboration_policy_response":
+      return {
+        kind: "collaboration-policy-response",
+        proposalId: Buffer.from(hex(value.proposalId, hex16), "hex"),
+        policyDigest: Buffer.from(hex(value.policyDigest, hex32), "hex"),
+        outcome: policyResponseOutcome(value.outcome)
+      };
+    case "collaboration_policy_revocation":
+      return {
+        kind: "collaboration-policy-revocation",
+        policyDigest: Buffer.from(hex(value.policyDigest, hex32), "hex")
+      };
+    case "member_added":
+      return {
+        kind: "member-added",
+        device: Buffer.from(hex(value.device, hex32), "hex"),
+        role: role(value.role)
+      };
+    case "member_removed":
+      return { kind: "member-removed", device: Buffer.from(hex(value.device, hex32), "hex") };
+    case "member_role_changed":
+      return {
+        kind: "member-role-changed",
+        device: Buffer.from(hex(value.device, hex32), "hex"),
+        role: role(value.role)
+      };
+    case "local_access_removed":
+      return {
+        kind: "local-access-removed",
+        device: Buffer.from(hex(value.device, hex32), "hex")
+      };
+    default:
+      throw new Error("the local service delivery response is malformed");
+  }
+}
+function event(value) {
+  if (!isRecord(value)) {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return {
+    notificationId: Buffer.from(hex(value.notificationId, hex16), "hex"),
+    leaseGeneration: integer(value.leaseGeneration),
+    sequence: integer(value.sequence),
+    conversation: Buffer.from(hex(value.conversation, hex32), "hex"),
+    sender: Buffer.from(hex(value.sender, hex32), "hex"),
+    relayCursor: integer(value.relayCursor),
+    payload: payload(value.payload)
+  };
+}
+function batch(value) {
+  if (!isRecord(value) || !Array.isArray(value.events) || value.events.length > maxClaimBatch) {
+    throw new Error("the local service delivery response is malformed");
+  }
+  return value.events.map(event);
+}
+function parseServiceStatus(value) {
+  if (!isRecord(value) || typeof value.profile !== "string" || typeof value.deviceId !== "string" || typeof value.relayConfigured !== "boolean" || typeof value.deliveryDegraded !== "boolean" || typeof value.authorizationPolicy !== "string" || typeof value.authorizationProvider !== "string" || !Array.isArray(value.authorizationEvidence) || !value.authorizationEvidence.every((item) => typeof item === "string")) {
+    throw new Error("the local service status response is malformed");
+  }
+  return {
+    profile: value.profile,
+    deviceId: value.deviceId,
+    relayConfigured: value.relayConfigured,
+    watchedConversations: integer(value.watchedConversations),
+    pendingEvents: integer(value.pendingEvents),
+    claimedEvents: integer(value.claimedEvents),
+    deliveryDegraded: value.deliveryDegraded,
+    authorizationPolicy: value.authorizationPolicy,
+    authorizationProvider: value.authorizationProvider,
+    authorizationEvidence: value.authorizationEvidence,
+    authorizationGeneration: integer(value.authorizationGeneration),
+    authorizationPolicyVersion: integer(value.authorizationPolicyVersion),
+    grantExpiresAtUnixMilliseconds: integer(value.grantExpiresAtUnixMilliseconds),
+    grantCapabilities: integer(value.grantCapabilities),
+    activeGrants: integer(value.activeGrants),
+    activeGrantsForIssuer: integer(value.activeGrantsForIssuer),
+    activeGrantsForProfile: integer(value.activeGrantsForProfile),
+    grantLimit: integer(value.grantLimit),
+    grantLimitPerIssuer: integer(value.grantLimitPerIssuer),
+    grantLimitPerProfile: integer(value.grantLimitPerProfile)
+  };
+}
+function createLocalServiceDeliveryChannel(client) {
+  return {
+    profile: client.profile,
+    async request(request) {
+      switch (request.kind) {
+        case "wait-and-claim": {
+          const events = batch(
+            await client.request(
+              deliveryOperations.claim,
+              {
+                maxEvents: request.maxEvents,
+                waitMilliseconds: request.waitMilliseconds
+              },
+              request.waitMilliseconds + deliveryDeadlineMarginMs
+            )
+          );
+          return { kind: "batch", events };
+        }
+        case "acknowledge":
+        case "release":
+          await client.request(
+            request.kind === "acknowledge" ? deliveryOperations.acknowledge : deliveryOperations.release,
+            {
+              notificationId: request.notificationId.toString("hex"),
+              leaseGeneration: request.leaseGeneration
+            }
+          );
+          return { kind: "accepted" };
+        case "heartbeat":
+          await client.request(deliveryOperations.heartbeat, {
+            turn: request.turn === void 0 ? null : {
+              conversationId: request.turn.conversation,
+              policyDigest: request.turn.policyDigest,
+              requestMessageId: request.turn.requestMessageId,
+              attempt: request.turn.attempt
+            }
+          });
+          return { kind: "accepted" };
+        case "status": {
+          const result = parseServiceStatus(await client.request(serviceOperations.status, {}));
+          return {
+            kind: "status",
+            status: {
+              authorizationGeneration: result.authorizationGeneration,
+              pendingEvents: result.pendingEvents,
+              claimedEvents: result.claimedEvents,
+              watchedConversations: result.watchedConversations,
+              deliveryDegraded: result.deliveryDegraded
+            }
+          };
+        }
+      }
+    },
+    close() {
+      client.close();
     }
   };
 }
@@ -2987,7 +3126,7 @@ function createCopilotPolicyGate(client) {
 }
 
 // src/service/commands.ts
-import { createHash, randomBytes as randomBytes3 } from "node:crypto";
+import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
 import { open, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { TextDecoder as TextDecoder2 } from "node:util";
@@ -6180,10 +6319,10 @@ function parseDelimitedMessage(raw, minimumIdentifiers, maximumIdentifiers, usag
   return { identifiers, text: text2 };
 }
 function messageRequestId(messageId) {
-  return createHash("sha256").update(commandMessageRequestDomain).update(Buffer.from(messageId, "hex")).digest().subarray(0, 16);
+  return createHash2("sha256").update(commandMessageRequestDomain).update(Buffer.from(messageId, "hex")).digest().subarray(0, 16);
 }
 function policyRequestId(operation, conversationId, identifier) {
-  return createHash("sha256").update(commandPolicyRequestDomain).update(operation).update("\0").update(Buffer.from(conversationId, "hex")).update(Buffer.from(identifier, "hex")).digest().subarray(0, 16);
+  return createHash2("sha256").update(commandPolicyRequestDomain).update(operation).update("\0").update(Buffer.from(conversationId, "hex")).update(Buffer.from(identifier, "hex")).digest().subarray(0, 16);
 }
 function parsePolicySourceArguments(raw, minimumIdentifiers, maximumIdentifiers, usage) {
   const separator = /(?:^|\s+)--\s+/u.exec(raw);
@@ -7997,8 +8136,9 @@ function createKonclaveCommands(dependencies) {
         try {
           await run(context.args ?? "");
         } catch (error) {
+          const diagnostic = localFailureDiagnostic(error);
           await output.write(
-            error instanceof LocalServiceError ? `konclave: ${error.operation} failed (${error.code})` : `konclave: ${boundedMessage(error instanceof Error ? error.message : "failed")}`
+            diagnostic ? formatLocalFailure(diagnostic) : error instanceof LocalServiceError ? `konclave: ${error.operation} failed (${error.code})` : `konclave: ${boundedMessage(error instanceof Error ? error.message : "failed")}`
           );
         }
       }
@@ -8007,7 +8147,7 @@ function createKonclaveCommands(dependencies) {
 }
 
 // src/service/tools.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 
 // ../../fixtures/local-service/v1/copilot-tools.json
 var copilot_tools_default = [
@@ -11115,12 +11255,15 @@ var toolRequestIdDomain = "konclave:copilot-tool-request:1\0";
 var maxInvocationIdentifierBytes = 1024;
 var alwaysLoadedTools = /* @__PURE__ */ new Set([collaborationReplyToolName]);
 function toolRequestId(invocation) {
+  if (typeof invocation.sessionId !== "string" || typeof invocation.toolCallId !== "string") {
+    throw new Error("Copilot tool invocation identifiers are invalid.");
+  }
   const sessionBytes = Buffer.byteLength(invocation.sessionId, "utf8");
   const toolCallBytes = Buffer.byteLength(invocation.toolCallId, "utf8");
   if (sessionBytes === 0 || sessionBytes > maxInvocationIdentifierBytes || toolCallBytes === 0 || toolCallBytes > maxInvocationIdentifierBytes) {
     throw new Error("Copilot tool invocation identifiers are invalid.");
   }
-  return createHash2("sha256").update(toolRequestIdDomain).update(Buffer.from([sessionBytes >> 8, sessionBytes & 255])).update(invocation.sessionId).update(Buffer.from([toolCallBytes >> 8, toolCallBytes & 255])).update(invocation.toolCallId).digest().subarray(0, 16);
+  return createHash3("sha256").update(toolRequestIdDomain).update(Buffer.from([sessionBytes >> 8, sessionBytes & 255])).update(invocation.sessionId).update(Buffer.from([toolCallBytes >> 8, toolCallBytes & 255])).update(invocation.toolCallId).digest().subarray(0, 16);
 }
 function createKonclaveTools(options) {
   const deadline = options.toolDeadlineMs ?? defaultToolDeadlineMs;
@@ -11130,12 +11273,24 @@ function createKonclaveTools(options) {
     parameters: definition.parameters,
     defer: alwaysLoadedTools.has(definition.name) ? "never" : "auto",
     async handler(args, invocation) {
-      const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
-      return options.client.request(
-        definition.name,
-        preparedArgs,
-        invocation ? { deadlineMs: deadline, requestId: toolRequestId(invocation) } : deadline
-      );
+      let stage = "tool_arguments";
+      try {
+        const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
+        stage = "tool_invocation";
+        const requestOptions = invocation ? { deadlineMs: deadline, requestId: toolRequestId(invocation) } : deadline;
+        stage = "tool_dispatch";
+        return await options.client.request(definition.name, preparedArgs, requestOptions);
+      } catch (error) {
+        if (stage === "tool_invocation") {
+          attachLocalFailure(error, { stage, code: "invalid_request" });
+        }
+        const failure = formatLocalServiceFailure(error, stage);
+        return {
+          resultType: "failure",
+          textResultForLlm: failure,
+          error: failure
+        };
+      }
     }
   }));
 }
@@ -11217,7 +11372,7 @@ function formatError(error) {
   return "Unknown error";
 }
 function formatStartupFailure(stage, error) {
-  const detail = formatError(error);
+  const detail = stage === "service" ? formatLocalServiceFailure(error, "startup") : formatError(error);
   if (stage === "service") {
     return `Konclave shared service unavailable: ${detail} Install or repair the native runtime, then restart Copilot. See ${installationGuideUrl}`;
   }
@@ -11331,7 +11486,7 @@ function deriveProfileId(environment) {
   if (!sessionId) {
     throw new Error("SESSION_ID is required to derive the Konclave profile.");
   }
-  return `session-${createHash3("sha256").update(sessionId).digest("hex").slice(0, 24)}`;
+  return `session-${createHash4("sha256").update(sessionId).digest("hex").slice(0, 24)}`;
 }
 function createExtensionJoinConfig(client, output, hooks = {}, prepareToolArguments) {
   return {
