@@ -6,7 +6,7 @@ import type { SessionHooks } from '@github/copilot-sdk';
 
 import type { DeliveryPrompt, DeliverySession } from './adapter/delivery.js';
 import { createDeliveryCoordinator, startDeliveryRuntime } from './adapter/runtime.js';
-import type { LocalServiceClient } from './service/client.js';
+import { formatLocalServiceFailure, type LocalServiceClient } from './service/client.js';
 import { createLocalServiceDeliveryChannel } from './service/delivery.js';
 import { connectInstalledService } from './service/installed.js';
 import { createCopilotPolicyGate, type CopilotPolicyGate } from './service/policy-enforcement.js';
@@ -261,7 +261,7 @@ function formatError(error: unknown): string {
 }
 
 function formatStartupFailure(stage: ExtensionStartupStage, error: unknown): string {
-  const detail = formatError(error);
+  const detail = stage === 'service' ? formatLocalServiceFailure(error, 'startup') : formatError(error);
   if (stage === 'service') {
     return (
       `Konclave shared service unavailable: ${detail} ` +

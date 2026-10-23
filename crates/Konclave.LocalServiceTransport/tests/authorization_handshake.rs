@@ -11,6 +11,7 @@ use KonclaveLocalServiceTransport::{
     complete_authorization_service_handshake,
     complete_authorization_service_handshake_with_authorizer, complete_issuer_client_handshake,
     complete_session_client_handshake,
+    complete_observed_authorization_service_handshake,
 };
 use tokio::io::AsyncReadExt as _;
 
@@ -18,6 +19,38 @@ struct Fixture {
     service: LocalServiceIdentity,
     issuer: LocalServiceIdentity,
     registry: InMemorySessionAuthorizationRegistry,
+}
+
+#[tokio::test]
+async fn observed_handshakes_use_fresh_service_challenges_and_preserve_uniform_rejection() {
+    let fixture = Fixture::new();
+    let request = Fixture::issuer_request();
+    let mut challenges = std::collections::BTreeSet::new();
+    for authorized in [true, false] {
+        let (mut client_stream, mut service_stream) = tokio::io::duplex(4_096);
+        let mut observed = None;
+        let (client, service) = tokio::join!(
+            complete_issuer_client_handshake(
+                &mut client_stream,
+                &request,
+                &fixture.issuer,
+                fixture.service.public_key(),
+            ),
+            complete_observed_authorization_service_handshake(
+                &mut service_stream,
+                &fixture.service,
+                |_| async { Ok(authorized) },
+                |challenge| observed = Some(*challenge.as_bytes()),
+            )
+        );
+        if authorized {
+            assert_eq!(client.unwrap().binding(), service.unwrap().binding());
+        } else {
+            assert_eq!(client.unwrap_err(), LocalServiceTransportError::UnauthenticClient);
+            assert_eq!(service.unwrap_err(), LocalServiceTransportError::UnauthenticClient);
+        }
+        assert!(challenges.insert(observed.unwrap()));
+    }
 }
 
 impl Fixture {

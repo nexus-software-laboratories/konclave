@@ -186,6 +186,12 @@ copilot plugin marketplace update konclave
 copilot plugin update konclave@konclave
 ```
 
+For local connection failures, retain the displayed stage, code, connection reference
+and request ordinal. The installed service keeps a bounded owner-only failure log
+beside its configuration; see [local failure diagnostics](../development/local-service-transport.md#local-failure-diagnostics)
+for its location, privacy limits and correlation procedure. Do not reset profiles or
+allocate replacement message identifiers to work around an unknown request outcome.
+
 ### Migrate to another self-hosted relay
 
 The destination relay must use a certificate trusted by the operating-system account

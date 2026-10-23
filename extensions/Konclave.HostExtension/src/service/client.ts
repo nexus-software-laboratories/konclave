@@ -1,6 +1,15 @@
 import { randomBytes, type KeyObject } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
 
+import {
+  attachLocalFailure,
+  connectionReference,
+  formatLocalFailureError,
+  localServiceErrorCodes,
+  type LocalFailureCode,
+  type LocalFailureStage,
+  type LocalServiceErrorCode,
+} from './failure-diagnostics.js';
 import { FrameError, FrameReader, frameHeaderLength, writeFrame } from './framing.js';
 import {
   generateSessionPrivateKey,
@@ -53,27 +62,8 @@ const kindRequest = 16;
 const kindSuccess = 32;
 const kindFailure = 33;
 
-/** The closed set of failure codes the service may return. */
-export const localServiceErrorCodes = {
-  1: 'invalid_request',
-  2: 'unknown_operation',
-  3: 'not_authorized',
-  4: 'profile_unavailable',
-  5: 'busy',
-  6: 'deadline_exceeded',
-  7: 'payload_too_large',
-  8: 'conflict',
-  9: 'internal',
-  10: 'cancelled',
-  11: 'reconciliation_pending',
-  12: 'profile_suspended',
-  13: 'issuer_disabled',
-  14: 'required_evidence_unavailable',
-  15: 'capacity',
-} as const;
-
-export type LocalServiceErrorCode =
-  (typeof localServiceErrorCodes)[keyof typeof localServiceErrorCodes];
+export { localServiceErrorCodes };
+export type { LocalServiceErrorCode };
 
 /**
  * A refusal reported by the service.
@@ -121,6 +111,57 @@ class LocalServiceAuthorizationError extends Error {
     super('the local service did not authorize this client');
     this.name = 'LocalServiceAuthorizationError';
   }
+}
+
+function classifyLocalFailure(error: unknown): LocalFailureCode {
+  if (error instanceof LocalServiceError) {
+    return error.code;
+  }
+  if (error instanceof LocalServiceAuthorizationError) {
+    return 'not_authorized';
+  }
+  if (error instanceof LocalServiceUpgradeRequiredError) {
+    return 'service_upgrade_required';
+  }
+  if (error instanceof LocalServiceProtocolError) {
+    return 'protocol_invalid';
+  }
+  if (error instanceof LocalServiceConnectionError) {
+    return 'connection_unavailable';
+  }
+  if (error instanceof FrameError) {
+    return error.failure === 'closed' ? 'channel_closed' : 'frame_invalid';
+  }
+  return 'unclassified_failure';
+}
+
+function rememberLocalFailure(
+  error: unknown,
+  stage: LocalFailureStage,
+  reference?: string,
+  sequence?: number,
+  code = classifyLocalFailure(error),
+): void {
+  attachLocalFailure(error, {
+      stage,
+      code,
+      ...(reference === undefined ? {} : { connectionReference: reference }),
+      ...(sequence === undefined ? {} : { requestSequence: sequence }),
+  });
+}
+
+/** Renders finite diagnostics without exposing messages, operations, stacks or payloads. */
+export function formatLocalServiceFailure(
+  error: unknown,
+  fallbackStage: LocalFailureStage = 'client_validation',
+): string {
+  return formatLocalFailureError(error, fallbackStage, classifyLocalFailure(error));
+}
+
+function closedClientError(): Error {
+  const error = new Error('the local service client is closed');
+  rememberLocalFailure(error, 'request_admission', undefined, undefined, 'client_closed');
+  return error;
 }
 
 export interface LocalServiceClientOptions {
@@ -552,10 +593,19 @@ async function openConnection(
   credential: ConnectionCredential,
 ): Promise<AuthenticatedConnection> {
   const createSocket = options.createSocket ?? defaultCreateSocket;
+  let stage: LocalFailureStage = 'connect';
+  let reference: string | undefined;
   if (credential.kind === 'session') {
     assertCanonicalProfile(credential.grant.profile);
   }
-  const socket = createSocket(options.endpoint);
+  let socket: Socket;
+  try {
+    socket = createSocket(options.endpoint);
+  } catch (error) {
+    const failure = sanitizeTransportError(error);
+    rememberLocalFailure(failure, stage);
+    throw failure;
+  }
   const reader = new FrameReader(socket, maxHandshakeFrameBytes + frameHeaderLength);
   let connected = true;
   socket.on('close', () => {
@@ -594,8 +644,11 @@ async function openConnection(
           maxHandshakeFrameBytes,
         );
 
+        stage = 'service_challenge';
         const challengeFrame = await readServiceHandshakeFrame(reader);
         const challenge = decodeServiceChallenge(challengeFrame);
+        reference = connectionReference(challenge.challenge);
+        stage = 'service_identity';
         if (!challenge.serviceKey.equals(options.serviceKey)) {
           throw new LocalServiceProtocolError('the local service presented an unexpected key');
         }
@@ -627,6 +680,7 @@ async function openConnection(
           maxHandshakeFrameBytes,
         );
 
+        stage = 'service_decision';
         const acceptFrame = await readServiceHandshakeFrame(reader);
         const decision = decodeServiceDecision(acceptFrame);
         const serviceKey = publicKeyFromRaw(challenge.serviceKey);
@@ -644,29 +698,39 @@ async function openConnection(
     reader.setBufferLimit(maxRpcFrameBytes + frameHeaderLength);
   } catch (error) {
     close();
-    throw sanitizeTransportError(error);
+    const failure = sanitizeTransportError(error);
+    rememberLocalFailure(failure, stage, reference);
+    throw failure;
   }
 
+  let requestSequence = 0;
   return {
     get connected() {
       return connected;
     },
     close,
     async invoke(requestId, operation, payload, onWritten) {
-      if (!connected) {
-        throw new FrameError('closed');
-      }
+      requestSequence = Math.min(Number.MAX_SAFE_INTEGER, requestSequence + 1);
+      const sequence = requestSequence;
+      let stage: LocalFailureStage = 'request_write';
       try {
+        if (!connected) {
+          throw new FrameError('closed');
+        }
         await writeFrame(socket, encodeRequest(requestId, operation, payload), maxRpcFrameBytes);
         onWritten?.();
+        stage = 'response_read';
         const frame = await reader.read(maxRpcFrameBytes);
+        stage = 'response_decode';
         const response = decodeResponse(frame, requestId, operation);
         return parseResponse(response.payload);
       } catch (error) {
         if (!(error instanceof LocalServiceError)) {
           close();
         }
-        throw sanitizeTransportError(error);
+        const failure = sanitizeTransportError(error);
+        rememberLocalFailure(failure, stage, reference, sequence);
+        throw failure;
       }
     },
   };
@@ -1163,7 +1227,7 @@ export async function connectLocalService(
     remainingMs: number,
   ): Promise<AuthenticatedConnection> => {
     if (closed) {
-      throw new Error('the local service client is closed');
+      throw closedClientError();
     }
     if (lane.connection?.connected && lane.grantExpiresAtUnixMilliseconds > BigInt(Date.now())) {
       return lane.connection;
@@ -1198,7 +1262,7 @@ export async function connectLocalService(
     if (closed) {
       lane.connection.close();
       lane.connection = null;
-      throw new Error('the local service client is closed');
+      throw closedClientError();
     }
     return lane.connection;
   };
@@ -1306,11 +1370,18 @@ export async function connectLocalService(
       try {
         normalized = normalizeRequestOptions(requestOptions, deadlineMs);
       } catch (error) {
-        return Promise.reject(error as Error);
+        rememberLocalFailure(error, 'client_validation', undefined, undefined, 'invalid_request');
+        return Promise.reject(error);
       }
       const requestId = normalized.requestId ?? randomBytes(requestIdLength);
-      const encoded = encodeRequestPayload(operation, payload ?? {});
-      encodeRequest(requestId, operation, encoded);
+      let encoded: Buffer;
+      try {
+        encoded = encodeRequestPayload(operation, payload ?? {});
+        encodeRequest(requestId, operation, encoded);
+      } catch (error) {
+        rememberLocalFailure(error, 'client_validation', undefined, undefined, 'invalid_request');
+        throw error;
+      }
       const deliveryOperation = isDeliveryLaneOperation(operation);
       const lane = deliveryOperation ? deliveryLane : interactiveLane;
       const allowedReconnects = deliveryOperation ? 0 : reconnectAttempts;
@@ -1386,6 +1457,9 @@ export async function connectLocalService(
           clearTimeout(deadlineTimer);
           normalized.signal?.removeEventListener('abort', abort);
         }
+      }).catch((error: unknown) => {
+        rememberLocalFailure(error, 'request_admission');
+        throw error;
       });
       lane.inFlight = run.then(
         () => undefined,

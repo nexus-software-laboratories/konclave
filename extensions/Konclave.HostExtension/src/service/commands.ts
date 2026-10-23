@@ -13,6 +13,7 @@ import {
 } from './clipboard.js';
 import type { LocalServiceClient } from './client.js';
 import { LocalServiceError } from './client.js';
+import { formatLocalFailure, localFailureDiagnostic } from './failure-diagnostics.js';
 import { parseServiceStatus } from './delivery.js';
 import { formatMessageDeliveryStatus, getMessageDeliveryStatus } from './delivery-diagnostics.js';
 import { isRecord, requireHexIdentifier } from './validation.js';
@@ -3496,8 +3497,11 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         } catch (error) {
           // A failure is rendered as a bounded line rather than thrown into the
           // session, so a command never becomes an error turn for the model.
+          const diagnostic = localFailureDiagnostic(error);
           await output.write(
-            error instanceof LocalServiceError
+            diagnostic
+              ? formatLocalFailure(diagnostic)
+              : error instanceof LocalServiceError
               ? `konclave: ${error.operation} failed (${error.code})`
               : `konclave: ${boundedMessage(error instanceof Error ? error.message : 'failed')}`,
           );

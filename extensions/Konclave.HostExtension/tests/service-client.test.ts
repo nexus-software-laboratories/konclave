@@ -11,10 +11,12 @@ import {
   LocalServiceError,
   LocalServiceProtocolError,
   LocalServiceUpgradeRequiredError,
+  formatLocalServiceFailure,
   isDeliveryLaneOperation,
   localServiceErrorCodes,
   type LocalServiceClientOptions,
 } from '../src/service/client.js';
+import { localFailureDiagnostic } from '../src/service/failure-diagnostics.js';
 import { FrameError, FrameReader, writeFrame } from '../src/service/framing.js';
 import {
   privateKeyFromSeed,
@@ -1487,13 +1489,69 @@ describe('shared local service client', () => {
     );
     const client = await connectLocalService(clientOptions(service));
 
-    await expect(client.request('get_identity', {})).rejects.toBeInstanceOf(
-      LocalServiceProtocolError,
-    );
+    const failure = await client.request('get_identity', {}).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(LocalServiceProtocolError);
+    expect(localFailureDiagnostic(failure)).toMatchObject({
+      stage: 'response_decode',
+      code: 'protocol_invalid',
+      connectionReference: expect.stringMatching(/^[a-f0-9]{16}$/),
+      requestSequence: 1,
+    });
     await expect(client.request('get_identity', {})).resolves.toEqual({ device_id: 'ef' });
 
     client.close();
     await service.close();
+  });
+
+  it('keeps typed refusals and connection-local ordering without exposing request data', async () => {
+    const service = await startService(
+      () => ({ kind: 'failure', wireCode: 4 }),
+      undefined,
+      { persistentSessions: true },
+    );
+    const client = await connectLocalService(clientOptions(service));
+    try {
+      const first = await client.request('get_identity', {}).catch((error: unknown) => error);
+      const second = await client
+        .request('get_identity', { sentinel: 'PRIVATE-PAYLOAD' })
+        .catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(LocalServiceError);
+      expect(second).toBeInstanceOf(LocalServiceError);
+      expect(localFailureDiagnostic(first)).toMatchObject({
+        stage: 'response_decode',
+        code: 'profile_unavailable',
+        connectionReference: expect.stringMatching(/^[a-f0-9]{16}$/),
+        requestSequence: 1,
+      });
+      expect(localFailureDiagnostic(second)).toMatchObject({
+        connectionReference: localFailureDiagnostic(first)?.connectionReference,
+        requestSequence: 2,
+      });
+      expect(formatLocalServiceFailure(second)).not.toContain('PRIVATE');
+      expect(formatLocalServiceFailure(second)).not.toContain('get_identity');
+    } finally {
+      client.close();
+      await service.close();
+    }
+  });
+
+  it('correlates an actual closed frame without changing its retry classification', async () => {
+    const service = await startService(() => ({ kind: 'drop' }));
+    const client = await connectLocalService({ ...clientOptions(service), reconnectAttempts: 0 });
+    try {
+      const failure = await client.request('get_identity', {}).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(FrameError);
+      expect(localFailureDiagnostic(failure)).toMatchObject({
+        stage: 'response_read',
+        code: 'channel_closed',
+        connectionReference: expect.stringMatching(/^[a-f0-9]{16}$/),
+        requestSequence: 1,
+      });
+      expect(formatLocalServiceFailure(failure)).toContain('may have committed');
+    } finally {
+      client.close();
+      await service.close();
+    }
   });
 
   it('uses a fresh delivery claim after reconnecting a lease-bound lane', async () => {

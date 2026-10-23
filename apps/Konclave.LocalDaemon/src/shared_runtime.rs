@@ -19,7 +19,7 @@ pub(crate) async fn run_until<F>(installation_path: &Path, shutdown: F) -> anyho
 where
     F: Future<Output = ()>,
 {
-    let _telemetry_guard = crate::observability::init()?;
+    let _telemetry_guard = crate::observability::init_shared(installation_path).await?;
     let installation_path_owned = installation_path.to_path_buf();
     let (installation, identity) = tokio::task::spawn_blocking(move || {
         let file = open_owner_protected_file(&installation_path_owned)

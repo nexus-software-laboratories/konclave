@@ -406,12 +406,45 @@ describe('agent tool surface', () => {
         { conversation_id: 'ab', message_id: 'cd', text: 'hi' },
         { ...invocation, toolCallId: '' },
       ),
-    ).rejects.toThrow('invocation identifiers are invalid');
+    ).resolves.toMatchObject({
+      resultType: 'failure',
+      textResultForLlm: expect.stringContaining('stage=tool_invocation code=invalid_request'),
+    });
 
     const identity = tools.find((tool) => tool.name === 'get_identity');
     await identity?.handler(undefined);
     expect(prepareArguments).toHaveBeenCalledWith('get_identity', {});
     expect(request).toHaveBeenCalledWith('get_identity', {}, expect.any(Number));
+  });
+
+  it('returns explicit opaque SDK failures for preparation and dispatch errors', async () => {
+    const request = vi.fn().mockRejectedValue(
+      new LocalServiceError('PRIVATE-OPERATION-AND-CREDENTIAL', 'profile_unavailable'),
+    );
+    const tools = createKonclaveTools({ client: stubClient(request) });
+    const identity = tools.find((tool) => tool.name === 'get_identity');
+    const failure = await identity?.handler({});
+    expect(failure).toEqual({
+      resultType: 'failure',
+      textResultForLlm: expect.stringContaining('stage=tool_dispatch code=profile_unavailable'),
+      error: expect.stringContaining('stage=tool_dispatch code=profile_unavailable'),
+    });
+    expect(JSON.stringify(failure)).not.toContain('PRIVATE');
+
+    request.mockClear();
+    const rejected = createKonclaveTools({
+      client: stubClient(request),
+      prepareArguments() {
+        throw new Error('PRIVATE-POLICY-ARGUMENTS');
+      },
+    }).find((tool) => tool.name === 'get_identity');
+    const preparationFailure = await rejected?.handler({});
+    expect(preparationFailure).toMatchObject({
+      resultType: 'failure',
+      textResultForLlm: expect.stringContaining('stage=tool_arguments code=unclassified_failure'),
+    });
+    expect(JSON.stringify(preparationFailure)).not.toContain('PRIVATE');
+    expect(request).not.toHaveBeenCalled();
   });
 });
 

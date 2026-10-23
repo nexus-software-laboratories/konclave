@@ -56,6 +56,7 @@ pub use authorization_handshake::{
     SessionHandshakeRequest, complete_authorization_service_handshake,
     complete_authorization_service_handshake_with_authorizer, complete_issuer_client_handshake,
     complete_session_client_handshake,
+    complete_observed_authorization_service_handshake,
 };
 pub use authorization_message::{
     AuthorizationHandshakeMessage, MAX_AUTHORIZATION_HANDSHAKE_FRAME_BYTES,

@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 
+import { formatLocalFailureError } from '../service/failure-diagnostics.js';
 import {
   createDeliveryCoordinator,
   type DeliveryClock,
@@ -133,11 +134,14 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
             }
             lastHeartbeatAt = now;
             resetFailures();
-          } catch {
+          } catch (error) {
             if (!running) {
               return;
             }
-            reportFailure('heartbeat-transport', 'Konclave heartbeat transport failed.');
+            reportFailure(
+              'heartbeat-transport',
+              `Konclave heartbeat transport failed. ${formatLocalFailureError(error, 'response_read')}`,
+            );
             await sleep(retryDelay(maximumHeartbeatRetryMilliseconds));
             continue;
           }
@@ -152,11 +156,14 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
           maxEvents: maxClaimBatch,
           waitMilliseconds: claimWaitMilliseconds,
         });
-      } catch {
+      } catch (error) {
         if (!running) {
           return;
         }
-        reportFailure('claim-transport', 'Konclave claim transport failed.');
+        reportFailure(
+          'claim-transport',
+          `Konclave claim transport failed. ${formatLocalFailureError(error, 'response_read')}`,
+        );
         await sleep(retryDelay());
         continue;
       }

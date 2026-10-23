@@ -338,7 +338,8 @@ describe('bootExtension', () => {
       { level: 'info' },
     );
     expect(diagnostics.stderr).toHaveBeenCalledWith(
-      'Konclave shared service unavailable: endpoint unavailable ' +
+      'Konclave shared service unavailable: Konclave local failure: stage=startup code=unclassified_failure. ' +
+        'An interrupted request may have committed; reconcile using its original identifiers. ' +
         'Install or repair the native runtime, then restart Copilot. See ' +
         'https://github.com/nexus-software-laboratories/konclave/blob/main/docs/distribution/installation.md',
     );

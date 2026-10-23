@@ -13,6 +13,7 @@ use tracing_subscriber::fmt::MakeWriter;
 const MAX_LOG_BYTES: u64 = 64 * 1024;
 const MAX_RECORD_BYTES: usize = 2048;
 const MAX_PENDING_RECORDS: usize = 64;
+pub(crate) const LOCAL_FAILURE_TARGET: &str = "konclave.local_failure";
 
 /// A bounded nonblocking writer for the dedicated, body-free diagnostic target only.
 #[derive(Clone)]

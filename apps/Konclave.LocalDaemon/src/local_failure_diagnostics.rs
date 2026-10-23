@@ -4,20 +4,21 @@ use KonclaveLocalServiceTransport::LocalServiceTransportError;
 use sha2::{Digest as _, Sha256};
 
 use crate::authorization_runtime::AuthorizationRuntimeError;
+use crate::local_failure_log::LOCAL_FAILURE_TARGET;
 use crate::persistence::ProfileStoreError;
 use crate::profile_supervisor::ProfileSupervisorError;
 
 const CONNECTION_REFERENCE_DOMAIN: &[u8] = b"konclave:local-connection\0";
 
-/// Ephemeral correlation derived only from the connection's random client nonce.
+/// Ephemeral correlation derived only from the service's fresh public challenge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectionReference(String);
 
 impl ConnectionReference {
-    pub(crate) fn new(client_instance: &[u8; 16]) -> Self {
+    pub(crate) fn new(service_challenge: &[u8; 32]) -> Self {
         let mut digest = Sha256::new();
         digest.update(CONNECTION_REFERENCE_DOMAIN);
-        digest.update(client_instance);
+        digest.update(service_challenge);
         let mut reference = format!("{:x}", digest.finalize());
         reference.truncate(16);
         Self(reference)
@@ -26,11 +27,20 @@ impl ConnectionReference {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn context(&self, stage: FailureStage, sequence: u64) -> FailureContext {
+        FailureContext {
+            stage,
+            connection: Some(self.clone()),
+            sequence,
+        }
+    }
 }
 
 /// Context labels carry no paths, credentials, operation names, or argument values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureStage {
+    ServiceLifecycle,
     Handshake,
     ProfileAttach,
     ProfileServices,
@@ -43,6 +53,7 @@ pub(crate) enum FailureStage {
 impl FailureStage {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::ServiceLifecycle => "service_lifecycle",
             Self::Handshake => "handshake",
             Self::ProfileAttach => "profile_attach",
             Self::ProfileServices => "profile_services",
@@ -108,6 +119,8 @@ pub(crate) fn failure_code(error: &anyhow::Error) -> &'static str {
             ProfileStoreError::ProfileMismatch => "profile_mismatch",
             ProfileStoreError::CorruptData => "profile_integrity_failure",
             ProfileStoreError::Credential => "profile_credential_unavailable",
+            ProfileStoreError::AdapterConsumerActive => "adapter_consumer_active",
+            ProfileStoreError::InvalidAdapterLease => "adapter_lease_invalid",
             _ => "profile_store_failure",
         };
     }
@@ -133,18 +146,37 @@ pub(crate) fn failure_code(error: &anyhow::Error) -> &'static str {
     "unclassified_failure"
 }
 
+pub(crate) fn record_failure(error: &anyhow::Error) {
+    record_failure_at(error, error.downcast_ref::<FailureContext>());
+}
+
+pub(crate) fn record_failure_at(error: &anyhow::Error, context: Option<&FailureContext>) {
+    record_code(context, failure_code(error));
+}
+
+pub(crate) fn record_code(context: Option<&FailureContext>, code: &'static str) {
+    tracing::warn!(
+        target: LOCAL_FAILURE_TARGET,
+        stage = context.map_or("client_task", |context| context.stage.as_str()),
+        code,
+        connection = context.and_then(|context| context.connection.as_ref().map(ConnectionReference::as_str)),
+        request_sequence = context.map(|context| context.sequence),
+        "local service failure"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn references_are_bounded_ephemeral_and_domain_separated() {
-        let first = ConnectionReference::new(&[0x42; 16]);
-        assert_eq!(first.as_str(), "5deed3fe8eee37ab");
+        let first = ConnectionReference::new(&[0x42; 32]);
+        assert_eq!(first.as_str(), "5c80549fc794cd0e");
         assert_eq!(first.as_str().len(), 16);
         assert!(first.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, ConnectionReference::new(&[0x43; 16]));
-        assert_eq!(first, ConnectionReference::new(&[0x42; 16]));
+        assert_ne!(first, ConnectionReference::new(&[0x43; 32]));
+        assert_eq!(first, ConnectionReference::new(&[0x42; 32]));
         assert_ne!(first.as_str(), "4242424242424242");
     }
 
@@ -194,7 +226,7 @@ mod tests {
         for (error, expected) in cases {
             let error = error.context(FailureContext {
                 stage: FailureStage::ProfileAttach,
-                connection: Some(ConnectionReference::new(&[0x42; 16])),
+                connection: Some(ConnectionReference::new(&[0x42; 32])),
                 sequence: 1,
             });
             assert_eq!(failure_code(&error), expected);
@@ -208,6 +240,7 @@ mod tests {
     #[test]
     fn all_failure_stages_have_distinct_finite_labels() {
         let stages = [
+            FailureStage::ServiceLifecycle,
             FailureStage::Handshake,
             FailureStage::ProfileAttach,
             FailureStage::ProfileServices,

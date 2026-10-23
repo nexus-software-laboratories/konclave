@@ -329,6 +329,54 @@ the accepted character set, a declared payload length above the bound or beyond 
 frame, a truncated field, and trailing bytes all fail before any value is used or any
 payload buffer is reserved.
 
+## Local failure diagnostics
+
+The installed shared service retains body-free failure records in
+`konclave-local-diagnostics.log`, beside its installation configuration. On Windows
+the default location is
+`%LOCALAPPDATA%\Konclave\service\konclave-local-diagnostics.log`. This is separate
+from [selected-message delivery inspection](local-delivery-diagnostics.md): it records
+failed local boundaries, not message history, authenticated delivery milestones, or
+remote execution.
+
+Native records contain a timestamp, finite stage/code, an optional ephemeral
+connection reference and a connection-local `request_sequence`. The extension
+surfaces matching references and `request` ordinals in deterministic commands,
+SDK failure results and throttled delivery failures. Stages distinguish connection,
+service proof/decision, profile attachment, RPC reading/execution/writing and lease
+release. A generic `unclassified_failure` is explicit; arbitrary exception messages,
+stacks, operation arguments and serialized results are never substituted for it.
+
+Both runtimes derive the 16-character reference from a domain-separated SHA-256 hash
+of the service's fresh public handshake challenge. It is not derived from profile,
+session, device, grant, request identifiers or payloads. Reconnecting changes the
+reference even when an issuer retries with its original idempotent client instance.
+Before a challenge is exchanged, one or both endpoints may have no reference.
+Correlation is diagnostic evidence, not authorization or proof of request completion.
+
+The native file and its `.lock` sibling use existing owner-protected file checks.
+Unsafe permissions, symbolic links, conflicting ownership or another writer are
+rejected without repair or overwrite. Storage is bounded to 64 KiB, each record to
+2 KiB and the nonblocking writer queue to 64 records. At the file bound the writer
+starts a new whole-record segment; it is not a complete archive. Saturation, unsafe
+storage or writer failure produces one fixed stderr notice and can lose diagnostic
+records, but does not grant authority, block the request hot path, or turn an
+operation failure into success. The owning service drains the bounded queue during
+shutdown. A crash may leave an incomplete final record.
+
+These records remain sensitive local metadata. They are not automatically exported
+or uploaded. Normal log filtering cannot enable payload collection in this file;
+its dedicated subscriber excludes other targets and ambient span fields.
+
+When diagnosing a failure, retain the extension's stage, code, reference and ordinal,
+then correlate them with the native record. A `channel_closed` is not a root cause:
+an earlier native `profile_locked`, `adapter_consumer_active`, storage/custody
+failure or authorization observation failure may explain why that connection ended.
+If a request was interrupted, reconcile using its original request/message identifiers.
+Never allocate a replacement identifier merely because the response was lost.
+Healthy aggregate status or a renewing delivery lease is not proof that a specific
+tool call, pairing or remote response completed.
+
 ## Local endpoint
 
 The service listens on one well-known per-user endpoint. This is local

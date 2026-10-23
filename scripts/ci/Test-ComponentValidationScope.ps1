@@ -75,6 +75,27 @@ foreach ($contract in $expectedContracts) {
     Write-Output "authorization history: contract=$contract, run=$expected"
 }
 
+foreach ($path in @(
+    'apps/Konclave.LocalDaemon/src/local_failure_diagnostics.rs'
+    'apps/Konclave.LocalDaemon/src/local_failure_log.rs'
+    'apps/Konclave.LocalDaemon/src/observability.rs'
+    'apps/Konclave.LocalDaemon/src/shared_runtime.rs'
+    'crates/Konclave.LocalServiceTransport/src/authorization_handshake.rs'
+    'crates/Konclave.LocalServiceTransport/tests/authorization_handshake.rs'
+    'extensions/Konclave.HostExtension/src/service/failure-diagnostics.ts'
+    'extensions/Konclave.HostExtension/src/service/client.ts'
+    'extensions/Konclave.HostExtension/src/service/tools.ts'
+    'extensions/Konclave.HostExtension/src/adapter/runtime.ts'
+    'extensions/Konclave.HostExtension/src/runtime.ts'
+)) {
+    if (-not (Get-ComponentValidationDecision `
+        -Contract 'local-delivery-diagnostics' `
+        -EventName pull_request `
+        -ChangedFiles @($path))) {
+        throw "Failure diagnostic boundary is not selected: $path"
+    }
+}
+
 $ownedCases = [ordered]@{
     'a2a-discovery' =
         'crates/Konclave.A2ADiscovery/src/catalog.rs'

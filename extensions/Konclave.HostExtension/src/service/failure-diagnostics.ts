@@ -7,10 +7,13 @@ const localFailureStages = [
   'service_challenge',
   'service_identity',
   'service_decision',
+  'request_admission',
   'request_write',
   'response_read',
   'response_decode',
   'tool_dispatch',
+  'tool_arguments',
+  'tool_invocation',
   'startup',
   'unknown_boundary',
 ] as const;
@@ -47,6 +50,7 @@ const transportFailureCodes = [
   'protocol_invalid',
   'service_upgrade_required',
   'connection_unavailable',
+  'client_closed',
   'unclassified_failure',
 ] as const;
 
@@ -56,7 +60,7 @@ const allowedCodes: ReadonlySet<string> = new Set([
   ...transportFailureCodes,
 ]);
 
-/** Contains only locally created labels and a hash of a fresh handshake nonce. */
+/** Contains only locally created labels and a hash of the fresh service challenge. */
 export interface LocalFailureDiagnostic {
   readonly stage: LocalFailureStage;
   readonly code: LocalFailureCode;
@@ -64,13 +68,36 @@ export interface LocalFailureDiagnostic {
   readonly requestSequence?: number;
 }
 
-export function connectionReference(instance: Uint8Array): string {
-  if (instance.byteLength !== 16) {
+const failureDiagnostics = new WeakMap<Error, LocalFailureDiagnostic>();
+
+/** Attaches metadata without wrapping errors or changing transport recovery decisions. */
+export function attachLocalFailure(error: unknown, diagnostic: LocalFailureDiagnostic): void {
+  if (error instanceof Error && !failureDiagnostics.has(error)) {
+    failureDiagnostics.set(error, diagnostic);
+  }
+}
+
+export function localFailureDiagnostic(error: unknown): LocalFailureDiagnostic | undefined {
+  return error instanceof Error ? failureDiagnostics.get(error) : undefined;
+}
+
+export function formatLocalFailureError(
+  error: unknown,
+  fallbackStage: LocalFailureStage,
+  fallbackCode: LocalFailureCode = 'unclassified_failure',
+): string {
+  return formatLocalFailure(
+    localFailureDiagnostic(error) ?? { stage: fallbackStage, code: fallbackCode },
+  );
+}
+
+export function connectionReference(serviceChallenge: Uint8Array): string {
+  if (serviceChallenge.byteLength !== 32) {
     throw new Error('local diagnostic nonce length is invalid');
   }
   return createHash('sha256')
     .update('konclave:local-connection\0')
-    .update(instance)
+    .update(serviceChallenge)
     .digest('hex')
     .slice(0, 16);
 }
