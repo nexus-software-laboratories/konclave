@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { Tool, ToolInvocation } from '@github/copilot-sdk';
+import type { Tool, ToolInvocation, ToolResultObject } from '@github/copilot-sdk';
 
 import generatedToolContracts from '../../../../fixtures/local-service/v1/copilot-tools.json';
 
@@ -138,20 +138,21 @@ export function createKonclaveTools(options: ToolRegistrationOptions): Registere
       try {
         const preparedArgs = options.prepareArguments?.(definition.name, args ?? {}) ?? args ?? {};
         stage = 'tool_invocation';
-        const requestOptions =
-          invocation ? { deadlineMs: deadline, requestId: toolRequestId(invocation) } : deadline;
+        const requestOptions = invocation
+          ? { deadlineMs: deadline, requestId: toolRequestId(invocation) }
+          : deadline;
         stage = 'tool_dispatch';
-        return await options.client.request(
-          definition.name,
-          preparedArgs,
-          requestOptions,
-        );
+        return await options.client.request(definition.name, preparedArgs, requestOptions);
       } catch (error) {
         if (stage === 'tool_invocation') {
           attachLocalFailure(error, { stage, code: 'invalid_request' });
         }
         const failure = formatLocalServiceFailure(error, stage);
-        return { resultType: 'failure', textResultForLlm: failure, error: failure };
+        return {
+          resultType: 'failure',
+          textResultForLlm: failure,
+          error: failure,
+        } satisfies ToolResultObject;
       }
     },
   }));

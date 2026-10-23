@@ -261,7 +261,8 @@ function formatError(error: unknown): string {
 }
 
 function formatStartupFailure(stage: ExtensionStartupStage, error: unknown): string {
-  const detail = stage === 'service' ? formatLocalServiceFailure(error, 'startup') : formatError(error);
+  const detail =
+    stage === 'service' ? formatLocalServiceFailure(error, 'startup') : formatError(error);
   if (stage === 'service') {
     return (
       `Konclave shared service unavailable: ${detail} ` +

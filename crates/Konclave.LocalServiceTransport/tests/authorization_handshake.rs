@@ -10,8 +10,7 @@ use KonclaveLocalServiceTransport::{
     SessionGrant, SessionGrantClaims, SessionGrantId, SessionHandshakeRequest,
     complete_authorization_service_handshake,
     complete_authorization_service_handshake_with_authorizer, complete_issuer_client_handshake,
-    complete_session_client_handshake,
-    complete_observed_authorization_service_handshake,
+    complete_observed_authorization_service_handshake, complete_session_client_handshake,
 };
 use tokio::io::AsyncReadExt as _;
 
@@ -46,8 +45,14 @@ async fn observed_handshakes_use_fresh_service_challenges_and_preserve_uniform_r
         if authorized {
             assert_eq!(client.unwrap().binding(), service.unwrap().binding());
         } else {
-            assert_eq!(client.unwrap_err(), LocalServiceTransportError::UnauthenticClient);
-            assert_eq!(service.unwrap_err(), LocalServiceTransportError::UnauthenticClient);
+            assert_eq!(
+                client.unwrap_err(),
+                LocalServiceTransportError::UnauthenticClient
+            );
+            assert_eq!(
+                service.unwrap_err(),
+                LocalServiceTransportError::UnauthenticClient
+            );
         }
         assert!(challenges.insert(observed.unwrap()));
     }

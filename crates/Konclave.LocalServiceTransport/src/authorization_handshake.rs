@@ -230,13 +230,8 @@ where
     A: FnOnce(AuthorizationBinding) -> D + Send,
     D: Future<Output = Result<bool, LocalServiceTransportError>> + Send,
 {
-    complete_observed_authorization_service_handshake(
-        stream,
-        service_identity,
-        authorize,
-        |_| {},
-    )
-    .await
+    complete_observed_authorization_service_handshake(stream, service_identity, authorize, |_| {})
+        .await
 }
 
 /// Observes the service's fresh public challenge without changing authorization.

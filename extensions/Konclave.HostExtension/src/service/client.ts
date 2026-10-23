@@ -143,10 +143,10 @@ function rememberLocalFailure(
   code = classifyLocalFailure(error),
 ): void {
   attachLocalFailure(error, {
-      stage,
-      code,
-      ...(reference === undefined ? {} : { connectionReference: reference }),
-      ...(sequence === undefined ? {} : { requestSequence: sequence }),
+    stage,
+    code,
+    ...(reference === undefined ? {} : { connectionReference: reference }),
+    ...(sequence === undefined ? {} : { requestSequence: sequence }),
   });
 }
 
@@ -1386,81 +1386,86 @@ export async function connectLocalService(
       const lane = deliveryOperation ? deliveryLane : interactiveLane;
       const allowedReconnects = deliveryOperation ? 0 : reconnectAttempts;
 
-      const run = lane.inFlight.then(async () => {
-        const expiresAt = Date.now() + normalized.deadlineMs;
-        let cancellationReason: 'caller' | 'deadline' | null = normalized.signal?.aborted
-          ? 'caller'
-          : null;
-        let admitted = false;
-        let cancellationSent = false;
-        const sendCancellation = (reason: 'caller' | 'deadline') => {
-          cancellationReason ??= reason;
-          if (!admitted || cancellationSent || closed) {
-            return;
-          }
-          cancellationSent = true;
-          void requestCancellation(requestId, cancellationReason).catch(() => {});
-        };
-        const abort = () => sendCancellation('caller');
-        normalized.signal?.addEventListener('abort', abort, { once: true });
-        const deadlineTimer = setTimeout(() => sendCancellation('deadline'), normalized.deadlineMs);
-        let attempt = 0;
-        let reconciliationAttempt = 0;
-        try {
-          while (true) {
-            const remainingMs = admitted ? normalized.deadlineMs : expiresAt - Date.now();
-            if (!admitted && remainingMs <= 0) {
-              throw new LocalServiceError(operation, 'deadline_exceeded');
+      const run = lane.inFlight
+        .then(async () => {
+          const expiresAt = Date.now() + normalized.deadlineMs;
+          let cancellationReason: 'caller' | 'deadline' | null = normalized.signal?.aborted
+            ? 'caller'
+            : null;
+          let admitted = false;
+          let cancellationSent = false;
+          const sendCancellation = (reason: 'caller' | 'deadline') => {
+            cancellationReason ??= reason;
+            if (!admitted || cancellationSent || closed) {
+              return;
             }
+            cancellationSent = true;
+            void requestCancellation(requestId, cancellationReason).catch(() => {});
+          };
+          const abort = () => sendCancellation('caller');
+          normalized.signal?.addEventListener('abort', abort, { once: true });
+          const deadlineTimer = setTimeout(
+            () => sendCancellation('deadline'),
+            normalized.deadlineMs,
+          );
+          let attempt = 0;
+          let reconciliationAttempt = 0;
+          try {
+            while (true) {
+              const remainingMs = admitted ? normalized.deadlineMs : expiresAt - Date.now();
+              if (!admitted && remainingMs <= 0) {
+                throw new LocalServiceError(operation, 'deadline_exceeded');
+              }
 
-            let active: AuthenticatedConnection;
-            try {
-              active = await getConnection(lane, remainingMs);
-              if (!admitted && cancellationReason) {
-                throw new LocalServiceError(
-                  operation,
-                  cancellationReason === 'caller' ? 'cancelled' : 'deadline_exceeded',
-                );
-              }
-              return await active.invoke(requestId, operation, encoded, () => {
-                admitted = true;
-                if (cancellationReason) {
-                  sendCancellation(cancellationReason);
+              let active: AuthenticatedConnection;
+              try {
+                active = await getConnection(lane, remainingMs);
+                if (!admitted && cancellationReason) {
+                  throw new LocalServiceError(
+                    operation,
+                    cancellationReason === 'caller' ? 'cancelled' : 'deadline_exceeded',
+                  );
                 }
-              });
-            } catch (error) {
-              if (lane.connection && !lane.connection.connected) {
-                lane.connection = null;
-              }
-              if (
-                error instanceof LocalServiceError &&
-                error.code === 'reconciliation_pending' &&
-                reconciliationAttempt < 3
-              ) {
-                reconciliationAttempt += 1;
-                await sleep(reconnectDelayMs);
-                continue;
-              }
-              if (closed || attempt >= allowedReconnects || !isRetryableTransportFailure(error)) {
-                throw error;
-              }
-              attempt += 1;
-              const delay = admitted
-                ? reconnectDelayMs
-                : Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
-              if (delay > 0) {
-                await sleep(delay);
+                return await active.invoke(requestId, operation, encoded, () => {
+                  admitted = true;
+                  if (cancellationReason) {
+                    sendCancellation(cancellationReason);
+                  }
+                });
+              } catch (error) {
+                if (lane.connection && !lane.connection.connected) {
+                  lane.connection = null;
+                }
+                if (
+                  error instanceof LocalServiceError &&
+                  error.code === 'reconciliation_pending' &&
+                  reconciliationAttempt < 3
+                ) {
+                  reconciliationAttempt += 1;
+                  await sleep(reconnectDelayMs);
+                  continue;
+                }
+                if (closed || attempt >= allowedReconnects || !isRetryableTransportFailure(error)) {
+                  throw error;
+                }
+                attempt += 1;
+                const delay = admitted
+                  ? reconnectDelayMs
+                  : Math.min(reconnectDelayMs, Math.max(0, expiresAt - Date.now()));
+                if (delay > 0) {
+                  await sleep(delay);
+                }
               }
             }
+          } finally {
+            clearTimeout(deadlineTimer);
+            normalized.signal?.removeEventListener('abort', abort);
           }
-        } finally {
-          clearTimeout(deadlineTimer);
-          normalized.signal?.removeEventListener('abort', abort);
-        }
-      }).catch((error: unknown) => {
-        rememberLocalFailure(error, 'request_admission');
-        throw error;
-      });
+        })
+        .catch((error: unknown) => {
+          rememberLocalFailure(error, 'request_admission');
+          throw error;
+        });
       lane.inFlight = run.then(
         () => undefined,
         () => undefined,

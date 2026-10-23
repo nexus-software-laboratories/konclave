@@ -162,8 +162,8 @@ where
                         });
                     }
                     Err(
-                        KonclaveLocalServiceTransport::LocalServiceTransportError::UnauthorizedPeer
-                        | KonclaveLocalServiceTransport::LocalServiceTransportError::PeerVerificationUnavailable,
+                        LocalServiceTransportError::UnauthorizedPeer
+                        | LocalServiceTransportError::PeerVerificationUnavailable,
                     ) => {}
                     Err(error) => {
                         service_error = Some(
@@ -453,15 +453,16 @@ async fn serve_session_client(
                 }
             };
             let (next_state, response) = match completed {
-                Ok(result) => result.with_context(|| reference.context(FailureStage::RequestExecution, sequence))?,
+                Ok(result) => result
+                    .with_context(|| reference.context(FailureStage::RequestExecution, sequence))?,
                 Err(reason) => {
                     if let Some(key) = request_key.as_ref() {
                         cancel_request(&cancellation_ledger, key, reason);
                     }
                     drop(stream.take());
-                    let (next_state, response) = execution
-                        .await
-                        .with_context(|| reference.context(FailureStage::RequestExecution, sequence))?;
+                    let (next_state, response) = execution.await.with_context(|| {
+                        reference.context(FailureStage::RequestExecution, sequence)
+                    })?;
                     state = Some(next_state);
                     let _ = response;
                     break;

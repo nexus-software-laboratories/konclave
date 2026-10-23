@@ -25,7 +25,9 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
 }
 
 #[cfg(feature = "rust-service-mcp")]
-pub(crate) async fn init_shared(installation_path: &std::path::Path) -> anyhow::Result<TelemetryGuard> {
+pub(crate) async fn init_shared(
+    installation_path: &std::path::Path,
+) -> anyhow::Result<TelemetryGuard> {
     let path = installation_path.with_file_name("konclave-local-diagnostics.log");
     let log = match tokio::task::spawn_blocking(move || LocalFailureLog::open(&path)).await {
         Ok(Ok(log)) => Some(log),
@@ -87,7 +89,11 @@ fn init_with_failure_log(
         global::set_tracer_provider(provider.clone());
         registry
             .with(format)
-            .with(tracing_opentelemetry::layer().with_tracer(tracer).with_filter(filter))
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(tracer)
+                    .with_filter(filter),
+            )
             .try_init()
             .map_err(|error| anyhow!("initializing OpenTelemetry subscriber: {error}"))?;
         return Ok(TelemetryGuard {
@@ -179,8 +185,8 @@ mod tests {
         KonclaveSecretStorage::ensure_owner_protected_directory(&directory).unwrap();
         let path = directory.join("diagnostics.log");
         let (writer, guard) = crate::local_failure_log::LocalFailureLog::open(&path).unwrap();
-        let subscriber = tracing_subscriber::Registry::default()
-            .with(super::local_failure_layer(writer));
+        let subscriber =
+            tracing_subscriber::Registry::default().with(super::local_failure_layer(writer));
         tracing::subscriber::with_default(subscriber, || {
             let _span = tracing::info_span!(
                 target: crate::local_failure_log::LOCAL_FAILURE_TARGET,

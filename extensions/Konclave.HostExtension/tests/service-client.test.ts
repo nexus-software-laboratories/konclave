@@ -1504,11 +1504,9 @@ describe('shared local service client', () => {
   });
 
   it('keeps typed refusals and connection-local ordering without exposing request data', async () => {
-    const service = await startService(
-      () => ({ kind: 'failure', wireCode: 4 }),
-      undefined,
-      { persistentSessions: true },
-    );
+    const service = await startService(() => ({ kind: 'failure', wireCode: 4 }), undefined, {
+      persistentSessions: true,
+    });
     const client = await connectLocalService(clientOptions(service));
     try {
       const first = await client.request('get_identity', {}).catch((error: unknown) => error);
@@ -1730,7 +1728,13 @@ describe('shared local service client', () => {
     client.close();
     client.close();
     expect(client.connected).toBe(false);
-    await expect(client.request('get_identity', {})).rejects.toThrow('client is closed');
+    const closedRequest = client.request('get_identity', {});
+    await expect(closedRequest).rejects.toThrow('client is closed');
+    const closedFailure = await closedRequest.catch((error: unknown) => error);
+    expect(localFailureDiagnostic(closedFailure)).toEqual({
+      stage: 'request_admission',
+      code: 'client_closed',
+    });
 
     await service.close();
   });

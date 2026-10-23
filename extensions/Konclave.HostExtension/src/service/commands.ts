@@ -3502,8 +3502,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             diagnostic
               ? formatLocalFailure(diagnostic)
               : error instanceof LocalServiceError
-              ? `konclave: ${error.operation} failed (${error.code})`
-              : `konclave: ${boundedMessage(error instanceof Error ? error.message : 'failed')}`,
+                ? `konclave: ${error.operation} failed (${error.code})`
+                : `konclave: ${boundedMessage(error instanceof Error ? error.message : 'failed')}`,
           );
         }
       },

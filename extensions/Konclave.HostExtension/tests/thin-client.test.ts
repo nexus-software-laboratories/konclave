@@ -418,9 +418,11 @@ describe('agent tool surface', () => {
   });
 
   it('returns explicit opaque SDK failures for preparation and dispatch errors', async () => {
-    const request = vi.fn().mockRejectedValue(
-      new LocalServiceError('PRIVATE-OPERATION-AND-CREDENTIAL', 'profile_unavailable'),
-    );
+    const request = vi
+      .fn()
+      .mockRejectedValue(
+        new LocalServiceError('PRIVATE-OPERATION-AND-CREDENTIAL', 'profile_unavailable'),
+      );
     const tools = createKonclaveTools({ client: stubClient(request) });
     const identity = tools.find((tool) => tool.name === 'get_identity');
     const failure = await identity?.handler({});
