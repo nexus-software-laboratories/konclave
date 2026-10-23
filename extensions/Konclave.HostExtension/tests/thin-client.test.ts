@@ -33,6 +33,7 @@ import {
 import { createLocalServiceDeliveryChannel } from '../src/service/delivery.js';
 import { createExtensionJoinConfig, deriveProfileId } from '../src/runtime.js';
 import { LocalServiceError, type LocalServiceClient } from '../src/service/client.js';
+import { attachLocalFailure } from '../src/service/failure-diagnostics.js';
 
 function createKonclaveCommands(dependencies: CommandDependencies) {
   return createCommands({ ...dependencies, outputMode: 'verbose' });
@@ -451,6 +452,34 @@ describe('agent tool surface', () => {
 });
 
 describe('deterministic commands', () => {
+  it('renders correlated client failures without operation names or exception text', async () => {
+    const failure = new LocalServiceError('PRIVATE-OPERATION', 'profile_unavailable');
+    attachLocalFailure(failure, {
+      stage: 'response_decode',
+      code: 'profile_unavailable',
+      connectionReference: '0123456789abcdef',
+      requestSequence: 3,
+    });
+    const lines: string[] = [];
+    const command = createCommands({
+      client: stubClient(vi.fn().mockRejectedValue(failure)),
+      output: {
+        write(line) {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext('identity'));
+
+    expect(lines).toEqual([
+      'Konclave local failure: stage=response_decode code=profile_unavailable ' +
+        'connection=0123456789abcdef request=3. ' +
+        'An interrupted request may have committed; reconcile using its original identifiers.',
+    ]);
+    expect(lines.join('\n')).not.toContain('PRIVATE');
+  });
+
   it('bounds parsed arguments', () => {
     expect(parseCommandArguments('  status  ')).toEqual(['status']);
     expect(parseCommandArguments('')).toEqual([]);
