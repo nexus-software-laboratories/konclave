@@ -30,6 +30,7 @@ if (
     throw 'Service paths contain unsupported task-scheduler characters.'
 }
 $arguments = "--config `"$configurationPath`""
+$normalTaskPriority = 4
 $restartCount = 999
 $restartInterval = New-TimeSpan -Minutes 1
 
@@ -40,6 +41,7 @@ if ($Action -ceq 'Render') {
         arguments = $arguments
         logonType = 'Interactive'
         runLevel = 'Limited'
+        priority = $normalTaskPriority
         startWhenAvailable = $true
         stopOnIdleEnd = $false
         restartCount = $restartCount
@@ -103,6 +105,7 @@ function Test-ManagedTaskSettings {
     )
 
     return (
+        [int]$Task.Settings.Priority -eq $normalTaskPriority -and
         [bool]$Task.Settings.StartWhenAvailable -and
         -not [bool]$Task.Settings.IdleSettings.StopOnIdleEnd -and
         [int]$Task.Settings.RestartCount -eq $restartCount -and
@@ -120,7 +123,7 @@ function Assert-ManagedTask {
 
     Assert-ManagedTaskOwnership -Task $Task
     if (-not (Test-ManagedTaskSettings -Task $Task)) {
-        throw "Scheduled task '$taskName' recovery settings do not match this installation."
+        throw "Scheduled task '$taskName' execution settings do not match this installation."
     }
 }
 
@@ -189,6 +192,7 @@ switch ($Action) {
                 -DontStopOnIdleEnd `
                 -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -MultipleInstances IgnoreNew `
+                -Priority $normalTaskPriority `
                 -RestartCount $restartCount `
                 -RestartInterval $restartInterval `
                 -StartWhenAvailable
