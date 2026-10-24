@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use crate::activity::{ProfileActivity, ProfileActivityError};
 use crate::persistence::{ProfileId, ProfileStoreError};
 use crate::profile_runtime::{ProfileHost, ProfileRunState, ProfileServices};
+use crate::profile_lifecycle::{ProfileFailure, observed_run_state};
 use crate::runtime::{ProfileSource, initialize_profile};
 
 /// How many profiles one service process may host at once.
@@ -136,7 +137,11 @@ pub(crate) enum ProfileSupervisorError {
     #[error("the local service is shutting down")]
     ShuttingDown,
     #[error("the profile runtime failed and its clients have not detached")]
-    FailedRuntime,
+    FailedRuntime(ProfileFailure),
+    #[error("the profile runtime stopped and its clients have not detached")]
+    StoppedRuntime,
+    #[error("the profile runtime owner is unavailable")]
+    UnavailableRuntime,
     #[error("the profile was closed and this lease no longer grants access")]
     Revoked,
     #[error("the profile is locked by another owner")]
@@ -158,7 +163,9 @@ impl ProfileSupervisorError {
             Self::ActiveProfileLimit => "active_profile_limit",
             Self::ClientLimit => "client_limit",
             Self::ShuttingDown => "shutting_down",
-            Self::FailedRuntime => "failed_runtime",
+            Self::FailedRuntime(_) => "failed_runtime",
+            Self::StoppedRuntime => "runtime_stopped",
+            Self::UnavailableRuntime => "runtime_unavailable",
             Self::Revoked => "revoked",
             Self::ProfileLocked => "profile_locked",
             Self::Open(_) => "open_failed",
@@ -166,14 +173,24 @@ impl ProfileSupervisorError {
         }
     }
 
-    /// Returns the retained cause of a failed open.
+    /// Returns the retained cause of a failed open or supervised runtime.
     ///
     /// The cause names local paths and endpoints, so it is for an operator reading a
     /// returned error, never for a log field or an exported telemetry value.
-    pub(crate) fn open_source(&self) -> Option<&anyhow::Error> {
+    pub(crate) fn failure_source(&self) -> Option<&anyhow::Error> {
         match self {
             Self::Open(source) => Some(source),
+            Self::FailedRuntime(failure) => Some(failure.cause()),
             _ => None,
+        }
+    }
+
+    fn for_run_state(state: ProfileRunState) -> Option<Self> {
+        match state {
+            ProfileRunState::Running => None,
+            ProfileRunState::Stopped => Some(Self::StoppedRuntime),
+            ProfileRunState::Failed(failure) => Some(Self::FailedRuntime(failure)),
+            ProfileRunState::Unavailable => Some(Self::UnavailableRuntime),
         }
     }
 }
@@ -183,7 +200,7 @@ impl ProfileSupervisorError {
 /// A derived implementation would format the retained open cause, which names local
 /// paths and endpoints. `Debug` reaches assertion messages, panic output, and
 /// structured logs, so it must stay as bounded as the message itself;
-/// [`ProfileSupervisorError::open_source`] is the one explicit way to see the detail.
+/// [`ProfileSupervisorError::failure_source`] is the one explicit way to see the detail.
 impl core::fmt::Debug for ProfileSupervisorError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -273,7 +290,7 @@ impl ActiveProfile {
     }
 
     fn run_state(&self) -> ProfileRunState {
-        *self.state.borrow()
+        observed_run_state(&self.state)
     }
 
     fn attach_client(&self, maximum: usize) -> Result<(), ProfileSupervisorError> {
@@ -433,6 +450,15 @@ impl ProfileLease {
     /// Returns the supervised state of the leased runtime.
     pub(crate) fn run_state(&self) -> ProfileRunState {
         self.profile.run_state()
+    }
+
+    /// Observes this exact runtime, including termination while a client is idle.
+    pub(crate) fn watch_run_state(&self) -> watch::Receiver<ProfileRunState> {
+        self.profile.state.clone()
+    }
+
+    pub(crate) fn termination_error(&self) -> Option<ProfileSupervisorError> {
+        ProfileSupervisorError::for_run_state(self.run_state())
     }
 }
 
@@ -614,7 +640,7 @@ impl ProfileSupervisor {
         }
     }
 
-    /// Closes every failed runtime that no client still holds.
+    /// Closes every terminal runtime that no client still holds.
     ///
     /// A failed profile keeps its lock and databases open until it is closed, so this
     /// is how a supervising loop turns one profile's failure into released resources
@@ -627,7 +653,7 @@ impl ProfileSupervisor {
                 .iter()
                 .filter_map(|(key, slot)| match slot {
                     ProfileSlot::Active(active)
-                        if active.run_state() == ProfileRunState::Failed
+                        if active.run_state().is_terminal()
                             && active.attached_clients() == 0 =>
                     {
                         Some(key.clone())
@@ -857,12 +883,14 @@ impl ProfileSupervisor {
                 state.slots.remove(&key);
             }
             Some(SlotView::Active(active)) => {
-                if active.run_state() == ProfileRunState::Failed {
+                if let Some(refusal) =
+                    ProfileSupervisorError::for_run_state(active.run_state())
+                {
                     if active.attached_clients() > 0 {
-                        return Err(ProfileSupervisorError::FailedRuntime);
+                        return Err(refusal);
                     }
                     let slot = begin_close(&mut state, &key, CloseAdmission::Unconditional)
-                        .ok_or(ProfileSupervisorError::FailedRuntime)?;
+                        .ok_or(refusal)?;
                     return Ok(AttachStep::Reap(slot));
                 }
                 if active.services().is_none() {
@@ -952,7 +980,7 @@ impl ProfileSupervisor {
                 tracing::error!(
                     profile = open.key.as_str(),
                     outcome = refusal.code(),
-                    stage = refusal.open_source().and_then(|source| {
+                    stage = refusal.failure_source().and_then(|source| {
                         source
                             .chain()
                             .find_map(|error| match error.to_string().as_str() {
@@ -963,12 +991,12 @@ impl ProfileSupervisor {
                                 _ => None,
                             })
                     }),
-                    profile_error = ?refusal.open_source().and_then(|source| {
+                    profile_error = ?refusal.failure_source().and_then(|source| {
                         source
                             .chain()
                             .find_map(|error| error.downcast_ref::<ProfileStoreError>())
                     }),
-                    conversation_error = ?refusal.open_source().and_then(|source| {
+                    conversation_error = ?refusal.failure_source().and_then(|source| {
                         source.chain().find_map(|error| {
                             error.downcast_ref::<crate::conversation::ConversationCoordinatorError>()
                         })
@@ -1189,10 +1217,41 @@ mod tests {
     use crate::activity::ProfileActivityError;
     use crate::profile_runtime::ProfileHostOptions;
     use crate::runtime::{ProfileConfig, ProfileCustody};
-    use crate::test_support::{TestProfileRoot, TestProfileSettings};
+    use crate::test_support::{ControlledProfileSource, TestProfileRoot, TestProfileSettings};
 
     /// The number of concurrent profiles ADR 0008 and issue #121 require.
     const REQUIRED_CONCURRENT_PROFILES: usize = 20;
+
+    #[test]
+    fn terminal_states_refuse_attachment_without_formatting_the_original_cause() {
+        let failure = ProfileFailure::new(anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "PRIVATE-PROFILE-FAILURE",
+        )));
+        for (state, expected) in [
+            (ProfileRunState::Running, None),
+            (ProfileRunState::Stopped, Some("runtime_stopped")),
+            (ProfileRunState::Unavailable, Some("runtime_unavailable")),
+            (ProfileRunState::Failed(failure.clone()), Some("failed_runtime")),
+        ] {
+            let refusal = ProfileSupervisorError::for_run_state(state);
+            assert_eq!(refusal.as_ref().map(ProfileSupervisorError::code), expected);
+            if let Some(refusal) = refusal {
+                assert!(!format!("{refusal:?}").contains("PRIVATE"));
+                assert!(!refusal.to_string().contains("PRIVATE"));
+            }
+        }
+        let refusal = ProfileSupervisorError::FailedRuntime(failure);
+        assert_eq!(
+            refusal
+                .failure_source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
 
     fn supervisor(root: &TestProfileRoot) -> Arc<ProfileSupervisor> {
         ProfileSupervisor::new(
@@ -1258,36 +1317,6 @@ mod tests {
             let config = self.inner.configure(profile);
             self.concurrent.fetch_sub(1, Ordering::SeqCst);
             config
-        }
-    }
-
-    /// Fails one profile's task set the first time that profile is hosted.
-    struct FailingRuntimeSource {
-        inner: TestProfileSettings,
-        failing_profile: String,
-        trigger: Mutex<Option<oneshot::Receiver<()>>>,
-    }
-
-    impl ProfileSource for FailingRuntimeSource {
-        fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig> {
-            self.inner.configure(profile)
-        }
-
-        fn host_options(&self, profile: &ProfileId) -> ProfileHostOptions {
-            if profile.as_str() != self.failing_profile {
-                return ProfileHostOptions::default();
-            }
-            let Some(trigger) = guard(&self.trigger).take() else {
-                return ProfileHostOptions::default();
-            };
-            ProfileHostOptions::default().with_attachment(Box::new(
-                move |_: &ProfileServices, _| {
-                    Box::pin(async move {
-                        let _ = trigger.await;
-                        Err(anyhow::anyhow!("profile runtime failed"))
-                    })
-                },
-            ))
         }
     }
 
@@ -1620,7 +1649,7 @@ mod tests {
         assert_eq!(debugged, "ProfileSupervisorError { code: \"open_failed\" }");
         assert!(!debugged.contains(&broken_key.display().to_string()));
         assert!(
-            format!("{:#}", refused.open_source().unwrap()).contains("broken"),
+            format!("{:#}", refused.failure_source().unwrap()).contains("broken"),
             "the retained cause must still identify the profile"
         );
         // The refused profile leaves nothing behind, and the unrelated profile is
@@ -1650,13 +1679,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_runtime_is_reported_without_ending_other_profiles() {
         let root = TestProfileRoot::new();
-        let (trigger, triggered) = oneshot::channel();
+        let (source, trigger) = ControlledProfileSource::new(root.settings(), "failing");
         let supervisor = ProfileSupervisor::new(
-            Arc::new(FailingRuntimeSource {
-                inner: root.settings(),
-                failing_profile: "failing".to_string(),
-                trigger: Mutex::new(Some(triggered)),
-            }),
+            Arc::new(source),
             ProfileSupervisorConfig::default(),
         )
         .unwrap();
@@ -1664,13 +1689,15 @@ mod tests {
         let healthy = supervisor.attach("healthy").await.unwrap();
         let failing = supervisor.attach("failing").await.unwrap();
         let mut state = supervisor.watch_run_state("failing").unwrap();
-        trigger.send(()).unwrap();
+        trigger
+            .send(Err(anyhow::anyhow!("profile runtime failed")))
+            .unwrap();
         state
             .wait_for(|state| *state != ProfileRunState::Running)
             .await
             .unwrap();
 
-        assert_eq!(failing.run_state(), ProfileRunState::Failed);
+        assert!(matches!(failing.run_state(), ProfileRunState::Failed(_)));
         assert_eq!(
             supervisor.run_state("healthy"),
             Some(ProfileRunState::Running)
@@ -1686,9 +1713,11 @@ mod tests {
         // A failed runtime with an attached client is never silently replaced.
         let refused = supervisor.attach("failing").await.unwrap_err();
         assert!(
-            matches!(refused, ProfileSupervisorError::FailedRuntime),
+            matches!(refused, ProfileSupervisorError::FailedRuntime(_)),
             "{refused:?}"
         );
+        assert_eq!(refused.to_string(), "the profile runtime failed and its clients have not detached");
+        assert!(format!("{:#}", refused.failure_source().unwrap()).contains("profile runtime failed"));
 
         drop(failing);
         let failures = supervisor.reap_failed().await;
@@ -1930,7 +1959,7 @@ mod tests {
             format!("{refused}"),
             "the profile is locked by another owner"
         );
-        assert!(refused.open_source().is_none());
+        assert!(refused.failure_source().is_none());
         drop(lease);
         owner.shutdown().await.unwrap();
     }

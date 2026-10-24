@@ -117,29 +117,50 @@ static LOCAL_REQUEST_OUTCOME_READ_FAILURES: LocalRequestOutcomeFailures = OnceLo
 static LOCAL_REQUEST_OUTCOME_WRITE_FAILURES: LocalRequestOutcomeFailures = OnceLock::new();
 
 #[cfg(test)]
-type LocalRequestOutcomeReadGates = OnceLock<Mutex<BTreeMap<String, Arc<BlockingTestGate>>>>;
+type LocalRequestOutcomeGates = OnceLock<Mutex<BTreeMap<String, Arc<BlockingTestGate>>>>;
 
 #[cfg(test)]
-static LOCAL_REQUEST_OUTCOME_READ_GATES: LocalRequestOutcomeReadGates = OnceLock::new();
+static LOCAL_REQUEST_OUTCOME_READ_GATES: LocalRequestOutcomeGates = OnceLock::new();
+
+#[cfg(test)]
+static LOCAL_REQUEST_OUTCOME_WRITE_GATES: LocalRequestOutcomeGates = OnceLock::new();
 
 #[cfg(test)]
 pub(crate) fn block_next_local_request_outcome_read(profile_id: &str) -> BlockingTestBlock {
+    block_next_local_request_outcome(&LOCAL_REQUEST_OUTCOME_READ_GATES, profile_id)
+}
+
+#[cfg(test)]
+pub(crate) fn block_next_local_request_outcome_write(profile_id: &str) -> BlockingTestBlock {
+    block_next_local_request_outcome(&LOCAL_REQUEST_OUTCOME_WRITE_GATES, profile_id)
+}
+
+#[cfg(test)]
+fn block_next_local_request_outcome(
+    gates: &LocalRequestOutcomeGates,
+    profile_id: &str,
+) -> BlockingTestBlock {
     let gate = Arc::new(BlockingTestGate::new());
-    let replaced = LOCAL_REQUEST_OUTCOME_READ_GATES
+    let replaced = gates
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .unwrap()
         .insert(profile_id.to_owned(), Arc::clone(&gate));
     assert!(
         replaced.is_none(),
-        "profile already has a blocked outcome read"
+        "profile already has a blocked outcome operation"
     );
     BlockingTestBlock(gate)
 }
 
 #[cfg(test)]
 fn block_local_request_outcome_read(profile_id: &str) {
-    let gate = LOCAL_REQUEST_OUTCOME_READ_GATES
+    block_local_request_outcome(&LOCAL_REQUEST_OUTCOME_READ_GATES, profile_id);
+}
+
+#[cfg(test)]
+fn block_local_request_outcome(gates: &LocalRequestOutcomeGates, profile_id: &str) {
+    let gate = gates
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
         .unwrap()
@@ -623,6 +644,11 @@ impl ProfileStore {
         completed_at_unix_milliseconds: u64,
         plaintext: &[u8],
     ) -> Result<(), ProfileStoreError> {
+        #[cfg(test)]
+        block_local_request_outcome(
+            &LOCAL_REQUEST_OUTCOME_WRITE_GATES,
+            self.locked_profile.profile_id.as_str(),
+        );
         if plaintext.is_empty() || plaintext.len() > MAX_LOCAL_REQUEST_OUTCOME_BYTES {
             return Err(ProfileStoreError::CorruptData);
         }

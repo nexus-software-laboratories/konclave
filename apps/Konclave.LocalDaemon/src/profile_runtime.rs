@@ -15,6 +15,8 @@ use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
 use crate::health::DeliveryHealth;
 use crate::pairing_service::PairingService;
+use crate::profile_lifecycle::{ProfileComponent, ProfileFailure};
+pub(crate) use crate::profile_lifecycle::ProfileRunState;
 use crate::service::Service;
 
 /// How often relay watch supervision rediscovers this profile's conversations.
@@ -130,17 +132,6 @@ impl ProfileHostOptions {
     }
 }
 
-/// Whether one profile's supervised task set is running, stopped, or failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProfileRunState {
-    /// The task set is supervising the profile.
-    Running,
-    /// The task set completed without a failure.
-    Stopped,
-    /// The task set ended with a failure its owner must observe.
-    Failed,
-}
-
 /// One running profile: its bound services, its stop signal, and its owned tasks.
 ///
 /// The task set is owned, never detached. Coordinated shutdown drains it and reports
@@ -204,6 +195,7 @@ impl ProfileHost {
             Service::new(relay_applications, RELAY_DISCOVERY_INTERVAL, relay_health)
                 .run_until(wait_for_shutdown(relay_shutdown))
                 .await
+                .context(ProfileComponent::RelayWatch)
         });
 
         let pairing_service = services.pairings.clone();
@@ -212,10 +204,12 @@ impl ProfileHost {
             crate::pairing_supervisor::PairingSupervisor::new(pairing_service, pairing_retry_seed)
                 .run_until(wait_for_shutdown(pairing_shutdown))
                 .await
+                .context(ProfileComponent::Pairing)
         });
 
         for attachment in options.attachments {
-            tasks.spawn(attachment(&services, stop_rx.clone()));
+            let attached = attachment(&services, stop_rx.clone());
+            tasks.spawn(async move { attached.await.context(ProfileComponent::Attachment) });
         }
 
         let tasks = tokio::spawn(supervise(tasks, stop_tx.clone(), state_tx));
@@ -377,13 +371,19 @@ async fn supervise(
         ));
     }
 
-    let outcome = aggregate_failures(failures);
-    let _ = state.send(if outcome.is_ok() {
-        ProfileRunState::Stopped
-    } else {
-        ProfileRunState::Failed
-    });
-    outcome
+    match aggregate_failures(failures) {
+        Ok(()) => {
+            state.send_replace(ProfileRunState::Stopped);
+            Ok(())
+        }
+        Err(error) => {
+            #[cfg(feature = "rust-service-mcp")]
+            crate::local_failure_diagnostics::record_profile_failure(&error);
+            let failure = ProfileFailure::new(error);
+            state.send_replace(ProfileRunState::Failed(failure.clone()));
+            Err(anyhow::Error::new(failure))
+        }
+    }
 }
 
 fn record_failure(
@@ -489,7 +489,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(*state.borrow(), ProfileRunState::Failed);
+        let ProfileRunState::Failed(failure) = state.borrow().clone() else {
+            panic!("the attachment failure was not retained");
+        };
+        assert!(failure.cause().to_string().contains("attachment"));
+        assert!(format!("{:#}", failure.cause()).contains("attachment failed"));
         let error = host.shutdown().await.unwrap_err();
         assert!(format!("{error:#}").contains("attachment failed"));
     }

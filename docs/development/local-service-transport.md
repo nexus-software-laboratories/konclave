@@ -323,6 +323,16 @@ exact retry attempts persistence again before returning that result. Coordinated
 shutdown atomically stops new ledger admission, requests pre-commit cancellation, and
 continues draining post-commit work after its diagnostic threshold.
 
+An attached connection observes its exact profile runtime, including while idle,
+reading a partial frame, or waiting for delivery. A failed or stopped runtime closes
+those connections. Admitted work still drains before its profile lease is released;
+socket closure alone does not prove that the old owner has finished. New attachments
+refuse a terminal runtime while its clients remain, then reopen the same durable
+profile after those clients detach. They never replace custody or identity.
+Transient profile unavailability before dispatch preserves the exact request binding
+for a freshly authorized retry, rather than sealing a false terminal failure.
+Committed work retains and journals its actual outcome before that retry can settle.
+
 Decoding validates every field at an exact offset: an unknown message kind, an
 unimplemented error code, an empty or oversized operation length, an operation outside
 the accepted character set, a declared payload length above the bound or beyond the
@@ -346,6 +356,14 @@ SDK failure results and throttled delivery failures. Stages distinguish connecti
 service proof/decision, profile attachment, RPC reading/execution/writing and lease
 release. A generic `unclassified_failure` is explicit; arbitrary exception messages,
 stacks, operation arguments and serialized results are never substituted for it.
+
+Profile task-set failures retain the original typed cause. Finite
+`profile_relay_watch`, `profile_pairing`, and `profile_attachment` stages identify
+the failed component without exporting its message. Later attachment and connection
+failures classify that retained cause instead of reducing every failure to
+`failed_runtime`. Relay rejection codes are remote input: diagnostics classify their
+status or category, never emit the remote string. A runtime-root record has no
+connection reference; the affected connection records carry their own references.
 
 Both runtimes derive the 16-character reference from a domain-separated SHA-256 hash
 of the service's fresh public handshake challenge. It is not derived from profile,

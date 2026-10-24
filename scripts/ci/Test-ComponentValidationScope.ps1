@@ -140,6 +140,8 @@ foreach ($path in @(
     'apps/Konclave.LocalDaemon/src/local_service.rs'
     'apps/Konclave.LocalDaemon/src/local_failure_diagnostics.rs'
     'apps/Konclave.LocalDaemon/src/session_request_read.rs'
+    'apps/Konclave.LocalDaemon/src/persistence.rs'
+    'apps/Konclave.LocalDaemon/src/test_support.rs'
 )) {
     if (-not (Get-ComponentValidationDecision `
         -Contract 'profile-lifecycle' `

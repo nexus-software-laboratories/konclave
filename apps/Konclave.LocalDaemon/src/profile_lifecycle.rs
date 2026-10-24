@@ -107,6 +107,7 @@ impl ProfileRunState {
 ///
 /// Nonterminal notifications retain the same waiting future; callers may pin this
 /// alongside a cancellation-safe request reader without restarting that reader.
+#[cfg(any(test, feature = "rust-service-mcp"))]
 pub(crate) async fn wait_for_profile_stop(mut state: watch::Receiver<ProfileRunState>) {
     loop {
         if state.borrow_and_update().is_terminal() {

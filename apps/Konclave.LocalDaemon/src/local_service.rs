@@ -60,7 +60,8 @@ use crate::persistence::{
     DirectedRequestClaimOutcome, DirectedRequestCompletionOutcome, RemoteEventPayload,
 };
 use crate::profile_runtime::ProfileServices;
-use crate::profile_supervisor::{ProfileSupervisor, ProfileSupervisorConfig};
+use crate::profile_lifecycle::{ProfileRunState, observed_run_state, wait_for_profile_stop};
+use crate::profile_supervisor::{ProfileLease, ProfileSupervisor, ProfileSupervisorConfig};
 use crate::runtime::ProfileSource;
 use crate::session_request_read::read_authorized_request;
 
@@ -367,12 +368,16 @@ async fn serve_session_client(
     let services = lease
         .services()
         .with_context(|| reference.context(FailureStage::ProfileServices, 0))?;
+    let profile_state = lease.watch_run_state();
+    let profile_stopped = wait_for_profile_stop(profile_state.clone());
+    tokio::pin!(profile_stopped);
     let mut request_state = ClientRequestState::new(
         ledger,
         Arc::clone(&authorization),
         grant,
         services,
         stop.clone(),
+        profile_state,
     );
     request_state.diagnostics = Some(reference.context(FailureStage::RequestExecution, 0));
     let mut state = Some(request_state);
@@ -388,14 +393,22 @@ async fn serve_session_client(
                 .as_ref()
                 .context("shared local session state is unavailable")?;
             let next_sequence = sequence.saturating_add(1);
-            let request = read_authorized_request(
-                active_stream,
-                &mut stop,
-                &mut authorization_status,
-                || request_state.authorization_is_active(),
-            )
-            .await
-            .with_context(|| reference.context(FailureStage::RequestRead, next_sequence))?;
+            let request = tokio::select! {
+                biased;
+                () = &mut profile_stopped => {
+                    return Err(profile_termination_error(
+                        &lease,
+                        reference.context(FailureStage::RequestRead, next_sequence),
+                    ));
+                }
+                request = read_authorized_request(
+                    active_stream,
+                    &mut stop,
+                    &mut authorization_status,
+                    || request_state.authorization_is_active(),
+                ) => request
+                    .with_context(|| reference.context(FailureStage::RequestRead, next_sequence))?,
+            };
             let Some(request) = request else {
                 drop(stream.take());
                 break;
@@ -426,9 +439,14 @@ async fn serve_session_client(
                 };
                 (request_state, response)
             });
+            let mut profile_interrupted = false;
             let completed = loop {
                 tokio::select! {
                     biased;
+                    () = &mut profile_stopped => {
+                        profile_interrupted = true;
+                        break Err(RequestCancellationReason::ProfileUnavailable);
+                    }
                     changed = stop.changed() => {
                         if changed.is_err() || *stop.borrow() {
                             break Err(RequestCancellationReason::Shutdown);
@@ -465,6 +483,12 @@ async fn serve_session_client(
                     })?;
                     state = Some(next_state);
                     let _ = response;
+                    if profile_interrupted {
+                        return Err(profile_termination_error(
+                            &lease,
+                            reference.context(FailureStage::RequestExecution, sequence),
+                        ));
+                    }
                     break;
                 }
             };
@@ -480,8 +504,14 @@ async fn serve_session_client(
             let request_state = state
                 .as_ref()
                 .context("shared local session state is unavailable")?;
+            if observed_run_state(&request_state.profile_state).is_terminal() {
+                return Err(profile_termination_error(
+                    &lease,
+                    reference.context(FailureStage::RequestExecution, sequence),
+                ));
+            }
             if *stop.borrow()
-                || request_state.authorization_interrupted
+                || request_state.connection_interrupted
                 || matches!(
                     *authorization_status.borrow(),
                     crate::authorization_runtime::AuthorizationRuntimeStatus::Failed(_)
@@ -524,6 +554,13 @@ async fn serve_session_client(
         }
     }
     result
+}
+
+fn profile_termination_error(lease: &ProfileLease, context: FailureContext) -> anyhow::Error {
+    match lease.termination_error() {
+        Some(error) => anyhow::Error::new(error).context(context),
+        None => anyhow::anyhow!("profile termination has no terminal snapshot").context(context),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1271,7 +1308,8 @@ struct ClientRequestState {
     delivery: Option<DeliveryAttachment>,
     collaboration_send_authorizations: HashMap<[u8; 16], CollaborationSendAuthorization>,
     shutdown: watch::Receiver<bool>,
-    authorization_interrupted: bool,
+    profile_state: watch::Receiver<ProfileRunState>,
+    connection_interrupted: bool,
     diagnostics: Option<FailureContext>,
     diagnostic_failure: bool,
 }
@@ -1283,6 +1321,7 @@ impl ClientRequestState {
         grant: SessionGrant,
         services: ProfileServices,
         shutdown: watch::Receiver<bool>,
+        profile_state: watch::Receiver<ProfileRunState>,
     ) -> Self {
         Self {
             ledger,
@@ -1295,7 +1334,8 @@ impl ClientRequestState {
             delivery: None,
             collaboration_send_authorizations: HashMap::new(),
             shutdown,
-            authorization_interrupted: false,
+            profile_state,
+            connection_interrupted: false,
             diagnostics: None,
             diagnostic_failure: false,
         }
@@ -1304,6 +1344,27 @@ impl ClientRequestState {
     fn authorization_is_active(&self) -> bool {
         self.authorization.grant_is_active(&self.grant)
     }
+
+    fn interruption(&self) -> Option<RequestCancellationReason> {
+        session_interruption(&self.authorization, &self.grant, &self.profile_state)
+    }
+}
+
+fn session_interruption(
+    authorization: &LiveAuthorizationRuntime,
+    grant: &SessionGrant,
+    profile: &watch::Receiver<ProfileRunState>,
+) -> Option<RequestCancellationReason> {
+    authorization.grant_interruption(grant).or_else(|| {
+        observed_run_state(profile)
+            .is_terminal()
+            .then_some(RequestCancellationReason::ProfileUnavailable)
+    })
+}
+
+fn interruption_needs_replay(reason: RequestCancellationReason) -> bool {
+    resolve_local_request_interruption(LocalRequestExecutionState::BeforeExecution, reason)
+        == LocalRequestInterruptionAction::AwaitAuthorization
 }
 
 fn detached_claim_replay_failure(
@@ -1328,7 +1389,7 @@ async fn execute_session_request(
     state: &mut ClientRequestState,
     request: LocalServiceRequest,
 ) -> LocalServiceResponse {
-    if let Some(reason) = state.authorization.grant_interruption(&state.grant) {
+    if let Some(reason) = state.interruption() {
         return interrupted_session_response(state, request.request_id(), reason);
     }
     let key = LedgerKey::for_grant(&state.grant, request.request_id());
@@ -1366,8 +1427,8 @@ async fn execute_session_request(
                     .ok()
                     .and_then(|response| response.clone())
                 {
-                    Some(RequestOutcome::AwaitingAuthorization) => {
-                        if let Some(reason) = state.authorization.grant_interruption(&state.grant) {
+                    Some(RequestOutcome::AwaitingRecovery(_)) => {
+                        if let Some(reason) = state.interruption() {
                             interrupted_session_response(state, request.request_id(), reason)
                         } else {
                             continue;
@@ -1468,8 +1529,8 @@ async fn execute_session_request(
                 let response = match dispatched {
                     Ok(response) => response,
                     Err(reason) => {
-                        if reason == RequestCancellationReason::AuthorizationUnavailable {
-                            state.authorization_interrupted = true;
+                        if interruption_needs_replay(reason) {
+                            state.connection_interrupted = true;
                         }
                         let Some(reason) = interrupt_undispatched_request(&ledger, &key, reason)
                         else {
@@ -1484,7 +1545,7 @@ async fn execute_session_request(
                         };
                         let response =
                             interrupted_session_response(state, request.request_id(), reason);
-                        if reason == RequestCancellationReason::AuthorizationUnavailable {
+                        if interruption_needs_replay(reason) {
                             return response;
                         }
                         response
@@ -1504,8 +1565,8 @@ fn interrupted_session_response(
     request_id: RequestId,
     reason: RequestCancellationReason,
 ) -> LocalServiceResponse {
-    if reason == RequestCancellationReason::AuthorizationUnavailable {
-        state.authorization_interrupted = true;
+    if interruption_needs_replay(reason) {
+        state.connection_interrupted = true;
     }
     LocalServiceResponse::failure(request_id, reason.error_code())
 }
@@ -1539,7 +1600,7 @@ where
             .and_then(|response| response.clone())
         {
             Some(RequestOutcome::Settled(response)) => response,
-            Some(RequestOutcome::AwaitingAuthorization) => LocalServiceResponse::failure(
+            Some(RequestOutcome::AwaitingRecovery(_)) => LocalServiceResponse::failure(
                 request.request_id(),
                 LocalServiceErrorCode::ReconciliationPending,
             ),
@@ -1740,7 +1801,7 @@ async fn dispatch_authorized_request(
     request: &LocalServiceRequest,
     request_key: Option<&LedgerKey>,
 ) -> Result<LocalServiceResponse, RequestCancellationReason> {
-    if let Some(reason) = state.authorization.grant_interruption(&state.grant) {
+    if let Some(reason) = state.interruption() {
         return Err(reason);
     }
     let operation = request.operation().as_str();
@@ -3046,7 +3107,8 @@ async fn delivery_claim(state: &mut ClientRequestState, payload: &[u8]) -> Resul
         shutdown,
         authorization,
         grant,
-        authorization_interrupted,
+        profile_state,
+        connection_interrupted,
         diagnostics,
         diagnostic_failure,
         ..
@@ -3076,7 +3138,7 @@ async fn delivery_claim(state: &mut ClientRequestState, payload: &[u8]) -> Resul
             request.max_events,
             request.wait_milliseconds,
             || {
-                interruption = authorization.grant_interruption(grant);
+                interruption = session_interruption(authorization, grant, profile_state);
                 interruption.is_none()
             },
         )
@@ -3093,8 +3155,8 @@ async fn delivery_claim(state: &mut ClientRequestState, payload: &[u8]) -> Resul
         DeliveryWaitOutcome::Events(events) => events,
         DeliveryWaitOutcome::AuthorizationLost => {
             *delivery = None;
-            if interruption == Some(RequestCancellationReason::AuthorizationUnavailable) {
-                *authorization_interrupted = true;
+            if interruption.is_some_and(interruption_needs_replay) {
+                *connection_interrupted = true;
                 return Err("profile_unavailable".to_string());
             }
             return Err("local_service_not_authorized".to_string());
@@ -3356,7 +3418,7 @@ struct LedgerEntry {
 
 #[derive(Clone)]
 enum RequestOutcome {
-    AwaitingAuthorization,
+    AwaitingRecovery(RequestCancellationReason),
     Settled(LocalServiceResponse),
 }
 
@@ -3394,7 +3456,7 @@ fn begin_request(
         }
         let outcome = entry.outcome.borrow().clone();
         return match outcome {
-            Some(RequestOutcome::AwaitingAuthorization) => {
+            Some(RequestOutcome::AwaitingRecovery(_)) => {
                 entry.phase = RequestPhase::PreCommit;
                 entry.cancellation = None;
                 entry.outcome.send_replace(None);
@@ -3448,11 +3510,8 @@ fn commit_request(
 ) -> Option<RequestCancellationReason> {
     let mut ledger = lock(ledger);
     let entry = ledger.entries.get_mut(key)?;
-    if matches!(
-        *entry.outcome.borrow(),
-        Some(RequestOutcome::AwaitingAuthorization)
-    ) {
-        return Some(RequestCancellationReason::AuthorizationUnavailable);
+    if let Some(RequestOutcome::AwaitingRecovery(reason)) = *entry.outcome.borrow() {
+        return Some(reason);
     }
     if entry.outcome.borrow().is_some() {
         return None;
@@ -3494,7 +3553,7 @@ fn preferred_interruption(
     observed: RequestCancellationReason,
 ) -> RequestCancellationReason {
     existing
-        .filter(|reason| *reason != RequestCancellationReason::AuthorizationUnavailable)
+        .filter(|reason| !interruption_needs_replay(*reason))
         .unwrap_or(observed)
 }
 
@@ -3505,7 +3564,7 @@ fn interrupt_ledger_entry(
 ) -> RequestCancellationState {
     let awaiting = matches!(
         *entry.outcome.borrow(),
-        Some(RequestOutcome::AwaitingAuthorization)
+        Some(RequestOutcome::AwaitingRecovery(_))
     );
     let execution = if matches!(*entry.outcome.borrow(), Some(RequestOutcome::Settled(_))) {
         LocalRequestExecutionState::Settled
@@ -3551,7 +3610,7 @@ fn interrupt_undispatched_request(
     {
         entry
             .outcome
-            .send_replace(Some(RequestOutcome::AwaitingAuthorization));
+            .send_replace(Some(RequestOutcome::AwaitingRecovery(reason)));
     }
     Some(reason)
 }
@@ -4620,7 +4679,7 @@ mod tests {
     use crate::profile_runtime::{ProfileHost, ProfileHostOptions};
     use crate::profile_supervisor::ProfileSupervisorConfig;
     use crate::runtime::{ProfileSource, initialize_profile};
-    use crate::test_support::{TestProfileRoot, TestProfileSettings};
+    use crate::test_support::{ControlledProfileSource, TestProfileRoot, TestProfileSettings};
 
     const TEST_STARTUP_DEADLINE: Duration = Duration::from_secs(5);
     const TEST_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
@@ -4796,6 +4855,81 @@ mod tests {
         authorization: Arc<LiveAuthorizationRuntime>,
         installation_path: PathBuf,
         installation_fingerprint: InstallationFingerprint,
+    }
+
+    struct SessionTestHost {
+        listener: KonclaveLocalServiceTransport::LocalServiceListener,
+        supervisor: Arc<super::ProfileSupervisor>,
+        ledger: Arc<Mutex<super::RequestLedger>>,
+        presence: Arc<Mutex<super::UserPresenceRegistry>>,
+        stop: tokio::sync::watch::Sender<bool>,
+    }
+
+    impl SessionTestHost {
+        async fn new(fixture: &Fixture, source: Arc<dyn ProfileSource>) -> Self {
+            Self {
+                listener: KonclaveLocalServiceTransport::LocalServiceListener::bind(
+                    &fixture.endpoint,
+                )
+                .await
+                .unwrap(),
+                supervisor: super::ProfileSupervisor::new(
+                    source,
+                    ProfileSupervisorConfig::default(),
+                )
+                .unwrap(),
+                ledger: Arc::new(Mutex::new(super::RequestLedger::default())),
+                presence: Arc::new(Mutex::new(super::UserPresenceRegistry::default())),
+                stop: tokio::sync::watch::channel(false).0,
+            }
+        }
+
+        async fn connect(
+            &mut self,
+            fixture: &Fixture,
+            grant: SessionGrant,
+            instance: u8,
+        ) -> (
+            KonclaveLocalServiceTransport::LocalServiceClientStream,
+            tokio::task::JoinHandle<anyhow::Result<()>>,
+        ) {
+            fixture.persist_grant(grant.clone()).await;
+            let server = async {
+                let stream = self.listener.accept().await.unwrap();
+                tokio::spawn(super::serve_client(
+                    stream,
+                    Arc::clone(&fixture.authorization),
+                    Arc::clone(&fixture.service_identity),
+                    Arc::clone(&self.supervisor),
+                    Arc::clone(&self.ledger),
+                    Arc::clone(&self.presence),
+                    self.stop.subscribe(),
+                ))
+            };
+            tokio::join!(fixture.connect_grant(grant, instance), server)
+        }
+
+        async fn stop(self) {
+            self.stop.send_replace(true);
+            self.supervisor.shutdown().await.unwrap();
+        }
+    }
+
+    async fn assert_profile_client_failed(task: tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let failure = tokio::time::timeout(TEST_REQUEST_DEADLINE, task)
+            .await
+            .expect("failed-profile connection retained its runtime")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            crate::local_failure_diagnostics::failure_code(&failure),
+            "permission_denied"
+        );
+        assert!(
+            failure
+                .downcast_ref::<crate::local_failure_diagnostics::FailureContext>()
+                .is_some()
+        );
     }
 
     struct BlockingProfileSource {
@@ -5454,6 +5588,10 @@ mod tests {
 
     #[test]
     fn rpc_interruption_preserves_exact_binding_and_execution_reservation() {
+        for unavailable in [
+            super::RequestCancellationReason::AuthorizationUnavailable,
+            super::RequestCancellationReason::ProfileUnavailable,
+        ] {
         let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
         let binding = binding("session-rpc-binding");
         let request = ledger_request(91, "create_conversation", b"{}".to_vec());
@@ -5468,7 +5606,6 @@ mod tests {
             panic!("an executing request did not retain its waiter");
         };
         let reserved = super::lock(&ledger).stored_bytes;
-        let unavailable = super::RequestCancellationReason::AuthorizationUnavailable;
         super::cancel_request(&ledger, &key, unavailable);
         assert_eq!(super::commit_request(&ledger, &key), Some(unavailable));
         assert_eq!(
@@ -5477,7 +5614,9 @@ mod tests {
         );
         assert!(matches!(
             *waiter.borrow(),
-            Some(super::RequestOutcome::AwaitingAuthorization)
+            Some(super::RequestOutcome::AwaitingRecovery(
+                reason
+            )) if reason == unavailable
         ));
         super::mark_request_durable(&ledger, &key);
         assert!(!super::request_is_durable(&ledger, &key));
@@ -5509,11 +5648,15 @@ mod tests {
             super::LedgerDecision::Cached(response, true) if response == actual
         ));
         assert!(super::lock(&ledger).stored_bytes < reserved);
+        }
     }
 
     #[test]
     fn rpc_interruption_never_masks_terminal_cancellation() {
-        let unavailable = super::RequestCancellationReason::AuthorizationUnavailable;
+        for unavailable in [
+            super::RequestCancellationReason::AuthorizationUnavailable,
+            super::RequestCancellationReason::ProfileUnavailable,
+        ] {
         for reason in [
             super::RequestCancellationReason::Caller,
             super::RequestCancellationReason::Deadline,
@@ -5547,6 +5690,7 @@ mod tests {
                         Some(unavailable)
                     );
                 }
+                }
                 assert_eq!(
                     super::cancel_request(&ledger, &key, reason),
                     super::RequestCancellationState::Requested
@@ -5579,7 +5723,10 @@ mod tests {
 
     #[test]
     fn rpc_interruption_preserves_postcommit_outcomes_without_redispatch() {
-        let unavailable = super::RequestCancellationReason::AuthorizationUnavailable;
+        for unavailable in [
+            super::RequestCancellationReason::AuthorizationUnavailable,
+            super::RequestCancellationReason::ProfileUnavailable,
+        ] {
         for actual in [
             LocalServiceResponse::success(RequestId::from_bytes([93; 16]), b"{}".to_vec()).unwrap(),
             LocalServiceResponse::failure(
@@ -5618,6 +5765,7 @@ mod tests {
                 super::begin_request(&ledger, key, &request),
                 super::LedgerDecision::Cached(response, true) if response == actual
             ));
+        }
         }
     }
 
@@ -5729,6 +5877,7 @@ mod tests {
             grant.clone(),
             services,
             stop_rx.clone(),
+            lease.watch_run_state(),
         );
         let status = ledger_request(95, "service.status", b"{}".to_vec());
         let create = ledger_request(96, "create_conversation", b"{}".to_vec());
@@ -5746,6 +5895,7 @@ mod tests {
             grant.clone(),
             lease.services().unwrap(),
             stop_rx.clone(),
+            lease.watch_run_state(),
         );
         let reload = {
             let waiter = super::execute_session_request(&mut waiter_state, status.clone());
@@ -5804,7 +5954,7 @@ mod tests {
             ));
             reload
         };
-        assert!(waiter_state.authorization_interrupted);
+        assert!(waiter_state.connection_interrupted);
         assert_eq!(
             super::delivery_claim(&mut state, br#"{"maxEvents":1,"waitMilliseconds":0}"#)
                 .await
@@ -5812,7 +5962,7 @@ mod tests {
             "profile_unavailable"
         );
         assert!(state.delivery.is_none());
-        assert!(state.authorization_interrupted);
+        assert!(state.connection_interrupted);
 
         let mut authorization_status = fixture.authorization.subscribe();
         gate.release();
@@ -5832,7 +5982,7 @@ mod tests {
         .unwrap();
         assert!(fixture.authorization.grant_interruption(&grant).is_none());
         let mut recovered = super::ClientRequestState {
-            authorization_interrupted: false,
+            connection_interrupted: false,
             ..state
         };
         for request in [&status, &create] {
@@ -7414,6 +7564,219 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn profile_failure_releases_idle_clients_and_preserves_identity() {
+        let fixture = Fixture::new().await;
+        let profile = "session-profile-idle";
+        let grant = fixture.grant(profile, 110);
+        let (source, terminate) = ControlledProfileSource::new(fixture.root.settings(), profile);
+        let mut host = SessionTestHost::new(&fixture, Arc::new(source)).await;
+        let (mut first, first_task) = host.connect(&fixture, grant.clone(), 110).await;
+        let original = request(&mut first, 110, "get_identity", b"{}").await;
+        let LocalServiceResponse::Success { payload: identity, .. } = original else {
+            panic!("original identity was unavailable");
+        };
+        let (mut second, second_task) = host.connect(&fixture, grant.clone(), 111).await;
+        assert!(matches!(
+            request(&mut second, 111, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+        let healthy_grant = fixture.grant("session-profile-healthy", 112);
+        let (mut healthy, healthy_task) = host.connect(&fixture, healthy_grant, 112).await;
+        assert!(matches!(
+            request(&mut healthy, 112, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+        terminate
+            .send(Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "PRIVATE-PROFILE-FAILURE",
+            ))))
+            .unwrap();
+        for client in [&mut first, &mut second] {
+            assert!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(client))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+        }
+        assert_profile_client_failed(first_task).await;
+        assert_profile_client_failed(second_task).await;
+        assert!(matches!(
+            request(&mut healthy, 113, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+        let (mut recovered, recovered_task) = host.connect(&fixture, grant, 114).await;
+        let LocalServiceResponse::Success { payload, .. } =
+            request(&mut recovered, 114, "get_identity", b"{}").await
+        else {
+            panic!("profile did not reopen after both clients detached");
+        };
+        assert_eq!(payload, identity);
+        drop((first, second, healthy, recovered));
+        for task in [healthy_task, recovered_task] {
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        host.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn profile_failure_drains_framed_work_and_reconciles_the_exact_request() {
+        for (profile, operation, committed, seed) in [
+            ("session-profile-status", "service.status", false, 115),
+            ("session-profile-create", "create_conversation", false, 116),
+            ("session-profile-committed", "create_conversation", true, 117),
+        ] {
+            let fixture = Fixture::new().await;
+            let grant = fixture.grant(profile, seed);
+            let (source, terminate) =
+                ControlledProfileSource::new(fixture.root.settings(), profile);
+            let mut host = SessionTestHost::new(&fixture, Arc::new(source)).await;
+            let (mut client, task) = host.connect(&fixture, grant.clone(), seed).await;
+            assert!(matches!(
+                request(&mut client, seed, "get_identity", b"{}").await,
+                LocalServiceResponse::Success { .. }
+            ));
+            let gate = if committed {
+                crate::persistence::block_next_local_request_outcome_write(profile)
+            } else {
+                crate::persistence::block_next_local_request_outcome_read(profile)
+            };
+            let original = ledger_request(seed + 10, operation, b"{}".to_vec());
+            write_request(&mut client, &original).await.unwrap();
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, gate.wait_until_entered())
+                .await
+                .unwrap();
+            terminate
+                .send(Err(anyhow::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "PRIVATE-PROFILE-FAILURE",
+                ))))
+                .unwrap();
+            assert!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut client))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(!task.is_finished(), "connection abandoned admitted work");
+            assert!(fixture.root.is_locked(profile));
+            let (mut premature, refused_task) =
+                host.connect(&fixture, grant.clone(), seed + 1).await;
+            assert!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut premature))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert_profile_client_failed(refused_task).await;
+            assert!(matches!(
+                host.supervisor.run_state(profile),
+                Some(crate::profile_lifecycle::ProfileRunState::Failed(_))
+            ));
+            gate.release();
+            assert_profile_client_failed(task).await;
+            wait_for_recorded_outcome_count(&fixture.root, profile, if committed { 2 } else { 1 })
+                .await;
+            let (mut recovered, recovered_task) =
+                host.connect(&fixture, grant, seed + 2).await;
+            write_request(&mut recovered, &original).await.unwrap();
+            let actual = tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(actual, LocalServiceResponse::Success { .. }));
+            write_request(&mut recovered, &original).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                actual
+            );
+            let changed = ledger_request(seed + 10, "get_identity", b"{}".to_vec());
+            write_request(&mut recovered, &changed).await.unwrap();
+            assert!(matches!(
+                tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                LocalServiceResponse::Failure { code: LocalServiceErrorCode::Conflict, .. }
+            ));
+            if operation == "create_conversation" {
+                let LocalServiceResponse::Success { payload, .. } =
+                    request(&mut recovered, seed + 20, "list_conversations", b"{}").await
+                else {
+                    panic!("conversation listing failed");
+                };
+                let listed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(listed["conversation_ids"].as_array().unwrap().len(), 1);
+            }
+            drop((client, premature, recovered));
+            tokio::time::timeout(TEST_REQUEST_DEADLINE, recovered_task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            host.stop().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn profile_failure_releases_a_long_delivery_wait() {
+        let fixture = Fixture::new().await;
+        let profile = "session-profile-delivery";
+        let grant = fixture.grant(profile, 118);
+        let (source, terminate) = ControlledProfileSource::new(fixture.root.settings(), profile);
+        let mut host = SessionTestHost::new(&fixture, Arc::new(source)).await;
+        let (mut client, task) = host.connect(&fixture, grant.clone(), 118).await;
+        assert!(matches!(
+            request(&mut client, 118, "get_identity", b"{}").await,
+            LocalServiceResponse::Success { .. }
+        ));
+        write_request(
+            &mut client,
+            &ledger_request(
+                119,
+                "delivery.claim",
+                br#"{"maxEvents":1,"waitMilliseconds":30000}"#.to_vec(),
+            ),
+        )
+        .await
+        .unwrap();
+        wait_for_active_delivery(&fixture.root, profile).await;
+        terminate
+            .send(Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "PRIVATE-PROFILE-FAILURE",
+            ))))
+            .unwrap();
+        assert_profile_client_failed(task).await;
+        let (mut recovered, recovered_task) = host.connect(&fixture, grant, 120).await;
+        assert!(matches!(
+            request(
+                &mut recovered,
+                120,
+                "delivery.claim",
+                br#"{"maxEvents":1,"waitMilliseconds":0}"#,
+            )
+            .await,
+            LocalServiceResponse::Success { .. }
+        ));
+        drop((client, recovered));
+        tokio::time::timeout(TEST_REQUEST_DEADLINE, recovered_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        host.stop().await;
     }
 
     #[tokio::test]
