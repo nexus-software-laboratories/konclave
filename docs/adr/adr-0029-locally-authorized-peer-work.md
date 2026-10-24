@@ -1,6 +1,6 @@
 ---
 title: Permit locally authorized ordinary peer work
-status: Proposed
+status: Accepted
 date: 2026-10-24
 authors:
   - Konclave maintainers

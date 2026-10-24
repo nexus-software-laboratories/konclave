@@ -4288,12 +4288,16 @@ mod collaboration_policy_tests {
             let store = coordinator.store();
             let digest = store
                 .store_collaboration_policy_bundle(&bundle_with_work_permission(
-                    CollaborationPolicyLimits::new(None, None, None, Some(1)).unwrap(),
+                    CollaborationPolicyLimits::new(Some(3_600_000), None, None, Some(1)).unwrap(),
                     effect,
                 ))
                 .unwrap();
             store
-                .activate_collaboration_policy(conversation.conversation_id, digest, 0)
+                .activate_collaboration_policy(
+                    conversation.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
                 .unwrap();
             let local_device = coordinator.device_id().unwrap();
             let (delivery, request_message_id, notification_id, lease_generation) =
@@ -4404,17 +4408,21 @@ mod collaboration_policy_tests {
                     local_device,
                     "copilot_delivery_not_proven",
                 ),
-                (
-                    HarnessKind::Copilot,
-                    consumer(),
-                    DeviceId::from_bytes([8; DeviceId::LENGTH]),
-                    "directed_request_claim_inactive",
-                ),
             ] {
                 let result = evaluate(&work_payload, harness, consumer_id, device);
                 assert_eq!(result["decision"], "deny");
                 assert_eq!(result["reason"], reason);
             }
+            assert!(matches!(
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    DeviceId::from_bytes([8; DeviceId::LENGTH]),
+                    &serde_json::to_vec(&work_payload).unwrap(),
+                ),
+                Err(error) if error == "collaboration_policy_conflict"
+            ));
             for (field, value) in [
                 ("messageId", json!("11".repeat(16))),
                 (
@@ -4446,6 +4454,37 @@ mod collaboration_policy_tests {
                 "requestMessageId": work_payload["requestMessageId"],
                 "attempt": 1,
             });
+            for (activated_at, reason) in [
+                (0, "duration_limit_exceeded"),
+                (
+                    SystemUnixClock.now_unix_milliseconds() + 3_600_000,
+                    "clock_regressed",
+                ),
+            ] {
+                store
+                    .activate_collaboration_policy(
+                        conversation.conversation_id,
+                        digest,
+                        activated_at,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    evaluate(
+                        &work_payload,
+                        HarnessKind::Copilot,
+                        consumer(),
+                        local_device
+                    )["reason"],
+                    reason
+                );
+            }
+            store
+                .activate_collaboration_policy(
+                    conversation.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap();
             complete_collaboration_turn(
                 &store,
                 &grant(HarnessKind::Copilot),
@@ -4496,6 +4535,10 @@ mod collaboration_policy_tests {
             store
                 .release_adapter_consumer(consumer(), delivery.lease_id())
                 .unwrap();
+            store
+                .acquire_adapter_consumer(consumer(), delivery.lease_id(), 0, 1)
+                .unwrap();
+            assert_eq!(store.active_adapter_consumer_expiry(consumer()).unwrap(), Some(1));
             assert_eq!(
                 evaluate(
                     &work_payload,
