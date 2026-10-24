@@ -1,6 +1,6 @@
 ---
 title: Keep recipe composition in explicitly selected external providers
-status: Accepted
+status: Superseded
 date: 2026-09-20
 authors:
   - Konclave maintainers
@@ -9,7 +9,8 @@ tags:
   - composition
   - security
 supersedes: []
-superseded_by: []
+superseded_by:
+  - adr-0029-locally-authorized-peer-work
 ---
 
 # Keep recipe composition in explicitly selected external providers

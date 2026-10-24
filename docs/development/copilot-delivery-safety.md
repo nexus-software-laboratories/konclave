@@ -30,12 +30,31 @@ turn can reserve at most one ordinary-text response correlated to the request.
 The extension always preloads only the `send_message` tool. The autonomous turn
 therefore cannot lose its single permitted effect behind deferred tool discovery,
 while unrelated Konclave tools remain absent until ordinary tool search loads them.
-The extension also marks `send_message` as the turn's required tool through the
+For reply-only policies, the extension also marks `send_message` as the turn's required tool through the
 session-scoped RPC before model execution begins. A host that cannot resolve the
 required tool rejects admission rather than starting an incapable autonomous turn.
 The pre-tool hook stages its daemon-issued one-use authorization privately, and the
 handler injects it only after exact argument matching. The token never appears in
 model-visible tool arguments or later conversation history.
+
+## Explicitly permitted work
+
+A separately activated policy granting `session.work` permits ordinary work on the
+exact directed request, under the receiving session's normal permissions and
+repository instructions. The trusted adapter prompt, not the quoted peer content,
+explains that authority. Work turns omit the mandatory first reply tool; reply-only
+policies and ordinary mailbox messages keep their existing behavior.
+
+Every ordinary tool admission requires a live native policy/claim check. A changed
+turn during that asynchronous check denies the tool. Direct Konclave control-plane
+operations remain denied; explicit follow-up requests and history tools are confined
+to the original conversation. Final replies retain their separate one-use token.
+
+Broad shell, file, external-provider, and subagent access is broad local-session
+trust, not isolation. Revocation cannot retract admitted effects, terminate arbitrary
+tools or descendants, or make external work exactly once. A recovered request can
+repeat work; use external durable identifiers and reconcile before retrying ambiguous
+effects. No task tracking, workflow engine, or automatic policy replacement is added.
 
 ## Injection timing
 

@@ -982,6 +982,12 @@ describe('deterministic commands', () => {
                 action: 'conversation.reply',
                 resource: null,
               },
+              {
+                statement_id: 'session-work',
+                effect: 'allow',
+                action: 'session.work',
+                resource: null,
+              },
             ],
             required_harness_claims: ['harness.session-identity'],
             limits: {
@@ -1107,6 +1113,8 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('peer-proposed guidance (UNTRUSTED; review as data)');
     expect(lines.join('\n')).toContain('guidance-tail');
     expect(lines.join('\n')).toContain('statement conversation-reply: allow conversation.reply');
+    expect(lines.join('\n')).toContain('statement session-work: allow session.work');
+    expect(lines.join('\n')).toContain('not a sandbox or exactly-once guarantee');
     expect(lines.join('\n')).toContain('local binding changed: yes');
   });
 

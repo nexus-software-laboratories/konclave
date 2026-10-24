@@ -48,8 +48,11 @@ export function peerToolAction(toolName: string, workAllowed: boolean): PeerTool
     return { kind: 'work', conversationBound: false };
   }
   if (
-    allOperations.some((operation) => name === operation || name.endsWith(`.${operation}`)) ||
-    [...extensionControlTools].some((operation) => name.endsWith(`.${operation}`))
+    [...allOperations, ...extensionControlTools].some(
+      (operation) =>
+        name === operation ||
+        ['.', ':', '-', '_'].some((separator) => name.endsWith(`${separator}${operation}`)),
+    )
   ) {
     return null;
   }

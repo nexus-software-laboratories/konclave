@@ -20,6 +20,14 @@ const statusTools = ['get_identity', 'delivery_status'];
 const workTools = new Set([...conversationTools, ...statusTools]);
 
 describe('peer-work permission foundation', () => {
+  it.each(['.', ':', '-', '_', '__'])(
+    'rejects foreign-provider aliases using %s instead of treating them as ordinary work',
+    (separator) => {
+      for (const operation of [...allOperations, 'extensions_reload', 'extensions_manage']) {
+        expect(peerToolAction(`provider${separator}${operation}`, true)).toBeNull();
+      }
+    },
+  );
   it('uses one explicit namespaced permission, not policy display metadata', () => {
     expect(peerWorkAction).toBe('session.work');
     expect(parsePeerWorkPermission(undefined)).toBe(false);

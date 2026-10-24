@@ -1,6 +1,6 @@
 ---
 title: Separate deterministic collaboration policy from directed request content
-status: Accepted
+status: Superseded
 date: 2026-08-28
 authors:
   - Konclave maintainers
@@ -12,7 +12,8 @@ tags:
   - protocol
 supersedes:
   - adr-0011-content-addressed-collaboration-policies
-superseded_by: []
+superseded_by:
+  - adr-0029-locally-authorized-peer-work
 ---
 
 # Separate deterministic collaboration policy from directed request content

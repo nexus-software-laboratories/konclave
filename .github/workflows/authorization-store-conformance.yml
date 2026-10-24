@@ -96,6 +96,11 @@ jobs:
             --package KonclaveLocalDaemon \
             --lib \
             local_service::tests
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            local_service::collaboration_policy_tests
           cargo clippy \
             --locked \
             --package KonclaveLocalAuthorizationStore \

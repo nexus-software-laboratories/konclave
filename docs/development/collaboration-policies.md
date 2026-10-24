@@ -1,6 +1,6 @@
 # Collaboration policy contracts
 
-ADR 0012 separates editable policy sources, immutable shared bundles, and local
+ADRs 0012 and 0029 separate editable policy sources, immutable shared bundles, and local
 conversation bindings. This page owns the evolving implementation contract; it does
 not make a hosted registry or one authoring syntax part of the core protocol.
 
@@ -378,7 +378,7 @@ deferred until the first reaches a terminal outcome. Interactive and delivery
 connections retain fresh handshake instance identifiers; the daemon correlates their
 consumer authority only when both prove the same authenticated session public key.
 
-During that turn, the paved hook may map only Konclave's `send_message` tool to
+In a reply-only turn, the paved hook maps only Konclave's `send_message` tool to
 `conversation.reply`. Action evaluation requires the exact request message and
 handling-attempt number and permits only a response whose `reply_to` identifies that
 request. A successful evaluation issues a one-use authorization bound to the exact
@@ -407,16 +407,57 @@ turn cannot learn or replay it from an earlier successful call.
 The extension marks only `send_message` as non-deferred in the Copilot SDK so an
 authorized autonomous turn never depends on tool search to load its sole permitted
 effect. Every other Konclave tool remains auto-deferred, bounding the always-loaded
-schema cost and preventing the collaboration turn from gaining another operation.
-The synthetic turn is submitted through the scoped session RPC with
+schema cost. A reply-only synthetic turn is submitted through the scoped session RPC with
 `requiredTool: "send_message"`, the same host-enforced mechanism used by Copilot
 continuations that require `task_complete`. The extension explicitly initializes and
 validates the session tool set before admission. If the host cannot materialize that
 tool, the turn fails before model execution instead of asking the model to repair
 tool availability from untrusted request content.
-Workspace, shell, web, MCP, and subagent tools deny because their effects occur
-outside that atomic boundary. Approval-required actions also deny until the harness
+Workspace, shell, web, MCP, and subagent tools deny in reply-only turns.
+Approval-required actions also deny until the harness
 can compose policy approval with, rather than replace, native permissions.
+
+### Explicit ordinary working turns
+
+The separate `policy/examples/peer-work.json` example grants both
+`conversation.reply` and the implemented unscoped `session.work` action.
+It does not modify `request-reply.json` or any active binding. A policy name,
+repository file, peer request, or accepted response never enables work by itself.
+
+With an explicitly locally activated work policy, the trusted prompt authorizes
+using the request as task input under normal session tools, permissions, and
+repository instructions. The extension initializes tools as before but omits
+`requiredTool`, so the agent can inspect or implement before sending its final reply.
+The hook re-evaluates `session.work` against the current digest and exact live
+request claim before every ordinary tool, and rejects results if the turn changes
+while that check is pending. It never returns a blanket native permission approval.
+Missing native work evidence preserves reply-only behavior; malformed evidence fails.
+
+Direct Konclave policy, membership, pairing, delivery-control, and extension-control
+tools remain denied. Explicit `send_directed_request` follow-ups and history/policy
+inspection tools must name the same conversation. Foreign qualified aliases of
+Konclave operations are denied rather than treated as ordinary tools. The final
+`send_message` still uses the existing exact one-use response authorization.
+
+This is broad trust, not a sandbox. Shell/file/external tools can access whatever
+the ordinary session is permitted to access, including effects outside Konclave's
+direct-tool restrictions. Revocation, expiry, policy replacement, and lost claims
+block subsequent admissions, not already admitted effects or descendants.
+Reclaimed work can repeat external effects; only the correlated terminal response,
+not arbitrary repository or service changes, has Konclave's durable reservation.
+
+To enable it, review the example and run `/konclave use <conversation-id>` on each
+endpoint. The proposing endpoint uses
+`/konclave policy propose <proposal-id> -- <peer-work-source-path>` if no policy is
+active, or `/konclave policy replace <active-policy-digest> <proposal-id> -- <peer-work-source-path>`
+for explicit replacement. Proposal identifiers are fresh 16-byte lowercase hexadecimal
+values retained for reconciliation. On the other endpoint, use
+`/konclave policy inspect <proposal-id>`, review the complete statements and broad-work
+warning, then explicitly `/konclave policy accept <proposal-id> <policy-digest>`.
+Use the displayed exact digest and identifiers, not a policy name. Each endpoint
+retains its own activation decision; this procedure never silently replaces one.
+An installed native package includes the example under
+`share/konclave/policy/examples/peer-work.json`.
 
 The extension prepares a pending gate before enqueue and activates it only after the
 session observes the exact synthetic prompt carrying a fresh local turn token. Any

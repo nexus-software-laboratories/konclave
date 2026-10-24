@@ -528,7 +528,7 @@ function Copy-ClientPayload {
             Join-Path $policyRoot $relative
         )
     }
-    foreach ($relative in @('request-reply.json', 'catalog.json')) {
+    foreach ($relative in @('request-reply.json', 'peer-work.json', 'catalog.json')) {
         Copy-ReleaseFile (
             Join-Path $ProjectRoot 'policy' 'examples' $relative
         ) (
