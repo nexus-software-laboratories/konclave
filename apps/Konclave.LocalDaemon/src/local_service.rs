@@ -4894,6 +4894,10 @@ mod tests {
             tokio::task::JoinHandle<anyhow::Result<()>>,
         ) {
             fixture.persist_grant(grant.clone()).await;
+            #[expect(
+                clippy::async_yields_async,
+                reason = "Tests own the connection task to observe lease release after admitted work drains."
+            )]
             let server = async {
                 let stream = self.listener.accept().await.unwrap();
                 tokio::spawn(super::serve_client(
