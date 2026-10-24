@@ -4430,6 +4430,7 @@ mod collaboration_policy_tests {
                     json!(crate::mcp::encode_hex(request_message_id.as_bytes())),
                 ),
                 ("text", json!("not a send")),
+                ("resource", json!("workspace")),
             ] {
                 let mut malformed = work_payload.clone();
                 malformed[field] = value;
@@ -4442,7 +4443,7 @@ mod collaboration_policy_tests {
                 ));
             }
             let mut resourced = work_payload.clone();
-            resourced["resource"] = json!("workspace");
+            resourced["resource"] = json!("workspace.files");
             assert_eq!(
                 evaluate(&resourced, HarnessKind::Copilot, consumer(), local_device)["decision"],
                 "deny"
@@ -4538,7 +4539,10 @@ mod collaboration_policy_tests {
             store
                 .acquire_adapter_consumer(consumer(), delivery.lease_id(), 0, 1)
                 .unwrap();
-            assert_eq!(store.active_adapter_consumer_expiry(consumer()).unwrap(), Some(1));
+            assert_eq!(
+                store.active_adapter_consumer_expiry(consumer()).unwrap(),
+                Some(1)
+            );
             assert_eq!(
                 evaluate(
                     &work_payload,
