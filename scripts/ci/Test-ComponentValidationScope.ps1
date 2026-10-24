@@ -15,6 +15,7 @@ $expectedContracts = @(
     'generic-client'
     'installer-lifecycle'
     'local-delivery-diagnostics'
+    'profile-lifecycle'
     'pairing-rendezvous'
     'short-code-pairing'
     'trusted-device-alias'
@@ -31,6 +32,7 @@ $workflowByContract = [ordered]@{
     'generic-client' = 'generic-client-conformance.yml'
     'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
     'local-delivery-diagnostics' = 'local-delivery-diagnostics-conformance.yml'
+    'profile-lifecycle' = 'profile-lifecycle-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
     'short-code-pairing' = 'short-code-pairing-conformance.yml'
     'trusted-device-alias' = 'trusted-device-alias-conformance.yml'
@@ -109,6 +111,8 @@ $ownedCases = [ordered]@{
         'scripts/installation/Install-Konclave.ps1'
     'local-delivery-diagnostics' =
         'crates/Konclave.DomainCore/src/delivery_diagnostics.rs'
+    'profile-lifecycle' =
+        'apps/Konclave.LocalDaemon/src/profile_lifecycle.rs'
     'pairing-rendezvous' =
         'extensions/Konclave.HostExtension/src/service/pairing-handoff.ts'
     'short-code-pairing' =
@@ -127,6 +131,22 @@ foreach ($entry in $ownedCases.GetEnumerator()) {
         throw "Owned component change did not select '$($entry.Key)'."
     }
     Write-Output "owned change: contract=$($entry.Key), run=True"
+}
+
+foreach ($path in @(
+    'apps/Konclave.LocalDaemon/src/activity.rs'
+    'apps/Konclave.LocalDaemon/src/profile_runtime.rs'
+    'apps/Konclave.LocalDaemon/src/profile_supervisor.rs'
+    'apps/Konclave.LocalDaemon/src/local_service.rs'
+    'apps/Konclave.LocalDaemon/src/local_failure_diagnostics.rs'
+    'apps/Konclave.LocalDaemon/src/session_request_read.rs'
+)) {
+    if (-not (Get-ComponentValidationDecision `
+        -Contract 'profile-lifecycle' `
+        -EventName pull_request `
+        -ChangedFiles @($path))) {
+        throw "Profile lifecycle boundary is not selected: $path"
+    }
 }
 
 foreach ($contract in $expectedContracts) {

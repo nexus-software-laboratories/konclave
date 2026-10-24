@@ -66,6 +66,13 @@ function Get-ComponentValidationContracts {
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-command|runtime)\.ts|src/adapter/runtime\.ts|src/service/(?:client|tools|commands|failure-diagnostics|delivery-diagnostics|operations|validation)\.ts|tests/(?:delivery-diagnostics|failure-diagnostics|generic-command|service-client|thin-client|delivery-runtime|extension-runtime)\.test\.ts)$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
+        'profile-lifecycle' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/profile-lifecycle-conformance\.yml$'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:lib|activity|profile_lifecycle|profile_runtime|profile_supervisor|local_service|local_failure_diagnostics|session_request_read|service|pairing_supervisor)\.rs)$'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'pairing-rendezvous' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
