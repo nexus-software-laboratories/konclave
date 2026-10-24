@@ -3,8 +3,8 @@ use std::fmt;
 use KonclaveLocalServiceTransport::LocalServiceTransportError;
 use sha2::{Digest as _, Sha256};
 
-use crate::authorization_runtime::AuthorizationRuntimeError;
 use crate::application::ApplicationServiceError;
+use crate::authorization_runtime::AuthorizationRuntimeError;
 use crate::conversation::ConversationCoordinatorError;
 use crate::local_failure_log::LOCAL_FAILURE_TARGET;
 use crate::pairing_service::PairingServiceError;
@@ -171,16 +171,16 @@ fn typed_failure_code(error: &(dyn std::error::Error + 'static)) -> Option<&'sta
 
 fn profile_store_failure_code(error: &ProfileStoreError) -> &'static str {
     match error {
-            ProfileStoreError::ProfileLocked => "profile_locked",
-            ProfileStoreError::Io => "profile_io_failure",
-            ProfileStoreError::Storage => "profile_storage_failure",
-            ProfileStoreError::UnsupportedSchema => "profile_schema_unsupported",
-            ProfileStoreError::ProfileMismatch => "profile_mismatch",
-            ProfileStoreError::CorruptData => "profile_integrity_failure",
-            ProfileStoreError::Credential => "profile_credential_unavailable",
-            ProfileStoreError::AdapterConsumerActive => "adapter_consumer_active",
-            ProfileStoreError::InvalidAdapterLease => "adapter_lease_invalid",
-            _ => "profile_store_failure",
+        ProfileStoreError::ProfileLocked => "profile_locked",
+        ProfileStoreError::Io => "profile_io_failure",
+        ProfileStoreError::Storage => "profile_storage_failure",
+        ProfileStoreError::UnsupportedSchema => "profile_schema_unsupported",
+        ProfileStoreError::ProfileMismatch => "profile_mismatch",
+        ProfileStoreError::CorruptData => "profile_integrity_failure",
+        ProfileStoreError::Credential => "profile_credential_unavailable",
+        ProfileStoreError::AdapterConsumerActive => "adapter_consumer_active",
+        ProfileStoreError::InvalidAdapterLease => "adapter_lease_invalid",
+        _ => "profile_store_failure",
     }
 }
 
@@ -260,7 +260,9 @@ fn conversation_failure_code(error: &ConversationCoordinatorError) -> &'static s
         ConversationCoordinatorError::SecretStorage => "conversation_secret_storage_failure",
         ConversationCoordinatorError::StateUnavailable => "conversation_state_unavailable",
         ConversationCoordinatorError::MissingMlsState => "conversation_mls_state_missing",
-        ConversationCoordinatorError::MissingMembershipJournal => "conversation_membership_journal_missing",
+        ConversationCoordinatorError::MissingMembershipJournal => {
+            "conversation_membership_journal_missing"
+        }
         ConversationCoordinatorError::StateMismatch => "conversation_state_mismatch",
         ConversationCoordinatorError::Protocol => "conversation_protocol_failure",
         ConversationCoordinatorError::Unauthorized => "conversation_not_authorized",
@@ -314,10 +316,7 @@ mod tests {
         assert_eq!(format!("{failure:?}"), "ProfileFailure");
         assert_eq!(failure.to_string(), "the profile task set failed");
         let refusal = ProfileSupervisorError::FailedRuntime(failure);
-        assert_eq!(
-            failure_code(&anyhow::Error::new(refusal.clone())),
-            expected
-        );
+        assert_eq!(failure_code(&anyhow::Error::new(refusal.clone())), expected);
         assert!(!format!("{refusal:?}").contains("PRIVATE"));
         assert!(!refusal.to_string().contains("PRIVATE"));
     }
@@ -377,18 +376,53 @@ mod tests {
     fn application_and_pairing_failures_have_finite_retained_codes() {
         for (error, expected) in [
             (ApplicationServiceError::Task, "application_worker_failed"),
-            (ApplicationServiceError::Protocol, "application_protocol_failure"),
-            (ApplicationServiceError::LocalPolicyProposal, "application_local_policy_proposal"),
-            (ApplicationServiceError::PolicyProposalMismatch, "application_policy_proposal_mismatch"),
-            (ApplicationServiceError::IdempotencyConflict, "application_idempotency_conflict"),
-            (ApplicationServiceError::OutboundExpired, "application_outbound_expired"),
-            (ApplicationServiceError::OutboundRemoved, "application_outbound_removed"),
-            (ApplicationServiceError::InvalidRelayResponse, "application_relay_response_invalid"),
-            (ApplicationServiceError::SystemTimeUnavailable, "application_clock_unavailable"),
-            (ApplicationServiceError::WatchCapacityExceeded, "application_watch_capacity_exceeded"),
+            (
+                ApplicationServiceError::Protocol,
+                "application_protocol_failure",
+            ),
+            (
+                ApplicationServiceError::LocalPolicyProposal,
+                "application_local_policy_proposal",
+            ),
+            (
+                ApplicationServiceError::PolicyProposalMismatch,
+                "application_policy_proposal_mismatch",
+            ),
+            (
+                ApplicationServiceError::IdempotencyConflict,
+                "application_idempotency_conflict",
+            ),
+            (
+                ApplicationServiceError::OutboundExpired,
+                "application_outbound_expired",
+            ),
+            (
+                ApplicationServiceError::OutboundRemoved,
+                "application_outbound_removed",
+            ),
+            (
+                ApplicationServiceError::InvalidRelayResponse,
+                "application_relay_response_invalid",
+            ),
+            (
+                ApplicationServiceError::SystemTimeUnavailable,
+                "application_clock_unavailable",
+            ),
+            (
+                ApplicationServiceError::WatchCapacityExceeded,
+                "application_watch_capacity_exceeded",
+            ),
             (ApplicationServiceError::ProfileClosing, "profile_closing"),
-            (ApplicationServiceError::PolicyStorage(ProfileStoreError::Storage), "profile_storage_failure"),
-            (ApplicationServiceError::Conversation(ConversationCoordinatorError::StateUnavailable), "conversation_state_unavailable"),
+            (
+                ApplicationServiceError::PolicyStorage(ProfileStoreError::Storage),
+                "profile_storage_failure",
+            ),
+            (
+                ApplicationServiceError::Conversation(
+                    ConversationCoordinatorError::StateUnavailable,
+                ),
+                "conversation_state_unavailable",
+            ),
         ] {
             assert_retained_code(PairingServiceError::Application(error).into(), expected);
         }
@@ -419,16 +453,46 @@ mod tests {
     #[test]
     fn conversation_failures_remain_typed_through_transparent_wrappers() {
         for (error, expected) in [
-            (ConversationCoordinatorError::Profile(ProfileStoreError::Storage), "profile_storage_failure"),
-            (ConversationCoordinatorError::Cryptographic, "conversation_cryptographic_failure"),
-            (ConversationCoordinatorError::SecretStorage, "conversation_secret_storage_failure"),
-            (ConversationCoordinatorError::StateUnavailable, "conversation_state_unavailable"),
-            (ConversationCoordinatorError::MissingMlsState, "conversation_mls_state_missing"),
-            (ConversationCoordinatorError::MissingMembershipJournal, "conversation_membership_journal_missing"),
-            (ConversationCoordinatorError::StateMismatch, "conversation_state_mismatch"),
-            (ConversationCoordinatorError::Protocol, "conversation_protocol_failure"),
-            (ConversationCoordinatorError::Unauthorized, "conversation_not_authorized"),
-            (ConversationCoordinatorError::TrustedDeviceRemoved, "conversation_operation_failure"),
+            (
+                ConversationCoordinatorError::Profile(ProfileStoreError::Storage),
+                "profile_storage_failure",
+            ),
+            (
+                ConversationCoordinatorError::Cryptographic,
+                "conversation_cryptographic_failure",
+            ),
+            (
+                ConversationCoordinatorError::SecretStorage,
+                "conversation_secret_storage_failure",
+            ),
+            (
+                ConversationCoordinatorError::StateUnavailable,
+                "conversation_state_unavailable",
+            ),
+            (
+                ConversationCoordinatorError::MissingMlsState,
+                "conversation_mls_state_missing",
+            ),
+            (
+                ConversationCoordinatorError::MissingMembershipJournal,
+                "conversation_membership_journal_missing",
+            ),
+            (
+                ConversationCoordinatorError::StateMismatch,
+                "conversation_state_mismatch",
+            ),
+            (
+                ConversationCoordinatorError::Protocol,
+                "conversation_protocol_failure",
+            ),
+            (
+                ConversationCoordinatorError::Unauthorized,
+                "conversation_not_authorized",
+            ),
+            (
+                ConversationCoordinatorError::TrustedDeviceRemoved,
+                "conversation_operation_failure",
+            ),
         ] {
             assert_retained_code(PairingServiceError::Conversation(error).into(), expected);
         }

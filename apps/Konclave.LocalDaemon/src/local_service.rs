@@ -59,8 +59,8 @@ use crate::persistence::{
     CollaborationActionAuthorization, CompleteDirectedRequest, DirectedRequestClaim,
     DirectedRequestClaimOutcome, DirectedRequestCompletionOutcome, RemoteEventPayload,
 };
-use crate::profile_runtime::ProfileServices;
 use crate::profile_lifecycle::{ProfileRunState, observed_run_state, wait_for_profile_stop};
+use crate::profile_runtime::ProfileServices;
 use crate::profile_supervisor::{ProfileLease, ProfileSupervisor, ProfileSupervisorConfig};
 use crate::runtime::ProfileSource;
 use crate::session_request_read::read_authorized_request;
@@ -5592,62 +5592,63 @@ mod tests {
             super::RequestCancellationReason::AuthorizationUnavailable,
             super::RequestCancellationReason::ProfileUnavailable,
         ] {
-        let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
-        let binding = binding("session-rpc-binding");
-        let request = ledger_request(91, "create_conversation", b"{}".to_vec());
-        let key = super::LedgerKey::new(&binding, request.request_id());
-        assert!(matches!(
-            super::begin_request(&ledger, key.clone(), &request),
-            super::LedgerDecision::Execute
-        ));
-        let super::LedgerDecision::Wait(waiter) =
-            super::begin_request(&ledger, key.clone(), &request)
-        else {
-            panic!("an executing request did not retain its waiter");
-        };
-        let reserved = super::lock(&ledger).stored_bytes;
-        super::cancel_request(&ledger, &key, unavailable);
-        assert_eq!(super::commit_request(&ledger, &key), Some(unavailable));
-        assert_eq!(
-            super::interrupt_undispatched_request(&ledger, &key, unavailable),
-            Some(unavailable)
-        );
-        assert!(matches!(
-            *waiter.borrow(),
-            Some(super::RequestOutcome::AwaitingRecovery(
-                reason
-            )) if reason == unavailable
-        ));
-        super::mark_request_durable(&ledger, &key);
-        assert!(!super::request_is_durable(&ledger, &key));
-        assert_eq!(super::commit_request(&ledger, &key), Some(unavailable));
-        for changed in [
-            ledger_request(91, "create_conversation", br#"{"changed":true}"#.to_vec()),
-            ledger_request(91, "get_identity", b"{}".to_vec()),
-        ] {
+            let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
+            let binding = binding("session-rpc-binding");
+            let request = ledger_request(91, "create_conversation", b"{}".to_vec());
+            let key = super::LedgerKey::new(&binding, request.request_id());
             assert!(matches!(
-                super::begin_request(&ledger, key.clone(), &changed),
-                super::LedgerDecision::Conflict
+                super::begin_request(&ledger, key.clone(), &request),
+                super::LedgerDecision::Execute
             ));
-        }
-        assert!(matches!(
-            super::begin_request(&ledger, key.clone(), &request),
-            super::LedgerDecision::Execute
-        ));
-        assert_eq!(super::lock(&ledger).stored_bytes, reserved);
-        assert_eq!(super::lock(&ledger).order.len(), 1);
-        assert!(matches!(
-            super::begin_request(&ledger, key.clone(), &request),
-            super::LedgerDecision::Wait(_)
-        ));
-        assert_eq!(super::commit_request(&ledger, &key), None);
-        let actual = LocalServiceResponse::success(request.request_id(), b"{}".to_vec()).unwrap();
-        super::complete_request(&ledger, &key, actual.clone());
-        assert!(matches!(
-            super::begin_request(&ledger, key, &request),
-            super::LedgerDecision::Cached(response, true) if response == actual
-        ));
-        assert!(super::lock(&ledger).stored_bytes < reserved);
+            let super::LedgerDecision::Wait(waiter) =
+                super::begin_request(&ledger, key.clone(), &request)
+            else {
+                panic!("an executing request did not retain its waiter");
+            };
+            let reserved = super::lock(&ledger).stored_bytes;
+            super::cancel_request(&ledger, &key, unavailable);
+            assert_eq!(super::commit_request(&ledger, &key), Some(unavailable));
+            assert_eq!(
+                super::interrupt_undispatched_request(&ledger, &key, unavailable),
+                Some(unavailable)
+            );
+            assert!(matches!(
+                *waiter.borrow(),
+                Some(super::RequestOutcome::AwaitingRecovery(
+                    reason
+                )) if reason == unavailable
+            ));
+            super::mark_request_durable(&ledger, &key);
+            assert!(!super::request_is_durable(&ledger, &key));
+            assert_eq!(super::commit_request(&ledger, &key), Some(unavailable));
+            for changed in [
+                ledger_request(91, "create_conversation", br#"{"changed":true}"#.to_vec()),
+                ledger_request(91, "get_identity", b"{}".to_vec()),
+            ] {
+                assert!(matches!(
+                    super::begin_request(&ledger, key.clone(), &changed),
+                    super::LedgerDecision::Conflict
+                ));
+            }
+            assert!(matches!(
+                super::begin_request(&ledger, key.clone(), &request),
+                super::LedgerDecision::Execute
+            ));
+            assert_eq!(super::lock(&ledger).stored_bytes, reserved);
+            assert_eq!(super::lock(&ledger).order.len(), 1);
+            assert!(matches!(
+                super::begin_request(&ledger, key.clone(), &request),
+                super::LedgerDecision::Wait(_)
+            ));
+            assert_eq!(super::commit_request(&ledger, &key), None);
+            let actual =
+                LocalServiceResponse::success(request.request_id(), b"{}".to_vec()).unwrap();
+            super::complete_request(&ledger, &key, actual.clone());
+            assert!(matches!(
+                super::begin_request(&ledger, key, &request),
+                super::LedgerDecision::Cached(response, true) if response == actual
+            ));
+            assert!(super::lock(&ledger).stored_bytes < reserved);
         }
     }
 
@@ -5657,66 +5658,66 @@ mod tests {
             super::RequestCancellationReason::AuthorizationUnavailable,
             super::RequestCancellationReason::ProfileUnavailable,
         ] {
-        for reason in [
-            super::RequestCancellationReason::Caller,
-            super::RequestCancellationReason::Deadline,
-            super::RequestCancellationReason::Shutdown,
-            super::RequestCancellationReason::AuthorizationLost,
-        ] {
-            let raced = Arc::new(Mutex::new(super::RequestLedger::default()));
-            let raced_binding = binding("session-rpc-cancel-race");
-            let raced_request = ledger_request(92, "get_identity", b"{}".to_vec());
-            let raced_key = super::LedgerKey::new(&raced_binding, raced_request.request_id());
-            super::cancel_request(&raced, &raced_key, unavailable);
-            super::cancel_request(&raced, &raced_key, reason);
-            assert!(matches!(
-                super::begin_request(&raced, raced_key.clone(), &raced_request),
-                super::LedgerDecision::Execute
-            ));
-            assert_eq!(super::commit_request(&raced, &raced_key), Some(reason));
-            for suspend_first in [false, true] {
-                let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
-                let binding = binding("session-rpc-terminal");
-                let request = ledger_request(92, "get_identity", b"{}".to_vec());
-                let key = super::LedgerKey::new(&binding, request.request_id());
+            for reason in [
+                super::RequestCancellationReason::Caller,
+                super::RequestCancellationReason::Deadline,
+                super::RequestCancellationReason::Shutdown,
+                super::RequestCancellationReason::AuthorizationLost,
+            ] {
+                let raced = Arc::new(Mutex::new(super::RequestLedger::default()));
+                let raced_binding = binding("session-rpc-cancel-race");
+                let raced_request = ledger_request(92, "get_identity", b"{}".to_vec());
+                let raced_key = super::LedgerKey::new(&raced_binding, raced_request.request_id());
+                super::cancel_request(&raced, &raced_key, unavailable);
+                super::cancel_request(&raced, &raced_key, reason);
                 assert!(matches!(
-                    super::begin_request(&ledger, key.clone(), &request),
+                    super::begin_request(&raced, raced_key.clone(), &raced_request),
                     super::LedgerDecision::Execute
                 ));
-                super::cancel_request(&ledger, &key, unavailable);
-                if suspend_first {
+                assert_eq!(super::commit_request(&raced, &raced_key), Some(reason));
+                for suspend_first in [false, true] {
+                    let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
+                    let binding = binding("session-rpc-terminal");
+                    let request = ledger_request(92, "get_identity", b"{}".to_vec());
+                    let key = super::LedgerKey::new(&binding, request.request_id());
+                    assert!(matches!(
+                        super::begin_request(&ledger, key.clone(), &request),
+                        super::LedgerDecision::Execute
+                    ));
+                    super::cancel_request(&ledger, &key, unavailable);
+                    if suspend_first {
+                        assert_eq!(
+                            super::interrupt_undispatched_request(&ledger, &key, unavailable),
+                            Some(unavailable)
+                        );
+                    }
                     assert_eq!(
-                        super::interrupt_undispatched_request(&ledger, &key, unavailable),
-                        Some(unavailable)
+                        super::cancel_request(&ledger, &key, reason),
+                        super::RequestCancellationState::Requested
                     );
-                }
-                }
-                assert_eq!(
-                    super::cancel_request(&ledger, &key, reason),
-                    super::RequestCancellationState::Requested
-                );
-                if !suspend_first {
+                    if !suspend_first {
+                        assert_eq!(
+                            super::interrupt_undispatched_request(&ledger, &key, unavailable),
+                            Some(reason)
+                        );
+                        super::complete_request_with_durability(
+                            &ledger,
+                            &key,
+                            LocalServiceResponse::failure(request.request_id(), reason.error_code()),
+                            false,
+                        );
+                    }
+                    assert!(matches!(
+                        super::begin_request(&ledger, key.clone(), &request),
+                        super::LedgerDecision::Cached(
+                            LocalServiceResponse::Failure { code, .. }, false
+                        ) if code == reason.error_code()
+                    ));
                     assert_eq!(
-                        super::interrupt_undispatched_request(&ledger, &key, unavailable),
-                        Some(reason)
-                    );
-                    super::complete_request_with_durability(
-                        &ledger,
-                        &key,
-                        LocalServiceResponse::failure(request.request_id(), reason.error_code()),
-                        false,
+                        super::cancel_request(&ledger, &key, unavailable),
+                        super::RequestCancellationState::Terminal
                     );
                 }
-                assert!(matches!(
-                    super::begin_request(&ledger, key.clone(), &request),
-                    super::LedgerDecision::Cached(
-                        LocalServiceResponse::Failure { code, .. }, false
-                    ) if code == reason.error_code()
-                ));
-                assert_eq!(
-                    super::cancel_request(&ledger, &key, unavailable),
-                    super::RequestCancellationState::Terminal
-                );
             }
         }
     }
@@ -5727,45 +5728,46 @@ mod tests {
             super::RequestCancellationReason::AuthorizationUnavailable,
             super::RequestCancellationReason::ProfileUnavailable,
         ] {
-        for actual in [
-            LocalServiceResponse::success(RequestId::from_bytes([93; 16]), b"{}".to_vec()).unwrap(),
-            LocalServiceResponse::failure(
-                RequestId::from_bytes([93; 16]),
-                LocalServiceErrorCode::ReconciliationPending,
-            ),
-        ] {
-            let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
-            let binding = binding("session-rpc-committed");
-            let request = ledger_request(93, "send_message", b"{}".to_vec());
-            let key = super::LedgerKey::new(&binding, request.request_id());
-            assert!(matches!(
-                super::begin_request(&ledger, key.clone(), &request),
-                super::LedgerDecision::Execute
-            ));
-            assert_eq!(super::commit_request(&ledger, &key), None);
-            assert_eq!(
-                super::cancel_request(&ledger, &key, unavailable),
-                super::RequestCancellationState::Reconciling
-            );
-            assert_eq!(
-                super::interrupt_undispatched_request(&ledger, &key, unavailable),
-                None
-            );
-            assert!(matches!(
-                super::begin_request(&ledger, key.clone(), &request),
-                super::LedgerDecision::Wait(_)
-            ));
-            super::complete_request_with_durability(&ledger, &key, actual.clone(), false);
-            assert!(matches!(
-                super::begin_request(&ledger, key.clone(), &request),
-                super::LedgerDecision::Cached(response, false) if response == actual
-            ));
-            super::mark_request_durable(&ledger, &key);
-            assert!(matches!(
-                super::begin_request(&ledger, key, &request),
-                super::LedgerDecision::Cached(response, true) if response == actual
-            ));
-        }
+            for actual in [
+                LocalServiceResponse::success(RequestId::from_bytes([93; 16]), b"{}".to_vec())
+                    .unwrap(),
+                LocalServiceResponse::failure(
+                    RequestId::from_bytes([93; 16]),
+                    LocalServiceErrorCode::ReconciliationPending,
+                ),
+            ] {
+                let ledger = Arc::new(Mutex::new(super::RequestLedger::default()));
+                let binding = binding("session-rpc-committed");
+                let request = ledger_request(93, "send_message", b"{}".to_vec());
+                let key = super::LedgerKey::new(&binding, request.request_id());
+                assert!(matches!(
+                    super::begin_request(&ledger, key.clone(), &request),
+                    super::LedgerDecision::Execute
+                ));
+                assert_eq!(super::commit_request(&ledger, &key), None);
+                assert_eq!(
+                    super::cancel_request(&ledger, &key, unavailable),
+                    super::RequestCancellationState::Reconciling
+                );
+                assert_eq!(
+                    super::interrupt_undispatched_request(&ledger, &key, unavailable),
+                    None
+                );
+                assert!(matches!(
+                    super::begin_request(&ledger, key.clone(), &request),
+                    super::LedgerDecision::Wait(_)
+                ));
+                super::complete_request_with_durability(&ledger, &key, actual.clone(), false);
+                assert!(matches!(
+                    super::begin_request(&ledger, key.clone(), &request),
+                    super::LedgerDecision::Cached(response, false) if response == actual
+                ));
+                super::mark_request_durable(&ledger, &key);
+                assert!(matches!(
+                    super::begin_request(&ledger, key, &request),
+                    super::LedgerDecision::Cached(response, true) if response == actual
+                ));
+            }
         }
     }
 
@@ -7575,7 +7577,10 @@ mod tests {
         let mut host = SessionTestHost::new(&fixture, Arc::new(source)).await;
         let (mut first, first_task) = host.connect(&fixture, grant.clone(), 110).await;
         let original = request(&mut first, 110, "get_identity", b"{}").await;
-        let LocalServiceResponse::Success { payload: identity, .. } = original else {
+        let LocalServiceResponse::Success {
+            payload: identity, ..
+        } = original
+        else {
             panic!("original identity was unavailable");
         };
         let (mut second, second_task) = host.connect(&fixture, grant.clone(), 111).await;
@@ -7632,7 +7637,12 @@ mod tests {
         for (profile, operation, committed, seed) in [
             ("session-profile-status", "service.status", false, 115),
             ("session-profile-create", "create_conversation", false, 116),
-            ("session-profile-committed", "create_conversation", true, 117),
+            (
+                "session-profile-committed",
+                "create_conversation",
+                true,
+                117,
+            ),
         ] {
             let fixture = Fixture::new().await;
             let grant = fixture.grant(profile, seed);
@@ -7685,8 +7695,7 @@ mod tests {
             assert_profile_client_failed(task).await;
             wait_for_recorded_outcome_count(&fixture.root, profile, if committed { 2 } else { 1 })
                 .await;
-            let (mut recovered, recovered_task) =
-                host.connect(&fixture, grant, seed + 2).await;
+            let (mut recovered, recovered_task) = host.connect(&fixture, grant, seed + 2).await;
             write_request(&mut recovered, &original).await.unwrap();
             let actual = tokio::time::timeout(TEST_REQUEST_DEADLINE, read_response(&mut recovered))
                 .await
@@ -7708,7 +7717,10 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap(),
-                LocalServiceResponse::Failure { code: LocalServiceErrorCode::Conflict, .. }
+                LocalServiceResponse::Failure {
+                    code: LocalServiceErrorCode::Conflict,
+                    ..
+                }
             ));
             if operation == "create_conversation" {
                 let LocalServiceResponse::Success { payload, .. } =

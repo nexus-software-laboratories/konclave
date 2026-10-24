@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 
 use crate::activity::{ProfileActivity, ProfileActivityError};
 use crate::persistence::{ProfileId, ProfileStoreError};
-use crate::profile_runtime::{ProfileHost, ProfileRunState, ProfileServices};
 use crate::profile_lifecycle::{ProfileFailure, observed_run_state};
+use crate::profile_runtime::{ProfileHost, ProfileRunState, ProfileServices};
 use crate::runtime::{ProfileSource, initialize_profile};
 
 /// How many profiles one service process may host at once.
@@ -653,8 +653,7 @@ impl ProfileSupervisor {
                 .iter()
                 .filter_map(|(key, slot)| match slot {
                     ProfileSlot::Active(active)
-                        if active.run_state().is_terminal()
-                            && active.attached_clients() == 0 =>
+                        if active.run_state().is_terminal() && active.attached_clients() == 0 =>
                     {
                         Some(key.clone())
                     }
@@ -883,9 +882,7 @@ impl ProfileSupervisor {
                 state.slots.remove(&key);
             }
             Some(SlotView::Active(active)) => {
-                if let Some(refusal) =
-                    ProfileSupervisorError::for_run_state(active.run_state())
-                {
+                if let Some(refusal) = ProfileSupervisorError::for_run_state(active.run_state()) {
                     if active.attached_clients() > 0 {
                         return Err(refusal);
                     }
@@ -1232,7 +1229,10 @@ mod tests {
             (ProfileRunState::Running, None),
             (ProfileRunState::Stopped, Some("runtime_stopped")),
             (ProfileRunState::Unavailable, Some("runtime_unavailable")),
-            (ProfileRunState::Failed(failure.clone()), Some("failed_runtime")),
+            (
+                ProfileRunState::Failed(failure.clone()),
+                Some("failed_runtime"),
+            ),
         ] {
             let refusal = ProfileSupervisorError::for_run_state(state);
             assert_eq!(refusal.as_ref().map(ProfileSupervisorError::code), expected);
@@ -1680,11 +1680,8 @@ mod tests {
     async fn a_failed_runtime_is_reported_without_ending_other_profiles() {
         let root = TestProfileRoot::new();
         let (source, trigger) = ControlledProfileSource::new(root.settings(), "failing");
-        let supervisor = ProfileSupervisor::new(
-            Arc::new(source),
-            ProfileSupervisorConfig::default(),
-        )
-        .unwrap();
+        let supervisor =
+            ProfileSupervisor::new(Arc::new(source), ProfileSupervisorConfig::default()).unwrap();
 
         let healthy = supervisor.attach("healthy").await.unwrap();
         let failing = supervisor.attach("failing").await.unwrap();
@@ -1716,8 +1713,13 @@ mod tests {
             matches!(refused, ProfileSupervisorError::FailedRuntime(_)),
             "{refused:?}"
         );
-        assert_eq!(refused.to_string(), "the profile runtime failed and its clients have not detached");
-        assert!(format!("{:#}", refused.failure_source().unwrap()).contains("profile runtime failed"));
+        assert_eq!(
+            refused.to_string(),
+            "the profile runtime failed and its clients have not detached"
+        );
+        assert!(
+            format!("{:#}", refused.failure_source().unwrap()).contains("profile runtime failed")
+        );
 
         drop(failing);
         let failures = supervisor.reap_failed().await;

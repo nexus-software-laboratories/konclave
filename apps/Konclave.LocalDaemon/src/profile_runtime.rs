@@ -15,8 +15,8 @@ use crate::application::ApplicationService;
 use crate::conversation::ConversationCoordinator;
 use crate::health::DeliveryHealth;
 use crate::pairing_service::PairingService;
-use crate::profile_lifecycle::{ProfileComponent, ProfileFailure};
 pub(crate) use crate::profile_lifecycle::ProfileRunState;
+use crate::profile_lifecycle::{ProfileComponent, ProfileFailure};
 use crate::service::Service;
 
 /// How often relay watch supervision rediscovers this profile's conversations.
