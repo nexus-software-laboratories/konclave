@@ -48,9 +48,7 @@ describe('peer-work permission foundation', () => {
         kind: 'work',
         conversationBound: false,
       });
-      expect(peerToolAction(`functions.${name}`, true)).toEqual(
-        peerToolAction(name, true),
-      );
+      expect(peerToolAction(`functions.${name}`, true)).toEqual(peerToolAction(name, true));
     },
   );
 

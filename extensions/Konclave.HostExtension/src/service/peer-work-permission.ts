@@ -3,8 +3,7 @@ import { allOperations } from './operations.js';
 export const peerWorkAction = 'session.work';
 
 export type PeerToolAction =
-  | { readonly kind: 'reply' }
-  | { readonly kind: 'work'; readonly conversationBound: boolean };
+  { readonly kind: 'reply' } | { readonly kind: 'work'; readonly conversationBound: boolean };
 
 const conversationTools = new Set([
   'send_directed_request',
@@ -48,11 +47,9 @@ export function peerToolAction(toolName: string, workAllowed: boolean): PeerTool
   if (statusTools.has(name)) {
     return { kind: 'work', conversationBound: false };
   }
-  const terminalName = name.split('.').at(-1);
   if (
-    allOperations.includes(name) ||
-    (terminalName !== undefined &&
-      (allOperations.includes(terminalName) || extensionControlTools.has(terminalName)))
+    allOperations.some((operation) => name === operation || name.endsWith(`.${operation}`)) ||
+    [...extensionControlTools].some((operation) => name.endsWith(`.${operation}`))
   ) {
     return null;
   }
