@@ -153,7 +153,6 @@ impl ShortCodeOperationState {
     }
 
     /// Revokes local confirmation before checkpointing cancellation of an attempt.
-    #[cfg(test)]
     pub(crate) fn begin_cancellation(&mut self) {
         self.phase = ShortCodePhase::Cancelling;
         self.confirmation = ShortCodeConfirmationState::Cancelled;
@@ -161,7 +160,6 @@ impl ShortCodeOperationState {
     }
 
     /// Finishes cancellation without extending an existing attempt deadline.
-    #[cfg(test)]
     pub(crate) fn complete_cancellation(&mut self, now_unix_seconds: u64) {
         self.begin_cancellation();
         self.phase = ShortCodePhase::Cancelled;
