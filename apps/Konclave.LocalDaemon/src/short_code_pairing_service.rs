@@ -1423,6 +1423,7 @@ mod tests {
         fail_after_capability_publish: bool,
         fail_after_cancel: bool,
         cancelled_attempts: Vec<ShortCodePairingAttemptId>,
+        cancellation_observer: Option<tokio::sync::mpsc::Sender<()>>,
     }
 
     #[derive(Clone)]
@@ -1653,6 +1654,9 @@ mod tests {
             if std::mem::take(&mut core.fail_after_cancel) {
                 Err(KonclaveClientError::TransportUnavailable)
             } else {
+                if let Some(observer) = &core.cancellation_observer {
+                    observer.try_send(()).unwrap();
+                }
                 Ok(())
             }
         }
@@ -1794,6 +1798,40 @@ mod tests {
             }
         }
         panic!("short-code identity and SAS exchange did not complete");
+    }
+
+    async fn expire_with_running_supervisor(
+        pairings: &PairingService<MemoryShortCodeRelay>,
+        core: &Arc<Mutex<MemoryCore>>,
+        attempt_id: ShortCodePairingAttemptId,
+    ) {
+        let (observer, mut cancellations) = tokio::sync::mpsc::channel(1);
+        core.lock().unwrap().cancellation_observer = Some(observer);
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let supervisor = crate::pairing_supervisor::PairingSupervisor::new(
+            Some(pairings.clone()),
+            pairings.local_device_id().await.unwrap(),
+        );
+        let mut worker = tokio::spawn(supervisor.run_until(async move {
+            stopped.await.unwrap();
+        }));
+        tokio::select! {
+            result = &mut worker => panic!("pairing worker stopped before cancellation: {result:?}"),
+            event = cancellations.recv() => event.unwrap(),
+        }
+        pairings
+            .conversations
+            .activity()
+            .wait_drained(std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            pairings.short_code_status(attempt_id).await.unwrap().phase,
+            ShortCodePhase::Cancelled
+        );
+        assert!(!worker.is_finished());
+        shutdown.send(()).unwrap();
+        worker.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -1995,25 +2033,21 @@ mod tests {
                         .claim_short_code_pairing(&created.code, NOW)
                         .await
                         .unwrap();
-                    let (creator_status, claimant_status) = mutually_verified_statuses(
-                        &creator_service,
-                        &claimant_service,
-                        attempt_id,
-                    )
-                    .await;
+                    let (creator_status, claimant_status) =
+                        mutually_verified_statuses(&creator_service, &claimant_service, attempt_id)
+                            .await;
                     let (mut pairings, status, profile_name, principal) = match role {
                         ShortCodeRole::Creator => {
                             (creator_service, creator_status, "cancellation-creator", 1)
                         }
-                        ShortCodeRole::Claimant => {
-                            (claimant_service, claimant_status, "cancellation-claimant", 2)
-                        }
+                        ShortCodeRole::Claimant => (
+                            claimant_service,
+                            claimant_status,
+                            "cancellation-claimant",
+                            2,
+                        ),
                     };
-                    let conversation_id = pairings
-                        .conversations
-                        .create()
-                        .unwrap()
-                        .conversation_id;
+                    let conversation_id = pairings.conversations.create().unwrap().conversation_id;
                     let confirmed = pairings
                         .confirm_short_code_pairing(
                             attempt_id,
@@ -2028,11 +2062,8 @@ mod tests {
                     assert!(confirmed.pairing_id.is_none());
                     let original = pairings.load_short_code(attempt_id).await.unwrap();
                     assert!(original.state.local_confirmation.is_some());
-                    let mut retained_proof = pairings
-                        .load_short_code(attempt_id)
-                        .await
-                        .unwrap()
-                        .state;
+                    let mut retained_proof =
+                        pairings.load_short_code(attempt_id).await.unwrap().state;
                     retained_proof.phase = ShortCodePhase::Cancelling;
                     retained_proof.confirmation = ShortCodeConfirmationState::Cancelled;
                     assert!(matches!(
@@ -2055,7 +2086,12 @@ mod tests {
                         NOW
                     };
                     let result = if expired {
-                        pairings.sync_all_active_once(now).await.map(|_| ())
+                        if response_lost {
+                            pairings.sync_all_active_once(now).await.map(|_| ())
+                        } else {
+                            expire_with_running_supervisor(&pairings, &core, attempt_id).await;
+                            Ok(())
+                        }
                     } else {
                         pairings
                             .cancel_short_code_pairing(attempt_id, now)
@@ -2136,10 +2172,7 @@ mod tests {
                             .generation,
                         cancelled.generation
                     );
-                    let preserved = pairings
-                        .conversations
-                        .open(conversation_id)
-                        .unwrap();
+                    let preserved = pairings.conversations.open(conversation_id).unwrap();
                     assert!(
                         preserved
                             .group
