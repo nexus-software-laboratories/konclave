@@ -208,6 +208,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0029-locally-authorized-peer-work.md",
+        "title": "ADR 0029: Locally authorized peer work",
+        "section": "Architecture",
+        "order": 290,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

@@ -90,19 +90,28 @@ jobs:
           node-version: ${{ steps.toolchains.outputs.node }}
           npm-cache-scope: agent-plugin-conformance
           npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
-      - name: Verify deterministic Agent Plugin
+      - name: Verify pure peer-work permission foundation
         if: steps.scope.outputs.run == 'true'
         working-directory: extensions/Konclave.HostExtension
         run: |
           npm ci
-          npm run format:check
+          npm run format
+          git diff
           npm run lint
           npm run typecheck
+          npm run test:unit -- tests/peer-work-permission.test.ts
+      - name: Verify deterministic Agent Plugin
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        run: |
           npm run test:coverage
           npm run compile
           npm run package
           npm run verify:package
           npm run test:package-contract
+      - name: Require unchanged submitted plugin formatting
+        if: steps.scope.outputs.run == 'true'
+        run: git diff --exit-code
       - name: Verify distribution integration
         if: steps.scope.outputs.run == 'true'
         shell: pwsh

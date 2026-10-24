@@ -14,7 +14,6 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0008: Host logical agent profiles in one per-user local service](../adr/adr-0008-shared-local-service.md)
 - [ADR 0009: Authorize local sessions through evidence-bound exact-profile grants](../adr/adr-0009-evidence-bound-session-grants.md)
 - [ADR 0010: Automate two-command pairing only under AccountTrusted capability policy](../adr/adr-0010-account-trusted-two-command-pairing.md)
-- [ADR 0012: Separate deterministic collaboration policy from directed request content](../adr/adr-0012-structured-directed-collaboration-requests.md)
 - [ADR 0013: Expose A2A through an edge gateway without replacing Konclave transport](../adr/adr-0013-a2a-edge-interoperability.md)
 - [ADR 0014: Persist A2A task projections behind a portable store contract](../adr/adr-0014-a2a-task-projection-store.md)
 - [ADR 0015: Keep A2A agent discovery private by default with authenticated projections](../adr/adr-0015-private-a2a-agent-discovery.md)
@@ -29,9 +28,16 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0025: Bootstrap repeat pairing through an existing authenticated conversation](../adr/adr-0025-trusted-device-alias-bootstrap.md)
 - [ADR 0026: Explain message delivery through authenticated local metadata](../adr/adr-0026-local-delivery-diagnostics.md)
 - [ADR 0027: Retain explicit service trust and defer automatic LAN discovery](../adr/adr-0027-lan-service-discovery.md)
-- [ADR 0028: Keep recipe composition in explicitly selected external providers](../adr/adr-0028-external-recipe-composition.md)
+- [ADR 0029: Permit locally authorized ordinary peer work](../adr/adr-0029-locally-authorized-peer-work.md)
 
 ## Superseded records
+
+- [ADR 0012: Separate deterministic collaboration policy from directed request content](../adr/adr-0012-structured-directed-collaboration-requests.md) —
+  its unconditional reply-only tool restriction is replaced by ADR 0029; deterministic
+  policy and terminal-response separation are preserved.
+- [ADR 0028: Keep recipe composition in explicitly selected external providers](../adr/adr-0028-external-recipe-composition.md) —
+  its automatic-turn tool restriction is replaced by ADR 0029; external recipe
+  ownership and non-executable definition data are preserved.
 
 - [ADR 0005: Separate harness delivery from the daemon through an outbound local adapter channel](../adr/adr-0005-harness-neutral-adapter-boundary.md) —
   superseded by ADR 0008 after the per-session process model proved unsuitable for

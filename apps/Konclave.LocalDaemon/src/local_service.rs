@@ -2083,7 +2083,9 @@ fn revalidate_collaboration_send(
             && revalidated.reply_to_message_id == candidate.reply_to_message_id
             && revalidated.directed_request_claim == candidate.directed_request_claim
             && revalidated.text.as_str() == candidate.text.as_str()),
-        CollaborationActionEvaluation::Deny(_) => Ok(false),
+        CollaborationActionEvaluation::AllowWork | CollaborationActionEvaluation::Deny(_) => {
+            Ok(false)
+        }
     }
 }
 
@@ -2160,6 +2162,7 @@ struct CollaborationTurnAuthorizationResult {
     policy_name: Option<String>,
     request_message_id: Option<String>,
     attempt: Option<u32>,
+    work_allowed: bool,
 }
 
 #[derive(Serialize)]
@@ -2195,6 +2198,7 @@ struct CollaborationSendAuthorization {
 
 enum CollaborationActionEvaluation {
     Allow(Box<CollaborationSendCandidate>),
+    AllowWork,
     Deny(&'static str),
 }
 
@@ -2530,6 +2534,15 @@ fn evaluate_collaboration_action_request(
     );
     match decision {
         CollaborationPolicyDecision::Allow => {
+            if request.action == "session.work" && request.resource.is_none() {
+                if request.message_id.is_some()
+                    || request.reply_to_message_id.is_some()
+                    || request.text.is_some()
+                {
+                    return Err("invalid_request".to_string());
+                }
+                return Ok(CollaborationActionEvaluation::AllowWork);
+            }
             if request.action != "conversation.reply" || request.resource.is_some() {
                 return Ok(CollaborationActionEvaluation::Deny(
                     "harness_control_missing",
@@ -2609,6 +2622,30 @@ fn encode_collaboration_turn_authorization(
     active: Option<&crate::persistence::ActiveCollaborationPolicy>,
     claim: Option<DirectedRequestClaim>,
 ) -> Result<Vec<u8>, String> {
+    let work_allowed = if let ("authorized", Some(active)) = (outcome, active) {
+        let elapsed = SystemUnixClock
+            .now_unix_milliseconds()
+            .checked_sub(active.activated_at_unix_milliseconds())
+            .ok_or_else(|| "clock_regressed".to_string())?;
+        let context = copilot_collaboration_policy_context(active.bundle())?;
+        let request = CollaborationPolicyEvaluationRequest::new(
+            CollaborationPolicyTarget::new("session.work", None)
+                .map_err(|_| "internal".to_string())?,
+            CollaborationPolicyCost::default(),
+            false,
+        );
+        matches!(
+            evaluate_collaboration_policy(
+                active.bundle(),
+                &context,
+                &request,
+                CollaborationPolicyUsage::new(elapsed, 0, 0, 1),
+            ),
+            CollaborationPolicyDecision::Allow
+        )
+    } else {
+        false
+    };
     serde_json::to_vec(&CollaborationTurnAuthorizationResult {
         outcome,
         reason,
@@ -2617,6 +2654,7 @@ fn encode_collaboration_turn_authorization(
         request_message_id: claim
             .map(|value| crate::mcp::encode_hex(value.request_message_id.as_bytes())),
         attempt: claim.map(|value| value.attempt),
+        work_allowed,
     })
     .map_err(|_| "response_encoding_failed".to_string())
 }
@@ -2629,6 +2667,7 @@ fn issue_collaboration_action_evaluation(
     authorizations.retain(|_, authorization| authorization.expires_at_unix_milliseconds > now);
     let (decision, reason, authorization) = match evaluation {
         CollaborationActionEvaluation::Deny(reason) => ("deny", Some(reason), None),
+        CollaborationActionEvaluation::AllowWork => ("allow", None, None),
         CollaborationActionEvaluation::Allow(candidate) => {
             if authorizations.len() >= MAX_COLLABORATION_SEND_AUTHORIZATIONS {
                 return serde_json::to_vec(&CollaborationActionEvaluationResult {
@@ -2701,7 +2740,7 @@ fn copilot_collaboration_policy_context(
         .map(|(action, resource)| CollaborationPolicyTarget::new(action, resource))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "internal".to_string())?;
-    let proven_harness_controls = [("conversation.reply", None)]
+    let proven_harness_controls = [("conversation.reply", None), ("session.work", None)]
         .into_iter()
         .map(|(action, resource)| {
             CollaborationPolicyTarget::new(action, resource.map(str::to_string))
@@ -4119,20 +4158,33 @@ mod collaboration_policy_tests {
     }
 
     fn bundle(limits: CollaborationPolicyLimits) -> Vec<u8> {
+        bundle_with_work_permission(limits, None)
+    }
+
+    fn bundle_with_work_permission(
+        limits: CollaborationPolicyLimits,
+        work_effect: Option<CollaborationPolicyEffect>,
+    ) -> Vec<u8> {
+        let mut statements = vec![
+            CollaborationPolicyStatement::new(
+                "reply",
+                CollaborationPolicyEffect::Allow,
+                "conversation.reply",
+                None,
+            )
+            .unwrap(),
+        ];
+        if let Some(effect) = work_effect {
+            statements.push(
+                CollaborationPolicyStatement::new("work", effect, "session.work", None).unwrap(),
+            );
+        }
         encode_collaboration_policy_bundle(
             &CollaborationPolicyBundle::new(
                 ProtocolVersion::application_v1(),
                 "copilot-policy",
                 Some("Align the contract and report the result.".to_string()),
-                vec![
-                    CollaborationPolicyStatement::new(
-                        "reply",
-                        CollaborationPolicyEffect::Allow,
-                        "conversation.reply",
-                        None,
-                    )
-                    .unwrap(),
-                ],
+                statements,
                 vec!["harness.session-identity".to_string()],
                 limits,
             )
@@ -4219,6 +4271,291 @@ mod collaboration_policy_tests {
     }
 
     #[test]
+    fn copilot_peer_work_requires_live_policy_and_exact_request_claim() {
+        for (label, effect, allowed) in [
+            ("reply-only", None, false),
+            ("work-allowed", Some(CollaborationPolicyEffect::Allow), true),
+            ("work-denied", Some(CollaborationPolicyEffect::Deny), false),
+            (
+                "work-approval",
+                Some(CollaborationPolicyEffect::RequireLocalApproval),
+                false,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let coordinator = open_coordinator(root.path(), label);
+            let conversation = coordinator.create().unwrap();
+            let store = coordinator.store();
+            let digest = store
+                .store_collaboration_policy_bundle(&bundle_with_work_permission(
+                    CollaborationPolicyLimits::new(Some(3_600_000), None, None, Some(1)).unwrap(),
+                    effect,
+                ))
+                .unwrap();
+            store
+                .activate_collaboration_policy(
+                    conversation.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap();
+            let local_device = coordinator.device_id().unwrap();
+            let (delivery, request_message_id, notification_id, lease_generation) =
+                directed_request_delivery(
+                    &store,
+                    conversation.conversation_id,
+                    conversation.routing_id,
+                    local_device,
+                );
+            let authorize_payload = serde_json::to_vec(&json!({
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "requestMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+                "notificationId": crate::mcp::encode_hex(notification_id.as_bytes()),
+                "leaseGeneration": lease_generation,
+            }))
+            .unwrap();
+            let authorized: serde_json::Value = serde_json::from_slice(
+                &authorize_collaboration_turn(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    Some(&delivery),
+                    local_device,
+                    &authorize_payload,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(authorized["outcome"], "authorized", "{label}");
+            assert_eq!(authorized["workAllowed"], allowed, "{label}");
+            let work_payload = json!({
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "policyDigest": crate::mcp::encode_hex(digest.as_bytes()),
+                "action": "session.work",
+                "requestMessageId": crate::mcp::encode_hex(request_message_id.as_bytes()),
+                "attempt": 1,
+            });
+            let evaluate = |payload: &serde_json::Value, harness, consumer_id, device| {
+                let mut authorizations = HashMap::new();
+                let result: serde_json::Value = serde_json::from_slice(
+                    &issue_collaboration_action_evaluation(
+                        &mut authorizations,
+                        evaluate_collaboration_action(
+                            &store,
+                            &grant(harness),
+                            consumer_id,
+                            device,
+                            &serde_json::to_vec(payload).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    authorizations.is_empty(),
+                    "work must never issue a reply token"
+                );
+                assert!(result["authorization"].is_null());
+                result
+            };
+            let result = evaluate(
+                &work_payload,
+                HarnessKind::Copilot,
+                consumer(),
+                local_device,
+            );
+            assert_eq!(
+                result["decision"],
+                if allowed { "allow" } else { "deny" },
+                "{label}"
+            );
+            if !allowed {
+                continue;
+            }
+            for (field, value, reason) in [
+                ("policyDigest", json!("ff".repeat(32)), "policy_changed"),
+                ("attempt", json!(2), "directed_request_claim_inactive"),
+                (
+                    "requestMessageId",
+                    json!("ff".repeat(16)),
+                    "directed_request_claim_inactive",
+                ),
+                (
+                    "action",
+                    json!("session.execute"),
+                    "harness_control_missing",
+                ),
+            ] {
+                let mut changed = work_payload.clone();
+                changed[field] = value;
+                let result = evaluate(&changed, HarnessKind::Copilot, consumer(), local_device);
+                assert_eq!(result["decision"], "deny", "{field}");
+                if field != "action" {
+                    assert_eq!(result["reason"], reason, "{field}");
+                }
+            }
+            for (harness, consumer_id, device, reason) in [
+                (
+                    HarnessKind::Generic,
+                    consumer(),
+                    local_device,
+                    "copilot_delivery_not_proven",
+                ),
+                (
+                    HarnessKind::Copilot,
+                    AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]),
+                    local_device,
+                    "copilot_delivery_not_proven",
+                ),
+            ] {
+                let result = evaluate(&work_payload, harness, consumer_id, device);
+                assert_eq!(result["decision"], "deny");
+                assert_eq!(result["reason"], reason);
+            }
+            assert!(matches!(
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    DeviceId::from_bytes([8; DeviceId::LENGTH]),
+                    &serde_json::to_vec(&work_payload).unwrap(),
+                ),
+                Err(error) if error == "collaboration_policy_conflict"
+            ));
+            for (field, value) in [
+                ("messageId", json!("11".repeat(16))),
+                (
+                    "replyToMessageId",
+                    json!(crate::mcp::encode_hex(request_message_id.as_bytes())),
+                ),
+                ("text", json!("not a send")),
+                ("resource", json!("workspace")),
+            ] {
+                let mut malformed = work_payload.clone();
+                malformed[field] = value;
+                assert!(matches!(
+                    evaluate_collaboration_action(
+                        &store, &grant(HarnessKind::Copilot), consumer(), local_device,
+                        &serde_json::to_vec(&malformed).unwrap(),
+                    ),
+                    Err(error) if error == "invalid_request"
+                ));
+            }
+            let mut resourced = work_payload.clone();
+            resourced["resource"] = json!("workspace.files");
+            assert_eq!(
+                evaluate(&resourced, HarnessKind::Copilot, consumer(), local_device)["decision"],
+                "deny"
+            );
+
+            let complete_payload = json!({
+                "conversationId": work_payload["conversationId"],
+                "policyDigest": work_payload["policyDigest"],
+                "requestMessageId": work_payload["requestMessageId"],
+                "attempt": 1,
+            });
+            for (activated_at, reason) in [
+                (0, "duration_limit_exceeded"),
+                (
+                    SystemUnixClock.now_unix_milliseconds() + 3_600_000,
+                    "clock_regressed",
+                ),
+            ] {
+                store
+                    .activate_collaboration_policy(
+                        conversation.conversation_id,
+                        digest,
+                        activated_at,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    evaluate(
+                        &work_payload,
+                        HarnessKind::Copilot,
+                        consumer(),
+                        local_device
+                    )["reason"],
+                    reason
+                );
+            }
+            store
+                .activate_collaboration_policy(
+                    conversation.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap();
+            complete_collaboration_turn(
+                &store,
+                &grant(HarnessKind::Copilot),
+                consumer(),
+                local_device,
+                &serde_json::to_vec(&complete_payload).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                evaluate(
+                    &work_payload,
+                    HarnessKind::Copilot,
+                    consumer(),
+                    local_device
+                )["reason"],
+                "directed_request_claim_inactive"
+            );
+
+            let replacement = store
+                .store_collaboration_policy_bundle(&bundle(
+                    CollaborationPolicyLimits::new(None, None, None, Some(1)).unwrap(),
+                ))
+                .unwrap();
+            store
+                .activate_collaboration_policy(conversation.conversation_id, replacement, 0)
+                .unwrap();
+            assert_eq!(
+                evaluate(
+                    &work_payload,
+                    HarnessKind::Copilot,
+                    consumer(),
+                    local_device
+                )["reason"],
+                "policy_changed"
+            );
+            store
+                .deactivate_collaboration_policy(conversation.conversation_id)
+                .unwrap();
+            assert_eq!(
+                evaluate(
+                    &work_payload,
+                    HarnessKind::Copilot,
+                    consumer(),
+                    local_device
+                )["reason"],
+                "policy_inactive"
+            );
+            store
+                .release_adapter_consumer(consumer(), delivery.lease_id())
+                .unwrap();
+            store
+                .acquire_adapter_consumer(consumer(), delivery.lease_id(), 0, 1)
+                .unwrap();
+            assert_eq!(
+                store.active_adapter_consumer_expiry(consumer()).unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                evaluate(
+                    &work_payload,
+                    HarnessKind::Copilot,
+                    consumer(),
+                    local_device
+                )["reason"],
+                "copilot_delivery_not_proven"
+            );
+        }
+    }
+
+    #[test]
     fn copilot_turn_authorization_and_action_evaluation_fail_closed() {
         let root = tempfile::tempdir().unwrap();
         let coordinator = open_coordinator(root.path(), "policy-eval");
@@ -4262,6 +4599,7 @@ mod collaboration_policy_tests {
         )
         .unwrap();
         assert_eq!(authorized["outcome"], "authorized");
+        assert_eq!(authorized["workAllowed"], false);
         assert!(authorized.get("guidance").is_none());
         assert_eq!(
             authorized["requestMessageId"],

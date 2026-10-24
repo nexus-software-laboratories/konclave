@@ -2,6 +2,10 @@
   "schemaVersion": 1,
   "entries": [
     {
+      "name": "peer-work",
+      "source": "peer-work.json"
+    },
+    {
       "name": "request-reply",
       "source": "request-reply.json"
     }

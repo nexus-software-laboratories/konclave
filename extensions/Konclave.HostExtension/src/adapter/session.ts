@@ -70,6 +70,7 @@ export interface CollaborationTurnClaim {
 export interface CollaborationTurnAuthorization extends CollaborationTurnClaim {
   readonly policyName: string;
   readonly turnToken: string;
+  readonly workAllowed?: boolean;
 }
 
 export type CollaborationTurnDecision =

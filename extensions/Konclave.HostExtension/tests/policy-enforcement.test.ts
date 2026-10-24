@@ -59,7 +59,7 @@ function hookInput(toolName: string, toolArgs: unknown) {
   };
 }
 
-function activateGate(gate: CopilotPolicyGate): void {
+function activateGate(gate: CopilotPolicyGate, workAllowed = false): void {
   const turnToken = '33'.repeat(16);
   gate.activate({
     conversation,
@@ -68,11 +68,200 @@ function activateGate(gate: CopilotPolicyGate): void {
     requestMessageId: '66'.repeat(16),
     attempt: 1,
     turnToken,
+    workAllowed,
   });
   gate.observePrompt(`Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`);
 }
 
 describe('Copilot collaboration policy gate', () => {
+  it.each([true, false, undefined])(
+    'parses explicit native work evidence %j',
+    async (workAllowed) => {
+      const gate = createCopilotPolicyGate(
+        client(
+          vi.fn().mockResolvedValue({
+            outcome: 'authorized',
+            policyDigest,
+            policyName: 'not-a-permission',
+            requestMessageId: '66'.repeat(16),
+            attempt: 1,
+            workAllowed,
+          }),
+        ),
+      );
+      const decision = await gate.authorizeTurn([requestEvent()]);
+      expect(decision).toMatchObject({ policyDigest });
+      expect(decision && !('kind' in decision) && decision.workAllowed === true).toBe(
+        workAllowed === true,
+      );
+    },
+  );
+
+  it.each([null, 'true', 1, { allowed: true }])(
+    'rejects malformed native work evidence %j',
+    async (workAllowed) => {
+      const gate = createCopilotPolicyGate(
+        client(
+          vi.fn().mockResolvedValue({
+            outcome: 'authorized',
+            policyDigest,
+            policyName: 'peer-work',
+            requestMessageId: '66'.repeat(16),
+            attempt: 1,
+            workAllowed,
+          }),
+        ),
+      );
+      await expect(gate.authorizeTurn([requestEvent()])).rejects.toThrow(
+        'peer-work permission is malformed',
+      );
+    },
+  );
+
+  it('admits ordinary work without overriding native permissions or tool arguments', async () => {
+    const request = vi.fn().mockResolvedValue({ decision: 'allow', authorization: null });
+    const gate = createCopilotPolicyGate(client(request));
+    activateGate(gate, true);
+    const args = { path: 'workspace' };
+    const result = await gate.hooks.onPreToolUse?.(hookInput('view', args), {
+      sessionId: 'session',
+    });
+    expect(result).toEqual({
+      additionalContext: expect.stringContaining('normal Copilot permissions'),
+    });
+    expect(result).not.toHaveProperty('permissionDecision');
+    expect(result).not.toHaveProperty('modifiedArgs');
+    expect(gate.prepareToolArguments('view', args)).toBe(args);
+    expect(request).toHaveBeenCalledWith('collaboration.action.evaluate', {
+      conversationId: conversation,
+      policyDigest,
+      action: 'session.work',
+      resource: null,
+      messageId: undefined,
+      replyToMessageId: undefined,
+      text: undefined,
+      requestMessageId: '66'.repeat(16),
+      attempt: 1,
+    });
+  });
+
+  it('permits explicit follow-up requests only in the authorized conversation', async () => {
+    const request = vi.fn().mockResolvedValue({ decision: 'allow' });
+    const gate = createCopilotPolicyGate(client(request));
+    activateGate(gate, true);
+    for (const conversation_id of [undefined, 'ff'.repeat(32)]) {
+      const denied = await gate.hooks.onPreToolUse?.(
+        hookInput('send_directed_request', { conversation_id }),
+        { sessionId: 'session' },
+      );
+      expect(denied).toMatchObject({ permissionDecision: 'deny' });
+    }
+    expect(request).not.toHaveBeenCalled();
+    const args = {
+      conversation_id: conversation,
+      message_id: '44'.repeat(16),
+      text: 'review these changes',
+    };
+    expect(
+      await gate.hooks.onPreToolUse?.(hookInput('send_directed_request', args), {
+        sessionId: 'session',
+      }),
+    ).not.toHaveProperty('permissionDecision');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'accept_collaboration_policy',
+    'functions.extensions_reload',
+    'provider.collaboration.turn.authorize',
+  ])('does not delegate control tool %s even with work permission', async (toolName) => {
+    const request = vi.fn();
+    const gate = createCopilotPolicyGate(client(request));
+    activateGate(gate, true);
+    expect(
+      await gate.hooks.onPreToolUse?.(hookInput(toolName, {}), { sessionId: 'session' }),
+    ).toMatchObject({ permissionDecision: 'deny' });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { decision: 'deny', reason: 'policy_inactive' },
+    { decision: 'deny', reason: 'policy_changed' },
+    { decision: 'deny', reason: 'directed_request_claim_inactive' },
+    { decision: 'ask', reason: 'local_approval_required' },
+    { decision: 'allow', authorization: 'aa'.repeat(16) },
+    { decision: 'unknown' },
+  ])('fails closed for a work evaluation %j', async (decision) => {
+    const request = vi.fn().mockResolvedValue(decision);
+    const gate = createCopilotPolicyGate(client(request));
+    activateGate(gate, true);
+    expect(
+      await gate.hooks.onPreToolUse?.(hookInput('view', {}), { sessionId: 'session' }),
+    ).toMatchObject({ permissionDecision: 'deny' });
+  });
+
+  it('fails closed when a native work check becomes unavailable', async () => {
+    const gate = createCopilotPolicyGate(client(vi.fn().mockRejectedValue(new Error('offline'))));
+    activateGate(gate, true);
+    expect(
+      await gate.hooks.onPreToolUse?.(hookInput('view', {}), { sessionId: 'session' }),
+    ).toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('gate_unavailable');
+  });
+
+  it.each(['foreground', 'clear', 'replacement'])(
+    'rejects in-flight work when %s changes the turn',
+    async (transition) => {
+      let resolveEvaluation: (value: unknown) => void = () => {
+        throw new Error('evaluation not started');
+      };
+      const request = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            resolveEvaluation = resolve;
+          }),
+      );
+      const gate = createCopilotPolicyGate(client(request));
+      activateGate(gate, true);
+      const result = gate.hooks.onPreToolUse?.(hookInput('view', {}), { sessionId: 'session' });
+      expect(request).toHaveBeenCalledTimes(1);
+      if (transition === 'foreground') {
+        gate.observePrompt('a new local user request');
+      } else if (transition === 'clear') {
+        gate.clear();
+      } else {
+        activateGate(gate, true);
+      }
+      resolveEvaluation({ decision: 'allow' });
+      expect(await result).toMatchObject({ permissionDecision: 'deny' });
+      expect(gate.lastDecision).toBe('turn_changed');
+    },
+  );
+
+  it('preserves the exact reply authorization path during working turns', async () => {
+    const gate = createCopilotPolicyGate(
+      client(
+        vi.fn().mockResolvedValue({
+          decision: 'allow',
+          authorization: 'aa'.repeat(16),
+        }),
+      ),
+    );
+    activateGate(gate, true);
+    const result = await gate.hooks.onPreToolUse?.(
+      hookInput('send_message', {
+        conversation_id: conversation,
+        message_id: '44'.repeat(16),
+        text: 'work completed',
+      }),
+      { sessionId: 'session' },
+    );
+    expect(gate.prepareToolArguments('send_message', result?.modifiedArgs)).toMatchObject({
+      collaboration_authorization: 'aa'.repeat(16),
+      reply_to_message_id: '66'.repeat(16),
+    });
+  });
+
   it('keeps terminal delivery out of model turns', async () => {
     const request = vi.fn();
     const gate = createCopilotPolicyGate(client(request));

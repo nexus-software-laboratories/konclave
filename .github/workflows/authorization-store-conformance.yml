@@ -83,7 +83,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveLocalAuthorizationStore -- --check
-          cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo fmt --package KonclaveLocalDaemon
+          git diff
           cargo test --locked --package KonclaveLocalAuthorizationStore
           cargo test \
             --locked \
@@ -95,6 +96,11 @@ jobs:
             --package KonclaveLocalDaemon \
             --lib \
             local_service::tests
+          cargo test \
+            --locked \
+            --package KonclaveLocalDaemon \
+            --lib \
+            local_service::collaboration_policy_tests
           cargo clippy \
             --locked \
             --package KonclaveLocalAuthorizationStore \
@@ -107,3 +113,4 @@ jobs:
             --lib \
             -- \
             -D warnings
+          git diff --exit-code

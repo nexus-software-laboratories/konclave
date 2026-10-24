@@ -42,7 +42,7 @@ export const defaultPromptStartTimeoutMilliseconds = 5 * 60_000;
 export interface DeliveryPrompt {
   readonly prompt: string;
   readonly mode: 'enqueue';
-  readonly requiredTool: typeof collaborationReplyToolName;
+  readonly requiredTool?: typeof collaborationReplyToolName;
 }
 
 export interface DeliverySession {
@@ -386,7 +386,7 @@ export function createDeliveryCoordinator(
       await options.session.send({
         prompt: frameDelivery([request], authorization),
         mode: 'enqueue',
-        requiredTool: collaborationReplyToolName,
+        ...(authorization.workAllowed === true ? {} : { requiredTool: collaborationReplyToolName }),
       });
     } catch (error) {
       deferredUntil.delete(notificationKey);

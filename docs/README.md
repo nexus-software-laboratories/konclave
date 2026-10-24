@@ -33,6 +33,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0026: Local delivery diagnostics](adr/adr-0026-local-delivery-diagnostics.md)
 - [ADR 0027: Explicit service trust and LAN discovery](adr/adr-0027-lan-service-discovery.md)
 - [ADR 0028: External recipe composition](adr/adr-0028-external-recipe-composition.md)
+- [ADR 0029: Locally authorized peer work](adr/adr-0029-locally-authorized-peer-work.md)
 
 ## Protocol
 

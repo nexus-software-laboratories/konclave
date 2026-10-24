@@ -2226,6 +2226,15 @@ async function renderCollaborationPolicyBundle(
   bundle: CollaborationPolicyBundleSummary,
   complete: boolean,
 ): Promise<void> {
+  if (
+    bundle.statements.some(
+      (statement) => statement.action === 'session.work' && statement.effect !== 'deny',
+    )
+  ) {
+    await presentation.write(
+      "session.work requests broad access to this session's normal tools and permissions, including shell/file access when granted. It is not a sandbox or exactly-once guarantee for external effects.",
+    );
+  }
   if (!complete && presentation.mode === 'normal') {
     return;
   }

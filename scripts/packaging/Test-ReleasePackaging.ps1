@@ -134,6 +134,7 @@ function Assert-ReleaseLayout {
                 'share/konclave/policy/collaboration-policy-source-v2.schema.json',
                 'share/konclave/policy/collaboration-policy-catalog-v1.schema.json',
                 'share/konclave/policy/examples/request-reply.json',
+                'share/konclave/policy/examples/peer-work.json',
                 'share/konclave/policy/examples/catalog.json'
             )) {
                 if (-not (
@@ -280,6 +281,10 @@ $projectRootPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
 foreach ($policyDocument in @(
     @{
         Example = 'policy/examples/request-reply.json'
+        Schema = 'policy/collaboration-policy-source-v2.schema.json'
+    },
+    @{
+        Example = 'policy/examples/peer-work.json'
         Schema = 'policy/collaboration-policy-source-v2.schema.json'
     },
     @{
