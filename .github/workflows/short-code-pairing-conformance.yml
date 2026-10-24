@@ -63,6 +63,18 @@ jobs:
           key: short-code-pairing-conformance
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Verify short-code cancellation state
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo fmt --package KonclaveLocalDaemon -- --check; then
+            cargo fmt --package KonclaveLocalDaemon
+            git diff -- apps/Konclave.LocalDaemon
+            exit 1
+          fi
+          cargo test --locked --package KonclaveLocalDaemon --lib short_code_pairing::tests
+          cargo clippy --locked --package KonclaveLocalDaemon --lib --tests -- -D warnings
       - name: Setup Node.js
         if: steps.scope.outputs.run == 'true'
         uses: ./.github/actions/setup-node
