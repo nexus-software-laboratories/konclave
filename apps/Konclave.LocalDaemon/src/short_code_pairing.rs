@@ -665,12 +665,8 @@ mod tests {
             }
             ShortCodeRole::Claimant => {
                 let (login, request) = ShortCodeOpaqueClientLogin::start(code).unwrap();
-                let mut claimant = ShortCodeOperationState::claimant(
-                    locator,
-                    device,
-                    login,
-                    request,
-                );
+                let mut claimant =
+                    ShortCodeOperationState::claimant(locator, device, login, request);
                 claimant.attempt_id = Some(attempt);
                 claimant.deadline_unix_seconds = Some(100);
                 claimant.phase = ShortCodePhase::ClaimantAwaitingConfirmation;
