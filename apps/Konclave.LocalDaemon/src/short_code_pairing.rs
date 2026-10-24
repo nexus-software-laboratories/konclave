@@ -152,6 +152,21 @@ impl ShortCodeOperationState {
         }
     }
 
+    /// Revokes local confirmation before checkpointing cancellation of an attempt.
+    pub(crate) fn begin_cancellation(&mut self) {
+        self.phase = ShortCodePhase::Cancelling;
+        self.confirmation = ShortCodeConfirmationState::Cancelled;
+        self.local_confirmation = None;
+    }
+
+    /// Finishes cancellation without extending an existing attempt deadline.
+    pub(crate) fn complete_cancellation(&mut self, now_unix_seconds: u64) {
+        self.begin_cancellation();
+        self.phase = ShortCodePhase::Cancelled;
+        self.deadline_unix_seconds = self.deadline_unix_seconds.or(Some(now_unix_seconds));
+        self.capability_text = None;
+    }
+
     /// Encodes exact bounded state for profile sealing.
     ///
     /// # Errors
@@ -624,5 +639,115 @@ mod tests {
         let mut encoded = state.encode().unwrap();
         encoded.push(0);
         assert!(ShortCodeOperationState::decode(&encoded).is_err());
+    }
+
+    fn awaiting_confirmation(
+        role: ShortCodeRole,
+        confirmation: ShortCodeConfirmationState,
+    ) -> ShortCodeOperationState {
+        let code = ShortCodePairingCode::parse("123456").unwrap();
+        let locator = code.locator();
+        let attempt = ShortCodePairingAttemptId::from_bytes([1; 16]);
+        let device = DeviceId::from_bytes([2; 32]);
+        let mut state = match role {
+            ShortCodeRole::Creator => {
+                let mut creator = ShortCodeOperationState::creator(
+                    locator,
+                    attempt,
+                    100,
+                    device,
+                    ShortCodeOpaqueServerRecord::register(&code, attempt).unwrap(),
+                );
+                creator.phase = ShortCodePhase::CreatorAwaitingConfirmation;
+                creator
+            }
+            ShortCodeRole::Claimant => {
+                let (login, request) = ShortCodeOpaqueClientLogin::start(code).unwrap();
+                let mut claimant =
+                    ShortCodeOperationState::claimant(locator, device, login, request);
+                claimant.attempt_id = Some(attempt);
+                claimant.deadline_unix_seconds = Some(100);
+                claimant.phase = ShortCodePhase::ClaimantAwaitingConfirmation;
+                claimant
+            }
+        };
+        state.confirmation = confirmation;
+        state.local_confirmation = matches!(
+            confirmation,
+            ShortCodeConfirmationState::AwaitingPeer | ShortCodeConfirmationState::Confirmed
+        )
+        .then(|| vec![7; 32]);
+        state
+    }
+
+    #[test]
+    fn cancellation_round_trips_for_every_confirmation_and_role() {
+        for role in [ShortCodeRole::Creator, ShortCodeRole::Claimant] {
+            for confirmation in [
+                ShortCodeConfirmationState::AwaitingBoth,
+                ShortCodeConfirmationState::AwaitingLocal,
+                ShortCodeConfirmationState::AwaitingPeer,
+                ShortCodeConfirmationState::Confirmed,
+            ] {
+                for destination in [ShortCodePhase::Cancelling, ShortCodePhase::Cancelled] {
+                    let mut state = awaiting_confirmation(role, confirmation);
+                    assert!(state.encode().is_ok());
+                    let locator = state.locator;
+                    let attempt_id = state.attempt_id;
+                    match destination {
+                        ShortCodePhase::Cancelling => state.begin_cancellation(),
+                        ShortCodePhase::Cancelled => state.complete_cancellation(200),
+                        _ => unreachable!(),
+                    }
+                    let encoded = state.encode().unwrap();
+                    let restored = ShortCodeOperationState::decode(&encoded).unwrap();
+                    assert_eq!(restored.role, role);
+                    assert_eq!(restored.phase, destination);
+                    assert_eq!(restored.locator, locator);
+                    assert_eq!(restored.attempt_id, attempt_id);
+                    assert_eq!(restored.deadline_unix_seconds, Some(100));
+                    assert_eq!(restored.confirmation, ShortCodeConfirmationState::Cancelled);
+                    assert!(restored.local_confirmation.is_none());
+                    state.complete_cancellation(300);
+                    assert_eq!(state.deadline_unix_seconds, Some(100));
+                    assert!(state.encode().is_ok());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_confirmation_still_rejects_retained_local_proof() {
+        for role in [ShortCodeRole::Creator, ShortCodeRole::Claimant] {
+            for destination in [ShortCodePhase::Cancelling, ShortCodePhase::Cancelled] {
+                let mut state =
+                    awaiting_confirmation(role, ShortCodeConfirmationState::AwaitingPeer);
+                state.phase = destination;
+                state.confirmation = ShortCodeConfirmationState::Cancelled;
+                assert!(matches!(
+                    state.encode(),
+                    Err(ShortCodeStateError::InvalidEncoding)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_before_claim_allocation_stays_terminal_without_an_attempt() {
+        let code = ShortCodePairingCode::parse("123456").unwrap();
+        let locator = code.locator();
+        let (login, request) = ShortCodeOpaqueClientLogin::start(code).unwrap();
+        let mut state = ShortCodeOperationState::claimant(
+            locator,
+            DeviceId::from_bytes([2; 32]),
+            login,
+            request,
+        );
+        state.complete_cancellation(200);
+        let restored = ShortCodeOperationState::decode(&state.encode().unwrap()).unwrap();
+        assert_eq!(restored.phase, ShortCodePhase::Cancelled);
+        assert!(restored.attempt_id.is_none());
+        assert_eq!(restored.deadline_unix_seconds, Some(200));
+        assert!(restored.local_confirmation.is_none());
     }
 }

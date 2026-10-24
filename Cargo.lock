@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "KonclaveA2AArtifactHttp"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AArtifactStorage",
  "KonclaveA2AContracts",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2AArtifactStorage"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveSecretStorage",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2AContracts"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveBoundedDocuments",
  "base64 0.23.1",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2ADiscovery"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADomain",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2ADomain"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveDomainCore",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2AGateway"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADiscovery",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2AGatewayHost"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AArtifactHttp",
  "KonclaveA2AArtifactStorage",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2AKonclaveBridge"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADiscovery",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2ATaskStore"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADomain",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveA2ATaskStoreSqlite"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADomain",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveAdapterSdk"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveBoundedDocuments",
  "KonclaveLocalServiceClient",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveAdapterTransport"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveCryptographicCore",
  "KonclaveLocalFraming",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveBoundedDocuments"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "cap-std",
  "serde",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveClientLibrary"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveCommunityRelay",
  "KonclaveCryptographicCore",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveCollaborationPolicies"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveBoundedDocuments",
  "KonclaveCryptographicCore",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveCommandLine"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveClientLibrary",
  "KonclaveCollaborationPolicies",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveCommunityRelay"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveCryptographicCore"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveDomainCore"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "thiserror 2.0.20",
  "zeroize",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveLocalAuthorizationStore"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveLocalServiceTransport",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveLocalDaemon"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveA2AContracts",
  "KonclaveA2ADomain",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveLocalFraming"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveLocalServiceClient"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveBoundedDocuments",
  "KonclaveCryptographicCore",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveLocalServiceTransport"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveCryptographicCore",
  "KonclaveDomainCore",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveProtectedHttp"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "reqwest",
  "rustls",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveProtocolContracts"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveRelayAuthentication",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveRelayAuthentication"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "sha2 0.10.9",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveRelayCore"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveProtocolContracts",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveSecretStorage"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveWindowsSecurity",
  "aws-lc-rs",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveUserPresence"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "KonclaveDomainCore",
  "KonclaveLocalServiceTransport",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "KonclaveWindowsSecurity"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "tempfile",
  "thiserror 2.0.20",
