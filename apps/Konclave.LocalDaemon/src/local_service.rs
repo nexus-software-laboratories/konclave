@@ -5703,7 +5703,10 @@ mod tests {
                         super::complete_request_with_durability(
                             &ledger,
                             &key,
-                            LocalServiceResponse::failure(request.request_id(), reason.error_code()),
+                            LocalServiceResponse::failure(
+                                request.request_id(),
+                                reason.error_code(),
+                            ),
                             false,
                         );
                     }
