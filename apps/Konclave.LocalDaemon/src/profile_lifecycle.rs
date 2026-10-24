@@ -158,9 +158,8 @@ mod tests {
             (ProfileComponent::Pairing, "pairing"),
             (ProfileComponent::Attachment, "attachment"),
         ] {
-            let failure = ProfileFailure::new(
-                anyhow::anyhow!("private operator context").context(component),
-            );
+            let failure =
+                ProfileFailure::new(anyhow::anyhow!("private operator context").context(component));
             assert_eq!(
                 failure
                     .cause()

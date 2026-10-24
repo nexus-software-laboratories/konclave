@@ -70,6 +70,7 @@ function Get-ComponentValidationContracts {
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
             '^\.github/workflows/profile-lifecycle-conformance\.yml$'
+            '^crates/Konclave\.LocalServiceTransport/'
             '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:lib|activity|profile_lifecycle|profile_runtime|profile_supervisor|local_service|local_failure_diagnostics|session_request_read|service|pairing_supervisor)\.rs)$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )

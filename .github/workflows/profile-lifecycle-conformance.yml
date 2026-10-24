@@ -61,5 +61,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --package KonclaveLocalDaemon --lib profile_lifecycle::tests
+          cargo test --locked --package KonclaveLocalServiceTransport request_interruption::tests
           cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo fmt --package KonclaveLocalServiceTransport -- --check
           cargo clippy --locked --package KonclaveLocalDaemon --lib --tests -- -D warnings
+          cargo clippy --locked --package KonclaveLocalServiceTransport --lib -- -D warnings
