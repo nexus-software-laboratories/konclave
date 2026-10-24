@@ -1785,7 +1785,7 @@ mod tests {
             if let (Some(creator_sas), Some(claimant_sas)) =
                 (creator_status.sas, claimant_status.sas)
             {
-                assert_eq!(creator_sas, claimant_sas);
+                assert!(creator_sas == claimant_sas);
                 assert_eq!(
                     creator_status.peer_device_id,
                     Some(claimant_status.local_device_id)

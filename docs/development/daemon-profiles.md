@@ -163,6 +163,14 @@ the table, advances the authenticated device-identity schema floor, and leaves v
 18 authoritative if either change fails. Active operations are bounded; expired
 terminal records are pruned before new reservations.
 
+Short-code cancellation clears the saved local-confirmation proof before sealing
+`Cancelling` with cancelled confirmation. It preserves the attempt identity and
+existing deadline, checkpoints before relay cancellation, and completes any reserved
+pairing's compensation before sealing terminal `Cancelled`. A lost relay response
+therefore resumes the same cancellation after reopen; it never restores confirmation
+or grants capability authority. Cancelled confirmation with retained local proof
+remains invalid.
+
 Remote application and membership completion create one context-bound event before
 advancing the relay cursor. Local echoes do not create events. Muted conversations
 create terminally suppressed records while relay replay and sealed history continue.
