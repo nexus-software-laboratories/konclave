@@ -100,7 +100,6 @@ jobs:
           npm run lint
           npm run typecheck
           npm run test:unit -- tests/peer-work-permission.test.ts
-          git diff --exit-code
       - name: Verify deterministic Agent Plugin
         if: steps.scope.outputs.run == 'true'
         working-directory: extensions/Konclave.HostExtension
@@ -110,6 +109,9 @@ jobs:
           npm run package
           npm run verify:package
           npm run test:package-contract
+      - name: Require unchanged submitted plugin formatting
+        if: steps.scope.outputs.run == 'true'
+        run: git diff --exit-code
       - name: Verify distribution integration
         if: steps.scope.outputs.run == 'true'
         shell: pwsh

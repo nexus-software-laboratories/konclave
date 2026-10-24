@@ -1,0 +1,32 @@
+{
+  "apiVersion": "konclave.dev/v2",
+  "kind": "CollaborationPolicy",
+  "metadata": {
+    "name": "peer-work"
+  },
+  "spec": {
+    "statements": [
+      {
+        "id": "conversation-reply",
+        "effect": "allow",
+        "action": "conversation.reply"
+      },
+      {
+        "id": "session-work",
+        "effect": "allow",
+        "action": "session.work"
+      }
+    ],
+    "requiredHarnessClaims": [
+      "harness.native-permission-intersection",
+      "harness.pre-tool-policy-gate",
+      "harness.session-identity"
+    ],
+    "limits": {
+      "durationMilliseconds": null,
+      "turns": null,
+      "tokens": null,
+      "concurrentRequests": 1
+    }
+  }
+}
