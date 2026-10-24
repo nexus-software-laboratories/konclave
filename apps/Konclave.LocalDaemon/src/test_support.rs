@@ -10,11 +10,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 use crate::persistence::{LockedProfile, ProfileId, ProfileStoreError};
+use crate::profile_runtime::{ProfileHostOptions, ProfileServices};
 use crate::runtime::{ProfileConfig, ProfileCustody, ProfileSource, read_relay_installation};
 
 /// Synchronizes a blocking boundary without sleeping or abandoning its worker.
@@ -129,6 +130,66 @@ impl ProfileSource for TestProfileSettings {
             ProfileCustody::ExternalFile(key),
             read_relay_installation(&self.root)?,
             false,
+        ))
+    }
+}
+
+/// Terminates one profile's first runtime through an explicit component outcome.
+pub(crate) struct ControlledProfileSource {
+    inner: TestProfileSettings,
+    profile: String,
+    outcome: Mutex<Option<oneshot::Receiver<anyhow::Result<()>>>>,
+}
+
+impl ControlledProfileSource {
+    pub(crate) fn new(
+        inner: TestProfileSettings,
+        profile: &str,
+    ) -> (Self, oneshot::Sender<anyhow::Result<()>>) {
+        let (complete, outcome) = oneshot::channel();
+        (
+            Self {
+                inner,
+                profile: profile.to_owned(),
+                outcome: Mutex::new(Some(outcome)),
+            },
+            complete,
+        )
+    }
+}
+
+impl ProfileSource for ControlledProfileSource {
+    fn configure(&self, profile: &ProfileId) -> anyhow::Result<ProfileConfig> {
+        self.inner.configure(profile)
+    }
+
+    fn host_options(&self, profile: &ProfileId) -> ProfileHostOptions {
+        if profile.as_str() != self.profile {
+            return ProfileHostOptions::default();
+        }
+        let Some(outcome) = self
+            .outcome
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return ProfileHostOptions::default();
+        };
+        ProfileHostOptions::default().with_attachment(Box::new(
+            move |_: &ProfileServices, mut stop| {
+                Box::pin(async move {
+                    tokio::select! {
+                        result = outcome => result.map_err(anyhow::Error::new)?,
+                        () = async {
+                            while !*stop.borrow_and_update() {
+                                if stop.changed().await.is_err() {
+                                    break;
+                                }
+                            }
+                        } => Ok(()),
+                    }
+                })
+            },
         ))
     }
 }

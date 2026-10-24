@@ -32,6 +32,7 @@ mod pairing_service;
 mod pairing_supervisor;
 #[allow(dead_code)]
 mod persistence;
+mod profile_lifecycle;
 mod profile_runtime;
 #[allow(dead_code)]
 mod profile_supervisor;

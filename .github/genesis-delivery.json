@@ -20,6 +20,7 @@
     "Distribution lifecycle acceptance",
     "Generic client conformance",
     "Local delivery diagnostics conformance",
+    "Profile lifecycle conformance",
     "Installer lifecycle conformance",
     "Marketplace conformance",
     "Pairing rendezvous conformance",
@@ -84,6 +85,7 @@
         "service-failure-contract",
         "generic-client-conformance",
         "local-delivery-diagnostics-conformance",
+        "profile-lifecycle-conformance",
         "resolve-installer-scope",
         "installer-lifecycle-conformance",
         "marketplace-conformance",
@@ -310,6 +312,17 @@
       "draftBehavior": "full",
       "requiredChecks": [
         "Local delivery diagnostics conformance"
+      ]
+    },
+    {
+      "source": "project",
+      "path": ".github/workflows/profile-lifecycle-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Profile lifecycle conformance"
       ]
     },
     {

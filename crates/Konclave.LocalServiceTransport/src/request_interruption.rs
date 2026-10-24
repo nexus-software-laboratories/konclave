@@ -13,6 +13,8 @@ pub enum LocalRequestInterruption {
     AuthorizationLost,
     /// No current verified authorization projection is available.
     AuthorizationUnavailable,
+    /// The bound profile's supervised runtime is no longer available.
+    ProfileUnavailable,
 }
 
 impl LocalRequestInterruption {
@@ -23,7 +25,9 @@ impl LocalRequestInterruption {
             Self::Deadline => LocalServiceErrorCode::DeadlineExceeded,
             Self::Shutdown => LocalServiceErrorCode::ProfileUnavailable,
             Self::AuthorizationLost => LocalServiceErrorCode::NotAuthorized,
-            Self::AuthorizationUnavailable => LocalServiceErrorCode::ReconciliationPending,
+            Self::AuthorizationUnavailable | Self::ProfileUnavailable => {
+                LocalServiceErrorCode::ReconciliationPending
+            }
         }
     }
 }
@@ -64,7 +68,8 @@ pub const fn resolve_local_request_interruption(
 ) -> LocalRequestInterruptionAction {
     match state {
         LocalRequestExecutionState::BeforeExecution => match reason {
-            LocalRequestInterruption::AuthorizationUnavailable => {
+            LocalRequestInterruption::AuthorizationUnavailable
+            | LocalRequestInterruption::ProfileUnavailable => {
                 LocalRequestInterruptionAction::AwaitAuthorization
             }
             reason => LocalRequestInterruptionAction::Cancel(reason.error_code()),
@@ -105,6 +110,10 @@ mod tests {
                 LocalRequestInterruption::AuthorizationUnavailable,
                 LocalServiceErrorCode::ReconciliationPending,
             ),
+            (
+                LocalRequestInterruption::ProfileUnavailable,
+                LocalServiceErrorCode::ReconciliationPending,
+            ),
         ] {
             assert_eq!(reason.error_code(), code, "{reason:?}");
         }
@@ -118,8 +127,13 @@ mod tests {
             LocalRequestInterruption::Shutdown,
             LocalRequestInterruption::AuthorizationLost,
             LocalRequestInterruption::AuthorizationUnavailable,
+            LocalRequestInterruption::ProfileUnavailable,
         ] {
-            let before_execution = if reason == LocalRequestInterruption::AuthorizationUnavailable {
+            let before_execution = if matches!(
+                reason,
+                LocalRequestInterruption::AuthorizationUnavailable
+                    | LocalRequestInterruption::ProfileUnavailable
+            ) {
                 LocalRequestInterruptionAction::AwaitAuthorization
             } else {
                 LocalRequestInterruptionAction::Cancel(reason.error_code())
