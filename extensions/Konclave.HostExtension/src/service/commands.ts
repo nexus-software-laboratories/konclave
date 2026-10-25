@@ -3333,13 +3333,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const usage = '/konclave request [conversation] [target-device] [message-id] -- <text>';
         const parsed = parseDelimitedMessage(argumentsText, 0, 3, usage);
         const { conversationId, remainingIdentifiers, explicitlySelectedConversation } =
-          await resolveConversationArguments(
-            client,
-            parsed.identifiers,
-            0,
-            2,
-            usage,
-          );
+          await resolveConversationArguments(client, parsed.identifiers, 0, 2, usage);
         const targetDeviceId =
           remainingIdentifiers[0]?.length === deviceIdCharacters
             ? requireHexIdentifier(

@@ -110,7 +110,7 @@ const implicitConversationCases = [
 
 function conversationSelectionClient() {
   let activeConversationId = conversationId;
-  const request = vi.fn(async (operation: string, payload: unknown) => {
+  const request = vi.fn(async (operation: string, payload: unknown): Promise<unknown> => {
     if (operation === 'list_conversations') {
       return {
         conversation_ids: [conversationId, '99'.repeat(32)],
