@@ -130,7 +130,14 @@ To request one automatic terminal response in a two-member conversation, use:
 ```
 
 For a group conversation, obtain the intended peer's full identifier with
-`/konclave identity` in that session and include it after the conversation ID.
+`/konclave identity` in that session and name it explicitly:
+
+```text
+/konclave request --to <target-device-id> -- <request text>
+```
+
+This uses the selected conversation. An explicit conversation before the options
+overrides it. The existing positional group-target form remains supported.
 Only newly established membership whose root-signed credential advertises directed
 requests is eligible. An older conversation remains usable for ordinary messages but
 must be paired again before it can carry this request kind.
@@ -152,8 +159,11 @@ For example, after `use`, run `messages [after-cursor]`, `reply <reply-to-messag
 [message-id] -- <text>`, `diagnose <message-id>`, `mute`, or `unmute` without repeating
 the conversation. A 32-hex message identifier before `--` retries an implicit send
 or request. A leading 64-hex identifier always means an explicit conversation, not a
-target device. Group requests therefore retain the unambiguous explicit form:
-`request <conversation-id> <target-device-id> [message-id] -- <text>`.
+target device. Use `request [message-id] --to <target-device-id> -- <text>` to target
+a group member without repeating the selected conversation. The legacy explicit
+form remains `request <conversation-id> <target-device-id> [message-id] -- <text>`.
+Do not combine `--to` with a positional target. All options precede `--`; text
+after that delimiter is message content, not command options.
 
 The two-command flow is an explicit `AccountTrusted` convenience policy. Capability
 creation and redemption are treated as the two same-account approval actions; status

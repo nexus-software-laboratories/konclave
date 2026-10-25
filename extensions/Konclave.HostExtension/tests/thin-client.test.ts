@@ -87,6 +87,25 @@ const selectedConversationCases = [
   ['send -- hello', 'send_message', { text: 'hello' }],
   ['request -- hello', 'send_directed_request', { text: 'hello' }],
   [
+    `request --to ${inviterDeviceId} -- hello`,
+    'send_directed_request',
+    { target_device_id: inviterDeviceId, text: 'hello' },
+  ],
+  [
+    `request ${'77'.repeat(16)} --to ${inviterDeviceId} -- retry`,
+    'send_directed_request',
+    { target_device_id: inviterDeviceId, message_id: '77'.repeat(16), text: 'retry' },
+  ],
+  [
+    `request --to ${inviterDeviceId} ${'77'.repeat(16)} -- hello --to literal`,
+    'send_directed_request',
+    {
+      target_device_id: inviterDeviceId,
+      message_id: '77'.repeat(16),
+      text: 'hello --to literal',
+    },
+  ],
+  [
     `request ${'77'.repeat(16)} -- retry`,
     'send_directed_request',
     { message_id: '77'.repeat(16), text: 'retry' },
@@ -2749,6 +2768,38 @@ describe('deterministic commands', () => {
       }
     },
   );
+
+  it.each([
+    'request --to -- missing',
+    'request --to short -- malformed',
+    `request --to ${'z'.repeat(64)} -- nonhex`,
+    `request --to ${'AB'.repeat(32)} -- uppercase`,
+    `request --to ${inviterDeviceId} --to ${joinerDeviceId} -- repeated`,
+    `request --to ${inviterDeviceId} --to ${inviterDeviceId} -- duplicated`,
+    `request ${conversationId} ${joinerDeviceId} --to ${inviterDeviceId} -- conflicting`,
+    `request ${conversationId} ${inviterDeviceId} --to ${inviterDeviceId} -- duplicated target`,
+    `request --target ${inviterDeviceId} -- unknown`,
+    `request --to=${inviterDeviceId} -- unsupported option`,
+    `request ${'77'.repeat(16)} ${'88'.repeat(16)} --to ${inviterDeviceId} -- ambiguous`,
+  ])('rejects unsafe named request targets without sending: %s', async (args) => {
+    const { client, request } = conversationSelectionClient();
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client,
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+
+    await command?.handler(commandContext(args));
+
+    expect(lines.some((line) => line.startsWith('konclave:'))).toBe(true);
+    expect(request.mock.calls.every(([operation]) => operation === 'list_conversations')).toBe(
+      true,
+    );
+  });
 
   it('preserves explicit request targets and rejects ambiguous identifiers', async () => {
     const request = vi.fn(async (operation: string, payload: unknown) => {

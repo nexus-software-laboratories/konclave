@@ -377,7 +377,9 @@ const helpLines = [
   '  /konclave send [conversation] [message-id] -- <text>',
   '                                                       Send or retry a message.',
   '  /konclave request [conversation] [target-device] [message-id] -- <text>',
-  '                                                       Group targets require a conversation ID.',
+  '                                                       Positional group targets require a conversation ID.',
+  '  /konclave request [conversation] [message-id] --to <device> -- <text>',
+  '                                                       Target a peer in the selected or explicit conversation.',
   '  /konclave reply [conversation] <reply-to> [message-id] -- <text>',
   '                                                       Reply or retry with an explicit ID.',
   '  /konclave messages [conversation] [after-cursor]    Sync and show a bounded message page.',
@@ -1393,6 +1395,45 @@ function parseDelimitedMessage(
     throw new Error(`message text must contain 1-${maxMessageBytes} UTF-8 bytes`);
   }
   return { identifiers, text };
+}
+
+function parseDirectedRequestArguments(
+  raw: string,
+  usage: string,
+): {
+  readonly identifiers: readonly string[];
+  readonly text: string;
+  readonly targetDeviceId: string | undefined;
+} {
+  const parsed = parseDelimitedMessage(raw, 0, 5, usage);
+  const identifiers: string[] = [];
+  let targetDeviceId: string | undefined;
+  let expectingTarget = false;
+  for (const identifier of parsed.identifiers) {
+    if (expectingTarget) {
+      targetDeviceId = requireHexIdentifier(
+        identifier,
+        deviceIdCharacters,
+        'target device identifier',
+      );
+      expectingTarget = false;
+    } else if (identifier === '--to') {
+      if (targetDeviceId !== undefined) {
+        throw new Error('--to may be supplied only once');
+      }
+      expectingTarget = true;
+    } else {
+      if (identifier.startsWith('-')) {
+        throw new Error(`unknown request option; usage: ${usage}`);
+      }
+      identifiers.push(identifier);
+    }
+  }
+  if (expectingTarget) {
+    throw new Error('--to requires a target device identifier');
+  }
+  requireArgumentCount(identifiers, 0, 3, usage);
+  return { identifiers, text: parsed.text, targetDeviceId };
 }
 
 function messageRequestId(messageId: string): Buffer {
@@ -3330,11 +3371,12 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         return;
       }
       case 'request': {
-        const usage = '/konclave request [conversation] [target-device] [message-id] -- <text>';
-        const parsed = parseDelimitedMessage(argumentsText, 0, 3, usage);
+        const usage =
+          '/konclave request [conversation] [target-device] [message-id] [--to <device>] -- <text>';
+        const parsed = parseDirectedRequestArguments(argumentsText, usage);
         const { conversationId, remainingIdentifiers, explicitlySelectedConversation } =
           await resolveConversationArguments(client, parsed.identifiers, 0, 2, usage);
-        const targetDeviceId =
+        const positionalTarget =
           remainingIdentifiers[0]?.length === deviceIdCharacters
             ? requireHexIdentifier(
                 remainingIdentifiers[0],
@@ -3342,8 +3384,12 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
                 'target device identifier',
               )
             : undefined;
-        const suppliedMessageId = remainingIdentifiers[targetDeviceId ? 1 : 0];
-        if (remainingIdentifiers.length === 2 && !targetDeviceId) {
+        if (parsed.targetDeviceId !== undefined && positionalTarget !== undefined) {
+          throw new Error('--to cannot be combined with a positional target');
+        }
+        const targetDeviceId = parsed.targetDeviceId ?? positionalTarget;
+        const suppliedMessageId = remainingIdentifiers[positionalTarget ? 1 : 0];
+        if (remainingIdentifiers.length === 2 && !positionalTarget) {
           throw new Error(usage);
         }
         const messageId = suppliedMessageId
