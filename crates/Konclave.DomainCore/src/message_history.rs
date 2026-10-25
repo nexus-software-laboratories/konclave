@@ -85,9 +85,8 @@ impl MessageHistoryQuery {
             return Err(MessageHistoryQueryError::InvalidPageSize);
         }
         if i64::try_from(after_cursor).is_err()
-            || before_cursor.is_some_and(|before| {
-                i64::try_from(before).is_err() || before <= after_cursor
-            })
+            || before_cursor
+                .is_some_and(|before| i64::try_from(before).is_err() || before <= after_cursor)
         {
             return Err(MessageHistoryQueryError::InvalidCursorBounds);
         }
@@ -234,16 +233,75 @@ mod tests {
     #[test]
     fn query_bounds_have_finite_validation_errors() {
         for (after, before, since, until, limit, expected) in [
-            (0, None, None, None, 0, MessageHistoryQueryError::InvalidPageSize),
-            (0, None, None, None, 101, MessageHistoryQueryError::InvalidPageSize),
-            (u64::MAX, None, None, None, 1, MessageHistoryQueryError::InvalidCursorBounds),
-            (0, Some(u64::MAX), None, None, 1, MessageHistoryQueryError::InvalidCursorBounds),
-            (0, Some(0), None, None, 1, MessageHistoryQueryError::InvalidCursorBounds),
-            (4, Some(4), None, None, 1, MessageHistoryQueryError::InvalidCursorBounds),
-            (4, Some(3), None, None, 1, MessageHistoryQueryError::InvalidCursorBounds),
-            (0, None, Some(2), Some(1), 1, MessageHistoryQueryError::InvalidTimeRange),
+            (
+                0,
+                None,
+                None,
+                None,
+                0,
+                MessageHistoryQueryError::InvalidPageSize,
+            ),
+            (
+                0,
+                None,
+                None,
+                None,
+                101,
+                MessageHistoryQueryError::InvalidPageSize,
+            ),
+            (
+                u64::MAX,
+                None,
+                None,
+                None,
+                1,
+                MessageHistoryQueryError::InvalidCursorBounds,
+            ),
+            (
+                0,
+                Some(u64::MAX),
+                None,
+                None,
+                1,
+                MessageHistoryQueryError::InvalidCursorBounds,
+            ),
+            (
+                0,
+                Some(0),
+                None,
+                None,
+                1,
+                MessageHistoryQueryError::InvalidCursorBounds,
+            ),
+            (
+                4,
+                Some(4),
+                None,
+                None,
+                1,
+                MessageHistoryQueryError::InvalidCursorBounds,
+            ),
+            (
+                4,
+                Some(3),
+                None,
+                None,
+                1,
+                MessageHistoryQueryError::InvalidCursorBounds,
+            ),
+            (
+                0,
+                None,
+                Some(2),
+                Some(1),
+                1,
+                MessageHistoryQueryError::InvalidTimeRange,
+            ),
         ] {
-            for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+            for order in [
+                MessageHistoryOrder::Ascending,
+                MessageHistoryOrder::Descending,
+            ] {
                 assert_eq!(
                     MessageHistoryQuery::new(order, after, before, since, until, limit),
                     Err(expected)
@@ -255,8 +313,12 @@ mod tests {
     #[test]
     fn scan_and_result_budgets_preserve_legacy_unfiltered_work() {
         for limit in [1, 10, MAX_MESSAGE_PAGE_SIZE] {
-            for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
-                let unfiltered = MessageHistoryQuery::new(order, 0, None, None, None, limit).unwrap();
+            for order in [
+                MessageHistoryOrder::Ascending,
+                MessageHistoryOrder::Descending,
+            ] {
+                let unfiltered =
+                    MessageHistoryQuery::new(order, 0, None, None, None, limit).unwrap();
                 assert_eq!(unfiltered.limit(), limit);
                 assert_eq!(unfiltered.scan_limit(), limit);
                 assert_eq!(unfiltered.order(), order);
@@ -275,17 +337,15 @@ mod tests {
     #[test]
     fn cursor_storage_bounds_are_checked_at_the_exact_integer_boundary() {
         let maximum_cursor = u64::try_from(i64::MAX).unwrap();
-        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
-            assert!(
-                MessageHistoryQuery::new(order, maximum_cursor, None, None, None, 1).is_ok()
-            );
+        for order in [
+            MessageHistoryOrder::Ascending,
+            MessageHistoryOrder::Descending,
+        ] {
+            assert!(MessageHistoryQuery::new(order, maximum_cursor, None, None, None, 1).is_ok());
             assert!(
                 MessageHistoryQuery::new(order, 0, Some(maximum_cursor), None, None, 1).is_ok()
             );
-            for (after, before) in [
-                (maximum_cursor + 1, None),
-                (0, Some(maximum_cursor + 1)),
-            ] {
+            for (after, before) in [(maximum_cursor + 1, None), (0, Some(maximum_cursor + 1))] {
                 assert_eq!(
                     MessageHistoryQuery::new(order, after, before, None, None, 1),
                     Err(MessageHistoryQueryError::InvalidCursorBounds)
@@ -296,9 +356,14 @@ mod tests {
 
     #[test]
     fn timestamp_filters_are_half_open_and_do_not_define_order() {
-        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+        for order in [
+            MessageHistoryOrder::Ascending,
+            MessageHistoryOrder::Descending,
+        ] {
             let query = query(order);
-            for (timestamp, matches) in [(40, false), (20, true), (0, false), (39, true), (19, false)] {
+            for (timestamp, matches) in
+                [(40, false), (20, true), (0, false), (39, true), (19, false)]
+            {
                 assert_eq!(query.matches_timestamp(timestamp), matches);
             }
             assert!(!query.matches_timestamp(u64::MAX));
@@ -324,7 +389,10 @@ mod tests {
 
     #[test]
     fn cursor_bounds_and_strict_order_prevent_repeated_or_reversed_progress() {
-        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+        for order in [
+            MessageHistoryOrder::Ascending,
+            MessageHistoryOrder::Descending,
+        ] {
             let query = query(order);
             for cursor in [0, 2, 10, u64::MAX] {
                 assert_eq!(
@@ -355,7 +423,10 @@ mod tests {
 
     #[test]
     fn continuation_uses_scanned_progress_even_without_any_timestamp_matches() {
-        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+        for order in [
+            MessageHistoryOrder::Ascending,
+            MessageHistoryOrder::Descending,
+        ] {
             let query = query(order);
             let cursors = match order {
                 MessageHistoryOrder::Ascending => [3, 4, 5],
