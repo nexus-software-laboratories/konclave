@@ -3608,16 +3608,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const synced = parseMessageList(
           await client.request('sync_messages', { conversation_id: conversationId }),
         );
-        const history = parseMessageList(
-          await client.request('read_messages', payload),
-        );
+        const history = parseMessageList(await client.request('read_messages', payload));
         if (
           history.hasMore &&
           (history.nextCursor === undefined ||
             history.nextCursor <= afterCursor ||
             (options.beforeCursor !== undefined && history.nextCursor >= options.beforeCursor))
         ) {
-          throw new Error('the local service history continuation is missing or outside the bounds');
+          throw new Error(
+            'the local service history continuation is missing or outside the bounds',
+          );
         }
         await presentation.detail(
           `synced messages: ${synced.messages.length}, more available: ${synced.hasMore ? 'yes' : 'no'}`,
@@ -3648,8 +3648,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
             continuation.push(String(lowerCursor));
           }
           continuation.push('--order', options.order);
-          const upperCursor =
-            options.order === 'desc' ? history.nextCursor : options.beforeCursor;
+          const upperCursor = options.order === 'desc' ? history.nextCursor : options.beforeCursor;
           if (upperCursor !== undefined) {
             continuation.push('--before-cursor', String(upperCursor));
           }

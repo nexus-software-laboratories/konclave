@@ -2780,17 +2780,23 @@ describe('deterministic commands', () => {
     ['--since 2026-10-01T01:00:00+01:00', { since_unix_milliseconds: Date.UTC(2026, 9, 1) }],
     ['--until 2026-10-01T18:30:00-05:30', { until_unix_milliseconds: Date.UTC(2026, 9, 2) }],
     ['--since 2024-02-29T00:00:00Z', { since_unix_milliseconds: Date.UTC(2024, 1, 29) }],
-    ['--since 0099-01-01T00:00:00Z', { since_unix_milliseconds: Date.parse('0099-01-01T00:00:00Z') }],
+    [
+      '--since 0099-01-01T00:00:00Z',
+      { since_unix_milliseconds: Date.parse('0099-01-01T00:00:00Z') },
+    ],
     ['--since 1970-01-01T00:00:00.123456Z', { since_unix_milliseconds: 124 }],
     ['--until 1970-01-01T00:00:00.0001Z', { until_unix_milliseconds: 1 }],
     ['--since 1969-12-31T23:59:59.9999Z', { since_unix_milliseconds: 0 }],
     ['--until 1969-12-31T23:59:59Z', { until_unix_milliseconds: -1000 }],
-    ['--since 1970-01-01t00:00:00z --until 1970-01-01T01:00:00+01:00',
-      { since_unix_milliseconds: 0, until_unix_milliseconds: 0 }],
+    [
+      '--since 1970-01-01t00:00:00z --until 1970-01-01T01:00:00+01:00',
+      { since_unix_milliseconds: 0, until_unix_milliseconds: 0 },
+    ],
   ] as const)('normalizes exact RFC 3339 filter bounds: %s', async (args, expected) => {
-    const { command, request, entries } = historyCommandFixture(
-      () => ({ messages: [], has_more: false }),
-    );
+    const { command, request, entries } = historyCommandFixture(() => ({
+      messages: [],
+      has_more: false,
+    }));
     await command.handler(commandContext(`messages ${conversationId} ${args}`));
     expect(request).toHaveBeenCalledWith('read_messages', {
       conversation_id: conversationId,
@@ -2830,9 +2836,10 @@ describe('deterministic commands', () => {
     '--order=asc',
     `--since ${'1'.repeat(129)}`,
   ])('rejects unsafe history arguments before synchronization: %s', async (args) => {
-    const { command, request, entries } = historyCommandFixture(
-      () => ({ messages: [], has_more: false }),
-    );
+    const { command, request, entries } = historyCommandFixture(() => ({
+      messages: [],
+      has_more: false,
+    }));
     await command.handler(commandContext(`messages ${conversationId} ${args}`));
     expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(true);
     expect(request).not.toHaveBeenCalledWith('sync_messages', expect.anything());
@@ -2842,7 +2849,8 @@ describe('deterministic commands', () => {
   it.each(['asc', 'desc'] as const)(
     'resumes an empty filtered %s scan using the scanned cursor and preserves every bound',
     async (order) => {
-      const getPage = vi.fn<() => unknown>()
+      const getPage = vi
+        .fn<() => unknown>()
         .mockReturnValueOnce({ messages: [], has_more: true, next_cursor: 100 })
         .mockReturnValueOnce({
           messages: [historyMessage(order === 'asc' ? 101 : 99)],
@@ -2854,7 +2862,9 @@ describe('deterministic commands', () => {
           `messages ${conversationId} 7 --order ${order} --before-cursor 200 --since 2026-10-01T01:00:00+01:00 --until 2026-11-01T02:00:00+02:00`,
         ),
       );
-      expect(entries.some((entry) => entry.line.includes('none matched in this bounded scan'))).toBe(true);
+      expect(
+        entries.some((entry) => entry.line.includes('none matched in this bounded scan')),
+      ).toBe(true);
       const continuation = entries.find((entry) => entry.line.startsWith('next: /konclave '));
       const expectedAfter = order === 'asc' ? 100 : 7;
       const expectedBefore = order === 'asc' ? 200 : 100;
@@ -2864,9 +2874,7 @@ describe('deterministic commands', () => {
       if (!continuation) {
         throw new Error('history continuation is missing');
       }
-      await command.handler(
-        commandContext(continuation.line.slice('next: /konclave '.length)),
-      );
+      await command.handler(commandContext(continuation.line.slice('next: /konclave '.length)));
       const reads = request.mock.calls
         .filter(([operation]) => operation === 'read_messages')
         .map(([, payload]) => payload);
@@ -2897,12 +2905,12 @@ describe('deterministic commands', () => {
   it.each([undefined, 0, 200, 250, '100'])(
     'rejects unusable history continuation %s instead of guessing from matching messages',
     async (cursor) => {
-      const { command, entries } = historyCommandFixture(
-        () => ({ messages: [], has_more: true, next_cursor: cursor }),
-      );
-      await command.handler(
-        commandContext(`messages ${conversationId} --before-cursor 200`),
-      );
+      const { command, entries } = historyCommandFixture(() => ({
+        messages: [],
+        has_more: true,
+        next_cursor: cursor,
+      }));
+      await command.handler(commandContext(`messages ${conversationId} --before-cursor 200`));
       expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(true);
       expect(entries.some((entry) => entry.line.startsWith('next:'))).toBe(false);
     },
