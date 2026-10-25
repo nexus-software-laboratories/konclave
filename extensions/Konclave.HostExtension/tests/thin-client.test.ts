@@ -124,10 +124,20 @@ const selectedConversationCases = [
 
 const implicitConversationCases = [
   ...selectedConversationCases,
+  [
+    `approve ${pairingId}`,
+    'authorize_pairing_joiner',
+    { pairing_id: pairingId, granted_role: 'member' },
+  ],
+  [
+    `approve ${pairingId} administrator`,
+    'authorize_pairing_joiner',
+    { pairing_id: pairingId, granted_role: 'administrator' },
+  ],
   ['policy status', 'get_collaboration_policy_status', {}],
 ] as const;
 
-function conversationSelectionClient() {
+function conversationSelectionClient(pairingOverrides: Record<string, unknown> = {}) {
   let activeConversationId = conversationId;
   const request = vi.fn(async (operation: string, payload: unknown): Promise<unknown> => {
     if (operation === 'list_conversations') {
@@ -135,6 +145,14 @@ function conversationSelectionClient() {
         conversation_ids: [conversationId, '99'.repeat(32)],
         active_conversation_id: activeConversationId,
       };
+    }
+    if (operation === 'get_pairing_status') {
+      return pairingStatus({
+        local_role: 'inviter',
+        phase: 'inviter_awaiting_authorization',
+        requested_role: 'administrator',
+        ...pairingOverrides,
+      });
     }
     if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
       throw new Error('missing conversation selection');
@@ -147,6 +165,17 @@ function conversationSelectionClient() {
       return { active_conversation_id: activeConversationId };
     }
     switch (operation) {
+      case 'authorize_pairing_joiner':
+        if (!('granted_role' in payload)) {
+          throw new Error('missing granted role');
+        }
+        return pairingStatus({
+          local_role: 'inviter',
+          phase: 'inviter_awaiting_join_proof',
+          conversation_id: payload.conversation_id,
+          granted_role: payload.granted_role,
+          inviter_device_id: inviterDeviceId,
+        });
       case 'send_message':
       case 'send_directed_request':
         if (!('message_id' in payload)) {
@@ -2359,6 +2388,12 @@ describe('deterministic commands', () => {
       commandContext(`approve ${pairingId} ${'55'.repeat(32)} ${conversationId} member`),
     );
     await command?.handler(
+      commandContext(`approve ${pairingId} ${inviterDeviceId} ${'99'.repeat(32)} member`),
+    );
+    await command?.handler(
+      commandContext(`approve ${pairingId} ${inviterDeviceId} ${conversationId} administrator`),
+    );
+    await command?.handler(
       commandContext(`approve ${pairingId} ${inviterDeviceId} ${conversationId} member`),
     );
     await command?.handler(commandContext(`sync ${pairingId}`));
@@ -2370,6 +2405,9 @@ describe('deterministic commands', () => {
       conversation_id: conversationId,
       granted_role: 'member',
     });
+    expect(
+      request.mock.calls.filter(([operation]) => operation === 'authorize_pairing_inviter'),
+    ).toHaveLength(1);
     expect(lines.join('\n')).toContain(
       'approval values do not match the authenticated pairing state',
     );
@@ -2377,6 +2415,80 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('phase: completed');
     expect(lines.join('\n')).toContain('phase: cancelled');
   });
+
+  it.each(['member', 'administrator'] as const)(
+    'approves an inviter-side %s grant using selected, restored, or explicit conversations',
+    async (role) => {
+      for (const selection of ['use', 'restored', 'explicit']) {
+        const { client, request } = conversationSelectionClient();
+        const lines: string[] = [];
+        const command = createKonclaveCommands({
+          client,
+          output: {
+            write: (line) => {
+              lines.push(line);
+            },
+          },
+        })[0];
+        if (selection === 'use') {
+          await command?.handler(commandContext(`use ${conversationId}`));
+        }
+        request.mockClear();
+        const targetConversationId = selection === 'explicit' ? '99'.repeat(32) : conversationId;
+        await command?.handler(
+          commandContext(
+            `approve ${pairingId} ${selection === 'explicit' ? `${targetConversationId} ` : ''}${role}`,
+          ),
+        );
+        expect(request).toHaveBeenCalledWith('authorize_pairing_joiner', {
+          pairing_id: pairingId,
+          conversation_id: targetConversationId,
+          granted_role: role,
+        });
+        expect(
+          request.mock.calls.filter(([operation]) => operation === 'authorize_pairing_joiner'),
+        ).toHaveLength(1);
+        expect(request).not.toHaveBeenCalledWith('set_active_conversation', expect.anything());
+        expect(lines.join('\n')).not.toContain('konclave:');
+        if (selection === 'explicit') {
+          expect(request).not.toHaveBeenCalledWith('list_conversations', {});
+        } else {
+          expect(request).toHaveBeenCalledWith('list_conversations', {});
+        }
+      }
+    },
+  );
+
+  it.each([
+    ['administrator', { requested_role: 'member' }, 'cannot be elevated'],
+    ['', { phase: 'completed' }, 'cannot be approved in phase'],
+    ['owner', {}, 'granted role'],
+    [`${'gg'.repeat(32)} member`, {}, 'conversation identifier'],
+    [`${conversationId} member extra`, {}, 'usage:'],
+    ['', { local_role: 'joiner' }, 'usage:'],
+    ['member', { local_role: 'joiner' }, 'usage:'],
+    [conversationId, { local_role: 'joiner' }, 'usage:'],
+  ] as const)(
+    'rejects unsafe or malformed approval arguments %s with pairing state %j',
+    async (args, statusOverrides, expectedError) => {
+      const { client, request } = conversationSelectionClient(statusOverrides);
+      const lines: string[] = [];
+      const command = createKonclaveCommands({
+        client,
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
+        },
+      })[0];
+      await command?.handler(commandContext(`approve ${pairingId} ${args}`));
+      expect(lines.join('\n')).toContain(expectedError);
+      expect(
+        request.mock.calls.filter(([operation]) => operation.startsWith('authorize_pairing_')),
+      ).toHaveLength(0);
+      expect(request).not.toHaveBeenCalledWith('set_active_conversation', expect.anything());
+    },
+  );
 
   it('sends, replies, and displays synchronized peer text ephemerally', async () => {
     const replyToMessageId = '66'.repeat(16);
@@ -2751,7 +2863,14 @@ describe('deterministic commands', () => {
         })[0];
         await command?.handler(commandContext(`use ${conversationId}`));
         request.mockClear();
-        request.mockImplementationOnce(async () => {
+        const implementation = request.getMockImplementation();
+        if (!implementation) {
+          throw new Error('selection client implementation is missing');
+        }
+        request.mockImplementation(async (operation, payload) => {
+          if (operation !== 'list_conversations') {
+            return implementation(operation, payload);
+          }
           if (failure === 'unavailable') {
             throw new Error('selection read unavailable');
           }
@@ -2763,7 +2882,9 @@ describe('deterministic commands', () => {
 
         await command?.handler(commandContext(args));
 
-        expect(request).toHaveBeenCalledExactlyOnceWith('list_conversations', {});
+        expect(
+          request.mock.calls.filter(([operation]) => operation !== 'get_pairing_status'),
+        ).toEqual([['list_conversations', {}]]);
         expect(lines.some((line) => line.startsWith('konclave:'))).toBe(true);
       }
     },
