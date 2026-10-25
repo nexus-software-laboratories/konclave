@@ -18,8 +18,9 @@ use KonclaveDomainCore::{
     CollaborationPolicyBundle, CollaborationPolicyDigest, ConversationId, ConversationRole,
     ConversationState, DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
     EnvelopeId, Invitation, InvitationId, JoinProof, MAX_COLLABORATION_POLICY_BUNDLE_BYTES,
-    MAX_MEMBERS, MembershipChange, MembershipOperationId, MessageId, NotificationId, RelayEnvelope,
-    RoutingId, StoredRelayEnvelope,
+    MAX_MEMBERS, MAX_MESSAGE_PAGE_SIZE, MembershipChange, MembershipOperationId,
+    MessageHistoryOrder, MessageHistoryQuery, MessageId, NotificationId, RelayEnvelope, RoutingId,
+    StoredRelayEnvelope,
 };
 use KonclaveLocalServiceTransport::MAX_RPC_FRAME_BYTES;
 use KonclaveProtocolContracts::v1::{
@@ -46,6 +47,7 @@ mod collaboration_policy_exchange;
 mod collaboration_policy_operation;
 mod delivery_diagnostics;
 mod directed_request_handling;
+mod message_history;
 mod relay_migration;
 pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
 pub(crate) use collaboration_policy_operation::CollaborationPolicyActivationOperation;
@@ -70,7 +72,6 @@ const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
 pub(crate) const MAX_CONVERSATION_PAGE_SIZE: usize = 100;
 const MAX_PENDING_OUTBOX: usize = 32;
-const MAX_MESSAGE_PAGE_SIZE: usize = 100;
 const LOCAL_RECORD_VERSION: u8 = 1;
 const OUTBOX_RECORD_SCOPE: u8 = 1;
 const INBOX_ENVELOPE_RECORD_SCOPE: u8 = 2;
@@ -6929,63 +6930,16 @@ impl ProfileStore {
         after_cursor: u64,
         limit: usize,
     ) -> Result<HistoryPage, ProfileStoreError> {
-        if !(1..=MAX_MESSAGE_PAGE_SIZE).contains(&limit) {
-            return Err(ProfileStoreError::InvalidTransition);
-        }
-        let conversation = self.load_conversation(conversation_id)?;
-        let routing_id = conversation.routing_id;
-        let message_ids = {
-            let connection = self.lock()?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT CASE WHEN length(message_id) = 16 THEN message_id END
-                     FROM daemon_message_history
-                     WHERE conversation_id = ?1
-                       AND status = 2
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM daemon_internal_application_message AS internal
-                           WHERE internal.conversation_id =
-                               daemon_message_history.conversation_id
-                             AND internal.message_id =
-                               daemon_message_history.message_id
-                       )
-                       AND cursor > ?2
-                       AND cursor <= ?3
-                     ORDER BY cursor
-                     LIMIT ?4",
-                )
-                .map_err(|_| ProfileStoreError::Storage)?;
-            statement
-                .query_map(
-                    params![
-                        conversation_id.as_bytes().as_slice(),
-                        to_sql_integer(after_cursor)?,
-                        to_sql_integer(conversation.replay_cursor)?,
-                        i64::try_from(limit + 1)
-                            .map_err(|_| ProfileStoreError::SequenceExhausted)?
-                    ],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .map_err(|_| ProfileStoreError::Storage)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| ProfileStoreError::Storage)?
-        };
-        let has_more = message_ids.len() > limit;
-        let mut messages = Vec::with_capacity(message_ids.len().min(limit));
-        for message_id in message_ids.into_iter().take(limit) {
-            let message_id =
-                MessageId::from_slice(&message_id).map_err(|_| ProfileStoreError::CorruptData)?;
-            let connection = self.lock()?;
-            let history = self
-                .load_history_record(&connection, conversation_id, routing_id, message_id)?
-                .ok_or(ProfileStoreError::CorruptData)?;
-            drop(connection);
-            let cursor = history.cursor.ok_or(ProfileStoreError::CorruptData)?;
-            self.verify_history_cursor_binding(conversation_id, routing_id, &history, cursor)?;
-            messages.push(stored_history_message(history).ok_or(ProfileStoreError::CorruptData)?);
-        }
-        Ok(HistoryPage { messages, has_more })
+        let query = MessageHistoryQuery::new(
+            MessageHistoryOrder::Ascending,
+            after_cursor,
+            None,
+            None,
+            None,
+            limit,
+        )
+        .map_err(|_| ProfileStoreError::InvalidTransition)?;
+        self.load_history_query(conversation_id, query)
     }
 
     fn verify_history_cursor_binding(
@@ -9301,6 +9255,7 @@ pub(crate) struct StoredHistoryMessage {
 pub(crate) struct HistoryPage {
     pub(crate) messages: Vec<StoredHistoryMessage>,
     pub(crate) has_more: bool,
+    pub(crate) next_cursor: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12195,6 +12150,26 @@ mod tests {
         sender_epoch: u64,
         sender_counter: u64,
     ) {
+        stage_inbox_application_message(
+            fixture,
+            cursor,
+            identifier,
+            sender_epoch,
+            &application_message(
+                identifier.wrapping_add(100),
+                sender_counter,
+                &format!("message-{identifier}"),
+            ),
+        );
+    }
+
+    fn stage_inbox_application_message(
+        fixture: &ConversationFixture,
+        cursor: u64,
+        identifier: u8,
+        sender_epoch: u64,
+        message: &ApplicationMessage,
+    ) {
         let envelope = StoredRelayEnvelope::new(
             relay_envelope(fixture.routing_id, identifier, &[identifier]),
             cursor,
@@ -12208,13 +12183,28 @@ mod tests {
                 cursor,
                 fixture.device_id,
                 sender_epoch,
-                &application_message(
-                    identifier.wrapping_add(100),
-                    sender_counter,
-                    &format!("message-{identifier}"),
-                ),
+                message,
             )
             .unwrap();
+    }
+
+    fn complete_history_message(
+        fixture: &ConversationFixture,
+        cursor: u64,
+        timestamp: u64,
+    ) {
+        let identifier = u8::try_from(cursor).unwrap();
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([identifier; MessageId::LENGTH]),
+            cursor,
+            timestamp,
+            None,
+            ApplicationContent::text(format!("history-{cursor}")).unwrap(),
+        )
+        .unwrap();
+        stage_inbox_application_message(fixture, cursor, identifier, 0, &message);
+        fixture.store.complete_inbox(fixture.conversation_id, cursor).unwrap();
     }
 
     fn stage_remote_inbox_message(
@@ -15040,7 +15030,7 @@ mod tests {
     }
 
     #[test]
-    fn history_hides_accepted_outbound_until_contiguous_echo_completion() {
+    fn message_history_hides_accepted_outbound_until_contiguous_echo_completion() {
         let fixture = conversation_fixture("history-contiguous-frontier");
         let message_id = MessageId::from_bytes([71; MessageId::LENGTH]);
         let envelope_id = EnvelopeId::from_bytes([72; EnvelopeId::LENGTH]);
@@ -15103,6 +15093,14 @@ mod tests {
             .unwrap();
         assert_eq!(first_page.messages.len(), 1);
         assert_eq!(first_page.messages[0].cursor, 1);
+        let descending = MessageHistoryQuery::new(
+            MessageHistoryOrder::Descending, 0, None, None, None, 10,
+        ).unwrap();
+        let before_echo = fixture.store.load_history_query(fixture.conversation_id, descending).unwrap();
+        assert_eq!(
+            before_echo.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            vec![1]
+        );
 
         let echo = StoredRelayEnvelope::new(outbound_envelope, 2).unwrap();
         fixture.store.record_inbox_envelope(&echo).unwrap();
@@ -15137,6 +15135,155 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+        let newest = fixture.store.load_history_query(fixture.conversation_id, descending).unwrap();
+        assert_eq!(
+            newest.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn message_history_newest_page_uses_the_cursor_index_and_preserves_legacy_ascending() {
+        let fixture = conversation_fixture("history-newest-page");
+        for cursor in 1..=205 {
+            complete_history_message(&fixture, cursor, 1_700_000_000_000);
+        }
+        let ascending = fixture.store.load_history(fixture.conversation_id, 0, 10).unwrap();
+        assert_eq!(
+            ascending.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(ascending.next_cursor, Some(10));
+        let query = MessageHistoryQuery::new(
+            MessageHistoryOrder::Descending, 0, None, None, None, 10,
+        ).unwrap();
+        let newest = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+        assert_eq!(
+            newest.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            (196..=205).rev().collect::<Vec<_>>()
+        );
+        assert_eq!(newest.next_cursor, Some(196));
+        assert!(newest.has_more);
+        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+            let connection = fixture.store.lock().unwrap();
+            let mut statement = connection.prepare(
+                &format!("EXPLAIN QUERY PLAN {}", message_history::candidate_query(order)),
+            ).unwrap();
+            let plan = statement.query_map(
+                params![fixture.conversation_id.as_bytes().as_slice(), 0_i64, 205_i64, 11_i64],
+                |row| row.get::<_, String>(3),
+            ).unwrap().collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+            assert!(
+                plan.contains("daemon_message_history_page_idx")
+                    || plan.contains("daemon_message_history_cursor_idx"),
+                "{plan}"
+            );
+            assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+        }
+    }
+
+    #[test]
+    fn message_history_sparse_empty_pages_resume_from_the_last_scanned_cursor() {
+        let fixture = conversation_fixture("history-sparse-range");
+        for cursor in 1..=205 {
+            complete_history_message(&fixture, cursor, if cursor == 1 { 1 } else { 100 });
+        }
+        let mut before = None;
+        for expected_cursor in [106, 6] {
+            let query = MessageHistoryQuery::new(
+                MessageHistoryOrder::Descending, 0, before, Some(0), Some(2), 10,
+            ).unwrap();
+            let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+            assert!(page.messages.is_empty());
+            assert!(page.has_more);
+            assert_eq!(page.next_cursor, Some(expected_cursor));
+            before = page.next_cursor;
+            if expected_cursor == 106 {
+                complete_history_message(&fixture, 206, 1);
+            }
+        }
+        let query = MessageHistoryQuery::new(
+            MessageHistoryOrder::Descending, 0, before, Some(0), Some(2), 10,
+        ).unwrap();
+        let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].cursor, 1);
+        assert!(!page.has_more);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn message_history_filters_nonmonotonic_equal_timestamps_with_exclusive_cursor_bounds() {
+        let fixture = conversation_fixture("history-clock-order");
+        for (index, timestamp) in [30, 10, 20, 20, 40].into_iter().enumerate() {
+            complete_history_message(&fixture, u64::try_from(index + 1).unwrap(), timestamp);
+        }
+        for (order, expected) in [
+            (MessageHistoryOrder::Ascending, vec![1, 3, 4]),
+            (MessageHistoryOrder::Descending, vec![4, 3, 1]),
+        ] {
+            let query = MessageHistoryQuery::new(order, 0, None, Some(20), Some(40), 10).unwrap();
+            let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+            assert_eq!(
+                page.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+                expected
+            );
+            assert!(!page.has_more);
+            let bounded = MessageHistoryQuery::new(order, 1, Some(4), None, None, 10).unwrap();
+            let page = fixture.store.load_history_query(fixture.conversation_id, bounded).unwrap();
+            let mut cursors = page.messages.iter().map(|message| message.cursor).collect::<Vec<_>>();
+            cursors.sort_unstable();
+            assert_eq!(cursors, vec![2, 3]);
+        }
+    }
+
+    #[test]
+    fn message_history_filters_authenticate_before_examining_sender_timestamps() {
+        let fixture = conversation_fixture("history-filter-auth");
+        complete_history_message(&fixture, 1, 100);
+        fixture.store.lock().unwrap().execute(
+            "UPDATE daemon_message_history
+             SET sealed_message = zeroblob(length(sealed_message))
+             WHERE conversation_id = ?1",
+            [fixture.conversation_id.as_bytes().as_slice()],
+        ).unwrap();
+        let query = MessageHistoryQuery::new(
+            MessageHistoryOrder::Descending, 0, None, Some(0), Some(2), 10,
+        ).unwrap();
+        assert!(matches!(
+            fixture.store.load_history_query(fixture.conversation_id, query),
+            Err(ProfileStoreError::CorruptData)
+        ));
+    }
+
+    #[test]
+    fn message_history_excludes_internal_control_records_in_both_orders() {
+        let fixture = conversation_fixture("history-hidden-control");
+        complete_history_message(&fixture, 1, 1);
+        stage_policy_exchange_message(
+            &fixture,
+            2,
+            2,
+            fixture.device_id,
+            2,
+            ApplicationContent::RepeatPairingRequest(Box::new(
+                KonclaveDomainCore::RepeatPairingRequest::new(
+                    KonclaveDomainCore::RepeatPairingOperationId::from_bytes([48; 16]),
+                    fixture.device_id,
+                    ConversationId::from_bytes([49; ConversationId::LENGTH]),
+                    2_000,
+                ).unwrap(),
+            )),
+        );
+        fixture.store.complete_inbox(fixture.conversation_id, 2).unwrap();
+        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+            let query = MessageHistoryQuery::new(order, 0, None, None, None, 10).unwrap();
+            let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+            assert_eq!(page.messages.len(), 1);
+            assert_eq!(page.messages[0].cursor, 1);
+            assert!(!page.has_more);
+            assert_eq!(page.next_cursor, None);
+        }
     }
 
     #[test]

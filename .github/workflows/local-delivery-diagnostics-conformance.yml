@@ -125,6 +125,8 @@ jobs:
           cargo test --locked --package KonclaveLocalServiceTransport --test authorization_handshake
           cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
           cargo test --locked --package KonclaveLocalDaemon --lib message_history
+          cargo test --locked --package KonclaveLocalDaemon --lib mcp::tests::regenerate_copilot_tool_contract_fixture -- --ignored --exact
+          cargo test --locked --package KonclaveLocalDaemon --lib mcp::tests::copilot_tool_contract_fixture_matches_the_router -- --exact
           cargo test --locked --package KonclaveLocalDaemon --lib local_
           cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
           cargo clippy --locked --package KonclaveLocalServiceTransport --all-targets -- -D warnings

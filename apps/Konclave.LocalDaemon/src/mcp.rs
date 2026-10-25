@@ -8,7 +8,8 @@ use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, CollaborationPolicyDigest, CollaborationPolicyEffect,
     CollaborationPolicyLimits, CollaborationPolicyProposalId, CollaborationPolicyResponseOutcome,
     ConversationId, ConversationRole, DeviceId, Ed25519PublicKey, EnvelopeId,
-    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MessageId, PairingId,
+    MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MessageHistoryOrder,
+    MessageHistoryQuery, MessageId, PairingId,
     RepeatPairingOperationId, RoutingId, ShortCodePairingAttemptId, ShortCodePairingSas,
     TrustedDeviceAlias, TrustedDeviceBindingStatus,
 };
@@ -184,6 +185,10 @@ struct RevokeCollaborationPolicyToolRequest {
 struct ReadMessagesRequest {
     conversation_id: String,
     after_cursor: Option<u64>,
+    before_cursor: Option<u64>,
+    order: Option<String>,
+    since_unix_milliseconds: Option<i64>,
+    until_unix_milliseconds: Option<i64>,
     limit: Option<usize>,
 }
 
@@ -464,6 +469,14 @@ enum MessageContentResult {
 struct MessageListResult {
     messages: Vec<MessageResult>,
     has_more: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ReadMessagesResult {
+    #[serde(flatten)]
+    page: MessageListResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1990,25 +2003,37 @@ impl StdioServer {
     async fn read_messages(
         &self,
         Parameters(request): Parameters<ReadMessagesRequest>,
-    ) -> Result<Json<MessageListResult>, String> {
+    ) -> Result<Json<ReadMessagesResult>, String> {
         self.authorize("read_messages")?;
         let conversation_id = parse_conversation_id(&request.conversation_id)?;
-        let after_cursor = request.after_cursor.unwrap_or(0);
-        let limit = page_size(request.limit)?;
+        let order = MessageHistoryOrder::try_from(request.order.as_deref().unwrap_or("asc"))
+            .map_err(|error| error.to_string())?;
+        let query = MessageHistoryQuery::new(
+            order,
+            request.after_cursor.unwrap_or(0),
+            request.before_cursor,
+            request.since_unix_milliseconds,
+            request.until_unix_milliseconds,
+            page_size(request.limit)?,
+        )
+        .map_err(|error| error.to_string())?;
         let conversations = self.conversations.clone();
         let history = tokio::task::spawn_blocking(move || {
-            conversations.history(conversation_id, after_cursor, limit)
+            conversations.history_query(conversation_id, query)
         })
         .await
         .map_err(|_| "task_failed".to_string())?
         .map_err(tool_error)?;
-        Ok(Json(MessageListResult {
-            messages: history
-                .messages
-                .into_iter()
-                .map(|message| history_result(conversation_id, message))
-                .collect::<Result<Vec<_>, _>>()?,
-            has_more: history.has_more,
+        Ok(Json(ReadMessagesResult {
+            page: MessageListResult {
+                messages: history
+                    .messages
+                    .into_iter()
+                    .map(|message| history_result(conversation_id, message))
+                    .collect::<Result<Vec<_>, _>>()?,
+                has_more: history.has_more,
+            },
+            next_cursor: history.next_cursor,
         }))
     }
 
@@ -3210,6 +3235,80 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.direction, "outbound");
+    }
+
+    #[tokio::test]
+    async fn message_history_json_validates_queries_and_preserves_the_legacy_empty_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "history-json");
+        let conversation = coordinator.create().unwrap();
+        let server = StdioServer::new(
+            coordinator,
+            None,
+            None,
+            DeliveryHealth::default(),
+            local_stdio_authorization(false),
+        );
+        let base = json!({
+            "conversation_id": super::encode_hex(conversation.conversation_id.as_bytes())
+        });
+        for extra in [
+            json!({}),
+            json!({"order": "asc"}),
+            json!({
+                "order": "desc",
+                "before_cursor": 20,
+                "since_unix_milliseconds": -1,
+                "until_unix_milliseconds": 20,
+                "limit": 10
+            }),
+        ] {
+            let mut request = base.clone();
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let result: serde_json::Value = serde_json::from_slice(
+                &server.dispatch_json("read_messages", &serde_json::to_vec(&request).unwrap())
+                    .await.unwrap(),
+            ).unwrap();
+            assert_eq!(result, json!({"messages": [], "has_more": false}));
+        }
+        for (extra, expected_error) in [
+            (json!({"order": "timestamp"}), "history order must be asc or desc"),
+            (json!({"before_cursor": 0}), "history cursor bounds are invalid"),
+            (json!({"after_cursor": 4, "before_cursor": 4}), "history cursor bounds are invalid"),
+            (json!({"since_unix_milliseconds": 2, "until_unix_milliseconds": 1}),
+             "history timestamp range is reversed"),
+        ] {
+            let mut request = base.clone();
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert_eq!(
+                server.dispatch_json("read_messages", &serde_json::to_vec(&request).unwrap())
+                    .await.err().as_deref(),
+                Some(expected_error)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn message_history_authorizes_before_query_or_conversation_inspection() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = open_coordinator(root.path(), "history-denied");
+        let server = StdioServer::new(
+            coordinator,
+            None,
+            None,
+            DeliveryHealth::default(),
+            Arc::new(|context| {
+                assert_eq!(context.method, "read_messages");
+                anyhow::bail!("local_service_not_authorized")
+            }),
+        );
+        assert_eq!(
+            server.dispatch_json("read_messages", &serde_json::to_vec(&json!({
+                "conversation_id": "01".repeat(32),
+                "order": "timestamp"
+            })).unwrap()).await.err().as_deref(),
+            Some("local_service_not_authorized")
+        );
     }
 
     #[tokio::test]
