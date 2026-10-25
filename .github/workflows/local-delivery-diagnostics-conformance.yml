@@ -67,14 +67,19 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-      - name: Verify body-free diagnostic decisions
+      - name: Verify pure diagnostic and bounded history decisions
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveDomainCore -- --check
           cargo test --locked --package KonclaveDomainCore delivery_diagnostics::tests
+          cargo test --locked --package KonclaveDomainCore message_history::tests
           cargo clippy --locked --package KonclaveDomainCore --all-targets -- -D warnings
+      - name: Verify deterministic component relevance
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: ./scripts/ci/Test-ComponentValidationScope.ps1
       - name: Resolve pinned Node version
         if: steps.scope.outputs.run == 'true'
         id: toolchains
@@ -119,6 +124,7 @@ jobs:
           cargo fmt --package KonclaveLocalServiceTransport -- --check
           cargo test --locked --package KonclaveLocalServiceTransport --test authorization_handshake
           cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
+          cargo test --locked --package KonclaveLocalDaemon --lib message_history
           cargo test --locked --package KonclaveLocalDaemon --lib local_
           cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
           cargo clippy --locked --package KonclaveLocalServiceTransport --all-targets -- -D warnings

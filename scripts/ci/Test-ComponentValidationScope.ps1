@@ -98,6 +98,19 @@ foreach ($path in @(
     }
 }
 
+foreach ($path in @(
+    'crates/Konclave.DomainCore/src/message_history.rs'
+    'apps/Konclave.LocalDaemon/src/persistence/message_history.rs'
+    'fixtures/local-service/v1/copilot-tools.json'
+)) {
+    if (-not (Get-ComponentValidationDecision `
+        -Contract 'local-delivery-diagnostics' `
+        -EventName pull_request `
+        -ChangedFiles @($path))) {
+        throw "Bounded history boundary is not selected: $path"
+    }
+}
+
 $ownedCases = [ordered]@{
     'a2a-discovery' =
         'crates/Konclave.A2ADiscovery/src/catalog.rs'
