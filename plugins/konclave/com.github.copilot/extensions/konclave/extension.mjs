@@ -5552,16 +5552,21 @@ var repeatPairingPhases = [
   "cancelled"
 ];
 function parseCommandArguments(raw) {
+  return parseBoundedCommandArguments(raw, maxArguments);
+}
+function parseBoundedCommandArguments(raw, argumentLimit) {
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     return [];
   }
-  if (trimmed.length > maxArgumentLength * maxArguments) {
+  if (trimmed.length > maxArgumentLength * argumentLimit) {
     throw new Error("command arguments are too long");
   }
   const parts = trimmed.split(/\s+/u);
-  if (parts.length > maxArguments) {
-    throw new Error("command accepts at most four arguments");
+  if (parts.length > argumentLimit) {
+    throw new Error(
+      `command accepts at most ${argumentLimit === maxArguments ? "four" : argumentLimit} arguments`
+    );
   }
   for (const part of parts) {
     if (part.length > maxArgumentLength) {
@@ -5607,7 +5612,7 @@ var helpLines = [
   "  /konclave pairing <pairing>                         Show authenticated pairing state.",
   "  /konclave verification <attempt>                    Show short-code verification state.",
   "  /konclave verify <attempt> <peer> <sas>             Explicitly confirm displayed short-code values.",
-  "  /konclave approve <pairing> <conversation> [role]   Approve a displayed joiner.",
+  "  /konclave approve <pairing> [conversation] [role]   Approve a displayed joiner; defaults to selected conversation and member.",
   "  /konclave approve <pairing> <inviter> <conversation> <role>",
   "                                                       Approve displayed inviter fields.",
   "  /konclave sync <pairing>                            Process one pairing progress page.",
@@ -5616,10 +5621,14 @@ var helpLines = [
   "  /konclave send [conversation] [message-id] -- <text>",
   "                                                       Send or retry a message.",
   "  /konclave request [conversation] [target-device] [message-id] -- <text>",
-  "                                                       Group targets require a conversation ID.",
+  "                                                       Positional group targets require a conversation ID.",
+  "  /konclave request [conversation] [message-id] --to <device> -- <text>",
+  "                                                       Target a peer in the selected or explicit conversation.",
   "  /konclave reply [conversation] <reply-to> [message-id] -- <text>",
   "                                                       Reply or retry with an explicit ID.",
-  "  /konclave messages [conversation] [after-cursor]    Sync and show a bounded message page.",
+  "  /konclave messages [conversation] [after-cursor]    Sync and show newest-first history with UTC timestamps.",
+  "    --order asc|desc --before-cursor <cursor>          Choose cursor order and a backward page bound.",
+  "    --since <RFC3339> --until <RFC3339>                Sender timestamp range [since, until); explicit timezone required.",
   "  /konclave use <conversation>                        Select the implicit conversation.",
   "  /konclave mute [conversation]                       Mute automatic delivery.",
   "  /konclave unmute [conversation]                     Resume automatic delivery.",
@@ -6295,7 +6304,7 @@ function parseMessageList(value) {
     throw new Error("the local service message-list response is malformed");
   }
   const messages = value.messages.map((message) => {
-    if (!isRecord4(message) || typeof message.cursor !== "number" || !Number.isSafeInteger(message.cursor) || message.cursor < 0 || message.direction !== "inbound" && message.direction !== "outbound" || typeof message.duplicate !== "boolean") {
+    if (!isRecord4(message) || typeof message.cursor !== "number" || !Number.isSafeInteger(message.cursor) || message.cursor < 0 || typeof message.sent_at_unix_milliseconds !== "number" || !Number.isInteger(message.sent_at_unix_milliseconds) || message.sent_at_unix_milliseconds < 0 || message.direction !== "inbound" && message.direction !== "outbound" || typeof message.duplicate !== "boolean") {
       throw new Error("the local service message-list response is malformed");
     }
     return {
@@ -6314,12 +6323,21 @@ function parseMessageList(value) {
         "sender device identifier"
       ),
       cursor: message.cursor,
+      sentAtUnixMilliseconds: message.sent_at_unix_milliseconds,
       direction: message.direction,
       content: parseMessageContent(message),
       duplicate: message.duplicate
     };
   });
-  return { messages, hasMore: value.has_more };
+  return {
+    messages,
+    hasMore: value.has_more,
+    nextCursor: optionalNonnegativeSafeInteger(
+      value,
+      "next_cursor",
+      "the local service history continuation is malformed"
+    )
+  };
 }
 function parseMessageContent(message) {
   switch (message.content_type) {
@@ -6407,6 +6425,37 @@ function parseDelimitedMessage(raw, minimumIdentifiers, maximumIdentifiers, usag
     throw new Error(`message text must contain 1-${maxMessageBytes} UTF-8 bytes`);
   }
   return { identifiers, text: text2 };
+}
+function parseDirectedRequestArguments(raw, usage) {
+  const parsed = parseDelimitedMessage(raw, 0, 5, usage);
+  const identifiers = [];
+  let targetDeviceId;
+  let expectingTarget = false;
+  for (const identifier of parsed.identifiers) {
+    if (expectingTarget) {
+      targetDeviceId = requireHexIdentifier(
+        identifier,
+        deviceIdCharacters,
+        "target device identifier"
+      );
+      expectingTarget = false;
+    } else if (identifier === "--to") {
+      if (targetDeviceId !== void 0) {
+        throw new Error("--to may be supplied only once");
+      }
+      expectingTarget = true;
+    } else {
+      if (identifier.startsWith("-")) {
+        throw new Error(`unknown request option; usage: ${usage}`);
+      }
+      identifiers.push(identifier);
+    }
+  }
+  if (expectingTarget) {
+    throw new Error("--to requires a target device identifier");
+  }
+  requireArgumentCount(identifiers, 0, 3, usage);
+  return { identifiers, text: parsed.text, targetDeviceId };
 }
 function messageRequestId(messageId) {
   return createHash2("sha256").update(commandMessageRequestDomain).update(Buffer.from(messageId, "hex")).digest().subarray(0, 16);
@@ -6768,10 +6817,7 @@ async function completeAccountTrustedPairing(client, initialStatus, presentation
     throw error;
   }
 }
-async function requireSingleConversation(client, activeConversationId) {
-  if (activeConversationId) {
-    return activeConversationId;
-  }
+async function requireSingleConversation(client) {
   const selection = conversations(await client.request("list_conversations", {}));
   if (selection.activeConversationId) {
     return selection.activeConversationId;
@@ -6783,22 +6829,118 @@ async function requireSingleConversation(client, activeConversationId) {
     "no active conversation is selected; run /konclave conversations, then /konclave use <conversation>"
   );
 }
-async function resolveConversationArguments(client, activeConversationId, identifiers, minimumRemaining, maximumRemaining, usage) {
+async function resolveConversationArguments(client, identifiers, minimumRemaining, maximumRemaining, usage) {
   const explicitlySelectedConversation = identifiers.length > maximumRemaining || identifiers[0]?.length === conversationIdCharacters;
   const remainingIdentifiers = explicitlySelectedConversation ? identifiers.slice(1) : identifiers;
   requireArgumentCount(remainingIdentifiers, minimumRemaining, maximumRemaining, usage);
-  const conversationId = explicitlySelectedConversation ? requireHexIdentifier(identifiers[0], conversationIdCharacters, "conversation identifier") : await requireSingleConversation(client, activeConversationId);
+  const conversationId = explicitlySelectedConversation ? requireHexIdentifier(identifiers[0], conversationIdCharacters, "conversation identifier") : await requireSingleConversation(client);
   return { conversationId, remainingIdentifiers, explicitlySelectedConversation };
 }
-function parseCursor(value) {
+function parseCursor(value, label = "after-cursor") {
   if (!value || !/^(0|[1-9][0-9]*)$/u.test(value)) {
-    throw new Error("after-cursor must be a non-negative integer");
+    throw new Error(`${label} must be a non-negative integer`);
   }
   const cursor = Number(value);
   if (!Number.isSafeInteger(cursor)) {
-    throw new Error("after-cursor exceeds the supported integer range");
+    throw new Error(`${label} exceeds the supported integer range`);
   }
   return cursor;
+}
+function parseHistoryInstant(value, label) {
+  const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})$/u.exec(
+    value
+  );
+  if (!match || !match[8]) {
+    throw new Error(`${label} must be a representable RFC 3339 instant with an explicit timezone`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? "";
+  const milliseconds = Number(fraction.slice(0, 3).padEnd(3, "0"));
+  const zone = match[8];
+  const offsetHours = zone.length === 1 ? 0 : Number(zone.slice(1, 3));
+  const offsetMinutes = zone.length === 1 ? 0 : Number(zone.slice(4, 6));
+  const local = /* @__PURE__ */ new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, milliseconds);
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() !== month - 1 || local.getUTCDate() !== day || hour > 23 || minute > 59 || second > 59 || offsetHours > 23 || offsetMinutes > 59) {
+    throw new Error(`${label} contains an invalid calendar date, time, offset, or leap second`);
+  }
+  const offset2 = (offsetHours * 60 + offsetMinutes) * (zone[0] === "-" ? -1 : 1);
+  const floorTimestamp = local.getTime() - offset2 * 6e4;
+  const unixMilliseconds = floorTimestamp + (/[1-9]/u.test(fraction.slice(3)) ? 1 : 0);
+  const normalized = new Date(unixMilliseconds);
+  const floorDate = new Date(floorTimestamp);
+  if (!Number.isSafeInteger(unixMilliseconds) || normalized.getUTCFullYear() < 0 || normalized.getUTCFullYear() > 9999 || floorDate.getUTCFullYear() < 0 || floorDate.getUTCFullYear() > 9999) {
+    throw new Error(`${label} cannot be normalized to a four-digit UTC year`);
+  }
+  return {
+    unixMilliseconds,
+    utc: normalized.toISOString(),
+    chronologicalKey: `${floorDate.toISOString().slice(0, 19)}.${fraction.replace(/0+$/u, "") || "0"}`
+  };
+}
+function parseHistoryArguments(raw) {
+  const parts = parseBoundedCommandArguments(raw, 10);
+  const identifiers = [];
+  const seen = /* @__PURE__ */ new Set();
+  let order = "desc";
+  let beforeCursor;
+  let since;
+  let until;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === void 0) {
+      throw new Error("history argument is missing");
+    }
+    if (!part.startsWith("-")) {
+      identifiers.push(part);
+      continue;
+    }
+    if (!["--order", "--before-cursor", "--since", "--until"].includes(part)) {
+      throw new Error("unknown history option");
+    }
+    if (seen.has(part)) {
+      throw new Error("history options cannot be repeated");
+    }
+    seen.add(part);
+    const value = parts[index + 1];
+    if (value === void 0 || value.startsWith("--")) {
+      throw new Error("history option is missing its value");
+    }
+    index += 1;
+    switch (part) {
+      case "--order":
+        if (value !== "asc" && value !== "desc") {
+          throw new Error("history order must be asc or desc");
+        }
+        order = value;
+        break;
+      case "--before-cursor":
+        beforeCursor = parseCursor(value, "before-cursor");
+        break;
+      case "--since":
+        since = parseHistoryInstant(value, "--since");
+        break;
+      case "--until":
+        until = parseHistoryInstant(value, "--until");
+        break;
+    }
+  }
+  if (since && until && since.chronologicalKey > until.chronologicalKey) {
+    throw new Error("history timestamp range is reversed");
+  }
+  return { identifiers, order, beforeCursor, since, until };
+}
+function displayMessageTimestamp(timestamp) {
+  if (!Number.isSafeInteger(timestamp) || timestamp > 864e13) {
+    return "[timestamp unavailable: sender value is outside the supported UTC range]";
+  }
+  return new Date(timestamp).toISOString();
 }
 function displayText(value) {
   const safe = value.replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, "\uFFFD");
@@ -7113,6 +7255,16 @@ function selectedConversation(value) {
     "active conversation identifier"
   );
 }
+async function selectActiveConversation(client, conversationId) {
+  const selected = selectedConversation(
+    await client.request("set_active_conversation", {
+      conversation_id: conversationId
+    })
+  );
+  if (selected !== conversationId) {
+    throw new Error("the local service selected a different active conversation");
+  }
+}
 function parseConversationArgument(argumentsText, usage) {
   const parts = parseCommandArguments(argumentsText);
   requireArgumentCount(parts, 1, 1, usage);
@@ -7127,7 +7279,6 @@ function createKonclaveCommands(dependencies) {
   const clipboard = dependencies.clipboard ?? createPairingClipboard();
   const terminalColumns = dependencies.terminalColumns ?? defaultTerminalColumns;
   const terminalInteractive = dependencies.terminalInteractive ?? defaultTerminalInteractive;
-  let activeConversationId;
   let clipboardReceipt;
   const runPolicy = async (raw) => {
     const parsed = parseCommand(raw);
@@ -7138,8 +7289,7 @@ function createKonclaveCommands(dependencies) {
       }
       return;
     }
-    const conversationId = await requireSingleConversation(client, activeConversationId);
-    activeConversationId = conversationId;
+    const conversationId = await requireSingleConversation(client);
     switch (parsed.subcommand) {
       case "status": {
         requireNoArguments(parsed.argumentsText, "policy status");
@@ -7392,7 +7542,6 @@ function createKonclaveCommands(dependencies) {
       case "diagnose": {
         const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
           client,
-          activeConversationId,
           parseCommandArguments(argumentsText),
           1,
           1,
@@ -7414,7 +7563,6 @@ function createKonclaveCommands(dependencies) {
       case "conversations": {
         requireNoArguments(argumentsText, subcommand);
         const selection = conversations(await client.request("list_conversations", {}));
-        activeConversationId = selection.activeConversationId;
         if (selection.conversationIds.length === 0) {
           await presentation.write(
             presentation.mode === "normal" ? "conversations: none" : "no conversations yet"
@@ -7659,7 +7807,7 @@ function createKonclaveCommands(dependencies) {
         if (!selection.conversationIds.includes(status.conversationId)) {
           throw new Error("completed pairing conversation is unavailable locally");
         }
-        activeConversationId = status.conversationId;
+        await selectActiveConversation(client, status.conversationId);
         if (presentation.mode === "verbose") {
           await renderPairing(presentation, status);
         }
@@ -7691,7 +7839,7 @@ function createKonclaveCommands(dependencies) {
         );
         await renderPairing(presentation, status);
         await presentation.write(
-          `next: verify the joiner device, run /konclave new, then /konclave approve ${status.pairingId} <conversation>`
+          `next: verify the joiner device, run /konclave use <conversation> or /konclave new, then /konclave approve ${status.pairingId}`
         );
         return;
       }
@@ -7700,7 +7848,6 @@ function createKonclaveCommands(dependencies) {
         requireArgumentCount(parts, 0, 1, "/konclave new [alias]");
         if (parts.length === 0) {
           const conversationId = parseConversation(await client.request("create_conversation", {}));
-          activeConversationId = conversationId;
           await presentation.write(`conversation created: ${conversationId}`);
           await presentation.detail(
             "conversation created durably; it remains if the pending pairing is abandoned"
@@ -7724,15 +7871,7 @@ function createKonclaveCommands(dependencies) {
           nowUnixMilliseconds,
           sleep
         );
-        const selected = selectedConversation(
-          await client.request("set_active_conversation", {
-            conversation_id: completed.conversationId
-          })
-        );
-        if (selected !== completed.conversationId) {
-          throw new Error("the local service selected a different repeat-pairing conversation");
-        }
-        activeConversationId = completed.conversationId;
+        await selectActiveConversation(client, completed.conversationId);
         await presentation.write(`connected ${alias}: ${completed.conversationId}`);
         await presentation.detail("next: /konclave send -- <message>");
         return;
@@ -7762,15 +7901,7 @@ function createKonclaveCommands(dependencies) {
           nowUnixMilliseconds,
           sleep
         );
-        const selected = selectedConversation(
-          await client.request("set_active_conversation", {
-            conversation_id: completed.conversationId
-          })
-        );
-        if (selected !== completed.conversationId) {
-          throw new Error("the local service selected a different repeat-pairing conversation");
-        }
-        activeConversationId = completed.conversationId;
+        await selectActiveConversation(client, completed.conversationId);
         await presentation.write(`connected: ${completed.conversationId}`);
         return;
       }
@@ -7878,7 +8009,7 @@ function createKonclaveCommands(dependencies) {
         if (!selection.conversationIds.includes(connected.conversationId)) {
           throw new Error("completed pairing conversation is unavailable locally");
         }
-        activeConversationId = connected.conversationId;
+        await selectActiveConversation(client, connected.conversationId);
         if (presentation.mode === "verbose") {
           await renderPairing(presentation, connected);
         }
@@ -7892,7 +8023,7 @@ function createKonclaveCommands(dependencies) {
           parts,
           1,
           4,
-          "/konclave approve <pairing> <conversation> [role] | <pairing> <inviter> <conversation> <role>"
+          "/konclave approve <pairing> [conversation] [role] | <pairing> <inviter> <conversation> <role>"
         );
         const pairingId = requireHexIdentifier(parts[0], pairingIdCharacters, "pairing identifier");
         const status = parsePairingStatus(
@@ -7903,18 +8034,14 @@ function createKonclaveCommands(dependencies) {
           if (status.phase !== "inviter_awaiting_authorization") {
             throw new Error(`pairing cannot be approved in phase ${status.phase}`);
           }
-          requireArgumentCount(
-            parts,
-            2,
-            3,
-            "/konclave approve <pairing> <conversation> [member|administrator]"
+          const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
+            client,
+            parts.slice(1),
+            0,
+            1,
+            "/konclave approve <pairing> [conversation] [member|administrator]"
           );
-          const conversationId = requireHexIdentifier(
-            parts[1],
-            conversationIdCharacters,
-            "conversation identifier"
-          );
-          const grantedRole = parts[2] ? parseRole(parts[2], "granted role") : "member";
+          const grantedRole = remainingIdentifiers[0] ? parseRole(remainingIdentifiers[0], "granted role") : "member";
           if (status.requestedRole === "member" && grantedRole === "administrator") {
             throw new Error("a member request cannot be elevated to administrator");
           }
@@ -8015,7 +8142,6 @@ function createKonclaveCommands(dependencies) {
         );
         const { conversationId, remainingIdentifiers, explicitlySelectedConversation } = await resolveConversationArguments(
           client,
-          activeConversationId,
           parsed.identifiers,
           isReply ? 1 : 0,
           isReply ? 2 : 1,
@@ -8053,16 +8179,8 @@ function createKonclaveCommands(dependencies) {
           throw new Error("the local service sent-message identity does not match the request");
         }
         if (explicitlySelectedConversation) {
-          const selected = selectedConversation(
-            await client.request("set_active_conversation", {
-              conversation_id: conversationId
-            })
-          );
-          if (selected !== conversationId) {
-            throw new Error("the local service selected a different active conversation");
-          }
+          await selectActiveConversation(client, conversationId);
         }
-        activeConversationId = conversationId;
         if (presentation.mode === "normal") {
           await presentation.write(
             `sent ${sent.messageId}: conversation ${sent.conversationId}; cursor ${sent.cursor}`
@@ -8074,23 +8192,20 @@ function createKonclaveCommands(dependencies) {
         return;
       }
       case "request": {
-        const usage = "/konclave request [conversation] [target-device] [message-id] -- <text>";
-        const parsed = parseDelimitedMessage(argumentsText, 0, 3, usage);
-        const { conversationId, remainingIdentifiers, explicitlySelectedConversation } = await resolveConversationArguments(
-          client,
-          activeConversationId,
-          parsed.identifiers,
-          0,
-          2,
-          usage
-        );
-        const targetDeviceId = remainingIdentifiers[0]?.length === deviceIdCharacters ? requireHexIdentifier(
+        const usage = "/konclave request [conversation] [target-device] [message-id] [--to <device>] -- <text>";
+        const parsed = parseDirectedRequestArguments(argumentsText, usage);
+        const { conversationId, remainingIdentifiers, explicitlySelectedConversation } = await resolveConversationArguments(client, parsed.identifiers, 0, 2, usage);
+        const positionalTarget = remainingIdentifiers[0]?.length === deviceIdCharacters ? requireHexIdentifier(
           remainingIdentifiers[0],
           deviceIdCharacters,
           "target device identifier"
         ) : void 0;
-        const suppliedMessageId = remainingIdentifiers[targetDeviceId ? 1 : 0];
-        if (remainingIdentifiers.length === 2 && !targetDeviceId) {
+        if (parsed.targetDeviceId !== void 0 && positionalTarget !== void 0) {
+          throw new Error("--to cannot be combined with a positional target");
+        }
+        const targetDeviceId = parsed.targetDeviceId ?? positionalTarget;
+        const suppliedMessageId = remainingIdentifiers[positionalTarget ? 1 : 0];
+        if (remainingIdentifiers.length === 2 && !positionalTarget) {
           throw new Error(usage);
         }
         const messageId = suppliedMessageId ? requireHexIdentifier(suppliedMessageId, messageIdCharacters, "message identifier") : randomBytes3(16).toString("hex");
@@ -8119,67 +8234,89 @@ function createKonclaveCommands(dependencies) {
           throw new Error("the local service sent-request identity does not match the request");
         }
         if (explicitlySelectedConversation) {
-          const selected = selectedConversation(
-            await client.request("set_active_conversation", {
-              conversation_id: conversationId
-            })
-          );
-          if (selected !== conversationId) {
-            throw new Error("the local service selected a different active conversation");
-          }
+          await selectActiveConversation(client, conversationId);
         }
-        activeConversationId = conversationId;
         await presentation.write(
           `requested ${sent.messageId}: conversation ${sent.conversationId}; cursor ${sent.cursor}`
         );
         return;
       }
       case "messages": {
+        const options = parseHistoryArguments(argumentsText);
         const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
           client,
-          activeConversationId,
-          parseCommandArguments(argumentsText),
+          options.identifiers,
           0,
           1,
           "/konclave messages [conversation] [after-cursor]"
         );
         const afterCursor = remainingIdentifiers[0] ? parseCursor(remainingIdentifiers[0]) : 0;
+        if (options.beforeCursor !== void 0 && options.beforeCursor <= afterCursor) {
+          throw new Error("before-cursor must be greater than after-cursor");
+        }
+        const payload2 = {
+          conversation_id: conversationId,
+          after_cursor: afterCursor,
+          order: options.order,
+          limit: maxDisplayedMessages
+        };
+        if (options.beforeCursor !== void 0) {
+          payload2.before_cursor = options.beforeCursor;
+        }
+        if (options.since) {
+          payload2.since_unix_milliseconds = options.since.unixMilliseconds;
+        }
+        if (options.until) {
+          payload2.until_unix_milliseconds = options.until.unixMilliseconds;
+        }
         const synced = parseMessageList(
           await client.request("sync_messages", { conversation_id: conversationId })
         );
-        const history = parseMessageList(
-          await client.request("read_messages", {
-            conversation_id: conversationId,
-            after_cursor: afterCursor,
-            limit: maxDisplayedMessages
-          })
-        );
+        const history = parseMessageList(await client.request("read_messages", payload2));
+        if (history.hasMore && (history.nextCursor === void 0 || history.nextCursor <= afterCursor || options.beforeCursor !== void 0 && history.nextCursor >= options.beforeCursor)) {
+          throw new Error(
+            "the local service history continuation is missing or outside the bounds"
+          );
+        }
         await presentation.detail(
           `synced messages: ${synced.messages.length}, more available: ${synced.hasMore ? "yes" : "no"}`
         );
         if (history.messages.length === 0) {
-          await presentation.write("messages: none after the requested cursor");
-          return;
+          await presentation.write(
+            history.hasMore ? "messages: none matched in this bounded scan; more history remains to scan" : "messages: none within the requested bounds"
+          );
         }
         for (const message of history.messages) {
           await presentation.detail(
             `message ${message.messageId}: ${message.direction}, sender ${message.senderDeviceId}, cursor ${message.cursor}, duplicate ${message.duplicate ? "yes" : "no"}`
           );
-          await presentation.write(displayMessageContent(message), { ephemeral: true });
+          await presentation.write(
+            `${displayMessageTimestamp(message.sentAtUnixMilliseconds)} ${displayMessageContent(message)}`,
+            { ephemeral: true }
+          );
         }
-        const lastCursor = history.messages.at(-1)?.cursor;
-        if (lastCursor !== void 0) {
-          if (presentation.mode === "normal") {
-            await presentation.write(
-              `messages: ${history.messages.length}; resume cursor ${lastCursor}${history.hasMore ? "; more available" : ""}`
-            );
-          } else {
-            await presentation.write(`resume after cursor: ${lastCursor}`);
-            await presentation.write(`next: /konclave messages ${conversationId} ${lastCursor}`);
+        if (history.messages.length > 0) {
+          await presentation.write(`messages: ${history.messages.length}; order ${options.order}`);
+        }
+        if (history.hasMore && history.nextCursor !== void 0) {
+          const continuation = ["/konclave messages", conversationId];
+          const lowerCursor = options.order === "asc" ? history.nextCursor : afterCursor;
+          if (lowerCursor > 0) {
+            continuation.push(String(lowerCursor));
           }
-        }
-        if (history.hasMore && presentation.mode === "verbose") {
-          await presentation.write("more messages are available");
+          continuation.push("--order", options.order);
+          const upperCursor = options.order === "desc" ? history.nextCursor : options.beforeCursor;
+          if (upperCursor !== void 0) {
+            continuation.push("--before-cursor", String(upperCursor));
+          }
+          if (options.since) {
+            continuation.push("--since", options.since.utc);
+          }
+          if (options.until) {
+            continuation.push("--until", options.until.utc);
+          }
+          await presentation.write("more history remains to scan");
+          await presentation.write(`next: ${continuation.join(" ")}`);
         }
         return;
       }
@@ -8188,15 +8325,7 @@ function createKonclaveCommands(dependencies) {
           argumentsText,
           "/konclave use <conversation>"
         );
-        const selected = selectedConversation(
-          await client.request("set_active_conversation", {
-            conversation_id: conversation
-          })
-        );
-        if (selected !== conversation) {
-          throw new Error("the local service selected a different active conversation");
-        }
-        activeConversationId = conversation;
+        await selectActiveConversation(client, conversation);
         await presentation.write(`active conversation selected: ${conversation}`);
         return;
       }
@@ -8204,7 +8333,6 @@ function createKonclaveCommands(dependencies) {
       case "unmute": {
         const { conversationId } = await resolveConversationArguments(
           client,
-          activeConversationId,
           parseCommandArguments(argumentsText),
           0,
           0,
@@ -9930,12 +10058,40 @@ var copilot_tools_default = [
             "null"
           ]
         },
+        before_cursor: {
+          format: "uint64",
+          minimum: 0,
+          type: [
+            "integer",
+            "null"
+          ]
+        },
         conversation_id: {
           type: "string"
         },
         limit: {
           format: "uint",
           minimum: 0,
+          type: [
+            "integer",
+            "null"
+          ]
+        },
+        order: {
+          type: [
+            "string",
+            "null"
+          ]
+        },
+        since_unix_milliseconds: {
+          format: "int64",
+          type: [
+            "integer",
+            "null"
+          ]
+        },
+        until_unix_milliseconds: {
+          format: "int64",
           type: [
             "integer",
             "null"
@@ -10125,6 +10281,14 @@ var copilot_tools_default = [
             $ref: "#/$defs/MessageResult"
           },
           type: "array"
+        },
+        next_cursor: {
+          format: "uint64",
+          minimum: 0,
+          type: [
+            "integer",
+            "null"
+          ]
         }
       },
       required: [
