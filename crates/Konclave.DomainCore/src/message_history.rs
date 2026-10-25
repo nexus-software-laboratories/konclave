@@ -273,6 +273,28 @@ mod tests {
     }
 
     #[test]
+    fn cursor_storage_bounds_are_checked_at_the_exact_integer_boundary() {
+        let maximum_cursor = u64::try_from(i64::MAX).unwrap();
+        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+            assert!(
+                MessageHistoryQuery::new(order, maximum_cursor, None, None, None, 1).is_ok()
+            );
+            assert!(
+                MessageHistoryQuery::new(order, 0, Some(maximum_cursor), None, None, 1).is_ok()
+            );
+            for (after, before) in [
+                (maximum_cursor + 1, None),
+                (0, Some(maximum_cursor + 1)),
+            ] {
+                assert_eq!(
+                    MessageHistoryQuery::new(order, after, before, None, None, 1),
+                    Err(MessageHistoryQueryError::InvalidCursorBounds)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn timestamp_filters_are_half_open_and_do_not_define_order() {
         for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
             let query = query(order);
