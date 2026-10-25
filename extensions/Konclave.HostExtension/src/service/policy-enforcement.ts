@@ -13,7 +13,7 @@ import {
   collaborationReplyToolName,
   collaborationTurnTokenLabel,
 } from '../collaboration-contract.js';
-import type { LocalServiceClient } from './client.js';
+import { formatLocalServiceFailure, type LocalServiceClient } from './client.js';
 import { collaborationOperations } from './operations.js';
 import {
   collaborationToolName,
@@ -367,9 +367,13 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
               policyDigest: authorization.policyDigest,
               action: action.action,
               resource: null,
-              messageId: sendArguments?.message_id,
-              replyToMessageId: sendArguments ? authorization.requestMessageId : undefined,
-              text: sendArguments?.text,
+              ...(sendArguments === null
+                ? {}
+                : {
+                    messageId: sendArguments.message_id,
+                    replyToMessageId: authorization.requestMessageId,
+                    text: sendArguments.text,
+                  }),
               requestMessageId: authorization.requestMessageId,
               attempt: authorization.attempt,
             }),
@@ -428,8 +432,11 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
             additionalContext:
               'Konclave policy permits this action, but normal Copilot permissions still apply.',
           };
-        } catch {
-          return deny('gate_unavailable', 'Konclave policy evaluation was unavailable.');
+        } catch (error) {
+          return deny(
+            'gate_unavailable',
+            `Konclave policy evaluation was unavailable. ${formatLocalServiceFailure(error, 'tool_dispatch')}`,
+          );
         }
       },
       onPostToolUse(input) {

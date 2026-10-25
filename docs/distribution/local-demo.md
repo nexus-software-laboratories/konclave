@@ -125,7 +125,8 @@ with:
 To request one automatic terminal response in a two-member conversation, use:
 
 ```text
-/konclave request <conversation-id> -- <request text>
+/konclave use <conversation-id>
+/konclave request -- <request text>
 ```
 
 For a group conversation, obtain the intended peer's full identifier with
@@ -134,12 +135,22 @@ Only newly established membership whose root-signed credential advertises direct
 requests is eligible. An older conversation remains usable for ordinary messages but
 must be paired again before it can carry this request kind.
 
-That selection is stored in the session's durable profile, so implicit send continues
-to target the same conversation after the Copilot session is restarted or resumed.
+That selection is stored in the session's durable profile, so `send`, `request`,
+`reply`, `messages`, `diagnose`, `mute`, and `unmute` continue to use it after the
+Copilot session is restarted or resumed. Each accepts an explicit conversation
+identifier to override the selection for that operation. Successful explicit sends,
+replies, and requests also select their conversation; inspection and muting do not.
 Profiles upgraded from an earlier candidate deliberately do not guess among existing
 conversations. If `/konclave conversations` shows no active selection, choose the
 intended identifier once with `/konclave use <conversation-id>`. Selection does not
 change that conversation's automatic-delivery mute state.
+
+For example, after `use`, run `messages [after-cursor]`, `reply <reply-to-message-id>
+[message-id] -- <text>`, `diagnose <message-id>`, `mute`, or `unmute` without repeating
+the conversation. A 32-hex message identifier before `--` retries an implicit send
+or request. A leading 64-hex identifier always means an explicit conversation, not a
+target device. Group requests therefore retain the unambiguous explicit form:
+`request <conversation-id> <target-device-id> [message-id] -- <text>`.
 
 The two-command flow is an explicit `AccountTrusted` convenience policy. Capability
 creation and redemption are treated as the two same-account approval actions; status

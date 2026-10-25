@@ -99,7 +99,7 @@ jobs:
           git diff
           npm run lint
           npm run typecheck
-          npm run test:unit -- tests/peer-work-permission.test.ts
+          npm run test:unit -- tests/peer-work-permission.test.ts tests/policy-enforcement.test.ts tests/service-client.test.ts
       - name: Verify deterministic Agent Plugin
         if: steps.scope.outputs.run == 'true'
         working-directory: extensions/Konclave.HostExtension

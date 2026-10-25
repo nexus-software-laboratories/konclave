@@ -17,6 +17,8 @@ import {
   type LocalServiceClientOptions,
 } from '../src/service/client.js';
 import { localFailureDiagnostic } from '../src/service/failure-diagnostics.js';
+import { createCopilotPolicyGate } from '../src/service/policy-enforcement.js';
+import { collaborationTurnTokenLabel } from '../src/collaboration-contract.js';
 import { FrameError, FrameReader, writeFrame } from '../src/service/framing.js';
 import {
   privateKeyFromSeed,
@@ -778,6 +780,61 @@ afterEach(() => {
 });
 
 describe('shared local service client', () => {
+  it('evaluates peer work through the real bounded client without reply-only fields', async () => {
+    const received: ReceivedRequest[] = [];
+    const service = await startService((request) => {
+      received.push(request);
+      return { kind: 'respond', value: { decision: 'allow', authorization: null } };
+    });
+    const client = await connectLocalService(clientOptions(service));
+    try {
+      const gate = createCopilotPolicyGate(client);
+      const conversation = '11'.repeat(32);
+      const policyDigest = '22'.repeat(32);
+      const requestMessageId = '33'.repeat(16);
+      const turnToken = '44'.repeat(16);
+      gate.activate({
+        conversation,
+        policyDigest,
+        policyName: 'peer-work',
+        requestMessageId,
+        attempt: 1,
+        turnToken,
+        workAllowed: true,
+      });
+      gate.observePrompt(
+        `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`,
+      );
+      const decision = await gate.hooks.onPreToolUse?.(
+        {
+          sessionId: 'session',
+          timestamp: new Date(0),
+          workingDirectory: 'workspace',
+          toolName: 'powershell',
+          toolArgs: { command: 'git status --short' },
+        },
+        { sessionId: 'session' },
+      );
+      expect(decision).toEqual({
+        additionalContext: expect.stringContaining('normal Copilot permissions'),
+      });
+      expect(received).toHaveLength(1);
+      expect(received[0]?.operation).toBe('collaboration.action.evaluate');
+      expect(received[0]?.payload).toEqual({
+        conversationId: conversation,
+        policyDigest,
+        action: 'session.work',
+        resource: null,
+        requestMessageId,
+        attempt: 1,
+      });
+      expect(gate.lastDecision).toBe('authorized');
+    } finally {
+      client.close();
+      await service.close();
+    }
+  });
+
   it('keeps the additive A2A gateway harness wire value distinct', () => {
     expect(harnessWireValues['a2a-gateway']).toBe(5);
   });

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createDeliveryCoordinator } from '../src/adapter/delivery.js';
 import type { DeliveredEvent } from '../src/adapter/session.js';
 import type { LocalServiceClient } from '../src/service/client.js';
+import { attachLocalFailure } from '../src/service/failure-diagnostics.js';
 import {
   createCopilotPolicyGate,
   type CopilotPolicyGate,
@@ -137,9 +138,6 @@ describe('Copilot collaboration policy gate', () => {
       policyDigest,
       action: 'session.work',
       resource: null,
-      messageId: undefined,
-      replyToMessageId: undefined,
-      text: undefined,
       requestMessageId: '66'.repeat(16),
       attempt: 1,
     });
@@ -206,6 +204,24 @@ describe('Copilot collaboration policy gate', () => {
     expect(
       await gate.hooks.onPreToolUse?.(hookInput('view', {}), { sessionId: 'session' }),
     ).toMatchObject({ permissionDecision: 'deny' });
+    expect(gate.lastDecision).toBe('gate_unavailable');
+  });
+
+  it('reports finite work-check diagnostics without exposing the exception content', async () => {
+    const error = new Error('private request body and credentials');
+    attachLocalFailure(error, { stage: 'client_validation', code: 'invalid_request' });
+    const gate = createCopilotPolicyGate(client(vi.fn().mockRejectedValue(error)));
+    activateGate(gate, true);
+    const decision = await gate.hooks.onPreToolUse?.(hookInput('view', {}), {
+      sessionId: 'session',
+    });
+    expect(decision).toMatchObject({
+      permissionDecision: 'deny',
+      permissionDecisionReason: expect.stringContaining(
+        'stage=client_validation code=invalid_request',
+      ),
+    });
+    expect(JSON.stringify(decision)).not.toContain(error.message);
     expect(gate.lastDecision).toBe('gate_unavailable');
   });
 
