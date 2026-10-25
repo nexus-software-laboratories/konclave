@@ -103,6 +103,63 @@ const selectedConversationCases = [
   [`diagnose ${'77'.repeat(16)}`, 'get_message_delivery_status', { message_id: '77'.repeat(16) }],
 ] as const;
 
+const implicitConversationCases = [
+  ...selectedConversationCases,
+  ['policy status', 'get_collaboration_policy_status', {}],
+] as const;
+
+function conversationSelectionClient() {
+  let activeConversationId = conversationId;
+  const request = vi.fn(async (operation: string, payload: unknown): Promise<unknown> => {
+    if (operation === 'list_conversations') {
+      return {
+        conversation_ids: [conversationId, '99'.repeat(32)],
+        active_conversation_id: activeConversationId,
+      };
+    }
+    if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
+      throw new Error('missing conversation selection');
+    }
+    if (operation === 'set_active_conversation') {
+      if (typeof payload.conversation_id !== 'string') {
+        throw new Error('invalid conversation selection');
+      }
+      activeConversationId = payload.conversation_id;
+      return { active_conversation_id: activeConversationId };
+    }
+    switch (operation) {
+      case 'send_message':
+      case 'send_directed_request':
+        if (!('message_id' in payload)) {
+          throw new Error('missing message identity');
+        }
+        return {
+          conversation_id: payload.conversation_id,
+          message_id: payload.message_id,
+          sender_counter: 1,
+          cursor: 9,
+        };
+      case 'sync_messages':
+      case 'read_messages':
+        return { messages: [], has_more: false };
+      case 'set_auto_delivery':
+        return {};
+      case 'get_message_delivery_status':
+        return {
+          message_status: 'not_observed',
+          auto_delivery_enabled: true,
+          profile_delivery_degraded: false,
+          remote_outcome: 'unknown',
+        };
+      case 'get_collaboration_policy_status':
+        return { conversation_id: payload.conversation_id, active_policy: null };
+      default:
+        throw new Error(`unexpected operation: ${operation}`);
+    }
+  });
+  return { client: stubClient(request), request };
+}
+
 function pairingStatus(overrides: Record<string, unknown> = {}) {
   return {
     pairing_id: pairingId,
@@ -1302,6 +1359,8 @@ describe('deterministic commands', () => {
             conversation_ids: [conversationId],
             active_conversation_id: null,
           };
+        case 'set_active_conversation':
+          return { active_conversation_id: conversationId };
         default:
           throw new Error(`unexpected operation: ${operation}`);
       }
@@ -1484,6 +1543,8 @@ describe('deterministic commands', () => {
             conversation_ids: [conversationId],
             active_conversation_id: null,
           };
+        case 'set_active_conversation':
+          return { active_conversation_id: conversationId };
         default:
           throw new Error('unexpected operation');
       }
@@ -1575,6 +1636,8 @@ describe('deterministic commands', () => {
             conversation_ids: [conversationId],
             active_conversation_id: null,
           };
+        case 'set_active_conversation':
+          return { active_conversation_id: conversationId };
         default:
           throw new Error('unexpected operation');
       }
@@ -1634,6 +1697,8 @@ describe('deterministic commands', () => {
             conversation_ids: [conversationId],
             active_conversation_id: null,
           };
+        case 'set_active_conversation':
+          return { active_conversation_id: conversationId };
         default:
           throw new Error('unexpected operation');
       }
@@ -1694,6 +1759,9 @@ describe('deterministic commands', () => {
           active_conversation_id: null,
         };
       }
+      if (operation === 'set_active_conversation') {
+        return { active_conversation_id: conversationId };
+      }
       throw new Error('unexpected operation');
     });
     const clipboard = {
@@ -1746,6 +1814,9 @@ describe('deterministic commands', () => {
           conversation_ids: [conversationId],
           active_conversation_id: null,
         };
+      }
+      if (operation === 'set_active_conversation') {
+        return { active_conversation_id: conversationId };
       }
       throw new Error('unexpected operation');
     });
@@ -1865,6 +1936,8 @@ describe('deterministic commands', () => {
             conversation_ids: [conversationId],
             active_conversation_id: null,
           };
+        case 'set_active_conversation':
+          return { active_conversation_id: conversationId };
         default:
           throw new Error('unexpected operation');
       }
@@ -2318,7 +2391,7 @@ describe('deterministic commands', () => {
         return { messages: [], has_more: false };
       }
       if (operation === 'list_conversations') {
-        return { conversation_ids: [conversationId] };
+        return { conversation_ids: [conversationId], active_conversation_id: conversationId };
       }
       if (operation === 'set_active_conversation') {
         if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
@@ -2573,56 +2646,9 @@ describe('deterministic commands', () => {
       for (const selection of ['use', 'restored', 'explicit']) {
         const otherConversationId = '99'.repeat(32);
         const lines: string[] = [];
-        const request = vi.fn(async (operation: string, payload: unknown) => {
-          switch (operation) {
-            case 'list_conversations':
-              return {
-                conversation_ids: [conversationId, otherConversationId],
-                active_conversation_id: conversationId,
-              };
-            case 'set_active_conversation':
-              if (
-                typeof payload !== 'object' ||
-                payload === null ||
-                !('conversation_id' in payload)
-              ) {
-                throw new Error('missing selection');
-              }
-              return { active_conversation_id: payload.conversation_id };
-            case 'send_message':
-            case 'send_directed_request':
-              if (
-                typeof payload !== 'object' ||
-                payload === null ||
-                !('conversation_id' in payload) ||
-                !('message_id' in payload)
-              ) {
-                throw new Error('missing message identity');
-              }
-              return {
-                conversation_id: payload.conversation_id,
-                message_id: payload.message_id,
-                sender_counter: 1,
-                cursor: 9,
-              };
-            case 'sync_messages':
-            case 'read_messages':
-              return { messages: [], has_more: false };
-            case 'set_auto_delivery':
-              return {};
-            case 'get_message_delivery_status':
-              return {
-                message_status: 'not_observed',
-                auto_delivery_enabled: true,
-                profile_delivery_degraded: false,
-                remote_outcome: 'unknown',
-              };
-            default:
-              throw new Error(`unexpected operation: ${operation}`);
-          }
-        });
+        const { client, request } = conversationSelectionClient();
         const command = createKonclaveCommands({
-          client: stubClient(request),
+          client,
           output: {
             write: (line) => {
               lines.push(line);
@@ -2644,7 +2670,7 @@ describe('deterministic commands', () => {
           ...expectedPayload,
         });
         expect(lines.join('\n')).not.toContain('konclave:');
-        if (selection === 'restored') {
+        if (selection !== 'explicit') {
           expect(request).toHaveBeenCalledWith('list_conversations', {});
         } else {
           expect(request).not.toHaveBeenCalledWith('list_conversations', {});
@@ -2653,8 +2679,82 @@ describe('deterministic commands', () => {
     },
   );
 
+  it.each(implicitConversationCases)(
+    'uses the agent-selected conversation without recreating the handler for %s',
+    async (args, operation, payload) => {
+      const { client, request } = conversationSelectionClient();
+      const lines: string[] = [];
+      const command = createKonclaveCommands({
+        client,
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
+        },
+      })[0];
+      const tool = createKonclaveTools({ client }).find(
+        (candidate) => candidate.name === 'set_active_conversation',
+      );
+      if (!command || !tool) {
+        throw new Error('conversation selection surfaces are missing');
+      }
+      await command.handler(commandContext(`use ${conversationId}`));
+      const otherConversationId = '99'.repeat(32);
+      await tool.handler({ conversation_id: otherConversationId });
+      request.mockClear();
+
+      await command.handler(commandContext(args));
+
+      expect(request).toHaveBeenCalledWith('list_conversations', {});
+      const operationCalls = request.mock.calls.filter(([name]) => name === operation);
+      expect(operationCalls).toHaveLength(1);
+      expect(operationCalls[0]?.[1]).toMatchObject({
+        conversation_id: otherConversationId,
+        ...payload,
+      });
+      expect(lines.join('\n')).not.toContain('konclave:');
+    },
+  );
+
+  it.each(implicitConversationCases)(
+    'does not reuse an earlier selection after a failed durable read for %s',
+    async (args) => {
+      for (const failure of ['missing', 'malformed', 'unavailable']) {
+        const { client, request } = conversationSelectionClient();
+        const lines: string[] = [];
+        const command = createKonclaveCommands({
+          client,
+          output: {
+            write: (line) => {
+              lines.push(line);
+            },
+          },
+        })[0];
+        await command?.handler(commandContext(`use ${conversationId}`));
+        request.mockClear();
+        request.mockImplementationOnce(async () => {
+          if (failure === 'unavailable') {
+            throw new Error('selection read unavailable');
+          }
+          return {
+            conversation_ids: [conversationId],
+            active_conversation_id: failure === 'missing' ? null : 'malformed',
+          };
+        });
+
+        await command?.handler(commandContext(args));
+
+        expect(request).toHaveBeenCalledExactlyOnceWith('list_conversations', {});
+        expect(lines.some((line) => line.startsWith('konclave:'))).toBe(true);
+      }
+    },
+  );
+
   it('preserves explicit request targets and rejects ambiguous identifiers', async () => {
     const request = vi.fn(async (operation: string, payload: unknown) => {
+      if (operation === 'list_conversations') {
+        return { conversation_ids: [conversationId], active_conversation_id: conversationId };
+      }
       if (operation === 'set_active_conversation') {
         return { active_conversation_id: conversationId };
       }
@@ -2693,7 +2793,11 @@ describe('deterministic commands', () => {
     ]) {
       await command?.handler(commandContext(args));
     }
-    expect(request.mock.calls.map(([operation]) => operation)).toEqual(['set_active_conversation']);
+    expect(
+      request.mock.calls
+        .filter(([operation]) => operation !== 'list_conversations')
+        .map(([operation]) => operation),
+    ).toEqual(['set_active_conversation']);
     expect(lines.filter((line) => line.startsWith('konclave:'))).toHaveLength(6);
     await command?.handler(
       commandContext(`request ${conversationId} ${inviterDeviceId} ${'77'.repeat(16)} -- targeted`),
