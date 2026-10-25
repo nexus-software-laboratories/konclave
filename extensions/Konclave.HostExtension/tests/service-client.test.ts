@@ -802,7 +802,9 @@ describe('shared local service client', () => {
         turnToken,
         workAllowed: true,
       });
-      gate.observePrompt(`Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`);
+      gate.observePrompt(
+        `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${turnToken}`,
+      );
       const decision = await gate.hooks.onPreToolUse?.(
         {
           sessionId: 'session',
