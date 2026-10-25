@@ -1865,13 +1865,7 @@ async function completeAccountTrustedPairing(
   }
 }
 
-async function requireSingleConversation(
-  client: LocalServiceClient,
-  activeConversationId: string | undefined,
-): Promise<string> {
-  if (activeConversationId) {
-    return activeConversationId;
-  }
+async function requireSingleConversation(client: LocalServiceClient): Promise<string> {
   const selection = conversations(await client.request('list_conversations', {}));
   if (selection.activeConversationId) {
     return selection.activeConversationId;
@@ -1886,7 +1880,6 @@ async function requireSingleConversation(
 
 async function resolveConversationArguments(
   client: LocalServiceClient,
-  activeConversationId: string | undefined,
   identifiers: readonly string[],
   minimumRemaining: number,
   maximumRemaining: number,
@@ -1902,7 +1895,7 @@ async function resolveConversationArguments(
   requireArgumentCount(remainingIdentifiers, minimumRemaining, maximumRemaining, usage);
   const conversationId = explicitlySelectedConversation
     ? requireHexIdentifier(identifiers[0], conversationIdCharacters, 'conversation identifier')
-    : await requireSingleConversation(client, activeConversationId);
+    : await requireSingleConversation(client);
   return { conversationId, remainingIdentifiers, explicitlySelectedConversation };
 }
 
@@ -2339,6 +2332,20 @@ function selectedConversation(value: unknown): string {
   );
 }
 
+async function selectActiveConversation(
+  client: LocalServiceClient,
+  conversationId: string,
+): Promise<void> {
+  const selected = selectedConversation(
+    await client.request('set_active_conversation', {
+      conversation_id: conversationId,
+    }),
+  );
+  if (selected !== conversationId) {
+    throw new Error('the local service selected a different active conversation');
+  }
+}
+
 function parseConversationArgument(argumentsText: string, usage: string): string {
   const parts = parseCommandArguments(argumentsText);
   requireArgumentCount(parts, 1, 1, usage);
@@ -2354,7 +2361,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
   const clipboard = dependencies.clipboard ?? createPairingClipboard();
   const terminalColumns = dependencies.terminalColumns ?? defaultTerminalColumns;
   const terminalInteractive = dependencies.terminalInteractive ?? defaultTerminalInteractive;
-  let activeConversationId: string | undefined;
   let clipboardReceipt: ClipboardWriteReceipt | undefined;
 
   const runPolicy = async (raw: string): Promise<void> => {
@@ -2366,8 +2372,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       }
       return;
     }
-    const conversationId = await requireSingleConversation(client, activeConversationId);
-    activeConversationId = conversationId;
+    const conversationId = await requireSingleConversation(client);
 
     switch (parsed.subcommand) {
       case 'status': {
@@ -2647,7 +2652,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       case 'diagnose': {
         const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
           client,
-          activeConversationId,
           parseCommandArguments(argumentsText),
           1,
           1,
@@ -2669,7 +2673,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       case 'conversations': {
         requireNoArguments(argumentsText, subcommand);
         const selection = conversations(await client.request('list_conversations', {}));
-        activeConversationId = selection.activeConversationId;
         if (selection.conversationIds.length === 0) {
           await presentation.write(
             presentation.mode === 'normal' ? 'conversations: none' : 'no conversations yet',
@@ -2920,7 +2923,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (!selection.conversationIds.includes(status.conversationId)) {
           throw new Error('completed pairing conversation is unavailable locally');
         }
-        activeConversationId = status.conversationId;
+        await selectActiveConversation(client, status.conversationId);
         if (presentation.mode === 'verbose') {
           await renderPairing(presentation, status);
         }
@@ -2963,7 +2966,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         requireArgumentCount(parts, 0, 1, '/konclave new [alias]');
         if (parts.length === 0) {
           const conversationId = parseConversation(await client.request('create_conversation', {}));
-          activeConversationId = conversationId;
           await presentation.write(`conversation created: ${conversationId}`);
           await presentation.detail(
             'conversation created durably; it remains if the pending pairing is abandoned',
@@ -2987,15 +2989,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           nowUnixMilliseconds,
           sleep,
         );
-        const selected = selectedConversation(
-          await client.request('set_active_conversation', {
-            conversation_id: completed.conversationId,
-          }),
-        );
-        if (selected !== completed.conversationId) {
-          throw new Error('the local service selected a different repeat-pairing conversation');
-        }
-        activeConversationId = completed.conversationId;
+        await selectActiveConversation(client, completed.conversationId);
         await presentation.write(`connected ${alias}: ${completed.conversationId}`);
         await presentation.detail('next: /konclave send -- <message>');
         return;
@@ -3025,15 +3019,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           nowUnixMilliseconds,
           sleep,
         );
-        const selected = selectedConversation(
-          await client.request('set_active_conversation', {
-            conversation_id: completed.conversationId,
-          }),
-        );
-        if (selected !== completed.conversationId) {
-          throw new Error('the local service selected a different repeat-pairing conversation');
-        }
-        activeConversationId = completed.conversationId;
+        await selectActiveConversation(client, completed.conversationId);
         await presentation.write(`connected: ${completed.conversationId}`);
         return;
       }
@@ -3146,7 +3132,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         if (!selection.conversationIds.includes(connected.conversationId)) {
           throw new Error('completed pairing conversation is unavailable locally');
         }
-        activeConversationId = connected.conversationId;
+        await selectActiveConversation(client, connected.conversationId);
         if (presentation.mode === 'verbose') {
           await renderPairing(presentation, connected);
         }
@@ -3290,7 +3276,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const { conversationId, remainingIdentifiers, explicitlySelectedConversation } =
           await resolveConversationArguments(
             client,
-            activeConversationId,
             parsed.identifiers,
             isReply ? 1 : 0,
             isReply ? 2 : 1,
@@ -3332,16 +3317,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           throw new Error('the local service sent-message identity does not match the request');
         }
         if (explicitlySelectedConversation) {
-          const selected = selectedConversation(
-            await client.request('set_active_conversation', {
-              conversation_id: conversationId,
-            }),
-          );
-          if (selected !== conversationId) {
-            throw new Error('the local service selected a different active conversation');
-          }
+          await selectActiveConversation(client, conversationId);
         }
-        activeConversationId = conversationId;
         if (presentation.mode === 'normal') {
           await presentation.write(
             `sent ${sent.messageId}: conversation ${sent.conversationId}; cursor ${sent.cursor}`,
@@ -3358,7 +3335,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         const { conversationId, remainingIdentifiers, explicitlySelectedConversation } =
           await resolveConversationArguments(
             client,
-            activeConversationId,
             parsed.identifiers,
             0,
             2,
@@ -3404,16 +3380,8 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           throw new Error('the local service sent-request identity does not match the request');
         }
         if (explicitlySelectedConversation) {
-          const selected = selectedConversation(
-            await client.request('set_active_conversation', {
-              conversation_id: conversationId,
-            }),
-          );
-          if (selected !== conversationId) {
-            throw new Error('the local service selected a different active conversation');
-          }
+          await selectActiveConversation(client, conversationId);
         }
-        activeConversationId = conversationId;
         await presentation.write(
           `requested ${sent.messageId}: conversation ${sent.conversationId}; cursor ${sent.cursor}`,
         );
@@ -3422,7 +3390,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       case 'messages': {
         const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
           client,
-          activeConversationId,
           parseCommandArguments(argumentsText),
           0,
           1,
@@ -3475,15 +3442,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           argumentsText,
           '/konclave use <conversation>',
         );
-        const selected = selectedConversation(
-          await client.request('set_active_conversation', {
-            conversation_id: conversation,
-          }),
-        );
-        if (selected !== conversation) {
-          throw new Error('the local service selected a different active conversation');
-        }
-        activeConversationId = conversation;
+        await selectActiveConversation(client, conversation);
         await presentation.write(`active conversation selected: ${conversation}`);
         return;
       }
@@ -3491,7 +3450,6 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
       case 'unmute': {
         const { conversationId } = await resolveConversationArguments(
           client,
-          activeConversationId,
           parseCommandArguments(argumentsText),
           0,
           0,

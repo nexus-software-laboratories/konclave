@@ -140,6 +140,9 @@ That selection is stored in the session's durable profile, so `send`, `request`,
 Copilot session is restarted or resumed. Each accepts an explicit conversation
 identifier to override the selection for that operation. Successful explicit sends,
 replies, and requests also select their conversation; inspection and muting do not.
+Implicit commands read the current durable selection each time. A selection changed
+by an agent tool is therefore immediately visible to slash commands in the same
+session; restarting the session or listing conversations is not required.
 Profiles upgraded from an earlier candidate deliberately do not guess among existing
 conversations. If `/konclave conversations` shows no active selection, choose the
 intended identifier once with `/konclave use <conversation-id>`. Selection does not
