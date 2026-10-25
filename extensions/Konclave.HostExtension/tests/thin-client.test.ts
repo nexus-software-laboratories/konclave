@@ -100,11 +100,7 @@ const selectedConversationCases = [
   ['messages 7', 'read_messages', { after_cursor: 7, limit: 10 }],
   ['mute', 'set_auto_delivery', { enabled: false }],
   ['unmute', 'set_auto_delivery', { enabled: true }],
-  [
-    `diagnose ${'77'.repeat(16)}`,
-    'get_message_delivery_status',
-    { message_id: '77'.repeat(16) },
-  ],
+  [`diagnose ${'77'.repeat(16)}`, 'get_message_delivery_status', { message_id: '77'.repeat(16) }],
 ] as const;
 
 function pairingStatus(overrides: Record<string, unknown> = {}) {
@@ -2325,7 +2321,11 @@ describe('deterministic commands', () => {
         return { conversation_ids: [conversationId] };
       }
       if (operation === 'set_active_conversation') {
-        if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          !('conversation_id' in payload)
+        ) {
           throw new Error('missing conversation selection');
         }
         return { active_conversation_id: payload.conversation_id };
@@ -2623,16 +2623,18 @@ describe('deterministic commands', () => {
         });
         const command = createKonclaveCommands({
           client: stubClient(request),
-          output: { write: (line) => { lines.push(line); } },
+          output: {
+            write: (line) => {
+              lines.push(line);
+            },
+          },
         })[0];
         if (selection !== 'restored') {
           await command?.handler(commandContext(`use ${conversationId}`));
         }
         await command?.handler(
           commandContext(
-            selection === 'explicit'
-              ? args.replace(/^(\w+)/u, `$1 ${otherConversationId}`)
-              : args,
+            selection === 'explicit' ? args.replace(/^(\w+)/u, `$1 ${otherConversationId}`) : args,
           ),
         );
         const calls = request.mock.calls.filter(([operation]) => operation === expectedOperation);
@@ -2674,7 +2676,11 @@ describe('deterministic commands', () => {
     const lines: string[] = [];
     const command = createKonclaveCommands({
       client: stubClient(request),
-      output: { write: (line) => { lines.push(line); } },
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
     })[0];
     await command?.handler(commandContext(`use ${conversationId}`));
     for (const args of [
@@ -2749,26 +2755,29 @@ describe('deterministic commands', () => {
     );
   });
 
-  it.each(selectedConversationCases)('fails closed for %s with malformed selection', async (args) => {
-    const lines: string[] = [];
-    const request = vi.fn().mockResolvedValueOnce({
-      conversation_ids: [conversationId],
-      active_conversation_id: 'short',
-    });
-    const command = createKonclaveCommands({
-      client: stubClient(request),
-      output: {
-        write: (line) => {
-          lines.push(line);
+  it.each(selectedConversationCases)(
+    'fails closed for %s with malformed selection',
+    async (args) => {
+      const lines: string[] = [];
+      const request = vi.fn().mockResolvedValueOnce({
+        conversation_ids: [conversationId],
+        active_conversation_id: 'short',
+      });
+      const command = createKonclaveCommands({
+        client: stubClient(request),
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
         },
-      },
-    })[0];
+      })[0];
 
-    await command?.handler(commandContext(args));
+      await command?.handler(commandContext(args));
 
-    expect(lines.join('\n')).toContain('active conversation identifier');
-    expect(request).toHaveBeenCalledExactlyOnceWith('list_conversations', {});
-  });
+      expect(lines.join('\n')).toContain('active conversation identifier');
+      expect(request).toHaveBeenCalledExactlyOnceWith('list_conversations', {});
+    },
+  );
 
   it.each(selectedConversationCases)('does not guess a conversation for %s', async (args) => {
     const lines: string[] = [];

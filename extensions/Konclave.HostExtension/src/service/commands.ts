@@ -1897,8 +1897,7 @@ async function resolveConversationArguments(
   explicitlySelectedConversation: boolean;
 }> {
   const explicitlySelectedConversation =
-    identifiers.length > maximumRemaining ||
-    identifiers[0]?.length === conversationIdCharacters;
+    identifiers.length > maximumRemaining || identifiers[0]?.length === conversationIdCharacters;
   const remainingIdentifiers = explicitlySelectedConversation ? identifiers.slice(1) : identifiers;
   requireArgumentCount(remainingIdentifiers, minimumRemaining, maximumRemaining, usage);
   const conversationId = explicitlySelectedConversation
