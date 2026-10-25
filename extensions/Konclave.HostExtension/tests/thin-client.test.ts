@@ -83,6 +83,29 @@ const inviterDeviceId = '44'.repeat(32);
 const shortCodeAttemptId = '55'.repeat(16);
 const shortCodeSas = '123456';
 const repeatPairingOperationId = '66'.repeat(16);
+const selectedConversationCases = [
+  ['send -- hello', 'send_message', { text: 'hello' }],
+  ['request -- hello', 'send_directed_request', { text: 'hello' }],
+  [
+    `request ${'77'.repeat(16)} -- retry`,
+    'send_directed_request',
+    { message_id: '77'.repeat(16), text: 'retry' },
+  ],
+  [
+    `reply ${'66'.repeat(16)} ${'77'.repeat(16)} -- reply`,
+    'send_message',
+    { reply_to_message_id: '66'.repeat(16), message_id: '77'.repeat(16), text: 'reply' },
+  ],
+  ['messages', 'read_messages', { after_cursor: 0, limit: 10 }],
+  ['messages 7', 'read_messages', { after_cursor: 7, limit: 10 }],
+  ['mute', 'set_auto_delivery', { enabled: false }],
+  ['unmute', 'set_auto_delivery', { enabled: true }],
+  [
+    `diagnose ${'77'.repeat(16)}`,
+    'get_message_delivery_status',
+    { message_id: '77'.repeat(16) },
+  ],
+] as const;
 
 function pairingStatus(overrides: Record<string, unknown> = {}) {
   return {
@@ -2548,6 +2571,139 @@ describe('deterministic commands', () => {
     ).toBe(true);
   });
 
+  it.each(selectedConversationCases)(
+    'honors selected, restored, and explicit conversations for %s',
+    async (args, expectedOperation, expectedPayload) => {
+      for (const selection of ['use', 'restored', 'explicit']) {
+        const otherConversationId = '99'.repeat(32);
+        const lines: string[] = [];
+        const request = vi.fn(async (operation: string, payload: unknown) => {
+          switch (operation) {
+            case 'list_conversations':
+              return {
+                conversation_ids: [conversationId, otherConversationId],
+                active_conversation_id: conversationId,
+              };
+            case 'set_active_conversation':
+              if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
+                throw new Error('missing selection');
+              }
+              return { active_conversation_id: payload.conversation_id };
+            case 'send_message':
+            case 'send_directed_request':
+              if (
+                typeof payload !== 'object' ||
+                payload === null ||
+                !('conversation_id' in payload) ||
+                !('message_id' in payload)
+              ) {
+                throw new Error('missing message identity');
+              }
+              return {
+                conversation_id: payload.conversation_id,
+                message_id: payload.message_id,
+                sender_counter: 1,
+                cursor: 9,
+              };
+            case 'sync_messages':
+            case 'read_messages':
+              return { messages: [], has_more: false };
+            case 'set_auto_delivery':
+              return {};
+            case 'get_message_delivery_status':
+              return {
+                message_status: 'not_observed',
+                auto_delivery_enabled: true,
+                profile_delivery_degraded: false,
+                remote_outcome: 'unknown',
+              };
+            default:
+              throw new Error(`unexpected operation: ${operation}`);
+          }
+        });
+        const command = createKonclaveCommands({
+          client: stubClient(request),
+          output: { write: (line) => { lines.push(line); } },
+        })[0];
+        if (selection !== 'restored') {
+          await command?.handler(commandContext(`use ${conversationId}`));
+        }
+        await command?.handler(
+          commandContext(
+            selection === 'explicit'
+              ? args.replace(/^(\w+)/u, `$1 ${otherConversationId}`)
+              : args,
+          ),
+        );
+        const calls = request.mock.calls.filter(([operation]) => operation === expectedOperation);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.[1]).toMatchObject({
+          conversation_id: selection === 'explicit' ? otherConversationId : conversationId,
+          ...expectedPayload,
+        });
+        expect(lines.join('\n')).not.toContain('konclave:');
+        if (selection === 'restored') {
+          expect(request).toHaveBeenCalledWith('list_conversations', {});
+        } else {
+          expect(request).not.toHaveBeenCalledWith('list_conversations', {});
+        }
+      }
+    },
+  );
+
+  it('preserves explicit request targets and rejects ambiguous identifiers', async () => {
+    const request = vi.fn(async (operation: string, payload: unknown) => {
+      if (operation === 'set_active_conversation') {
+        return { active_conversation_id: conversationId };
+      }
+      if (
+        operation === 'send_directed_request' &&
+        typeof payload === 'object' &&
+        payload !== null &&
+        'message_id' in payload
+      ) {
+        return {
+          conversation_id: conversationId,
+          message_id: payload.message_id,
+          sender_counter: 1,
+          cursor: 9,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: { write: (line) => { lines.push(line); } },
+    })[0];
+    await command?.handler(commandContext(`use ${conversationId}`));
+    for (const args of [
+      `request ${'77'.repeat(16)} ${'88'.repeat(16)} -- ambiguous`,
+      `request ${conversationId} ${'77'.repeat(16)} ${'88'.repeat(16)} -- ambiguous`,
+      `request ${'z'.repeat(64)} -- invalid conversation`,
+      `reply ${'z'.repeat(32)} -- invalid reply`,
+      'messages -1',
+      'messages 9007199254740992',
+    ]) {
+      await command?.handler(commandContext(args));
+    }
+    expect(request.mock.calls.map(([operation]) => operation)).toEqual(['set_active_conversation']);
+    expect(lines.filter((line) => line.startsWith('konclave:'))).toHaveLength(6);
+    await command?.handler(
+      commandContext(`request ${conversationId} ${inviterDeviceId} ${'77'.repeat(16)} -- targeted`),
+    );
+    expect(request).toHaveBeenCalledWith(
+      'send_directed_request',
+      {
+        conversation_id: conversationId,
+        target_device_id: inviterDeviceId,
+        message_id: '77'.repeat(16),
+        text: 'targeted',
+      },
+      { requestId: expect.any(Buffer) },
+    );
+  });
+
   it('restores the active conversation for implicit sends after restart', async () => {
     const otherConversationId = '99'.repeat(32);
     const request = vi.fn(async (operation: string, payload: unknown) => {
@@ -2593,7 +2749,7 @@ describe('deterministic commands', () => {
     );
   });
 
-  it('fails closed when the persisted active conversation is malformed', async () => {
+  it.each(selectedConversationCases)('fails closed for %s with malformed selection', async (args) => {
     const lines: string[] = [];
     const request = vi.fn().mockResolvedValueOnce({
       conversation_ids: [conversationId],
@@ -2608,13 +2764,13 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext('send -- malformed active'));
+    await command?.handler(commandContext(args));
 
     expect(lines.join('\n')).toContain('active conversation identifier');
-    expect(request).not.toHaveBeenCalledWith('send_message', expect.anything(), expect.anything());
+    expect(request).toHaveBeenCalledExactlyOnceWith('list_conversations', {});
   });
 
-  it('requires explicit selection when a migrated profile has no active conversation', async () => {
+  it.each(selectedConversationCases)('does not guess a conversation for %s', async (args) => {
     const lines: string[] = [];
     const request = vi.fn().mockResolvedValue({
       conversation_ids: [conversationId],
@@ -2629,10 +2785,10 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext('send -- do not guess'));
+    await command?.handler(commandContext(args));
 
     expect(lines.join('\n')).toContain('no active conversation is selected');
-    expect(request).not.toHaveBeenCalledWith('send_message', expect.anything(), expect.anything());
+    expect(request).toHaveBeenCalledExactlyOnceWith('list_conversations', {});
   });
 
   it('rejects unsafe workflow arguments before their side effects', async () => {

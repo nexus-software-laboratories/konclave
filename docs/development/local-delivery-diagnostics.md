@@ -62,11 +62,12 @@ Changing the current mute setting does not change an earlier suppression outcome
 The paved Copilot CLI command is:
 
 ```text
-/konclave diagnose <conversation-id> <message-id>
+/konclave diagnose [conversation-id] <message-id>
 ```
 
-It renders bounded, ephemeral explanations without starting a model turn, repairing
-delivery or changing permissions. The packaged client exports
+Omit the conversation identifier after `/konclave use <conversation-id>` to inspect
+the selected conversation. It renders bounded, ephemeral explanations without
+starting a model turn, repairing delivery or changing permissions. The packaged client exports
 `getMessageDeliveryStatus(client, conversationId, messageId, options?)` for an already
 authenticated `LocalServiceClient`.
 
