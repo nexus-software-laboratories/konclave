@@ -49,6 +49,10 @@ Every ordinary tool admission requires a live native policy/claim check. A chang
 turn during that asynchronous check denies the tool. Direct Konclave control-plane
 operations remain denied; explicit follow-up requests and history tools are confined
 to the original conversation. Final replies retain their separate one-use token.
+Work evaluation omits reply-only fields rather than sending non-JSON `undefined`
+values. The focused gate exercises this path through the real bounded local-service
+client and authenticated transport. Failed checks preserve finite diagnostic labels
+without exposing exception content, tool arguments, or peer text.
 
 Broad shell, file, external-provider, and subagent access is broad local-session
 trust, not isolation. Revocation cannot retract admitted effects, terminate arbitrary
