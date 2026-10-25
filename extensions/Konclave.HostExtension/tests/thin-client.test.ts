@@ -2321,11 +2321,7 @@ describe('deterministic commands', () => {
         return { conversation_ids: [conversationId] };
       }
       if (operation === 'set_active_conversation') {
-        if (
-          typeof payload !== 'object' ||
-          payload === null ||
-          !('conversation_id' in payload)
-        ) {
+        if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
           throw new Error('missing conversation selection');
         }
         return { active_conversation_id: payload.conversation_id };
@@ -2585,7 +2581,11 @@ describe('deterministic commands', () => {
                 active_conversation_id: conversationId,
               };
             case 'set_active_conversation':
-              if (typeof payload !== 'object' || payload === null || !('conversation_id' in payload)) {
+              if (
+                typeof payload !== 'object' ||
+                payload === null ||
+                !('conversation_id' in payload)
+              ) {
                 throw new Error('missing selection');
               }
               return { active_conversation_id: payload.conversation_id };
