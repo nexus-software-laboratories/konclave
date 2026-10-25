@@ -115,8 +115,8 @@ const selectedConversationCases = [
     'send_message',
     { reply_to_message_id: '66'.repeat(16), message_id: '77'.repeat(16), text: 'reply' },
   ],
-  ['messages', 'read_messages', { after_cursor: 0, limit: 10 }],
-  ['messages 7', 'read_messages', { after_cursor: 7, limit: 10 }],
+  ['messages', 'read_messages', { after_cursor: 0, order: 'desc', limit: 10 }],
+  ['messages 7', 'read_messages', { after_cursor: 7, order: 'desc', limit: 10 }],
   ['mute', 'set_auto_delivery', { enabled: false }],
   ['unmute', 'set_auto_delivery', { enabled: true }],
   [`diagnose ${'77'.repeat(16)}`, 'get_message_delivery_status', { message_id: '77'.repeat(16) }],
@@ -206,6 +206,47 @@ function conversationSelectionClient(pairingOverrides: Record<string, unknown> =
     }
   });
   return { client: stubClient(request), request };
+}
+
+function historyMessage(cursor: number, timestamp = Date.UTC(2026, 9, 1)) {
+  return {
+    message_id: cursor.toString(16).padStart(32, '0'),
+    sender_device_id: inviterDeviceId,
+    cursor,
+    sent_at_unix_milliseconds: timestamp,
+    direction: 'inbound',
+    content_type: 'text',
+    text: `history-${cursor}`,
+    duplicate: false,
+  };
+}
+
+function historyCommandFixture(
+  getPage: () => unknown,
+  outputMode: 'normal' | 'verbose' = 'verbose',
+) {
+  const { client, request } = conversationSelectionClient();
+  const implementation = request.getMockImplementation();
+  if (!implementation) {
+    throw new Error('selection client implementation is missing');
+  }
+  request.mockImplementation(async (operation, payload) =>
+    operation === 'read_messages' ? getPage() : implementation(operation, payload),
+  );
+  const entries: Array<{ line: string; options: CommandOutputOptions | undefined }> = [];
+  const command = createCommands({
+    client,
+    outputMode,
+    output: {
+      write: (line, options) => {
+        entries.push({ line, options });
+      },
+    },
+  })[0];
+  if (!command) {
+    throw new Error('history command is missing');
+  }
+  return { command, request, entries };
 }
 
 function pairingStatus(overrides: Record<string, unknown> = {}) {
@@ -2565,6 +2606,7 @@ describe('deterministic commands', () => {
             },
           ],
           has_more: true,
+          next_cursor: 9,
         };
       }
       throw new Error('unexpected operation');
@@ -2596,7 +2638,7 @@ describe('deterministic commands', () => {
       ),
     );
     await command?.handler(commandContext('send -- implicit hello'));
-    await command?.handler(commandContext(`messages ${conversationId} 7`));
+    await command?.handler(commandContext(`messages ${conversationId} 7 --order asc`));
 
     const sends = request.mock.calls.filter(([operation]) => operation === 'send_message');
     expect(sends).toHaveLength(3);
@@ -2660,12 +2702,14 @@ describe('deterministic commands', () => {
     expect(request).toHaveBeenCalledWith('read_messages', {
       conversation_id: conversationId,
       after_cursor: 7,
+      order: 'asc',
       limit: 10,
     });
     expect(
       entries.some(
         (entry) =>
-          entry.line === 'untrusted peer text: "peer line one\\npeer �line two"' &&
+          entry.line ===
+            '1970-01-01T00:00:00.001Z untrusted peer text: "peer line one\\npeer �line two"' &&
           entry.options?.ephemeral === true,
       ),
     ).toBe(true);
@@ -2673,13 +2717,204 @@ describe('deterministic commands', () => {
       entries.some(
         (entry) =>
           entry.line ===
-            `untrusted peer directed request to ${'91'.repeat(32)}: "confirm the response contract"` &&
+            `1970-01-01T00:00:00.002Z untrusted peer directed request to ${'91'.repeat(32)}: "confirm the response contract"` &&
           entry.options?.ephemeral === true,
       ),
     ).toBe(true);
-    expect(entries.some((entry) => entry.line === 'resume after cursor: 9')).toBe(true);
-    expect(entries.some((entry) => entry.line.includes('more messages are available'))).toBe(true);
+    expect(
+      entries.some(
+        (entry) => entry.line === `next: /konclave messages ${conversationId} 9 --order asc`,
+      ),
+    ).toBe(true);
+    expect(entries.some((entry) => entry.line.includes('more history remains to scan'))).toBe(true);
   });
+
+  it.each(['normal', 'verbose'] as const)(
+    'requests newest-first history and reports UTC or an explicit timestamp diagnostic in %s mode',
+    async (mode) => {
+      const { command, request, entries } = historyCommandFixture(
+        () => ({
+          messages: [
+            historyMessage(12),
+            historyMessage(11, Number.MAX_SAFE_INTEGER + 1),
+            historyMessage(10, 8_640_000_000_000_001),
+            historyMessage(9, 8_640_000_000_000_000),
+          ],
+          has_more: false,
+        }),
+        mode,
+      );
+      await command.handler(commandContext('messages'));
+      expect(request).toHaveBeenCalledWith('read_messages', {
+        conversation_id: conversationId,
+        after_cursor: 0,
+        order: 'desc',
+        limit: 10,
+      });
+      const bodies = entries.filter((entry) => entry.line.includes('untrusted peer text:'));
+      expect(bodies.map((entry) => entry.line)).toEqual([
+        '2026-10-01T00:00:00.000Z untrusted peer text: "history-12"',
+        '[timestamp unavailable: sender value is outside the supported UTC range] untrusted peer text: "history-11"',
+        '[timestamp unavailable: sender value is outside the supported UTC range] untrusted peer text: "history-10"',
+        '+275760-09-13T00:00:00.000Z untrusted peer text: "history-9"',
+      ]);
+      expect(bodies.every((entry) => entry.options?.ephemeral === true)).toBe(true);
+      expect(entries.some((entry) => entry.line.startsWith('next:'))).toBe(false);
+    },
+  );
+
+  it.each([-1, 1.5, '1', undefined, null])(
+    'rejects malformed sender timestamp %s rather than inventing a date',
+    async (timestamp) => {
+      const { command, entries } = historyCommandFixture(() => ({
+        messages: [{ ...historyMessage(1), sent_at_unix_milliseconds: timestamp }],
+        has_more: false,
+      }));
+      await command.handler(commandContext('messages'));
+      expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(true);
+      expect(entries.some((entry) => entry.line.includes('untrusted peer text:'))).toBe(false);
+    },
+  );
+
+  it.each([
+    ['--since 2026-10-01T01:00:00+01:00', { since_unix_milliseconds: Date.UTC(2026, 9, 1) }],
+    ['--until 2026-10-01T18:30:00-05:30', { until_unix_milliseconds: Date.UTC(2026, 9, 2) }],
+    ['--since 2024-02-29T00:00:00Z', { since_unix_milliseconds: Date.UTC(2024, 1, 29) }],
+    [
+      '--since 0099-01-01T00:00:00Z',
+      { since_unix_milliseconds: Date.parse('0099-01-01T00:00:00Z') },
+    ],
+    ['--since 1970-01-01T00:00:00.123456Z', { since_unix_milliseconds: 124 }],
+    ['--until 1970-01-01T00:00:00.0001Z', { until_unix_milliseconds: 1 }],
+    ['--since 1969-12-31T23:59:59.9999Z', { since_unix_milliseconds: 0 }],
+    ['--until 1969-12-31T23:59:59Z', { until_unix_milliseconds: -1000 }],
+    [
+      '--since 1970-01-01t00:00:00z --until 1970-01-01T01:00:00+01:00',
+      { since_unix_milliseconds: 0, until_unix_milliseconds: 0 },
+    ],
+  ] as const)('normalizes exact RFC 3339 filter bounds: %s', async (args, expected) => {
+    const { command, request, entries } = historyCommandFixture(() => ({
+      messages: [],
+      has_more: false,
+    }));
+    await command.handler(commandContext(`messages ${conversationId} ${args}`));
+    expect(request).toHaveBeenCalledWith('read_messages', {
+      conversation_id: conversationId,
+      after_cursor: 0,
+      order: 'desc',
+      limit: 10,
+      ...expected,
+    });
+    expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(false);
+  });
+
+  it.each([
+    '--order newest',
+    '--order',
+    '--order asc --order desc',
+    '--before-cursor',
+    '--before-cursor 0',
+    '--before-cursor -1',
+    '--before-cursor 9007199254740992',
+    '20 --before-cursor 20',
+    '--since 2026-10-01',
+    '--since 2026-10-01T00:00:00',
+    '--since 2026-02-30T00:00:00Z',
+    '--since 2025-02-29T00:00:00Z',
+    '--since 2026-13-01T00:00:00Z',
+    '--since 2026-10-01T24:00:00Z',
+    '--since 2026-10-01T00:00:60Z',
+    '--since 2026-10-01T00:00:00+24:00',
+    '--since 0000-01-01T00:00:00+00:01',
+    '--until 9999-12-31T23:59:59.9999Z',
+    '--until 2026-10-01T00:00:00+00:60',
+    '--since 2026-10-02T00:00:00Z --until 2026-10-01T00:00:00Z',
+    '--since 1970-01-01T00:00:00.0002Z --until 1970-01-01T00:00:00.0001Z',
+    '--since 2026-10-01T00:00:00Z --since 2026-10-01T00:00:00Z',
+    '--until --order asc',
+    '--after 1',
+    '--order=asc',
+    `--since ${'1'.repeat(129)}`,
+  ])('rejects unsafe history arguments before synchronization: %s', async (args) => {
+    const { command, request, entries } = historyCommandFixture(() => ({
+      messages: [],
+      has_more: false,
+    }));
+    await command.handler(commandContext(`messages ${conversationId} ${args}`));
+    expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(true);
+    expect(request).not.toHaveBeenCalledWith('sync_messages', expect.anything());
+    expect(request).not.toHaveBeenCalledWith('read_messages', expect.anything());
+  });
+
+  it.each(['asc', 'desc'] as const)(
+    'resumes an empty filtered %s scan using the scanned cursor and preserves every bound',
+    async (order) => {
+      const getPage = vi
+        .fn<() => unknown>()
+        .mockReturnValueOnce({ messages: [], has_more: true, next_cursor: 100 })
+        .mockReturnValueOnce({
+          messages: [historyMessage(order === 'asc' ? 101 : 99)],
+          has_more: false,
+        });
+      const { command, request, entries } = historyCommandFixture(getPage);
+      await command.handler(
+        commandContext(
+          `messages ${conversationId} 7 --order ${order} --before-cursor 200 --since 2026-10-01T01:00:00+01:00 --until 2026-11-01T02:00:00+02:00`,
+        ),
+      );
+      expect(
+        entries.some((entry) => entry.line.includes('none matched in this bounded scan')),
+      ).toBe(true);
+      const continuation = entries.find((entry) => entry.line.startsWith('next: /konclave '));
+      const expectedAfter = order === 'asc' ? 100 : 7;
+      const expectedBefore = order === 'asc' ? 200 : 100;
+      expect(continuation?.line).toBe(
+        `next: /konclave messages ${conversationId} ${expectedAfter} --order ${order} --before-cursor ${expectedBefore} --since 2026-10-01T00:00:00.000Z --until 2026-11-01T00:00:00.000Z`,
+      );
+      if (!continuation) {
+        throw new Error('history continuation is missing');
+      }
+      await command.handler(commandContext(continuation.line.slice('next: /konclave '.length)));
+      const reads = request.mock.calls
+        .filter(([operation]) => operation === 'read_messages')
+        .map(([, payload]) => payload);
+      expect(reads).toEqual([
+        {
+          conversation_id: conversationId,
+          after_cursor: 7,
+          before_cursor: 200,
+          order,
+          since_unix_milliseconds: Date.UTC(2026, 9, 1),
+          until_unix_milliseconds: Date.UTC(2026, 10, 1),
+          limit: 10,
+        },
+        {
+          conversation_id: conversationId,
+          after_cursor: expectedAfter,
+          before_cursor: expectedBefore,
+          order,
+          since_unix_milliseconds: Date.UTC(2026, 9, 1),
+          until_unix_milliseconds: Date.UTC(2026, 10, 1),
+          limit: 10,
+        },
+      ]);
+      expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(false);
+    },
+  );
+
+  it.each([undefined, 0, 200, 250, '100'])(
+    'rejects unusable history continuation %s instead of guessing from matching messages',
+    async (cursor) => {
+      const { command, entries } = historyCommandFixture(() => ({
+        messages: [],
+        has_more: true,
+        next_cursor: cursor,
+      }));
+      await command.handler(commandContext(`messages ${conversationId} --before-cursor 200`));
+      expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(true);
+      expect(entries.some((entry) => entry.line.startsWith('next:'))).toBe(false);
+    },
+  );
 
   it('displays typed policy history without treating receipt as authority', async () => {
     const proposalId = '31'.repeat(16);
@@ -2756,7 +2991,7 @@ describe('deterministic commands', () => {
       },
     })[0];
 
-    await command?.handler(commandContext(`messages ${conversationId}`));
+    await command?.handler(commandContext(`messages ${conversationId} --order asc`));
 
     const output = entries.map((entry) => entry.line).join('\n');
     expect(output).toContain('receipt does not activate local authority');
@@ -3156,6 +3391,7 @@ describe('deterministic commands', () => {
           {
             message_id: '99'.repeat(16),
             sender_device_id: 'short',
+            sent_at_unix_milliseconds: 1,
             cursor: 1,
             direction: 'inbound',
             text: 'hello',

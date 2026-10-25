@@ -5,6 +5,7 @@ mod collaboration_policy;
 mod delivery_diagnostics;
 mod error;
 mod identifiers;
+mod message_history;
 mod model;
 mod pairing_rendezvous;
 mod short_code_pairing;
@@ -39,6 +40,9 @@ pub use identifiers::{
     PairingContextHash, PairingId, PairingMessageId, PairingNonce, PairingRendezvousId,
     PairingRendezvousNonce, RepeatPairingOperationId, RoutingId, ShortCodeCapabilityTakeId,
     ShortCodePairingAttemptId, ShortCodePairingLocator, ShortCodePairingTranscriptHash,
+};
+pub use message_history::{
+    MAX_MESSAGE_PAGE_SIZE, MessageHistoryOrder, MessageHistoryQuery, MessageHistoryQueryError,
 };
 pub use model::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING,

@@ -194,7 +194,7 @@ or tool activity as idle; observed activity cancels that inference, and the next
 explicit idle event remains authoritative. `/konclave messages
 <conversation-id>` performs an explicit bounded sync/read when diagnosing delivery,
 and `/konclave reply <conversation-id> <reply-to-message-id> [message-id] --
-<message text>` records a reply relationship when desired. Both commands print the
+<message text>` records a reply relationship when desired. Reply prints the
 generated message identifier before sending; reuse it in the optional position after
 a transport failure to reconcile the same operation instead of creating a duplicate.
 
@@ -202,6 +202,47 @@ The accepting `connect` command creates a durable conversation before the remote
 command completes. If the pairing is abandoned or times out, that empty conversation
 remains visible in `/konclave conversations`; the command does not hide this
 non-atomic boundary.
+
+## Browse message history
+
+History uses the conversation selected with `/konclave use`, unless an explicit
+conversation overrides it. The slash command defaults to newest-first durable
+cursor order; `--order asc` restores oldest-first browsing:
+
+```text
+/konclave messages
+/konclave messages --order asc
+/konclave messages <conversation-id> --order desc
+/konclave messages --since 2026-10-01T00:00:00Z --until 2026-11-01T00:00:00Z
+/konclave messages --since 2026-10-01T09:00:00+02:00
+/konclave messages <conversation-id> --before-cursor <cursor>
+```
+
+Each message displays its sender timestamp as UTC ISO 8601 ending in `Z`, in
+normal and verbose output. A sender value outside the supported date range
+produces an explicit timestamp diagnostic without hiding the message. Sender
+clocks can differ or move backward: timestamps are display/filter metadata, not
+trusted ordering, replay, or authorization authority.
+
+`--since` is inclusive and `--until` exclusive: `[since, until)`. Either bound can
+be used alone. Values must be valid RFC 3339 instants with an explicit timezone;
+offsets normalize to UTC. Invalid calendar dates, leap seconds, repeated options,
+and reversed ranges are rejected. Filters compare the existing integer-millisecond
+sender timestamps; fractional-millisecond bounds are rounded upward consistently
+with the half-open interval.
+
+Every command performs one bounded sync and one bounded history read. Timestamps
+remain sealed, so a sparse date range can require multiple authenticated scans,
+including pages with no matches. When more candidates remain, copy the printed
+continuation command: it preserves the conversation, order, dates, and cursor
+bounds, and advances past the last scanned record rather than the last match.
+An empty bounded scan does not mean the entire history has no matches.
+
+The legacy positional `[after-cursor]` remains an exclusive lower cursor bound,
+including when browsing newest-first. `--before-cursor` is an exclusive upper
+bound and enables backward continuation. Neither bound is an offset. Native
+`read_messages` callers retain their existing ascending default; the slash command
+requests descending order explicitly.
 
 ## Automated two-session smoke
 

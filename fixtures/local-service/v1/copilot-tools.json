@@ -1680,12 +1680,40 @@
             "null"
           ]
         },
+        "before_cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "conversation_id": {
           "type": "string"
         },
         "limit": {
           "format": "uint",
           "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "order": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since_unix_milliseconds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until_unix_milliseconds": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
@@ -1875,6 +1903,14 @@
             "$ref": "#/$defs/MessageResult"
           },
           "type": "array"
+        },
+        "next_cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

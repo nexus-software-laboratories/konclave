@@ -11,9 +11,9 @@ use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
     JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus,
-    MessageId, NotificationId, PairingControl, PairingId, PairingMessageId, PairingStage,
-    ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId, StoredRelayEnvelope,
-    TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
+    MessageHistoryQuery, MessageId, NotificationId, PairingControl, PairingId, PairingMessageId,
+    PairingStage, ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId,
+    StoredRelayEnvelope, TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
     TrustedDeviceBindingStatus, TrustedDeviceEvidence, TrustedDeviceResolution,
     resolve_trusted_device, trusted_device_binding_status,
 };
@@ -1911,6 +1911,21 @@ impl ConversationCoordinator {
     ) -> Result<HistoryPage, ConversationCoordinatorError> {
         self.store
             .load_history(conversation_id, after_cursor, limit)
+            .map_err(Into::into)
+    }
+
+    /// Reads authenticated sealed history using validated cursor and timestamp bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a profile, authentication, corruption, protocol, or storage error.
+    pub(crate) fn history_query(
+        &self,
+        conversation_id: ConversationId,
+        query: MessageHistoryQuery,
+    ) -> Result<HistoryPage, ConversationCoordinatorError> {
+        self.store
+            .load_history_query(conversation_id, query)
             .map_err(Into::into)
     }
 

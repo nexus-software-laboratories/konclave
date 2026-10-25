@@ -142,6 +142,21 @@ For ongoing conversations, invoke `sync_messages`, then `read_messages` or
 `watch_messages` with an explicit conversation identifier. Let each bounded wait
 complete instead of busy-polling.
 
+`read_messages` retains ascending durable cursor order by default. Optional
+`order` accepts `asc` or `desc`; `after_cursor` is always an exclusive lower bound,
+and `before_cursor` an exclusive upper bound. Optional
+`since_unix_milliseconds` and `until_unix_milliseconds` filter authenticated sender
+timestamps inclusively and exclusively, respectively. Sender clocks do not
+establish trusted order. Page limits remain 1–100; filtered reads scan at most
+100 authenticated candidates rather than decrypting the entire history.
+
+When `has_more` is true, resume from `next_cursor`, the last scanned cursor, even
+if `messages` is empty. For ascending reads replace `after_cursor`; for descending
+reads replace `before_cursor`. Preserve the other cursor bound and date filters.
+Do not infer continuation from the last returned message, and do not interpret an
+empty filtered scan as exhaustion. `sync_messages` and `watch_messages` retain
+their existing response shapes.
+
 For read-only troubleshooting, `get_message_delivery_status` accepts one explicit
 `conversation_id` and `message_id`. It returns only finite local evidence, the
 current mute setting, profile-wide degradation, and an unknown remote outcome. It

@@ -67,14 +67,19 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-      - name: Verify body-free diagnostic decisions
+      - name: Verify pure diagnostic and bounded history decisions
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveDomainCore -- --check
           cargo test --locked --package KonclaveDomainCore delivery_diagnostics::tests
+          cargo test --locked --package KonclaveDomainCore message_history::tests
           cargo clippy --locked --package KonclaveDomainCore --all-targets -- -D warnings
+      - name: Verify deterministic component relevance
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: ./scripts/ci/Test-ComponentValidationScope.ps1
       - name: Resolve pinned Node version
         if: steps.scope.outputs.run == 'true'
         id: toolchains
@@ -119,9 +124,16 @@ jobs:
           cargo fmt --package KonclaveLocalServiceTransport -- --check
           cargo test --locked --package KonclaveLocalServiceTransport --test authorization_handshake
           cargo test --locked --package KonclaveLocalDaemon --lib message_delivery
+          cargo test --locked --package KonclaveLocalDaemon --lib message_history
+          cargo test --locked --package KonclaveLocalDaemon --lib mcp::tests::regenerate_copilot_tool_contract_fixture -- --ignored --exact
+          cargo test --locked --package KonclaveLocalDaemon --lib mcp::tests::copilot_tool_contract_fixture_matches_the_router -- --exact
           cargo test --locked --package KonclaveLocalDaemon --lib local_
           cargo clippy --locked --package KonclaveLocalDaemon --lib -- -D warnings
           cargo clippy --locked --package KonclaveLocalServiceTransport --all-targets -- -D warnings
+      - name: Require unchanged submitted formatting and generated contracts
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: git diff --exit-code
       - name: Measure on-demand inspection overhead
         if: steps.scope.outputs.run == 'true'
         shell: bash
@@ -130,7 +142,3 @@ jobs:
           cargo test --locked --release --package KonclaveLocalDaemon --lib \
             persistence::tests::message_delivery_inspection_performance_evidence \
             -- --ignored --exact --nocapture
-      - name: Require unchanged submitted formatting
-        if: steps.scope.outputs.run == 'true'
-        shell: bash
-        run: git diff --exit-code
