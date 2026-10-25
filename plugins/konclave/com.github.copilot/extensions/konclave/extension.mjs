@@ -3026,9 +3026,11 @@ function createCopilotPolicyGate(client) {
               policyDigest: authorization.policyDigest,
               action: action.action,
               resource: null,
-              messageId: sendArguments?.message_id,
-              replyToMessageId: sendArguments ? authorization.requestMessageId : void 0,
-              text: sendArguments?.text,
+              ...sendArguments === null ? {} : {
+                messageId: sendArguments.message_id,
+                replyToMessageId: authorization.requestMessageId,
+                text: sendArguments.text
+              },
               requestMessageId: authorization.requestMessageId,
               attempt: authorization.attempt
             })
@@ -3085,8 +3087,11 @@ function createCopilotPolicyGate(client) {
             },
             additionalContext: "Konclave policy permits this action, but normal Copilot permissions still apply."
           };
-        } catch {
-          return deny("gate_unavailable", "Konclave policy evaluation was unavailable.");
+        } catch (error) {
+          return deny(
+            "gate_unavailable",
+            `Konclave policy evaluation was unavailable. ${formatLocalServiceFailure(error, "tool_dispatch")}`
+          );
         }
       },
       onPostToolUse(input) {
@@ -5581,7 +5586,7 @@ var helpLines = [
   "  /konclave help                                      Show this list.",
   "  /konclave output <normal|verbose>                   Set command detail for this session.",
   "  /konclave status                                    Show profile, delivery, and relay state.",
-  "  /konclave diagnose <conversation> <message>         Explain body-free local delivery evidence.",
+  "  /konclave diagnose [conversation] <message>         Explain body-free local delivery evidence.",
   "  /konclave identity                                  Show this profile device identifier.",
   "  /konclave conversations                             List local conversation identifiers.",
   "  /konclave devices                                   List local trusted-device aliases.",
@@ -5610,14 +5615,14 @@ var helpLines = [
   "  /konclave cancel-verification <attempt>             Cancel a short-code verification attempt.",
   "  /konclave send [conversation] [message-id] -- <text>",
   "                                                       Send or retry a message.",
-  "  /konclave request <conversation> [target-device] [message-id] -- <text>",
-  "                                                       Request one response; target groups.",
-  "  /konclave reply <conversation> <reply-to> [message-id] -- <text>",
+  "  /konclave request [conversation] [target-device] [message-id] -- <text>",
+  "                                                       Group targets require a conversation ID.",
+  "  /konclave reply [conversation] <reply-to> [message-id] -- <text>",
   "                                                       Reply or retry with an explicit ID.",
-  "  /konclave messages <conversation> [after-cursor]    Sync and show a bounded message page.",
-  "  /konclave use <conversation>                        Select the implicit send target.",
-  "  /konclave mute <conversation>                       Mute automatic delivery.",
-  "  /konclave unmute <conversation>                     Resume automatic delivery.",
+  "  /konclave messages [conversation] [after-cursor]    Sync and show a bounded message page.",
+  "  /konclave use <conversation>                        Select the implicit conversation.",
+  "  /konclave mute [conversation]                       Mute automatic delivery.",
+  "  /konclave unmute [conversation]                     Resume automatic delivery.",
   ...policyHelpLines
 ];
 function bounded(value, limit = 64) {
@@ -6778,6 +6783,13 @@ async function requireSingleConversation(client, activeConversationId) {
     "no active conversation is selected; run /konclave conversations, then /konclave use <conversation>"
   );
 }
+async function resolveConversationArguments(client, activeConversationId, identifiers, minimumRemaining, maximumRemaining, usage) {
+  const explicitlySelectedConversation = identifiers.length > maximumRemaining || identifiers[0]?.length === conversationIdCharacters;
+  const remainingIdentifiers = explicitlySelectedConversation ? identifiers.slice(1) : identifiers;
+  requireArgumentCount(remainingIdentifiers, minimumRemaining, maximumRemaining, usage);
+  const conversationId = explicitlySelectedConversation ? requireHexIdentifier(identifiers[0], conversationIdCharacters, "conversation identifier") : await requireSingleConversation(client, activeConversationId);
+  return { conversationId, remainingIdentifiers, explicitlySelectedConversation };
+}
 function parseCursor(value) {
   if (!value || !/^(0|[1-9][0-9]*)$/u.test(value)) {
     throw new Error("after-cursor must be a non-negative integer");
@@ -7378,11 +7390,16 @@ function createKonclaveCommands(dependencies) {
         return;
       }
       case "diagnose": {
-        const parts = parseCommandArguments(argumentsText);
-        requireArgumentCount(parts, 2, 2, "/konclave diagnose <conversation> <message>");
-        const conversation = requireHexIdentifier(parts[0], 64, "conversation identifier");
-        const message = requireHexIdentifier(parts[1], 32, "message identifier");
-        const diagnostic = await getMessageDeliveryStatus(client, conversation, message);
+        const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
+          client,
+          activeConversationId,
+          parseCommandArguments(argumentsText),
+          1,
+          1,
+          "/konclave diagnose [conversation] <message>"
+        );
+        const message = requireHexIdentifier(remainingIdentifiers[0], 32, "message identifier");
+        const diagnostic = await getMessageDeliveryStatus(client, conversationId, message);
         for (const line of formatMessageDeliveryStatus(diagnostic)) {
           await presentation.write(line, { ephemeral: true });
         }
@@ -7989,45 +8006,24 @@ function createKonclaveCommands(dependencies) {
       case "send":
       case "reply": {
         const isReply = subcommand === "reply";
-        const usage = isReply ? "/konclave reply <conversation> <reply-to> [message-id] -- <text>" : "/konclave send [conversation] [message-id] -- <text>";
+        const usage = isReply ? "/konclave reply [conversation] <reply-to> [message-id] -- <text>" : "/konclave send [conversation] [message-id] -- <text>";
         const parsed = parseDelimitedMessage(
           argumentsText,
-          isReply ? 2 : 0,
+          isReply ? 1 : 0,
           isReply ? 3 : 2,
           usage
         );
-        let conversationId;
-        let suppliedMessageId;
-        let explicitlySelectedConversation = isReply || parsed.identifiers.length === 2;
-        if (isReply || parsed.identifiers.length === 2) {
-          conversationId = requireHexIdentifier(
-            parsed.identifiers[0],
-            conversationIdCharacters,
-            "conversation identifier"
-          );
-          suppliedMessageId = parsed.identifiers[isReply ? 2 : 1];
-        } else if (parsed.identifiers.length === 1) {
-          const identifier = parsed.identifiers[0];
-          if (identifier?.length === conversationIdCharacters) {
-            explicitlySelectedConversation = true;
-            conversationId = requireHexIdentifier(
-              identifier,
-              conversationIdCharacters,
-              "conversation identifier"
-            );
-          } else {
-            conversationId = await requireSingleConversation(client, activeConversationId);
-            suppliedMessageId = requireHexIdentifier(
-              identifier,
-              messageIdCharacters,
-              "message identifier"
-            );
-          }
-        } else {
-          conversationId = await requireSingleConversation(client, activeConversationId);
-        }
+        const { conversationId, remainingIdentifiers, explicitlySelectedConversation } = await resolveConversationArguments(
+          client,
+          activeConversationId,
+          parsed.identifiers,
+          isReply ? 1 : 0,
+          isReply ? 2 : 1,
+          usage
+        );
+        const suppliedMessageId = remainingIdentifiers[isReply ? 1 : 0];
         const replyToMessageId = isReply ? requireHexIdentifier(
-          parsed.identifiers[1],
+          remainingIdentifiers[0],
           messageIdCharacters,
           "reply-to message identifier"
         ) : void 0;
@@ -8078,20 +8074,23 @@ function createKonclaveCommands(dependencies) {
         return;
       }
       case "request": {
-        const usage = "/konclave request <conversation> [target-device] [message-id] -- <text>";
-        const parsed = parseDelimitedMessage(argumentsText, 1, 3, usage);
-        const conversationId = requireHexIdentifier(
-          parsed.identifiers[0],
-          conversationIdCharacters,
-          "conversation identifier"
+        const usage = "/konclave request [conversation] [target-device] [message-id] -- <text>";
+        const parsed = parseDelimitedMessage(argumentsText, 0, 3, usage);
+        const { conversationId, remainingIdentifiers, explicitlySelectedConversation } = await resolveConversationArguments(
+          client,
+          activeConversationId,
+          parsed.identifiers,
+          0,
+          2,
+          usage
         );
-        const targetDeviceId = parsed.identifiers[1]?.length === deviceIdCharacters ? requireHexIdentifier(
-          parsed.identifiers[1],
+        const targetDeviceId = remainingIdentifiers[0]?.length === deviceIdCharacters ? requireHexIdentifier(
+          remainingIdentifiers[0],
           deviceIdCharacters,
           "target device identifier"
         ) : void 0;
-        const suppliedMessageId = targetDeviceId ? parsed.identifiers[2] : parsed.identifiers[1];
-        if (parsed.identifiers.length === 3 && !targetDeviceId) {
+        const suppliedMessageId = remainingIdentifiers[targetDeviceId ? 1 : 0];
+        if (remainingIdentifiers.length === 2 && !targetDeviceId) {
           throw new Error(usage);
         }
         const messageId = suppliedMessageId ? requireHexIdentifier(suppliedMessageId, messageIdCharacters, "message identifier") : randomBytes3(16).toString("hex");
@@ -8119,13 +8118,15 @@ function createKonclaveCommands(dependencies) {
         if (sent.conversationId !== conversationId || sent.messageId !== messageId) {
           throw new Error("the local service sent-request identity does not match the request");
         }
-        const selected = selectedConversation(
-          await client.request("set_active_conversation", {
-            conversation_id: conversationId
-          })
-        );
-        if (selected !== conversationId) {
-          throw new Error("the local service selected a different active conversation");
+        if (explicitlySelectedConversation) {
+          const selected = selectedConversation(
+            await client.request("set_active_conversation", {
+              conversation_id: conversationId
+            })
+          );
+          if (selected !== conversationId) {
+            throw new Error("the local service selected a different active conversation");
+          }
         }
         activeConversationId = conversationId;
         await presentation.write(
@@ -8134,14 +8135,15 @@ function createKonclaveCommands(dependencies) {
         return;
       }
       case "messages": {
-        const parts = parseCommandArguments(argumentsText);
-        requireArgumentCount(parts, 1, 2, "/konclave messages <conversation> [after-cursor]");
-        const conversationId = requireHexIdentifier(
-          parts[0],
-          conversationIdCharacters,
-          "conversation identifier"
+        const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
+          client,
+          activeConversationId,
+          parseCommandArguments(argumentsText),
+          0,
+          1,
+          "/konclave messages [conversation] [after-cursor]"
         );
-        const afterCursor = parts[1] ? parseCursor(parts[1]) : 0;
+        const afterCursor = remainingIdentifiers[0] ? parseCursor(remainingIdentifiers[0]) : 0;
         const synced = parseMessageList(
           await client.request("sync_messages", { conversation_id: conversationId })
         );
@@ -8200,16 +8202,20 @@ function createKonclaveCommands(dependencies) {
       }
       case "mute":
       case "unmute": {
-        const conversation = parseConversationArgument(
-          argumentsText,
-          `/konclave ${subcommand} <conversation>`
+        const { conversationId } = await resolveConversationArguments(
+          client,
+          activeConversationId,
+          parseCommandArguments(argumentsText),
+          0,
+          0,
+          `/konclave ${subcommand} [conversation]`
         );
         await client.request("set_auto_delivery", {
-          conversation_id: conversation,
+          conversation_id: conversationId,
           enabled: subcommand === "unmute"
         });
         await presentation.write(
-          `automatic delivery ${subcommand === "unmute" ? "resumed" : "muted"} for ${bounded(conversation)}`
+          `automatic delivery ${subcommand === "unmute" ? "resumed" : "muted"} for ${bounded(conversationId)}`
         );
         return;
       }
