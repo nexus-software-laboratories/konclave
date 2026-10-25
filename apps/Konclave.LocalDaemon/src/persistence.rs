@@ -12188,11 +12188,7 @@ mod tests {
             .unwrap();
     }
 
-    fn complete_history_message(
-        fixture: &ConversationFixture,
-        cursor: u64,
-        timestamp: u64,
-    ) {
+    fn complete_history_message(fixture: &ConversationFixture, cursor: u64, timestamp: u64) {
         let identifier = u8::try_from(cursor).unwrap();
         let message = ApplicationMessage::new(
             ProtocolVersion::application_v1(),
@@ -12204,7 +12200,10 @@ mod tests {
         )
         .unwrap();
         stage_inbox_application_message(fixture, cursor, identifier, 0, &message);
-        fixture.store.complete_inbox(fixture.conversation_id, cursor).unwrap();
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, cursor)
+            .unwrap();
     }
 
     fn stage_remote_inbox_message(
@@ -15093,12 +15092,19 @@ mod tests {
             .unwrap();
         assert_eq!(first_page.messages.len(), 1);
         assert_eq!(first_page.messages[0].cursor, 1);
-        let descending = MessageHistoryQuery::new(
-            MessageHistoryOrder::Descending, 0, None, None, None, 10,
-        ).unwrap();
-        let before_echo = fixture.store.load_history_query(fixture.conversation_id, descending).unwrap();
+        let descending =
+            MessageHistoryQuery::new(MessageHistoryOrder::Descending, 0, None, None, None, 10)
+                .unwrap();
+        let before_echo = fixture
+            .store
+            .load_history_query(fixture.conversation_id, descending)
+            .unwrap();
         assert_eq!(
-            before_echo.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            before_echo
+                .messages
+                .iter()
+                .map(|message| message.cursor)
+                .collect::<Vec<_>>(),
             vec![1]
         );
 
@@ -15135,9 +15141,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
-        let newest = fixture.store.load_history_query(fixture.conversation_id, descending).unwrap();
+        let newest = fixture
+            .store
+            .load_history_query(fixture.conversation_id, descending)
+            .unwrap();
         assert_eq!(
-            newest.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            newest
+                .messages
+                .iter()
+                .map(|message| message.cursor)
+                .collect::<Vec<_>>(),
             vec![2, 1]
         );
     }
@@ -15148,31 +15161,61 @@ mod tests {
         for cursor in 1..=205 {
             complete_history_message(&fixture, cursor, 1_700_000_000_000);
         }
-        let ascending = fixture.store.load_history(fixture.conversation_id, 0, 10).unwrap();
+        let ascending = fixture
+            .store
+            .load_history(fixture.conversation_id, 0, 10)
+            .unwrap();
         assert_eq!(
-            ascending.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            ascending
+                .messages
+                .iter()
+                .map(|message| message.cursor)
+                .collect::<Vec<_>>(),
             (1..=10).collect::<Vec<_>>()
         );
         assert_eq!(ascending.next_cursor, Some(10));
-        let query = MessageHistoryQuery::new(
-            MessageHistoryOrder::Descending, 0, None, None, None, 10,
-        ).unwrap();
-        let newest = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+        let query =
+            MessageHistoryQuery::new(MessageHistoryOrder::Descending, 0, None, None, None, 10)
+                .unwrap();
+        let newest = fixture
+            .store
+            .load_history_query(fixture.conversation_id, query)
+            .unwrap();
         assert_eq!(
-            newest.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+            newest
+                .messages
+                .iter()
+                .map(|message| message.cursor)
+                .collect::<Vec<_>>(),
             (196..=205).rev().collect::<Vec<_>>()
         );
         assert_eq!(newest.next_cursor, Some(196));
         assert!(newest.has_more);
-        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+        for order in [
+            MessageHistoryOrder::Ascending,
+            MessageHistoryOrder::Descending,
+        ] {
             let connection = fixture.store.lock().unwrap();
-            let mut statement = connection.prepare(
-                &format!("EXPLAIN QUERY PLAN {}", message_history::candidate_query(order)),
-            ).unwrap();
-            let plan = statement.query_map(
-                params![fixture.conversation_id.as_bytes().as_slice(), 0_i64, 205_i64, 11_i64],
-                |row| row.get::<_, String>(3),
-            ).unwrap().collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+            let mut statement = connection
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    message_history::candidate_query(order)
+                ))
+                .unwrap();
+            let plan = statement
+                .query_map(
+                    params![
+                        fixture.conversation_id.as_bytes().as_slice(),
+                        0_i64,
+                        205_i64,
+                        11_i64
+                    ],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
             assert!(
                 plan.contains("daemon_message_history_page_idx")
                     || plan.contains("daemon_message_history_cursor_idx"),
@@ -15191,9 +15234,18 @@ mod tests {
         let mut before = None;
         for expected_cursor in [106, 6] {
             let query = MessageHistoryQuery::new(
-                MessageHistoryOrder::Descending, 0, before, Some(0), Some(2), 10,
-            ).unwrap();
-            let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+                MessageHistoryOrder::Descending,
+                0,
+                before,
+                Some(0),
+                Some(2),
+                10,
+            )
+            .unwrap();
+            let page = fixture
+                .store
+                .load_history_query(fixture.conversation_id, query)
+                .unwrap();
             assert!(page.messages.is_empty());
             assert!(page.has_more);
             assert_eq!(page.next_cursor, Some(expected_cursor));
@@ -15203,9 +15255,18 @@ mod tests {
             }
         }
         let query = MessageHistoryQuery::new(
-            MessageHistoryOrder::Descending, 0, before, Some(0), Some(2), 10,
-        ).unwrap();
-        let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+            MessageHistoryOrder::Descending,
+            0,
+            before,
+            Some(0),
+            Some(2),
+            10,
+        )
+        .unwrap();
+        let page = fixture
+            .store
+            .load_history_query(fixture.conversation_id, query)
+            .unwrap();
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].cursor, 1);
         assert!(!page.has_more);
@@ -15223,15 +15284,28 @@ mod tests {
             (MessageHistoryOrder::Descending, vec![4, 3, 1]),
         ] {
             let query = MessageHistoryQuery::new(order, 0, None, Some(20), Some(40), 10).unwrap();
-            let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+            let page = fixture
+                .store
+                .load_history_query(fixture.conversation_id, query)
+                .unwrap();
             assert_eq!(
-                page.messages.iter().map(|message| message.cursor).collect::<Vec<_>>(),
+                page.messages
+                    .iter()
+                    .map(|message| message.cursor)
+                    .collect::<Vec<_>>(),
                 expected
             );
             assert!(!page.has_more);
             let bounded = MessageHistoryQuery::new(order, 1, Some(4), None, None, 10).unwrap();
-            let page = fixture.store.load_history_query(fixture.conversation_id, bounded).unwrap();
-            let mut cursors = page.messages.iter().map(|message| message.cursor).collect::<Vec<_>>();
+            let page = fixture
+                .store
+                .load_history_query(fixture.conversation_id, bounded)
+                .unwrap();
+            let mut cursors = page
+                .messages
+                .iter()
+                .map(|message| message.cursor)
+                .collect::<Vec<_>>();
             cursors.sort_unstable();
             assert_eq!(cursors, vec![2, 3]);
         }
@@ -15241,17 +15315,30 @@ mod tests {
     fn message_history_filters_authenticate_before_examining_sender_timestamps() {
         let fixture = conversation_fixture("history-filter-auth");
         complete_history_message(&fixture, 1, 100);
-        fixture.store.lock().unwrap().execute(
-            "UPDATE daemon_message_history
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_message_history
              SET sealed_message = zeroblob(length(sealed_message))
              WHERE conversation_id = ?1",
-            [fixture.conversation_id.as_bytes().as_slice()],
-        ).unwrap();
+                [fixture.conversation_id.as_bytes().as_slice()],
+            )
+            .unwrap();
         let query = MessageHistoryQuery::new(
-            MessageHistoryOrder::Descending, 0, None, Some(0), Some(2), 10,
-        ).unwrap();
+            MessageHistoryOrder::Descending,
+            0,
+            None,
+            Some(0),
+            Some(2),
+            10,
+        )
+        .unwrap();
         assert!(matches!(
-            fixture.store.load_history_query(fixture.conversation_id, query),
+            fixture
+                .store
+                .load_history_query(fixture.conversation_id, query),
             Err(ProfileStoreError::CorruptData)
         ));
     }
@@ -15272,13 +15359,23 @@ mod tests {
                     fixture.device_id,
                     ConversationId::from_bytes([49; ConversationId::LENGTH]),
                     2_000,
-                ).unwrap(),
+                )
+                .unwrap(),
             )),
         );
-        fixture.store.complete_inbox(fixture.conversation_id, 2).unwrap();
-        for order in [MessageHistoryOrder::Ascending, MessageHistoryOrder::Descending] {
+        fixture
+            .store
+            .complete_inbox(fixture.conversation_id, 2)
+            .unwrap();
+        for order in [
+            MessageHistoryOrder::Ascending,
+            MessageHistoryOrder::Descending,
+        ] {
             let query = MessageHistoryQuery::new(order, 0, None, None, None, 10).unwrap();
-            let page = fixture.store.load_history_query(fixture.conversation_id, query).unwrap();
+            let page = fixture
+                .store
+                .load_history_query(fixture.conversation_id, query)
+                .unwrap();
             assert_eq!(page.messages.len(), 1);
             assert_eq!(page.messages[0].cursor, 1);
             assert!(!page.has_more);

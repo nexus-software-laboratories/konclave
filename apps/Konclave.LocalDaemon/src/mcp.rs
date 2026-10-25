@@ -9,9 +9,8 @@ use KonclaveDomainCore::{
     CollaborationPolicyLimits, CollaborationPolicyProposalId, CollaborationPolicyResponseOutcome,
     ConversationId, ConversationRole, DeviceId, Ed25519PublicKey, EnvelopeId,
     MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MessageHistoryOrder,
-    MessageHistoryQuery, MessageId, PairingId,
-    RepeatPairingOperationId, RoutingId, ShortCodePairingAttemptId, ShortCodePairingSas,
-    TrustedDeviceAlias, TrustedDeviceBindingStatus,
+    MessageHistoryQuery, MessageId, PairingId, RepeatPairingOperationId, RoutingId,
+    ShortCodePairingAttemptId, ShortCodePairingSas, TrustedDeviceAlias, TrustedDeviceBindingStatus,
 };
 use KonclaveProtocolContracts::v1::{
     decode_collaboration_policy_bundle, decode_device_credential_binding, decode_invitation,
@@ -3264,25 +3263,48 @@ mod tests {
             }),
         ] {
             let mut request = base.clone();
-            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             let result: serde_json::Value = serde_json::from_slice(
-                &server.dispatch_json("read_messages", &serde_json::to_vec(&request).unwrap())
-                    .await.unwrap(),
-            ).unwrap();
+                &server
+                    .dispatch_json("read_messages", &serde_json::to_vec(&request).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(result, json!({"messages": [], "has_more": false}));
         }
         for (extra, expected_error) in [
-            (json!({"order": "timestamp"}), "history order must be asc or desc"),
-            (json!({"before_cursor": 0}), "history cursor bounds are invalid"),
-            (json!({"after_cursor": 4, "before_cursor": 4}), "history cursor bounds are invalid"),
-            (json!({"since_unix_milliseconds": 2, "until_unix_milliseconds": 1}),
-             "history timestamp range is reversed"),
+            (
+                json!({"order": "timestamp"}),
+                "history order must be asc or desc",
+            ),
+            (
+                json!({"before_cursor": 0}),
+                "history cursor bounds are invalid",
+            ),
+            (
+                json!({"after_cursor": 4, "before_cursor": 4}),
+                "history cursor bounds are invalid",
+            ),
+            (
+                json!({"since_unix_milliseconds": 2, "until_unix_milliseconds": 1}),
+                "history timestamp range is reversed",
+            ),
         ] {
             let mut request = base.clone();
-            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             assert_eq!(
-                server.dispatch_json("read_messages", &serde_json::to_vec(&request).unwrap())
-                    .await.err().as_deref(),
+                server
+                    .dispatch_json("read_messages", &serde_json::to_vec(&request).unwrap())
+                    .await
+                    .err()
+                    .as_deref(),
                 Some(expected_error)
             );
         }
@@ -3303,10 +3325,18 @@ mod tests {
             }),
         );
         assert_eq!(
-            server.dispatch_json("read_messages", &serde_json::to_vec(&json!({
-                "conversation_id": "01".repeat(32),
-                "order": "timestamp"
-            })).unwrap()).await.err().as_deref(),
+            server
+                .dispatch_json(
+                    "read_messages",
+                    &serde_json::to_vec(&json!({
+                        "conversation_id": "01".repeat(32),
+                        "order": "timestamp"
+                    }))
+                    .unwrap()
+                )
+                .await
+                .err()
+                .as_deref(),
             Some("local_service_not_authorized")
         );
     }

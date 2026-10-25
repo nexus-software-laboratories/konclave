@@ -228,9 +228,24 @@ interface MessageSummary {
   readonly messageId: string;
   readonly senderDeviceId: string;
   readonly cursor: number;
+  readonly sentAtUnixMilliseconds: number;
   readonly direction: 'inbound' | 'outbound';
   readonly content: MessageContentSummary;
   readonly duplicate: boolean;
+}
+
+interface HistoryInstant {
+  readonly unixMilliseconds: number;
+  readonly utc: string;
+  readonly chronologicalKey: string;
+}
+
+interface HistoryArguments {
+  readonly identifiers: readonly string[];
+  readonly order: 'asc' | 'desc';
+  readonly beforeCursor: number | undefined;
+  readonly since: HistoryInstant | undefined;
+  readonly until: HistoryInstant | undefined;
 }
 
 type MessageContentSummary =
@@ -311,16 +326,22 @@ interface ParsedCommand {
 
 /** Parses a bounded, whitespace-separated argument list. */
 export function parseCommandArguments(raw: string): string[] {
+  return parseBoundedCommandArguments(raw, maxArguments);
+}
+
+function parseBoundedCommandArguments(raw: string, argumentLimit: number): string[] {
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     return [];
   }
-  if (trimmed.length > maxArgumentLength * maxArguments) {
+  if (trimmed.length > maxArgumentLength * argumentLimit) {
     throw new Error('command arguments are too long');
   }
   const parts = trimmed.split(/\s+/u);
-  if (parts.length > maxArguments) {
-    throw new Error('command accepts at most four arguments');
+  if (parts.length > argumentLimit) {
+    throw new Error(
+      `command accepts at most ${argumentLimit === maxArguments ? 'four' : argumentLimit} arguments`,
+    );
   }
   for (const part of parts) {
     if (part.length > maxArgumentLength) {
@@ -382,7 +403,9 @@ const helpLines = [
   '                                                       Target a peer in the selected or explicit conversation.',
   '  /konclave reply [conversation] <reply-to> [message-id] -- <text>',
   '                                                       Reply or retry with an explicit ID.',
-  '  /konclave messages [conversation] [after-cursor]    Sync and show a bounded message page.',
+  '  /konclave messages [conversation] [after-cursor]    Sync and show newest-first history with UTC timestamps.',
+  '    --order asc|desc --before-cursor <cursor>          Choose cursor order and a backward page bound.',
+  '    --since <RFC3339> --until <RFC3339>                Sender timestamp range [since, until); explicit timezone required.',
   '  /konclave use <conversation>                        Select the implicit conversation.',
   '  /konclave mute [conversation]                       Mute automatic delivery.',
   '  /konclave unmute [conversation]                     Resume automatic delivery.',
@@ -1255,6 +1278,7 @@ function optionalPositiveSafeInteger(
 function parseMessageList(value: unknown): {
   readonly messages: readonly MessageSummary[];
   readonly hasMore: boolean;
+  readonly nextCursor: number | undefined;
 } {
   if (
     !isRecord(value) ||
@@ -1270,6 +1294,9 @@ function parseMessageList(value: unknown): {
       typeof message.cursor !== 'number' ||
       !Number.isSafeInteger(message.cursor) ||
       message.cursor < 0 ||
+      typeof message.sent_at_unix_milliseconds !== 'number' ||
+      !Number.isInteger(message.sent_at_unix_milliseconds) ||
+      message.sent_at_unix_milliseconds < 0 ||
       (message.direction !== 'inbound' && message.direction !== 'outbound') ||
       typeof message.duplicate !== 'boolean'
     ) {
@@ -1291,12 +1318,21 @@ function parseMessageList(value: unknown): {
         'sender device identifier',
       ),
       cursor: message.cursor,
+      sentAtUnixMilliseconds: message.sent_at_unix_milliseconds,
       direction: message.direction,
       content: parseMessageContent(message),
       duplicate: message.duplicate,
     };
   });
-  return { messages, hasMore: value.has_more };
+  return {
+    messages,
+    hasMore: value.has_more,
+    nextCursor: optionalNonnegativeSafeInteger(
+      value,
+      'next_cursor',
+      'the local service history continuation is malformed',
+    ),
+  };
 }
 
 function parseMessageContent(message: Record<string, unknown>): MessageContentSummary {
@@ -1940,15 +1976,131 @@ async function resolveConversationArguments(
   return { conversationId, remainingIdentifiers, explicitlySelectedConversation };
 }
 
-function parseCursor(value: string | undefined): number {
+function parseCursor(value: string | undefined, label = 'after-cursor'): number {
   if (!value || !/^(0|[1-9][0-9]*)$/u.test(value)) {
-    throw new Error('after-cursor must be a non-negative integer');
+    throw new Error(`${label} must be a non-negative integer`);
   }
   const cursor = Number(value);
   if (!Number.isSafeInteger(cursor)) {
-    throw new Error('after-cursor exceeds the supported integer range');
+    throw new Error(`${label} exceeds the supported integer range`);
   }
   return cursor;
+}
+
+function parseHistoryInstant(value: string, label: string): HistoryInstant {
+  const match =
+    /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})$/u.exec(
+      value,
+    );
+  if (!match || !match[8]) {
+    throw new Error(`${label} must be a representable RFC 3339 instant with an explicit timezone`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? '';
+  const milliseconds = Number(fraction.slice(0, 3).padEnd(3, '0'));
+  const zone = match[8];
+  const offsetHours = zone.length === 1 ? 0 : Number(zone.slice(1, 3));
+  const offsetMinutes = zone.length === 1 ? 0 : Number(zone.slice(4, 6));
+  const local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, milliseconds);
+  if (
+    local.getUTCFullYear() !== year ||
+    local.getUTCMonth() !== month - 1 ||
+    local.getUTCDate() !== day ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHours > 23 ||
+    offsetMinutes > 59
+  ) {
+    throw new Error(`${label} contains an invalid calendar date, time, offset, or leap second`);
+  }
+  const offset = (offsetHours * 60 + offsetMinutes) * (zone[0] === '-' ? -1 : 1);
+  const floorTimestamp = local.getTime() - offset * 60_000;
+  // Integer message timestamps require ceiling both half-open filter bounds.
+  const unixMilliseconds = floorTimestamp + (/[1-9]/u.test(fraction.slice(3)) ? 1 : 0);
+  const normalized = new Date(unixMilliseconds);
+  const floorDate = new Date(floorTimestamp);
+  if (
+    !Number.isSafeInteger(unixMilliseconds) ||
+    normalized.getUTCFullYear() < 0 ||
+    normalized.getUTCFullYear() > 9999 ||
+    floorDate.getUTCFullYear() < 0 ||
+    floorDate.getUTCFullYear() > 9999
+  ) {
+    throw new Error(`${label} cannot be normalized to a four-digit UTC year`);
+  }
+  return {
+    unixMilliseconds,
+    utc: normalized.toISOString(),
+    chronologicalKey: `${floorDate.toISOString().slice(0, 19)}.${fraction.replace(/0+$/u, '') || '0'}`,
+  };
+}
+
+function parseHistoryArguments(raw: string): HistoryArguments {
+  const parts = parseBoundedCommandArguments(raw, 10);
+  const identifiers: string[] = [];
+  const seen = new Set<string>();
+  let order: 'asc' | 'desc' = 'desc';
+  let beforeCursor: number | undefined;
+  let since: HistoryInstant | undefined;
+  let until: HistoryInstant | undefined;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === undefined) {
+      throw new Error('history argument is missing');
+    }
+    if (!part.startsWith('-')) {
+      identifiers.push(part);
+      continue;
+    }
+    if (!['--order', '--before-cursor', '--since', '--until'].includes(part)) {
+      throw new Error('unknown history option');
+    }
+    if (seen.has(part)) {
+      throw new Error('history options cannot be repeated');
+    }
+    seen.add(part);
+    const value = parts[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error('history option is missing its value');
+    }
+    index += 1;
+    switch (part) {
+      case '--order':
+        if (value !== 'asc' && value !== 'desc') {
+          throw new Error('history order must be asc or desc');
+        }
+        order = value;
+        break;
+      case '--before-cursor':
+        beforeCursor = parseCursor(value, 'before-cursor');
+        break;
+      case '--since':
+        since = parseHistoryInstant(value, '--since');
+        break;
+      case '--until':
+        until = parseHistoryInstant(value, '--until');
+        break;
+    }
+  }
+  if (since && until && since.chronologicalKey > until.chronologicalKey) {
+    throw new Error('history timestamp range is reversed');
+  }
+  return { identifiers, order, beforeCursor, since, until };
+}
+
+function displayMessageTimestamp(timestamp: number): string {
+  if (!Number.isSafeInteger(timestamp) || timestamp > 8_640_000_000_000_000) {
+    return '[timestamp unavailable: sender value is outside the supported UTC range]';
+  }
+  return new Date(timestamp).toISOString();
 }
 
 function displayText(value: string): string {
@@ -3426,52 +3578,89 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         return;
       }
       case 'messages': {
+        const options = parseHistoryArguments(argumentsText);
         const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
           client,
-          parseCommandArguments(argumentsText),
+          options.identifiers,
           0,
           1,
           '/konclave messages [conversation] [after-cursor]',
         );
         const afterCursor = remainingIdentifiers[0] ? parseCursor(remainingIdentifiers[0]) : 0;
+        if (options.beforeCursor !== undefined && options.beforeCursor <= afterCursor) {
+          throw new Error('before-cursor must be greater than after-cursor');
+        }
+        const payload: Record<string, unknown> = {
+          conversation_id: conversationId,
+          after_cursor: afterCursor,
+          order: options.order,
+          limit: maxDisplayedMessages,
+        };
+        if (options.beforeCursor !== undefined) {
+          payload.before_cursor = options.beforeCursor;
+        }
+        if (options.since) {
+          payload.since_unix_milliseconds = options.since.unixMilliseconds;
+        }
+        if (options.until) {
+          payload.until_unix_milliseconds = options.until.unixMilliseconds;
+        }
         const synced = parseMessageList(
           await client.request('sync_messages', { conversation_id: conversationId }),
         );
         const history = parseMessageList(
-          await client.request('read_messages', {
-            conversation_id: conversationId,
-            after_cursor: afterCursor,
-            limit: maxDisplayedMessages,
-          }),
+          await client.request('read_messages', payload),
         );
+        if (
+          history.hasMore &&
+          (history.nextCursor === undefined ||
+            history.nextCursor <= afterCursor ||
+            (options.beforeCursor !== undefined && history.nextCursor >= options.beforeCursor))
+        ) {
+          throw new Error('the local service history continuation is missing or outside the bounds');
+        }
         await presentation.detail(
           `synced messages: ${synced.messages.length}, more available: ${synced.hasMore ? 'yes' : 'no'}`,
         );
         if (history.messages.length === 0) {
-          await presentation.write('messages: none after the requested cursor');
-          return;
+          await presentation.write(
+            history.hasMore
+              ? 'messages: none matched in this bounded scan; more history remains to scan'
+              : 'messages: none within the requested bounds',
+          );
         }
         for (const message of history.messages) {
           await presentation.detail(
             `message ${message.messageId}: ${message.direction}, sender ${message.senderDeviceId}, cursor ${message.cursor}, duplicate ${message.duplicate ? 'yes' : 'no'}`,
           );
-          await presentation.write(displayMessageContent(message), { ephemeral: true });
+          await presentation.write(
+            `${displayMessageTimestamp(message.sentAtUnixMilliseconds)} ${displayMessageContent(message)}`,
+            { ephemeral: true },
+          );
         }
-        const lastCursor = history.messages.at(-1)?.cursor;
-        if (lastCursor !== undefined) {
-          if (presentation.mode === 'normal') {
-            await presentation.write(
-              `messages: ${history.messages.length}; resume cursor ${lastCursor}${
-                history.hasMore ? '; more available' : ''
-              }`,
-            );
-          } else {
-            await presentation.write(`resume after cursor: ${lastCursor}`);
-            await presentation.write(`next: /konclave messages ${conversationId} ${lastCursor}`);
+        if (history.messages.length > 0) {
+          await presentation.write(`messages: ${history.messages.length}; order ${options.order}`);
+        }
+        if (history.hasMore && history.nextCursor !== undefined) {
+          const continuation = ['/konclave messages', conversationId];
+          const lowerCursor = options.order === 'asc' ? history.nextCursor : afterCursor;
+          if (lowerCursor > 0) {
+            continuation.push(String(lowerCursor));
           }
-        }
-        if (history.hasMore && presentation.mode === 'verbose') {
-          await presentation.write('more messages are available');
+          continuation.push('--order', options.order);
+          const upperCursor =
+            options.order === 'desc' ? history.nextCursor : options.beforeCursor;
+          if (upperCursor !== undefined) {
+            continuation.push('--before-cursor', String(upperCursor));
+          }
+          if (options.since) {
+            continuation.push('--since', options.since.utc);
+          }
+          if (options.until) {
+            continuation.push('--until', options.until.utc);
+          }
+          await presentation.write('more history remains to scan');
+          await presentation.write(`next: ${continuation.join(' ')}`);
         }
         return;
       }

@@ -36,9 +36,11 @@ impl ProfileStore {
     ) -> Result<HistoryPage, ProfileStoreError> {
         let conversation = self.load_conversation(conversation_id)?;
         let routing_id = conversation.routing_id;
-        let upper_cursor = query.before_cursor().map_or(conversation.replay_cursor, |before| {
-            conversation.replay_cursor.min(before - 1)
-        });
+        let upper_cursor = query
+            .before_cursor()
+            .map_or(conversation.replay_cursor, |before| {
+                conversation.replay_cursor.min(before - 1)
+            });
         let message_ids = {
             let connection = self.lock()?;
             let mut statement = connection

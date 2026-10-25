@@ -11,10 +11,9 @@ use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
     JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus,
-    MessageHistoryQuery,
-    MessageId, NotificationId, PairingControl, PairingId, PairingMessageId, PairingStage,
-    ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId, StoredRelayEnvelope,
-    TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
+    MessageHistoryQuery, MessageId, NotificationId, PairingControl, PairingId, PairingMessageId,
+    PairingStage, ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId,
+    StoredRelayEnvelope, TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
     TrustedDeviceBindingStatus, TrustedDeviceEvidence, TrustedDeviceResolution,
     resolve_trusted_device, trusted_device_binding_status,
 };
