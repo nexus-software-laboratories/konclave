@@ -368,7 +368,7 @@ const helpLines = [
   '  /konclave pairing <pairing>                         Show authenticated pairing state.',
   '  /konclave verification <attempt>                    Show short-code verification state.',
   '  /konclave verify <attempt> <peer> <sas>             Explicitly confirm displayed short-code values.',
-  '  /konclave approve <pairing> <conversation> [role]   Approve a displayed joiner.',
+  '  /konclave approve <pairing> [conversation] [role]   Approve a displayed joiner; defaults to selected conversation and member.',
   '  /konclave approve <pairing> <inviter> <conversation> <role>',
   '                                                       Approve displayed inviter fields.',
   '  /konclave sync <pairing>                            Process one pairing progress page.',
@@ -2998,7 +2998,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         );
         await renderPairing(presentation, status);
         await presentation.write(
-          `next: verify the joiner device, run /konclave new, then /konclave approve ${status.pairingId} <conversation>`,
+          `next: verify the joiner device, run /konclave use <conversation> or /konclave new, then /konclave approve ${status.pairingId}`,
         );
         return;
       }
@@ -3187,7 +3187,7 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           parts,
           1,
           4,
-          '/konclave approve <pairing> <conversation> [role] | <pairing> <inviter> <conversation> <role>',
+          '/konclave approve <pairing> [conversation] [role] | <pairing> <inviter> <conversation> <role>',
         );
         const pairingId = requireHexIdentifier(parts[0], pairingIdCharacters, 'pairing identifier');
         const status = parsePairingStatus(
@@ -3198,18 +3198,16 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
           if (status.phase !== 'inviter_awaiting_authorization') {
             throw new Error(`pairing cannot be approved in phase ${status.phase}`);
           }
-          requireArgumentCount(
-            parts,
-            2,
-            3,
-            '/konclave approve <pairing> <conversation> [member|administrator]',
+          const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
+            client,
+            parts.slice(1),
+            0,
+            1,
+            '/konclave approve <pairing> [conversation] [member|administrator]',
           );
-          const conversationId = requireHexIdentifier(
-            parts[1],
-            conversationIdCharacters,
-            'conversation identifier',
-          );
-          const grantedRole = parts[2] ? parseRole(parts[2], 'granted role') : 'member';
+          const grantedRole = remainingIdentifiers[0]
+            ? parseRole(remainingIdentifiers[0], 'granted role')
+            : 'member';
           if (status.requestedRole === 'member' && grantedRole === 'administrator') {
             throw new Error('a member request cannot be elevated to administrator');
           }

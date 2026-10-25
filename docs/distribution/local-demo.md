@@ -143,8 +143,8 @@ requests is eligible. An older conversation remains usable for ordinary messages
 must be paired again before it can carry this request kind.
 
 That selection is stored in the session's durable profile, so `send`, `request`,
-`reply`, `messages`, `diagnose`, `mute`, and `unmute` continue to use it after the
-Copilot session is restarted or resumed. Each accepts an explicit conversation
+`reply`, `messages`, `diagnose`, `mute`, `unmute`, and inviter-side `approve` continue
+to use it after the Copilot session is restarted or resumed. Each accepts an explicit conversation
 identifier to override the selection for that operation. Successful explicit sends,
 replies, and requests also select their conversation; inspection and muting do not.
 Implicit commands read the current durable selection each time. A selection changed
@@ -170,6 +170,19 @@ creation and redemption are treated as the two same-account approval actions; st
 states that no independent identity verification occurred, and only the `member` role
 is granted. Stronger authorization policies and administrator grants use the manual
 `pair`, `join`, `new`, `approve`, and `sync` commands.
+
+On the inviter side, verify the displayed joiner device, select an existing
+conversation with `/konclave use <conversation-id>` or create a selected one with
+`/konclave new`, then run `/konclave approve <pairing-id>`. The grant defaults to
+`member`. Use `/konclave approve <pairing-id> administrator` only when the peer
+requested that role and the native authorization checks allow it. The explicit
+override remains `/konclave approve <pairing-id> <conversation-id> [role]`;
+approval does not change the selected conversation.
+
+On the joiner side, approval still requires every displayed authenticated value:
+`/konclave approve <pairing-id> <inviter-device-id> <conversation-id> <role>`.
+The incoming conversation may not exist locally yet. Selection never replaces
+this explicit identity, conversation, and role confirmation.
 
 The capability remains terminal-visible and may appear in local CLI input history. It
 is protected by short expiry, one-time consumption, and daemon-side zeroization, not
