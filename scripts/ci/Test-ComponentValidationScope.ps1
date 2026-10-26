@@ -17,10 +17,10 @@ $expectedContracts = @(
     'local-delivery-diagnostics'
     'profile-lifecycle'
     'pairing-rendezvous'
+    'response-continuation'
     'short-code-pairing'
     'trusted-device-alias'
     'user-presence'
-    'response-continuation'
 )
 if (($contracts.Keys -join ',') -cne ($expectedContracts -join ',')) {
     throw 'Component validation contract inventory is incomplete or unordered.'
