@@ -13,9 +13,8 @@ import {
 /**
  * Coalescing and wake limits.
  *
- * A directed request costs user attention and model budget, so request bodies and
- * wakes are bounded independently overall and per conversation. Terminal updates do
- * not consume this budget.
+ * Requests and correlated answer continuations share the overall and per-conversation
+ * budget. Uncorrelated terminal updates do not consume it.
  */
 export interface WakeBudget {
   /** Must remain one for the exact-request turn contract. */
@@ -146,7 +145,7 @@ export function createDeliveryCoordinator(
     !Number.isSafeInteger(promptStartTimeoutMilliseconds) ||
     promptStartTimeoutMilliseconds < 1
   ) {
-    throw new Error('the directed-request wake budget is invalid');
+    throw new Error('the collaboration wake budget is invalid');
   }
   const clock = options.clock ?? { now: () => Date.now() };
   const queue: DeliveredEvent[] = [];
@@ -298,7 +297,7 @@ export function createDeliveryCoordinator(
       return;
     }
     options.diagnostics.error(
-      'Konclave completed a directed request because its synthetic prompt did not start in time.',
+      'Konclave completed a collaboration turn because its synthetic prompt did not start in time.',
     );
     await finishInFlight(true);
   };
@@ -345,7 +344,7 @@ export function createDeliveryCoordinator(
       request.payload.text.length > budget.maxCharactersPerTurn
     ) {
       options.diagnostics.error(
-        'Konclave retained a directed request outside the automatic turn budget.',
+        'Konclave retained a collaboration message outside the automatic turn budget.',
       );
       deferredUntil.delete(notificationKey);
       await settle([request], true);
@@ -356,7 +355,7 @@ export function createDeliveryCoordinator(
 
     try {
       if (!options.authorizeTurn || !options.completeAuthorizedTurn) {
-        throw new Error('the directed-request handling boundary is unavailable');
+        throw new Error('the collaboration handling boundary is unavailable');
       }
       const decision = await options.authorizeTurn([request]);
       if (isDeferredDecision(decision)) {
@@ -369,7 +368,7 @@ export function createDeliveryCoordinator(
       authorization = decision;
       if (!authorization) {
         options.diagnostics.error(
-          'Konclave retained a directed request in message history; no automatic turn was authorized.',
+          'Konclave retained a collaboration message in history; no automatic turn was authorized.',
         );
         await settle([request], true);
         outstanding = false;

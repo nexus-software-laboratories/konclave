@@ -2213,7 +2213,12 @@ fn authorize_collaboration_turn(
     payload: &[u8],
 ) -> Result<Vec<u8>, String> {
     authorize_collaboration_turn_with_lease(
-        store, grant, consumer, delivery.map(DeliveryAttachment::lease_id), local_device, payload,
+        store,
+        grant,
+        consumer,
+        delivery.map(DeliveryAttachment::lease_id),
+        local_device,
+        payload,
     )
 }
 
@@ -4043,6 +4048,8 @@ mod collaboration_policy_tests {
     use zeroize::Zeroizing;
 
     use super::{
+        CollaborationActionEvaluation, EvaluateCollaborationActionRequest,
+        authorize_collaboration_turn_with_lease, evaluate_collaboration_action_request,
         CollaborationAuthorizedSendRequest, CollaborationSendAuthorization,
         CollaborationSendCandidate, SystemUnixClock, UnixClock, authorize_collaboration_turn,
         complete_collaboration_turn, consume_collaboration_send_authorization,
@@ -4323,30 +4330,44 @@ mod collaboration_policy_tests {
             Some(CollaborationPolicyEffect::RequireLocalApproval),
         ] {
             let (fixture, input, response) = crate::persistence::response_continuation_fixture_at(
-                "native-continuation", SystemUnixClock.now_unix_milliseconds(),
+                "native-continuation",
+                SystemUnixClock.now_unix_milliseconds(),
             );
             let store = &fixture.store;
-            let digest = store.store_collaboration_policy_bundle(&bundle_with_work_permission(
-                CollaborationPolicyLimits::new(Some(3_600_000), None, None, Some(1)).unwrap(),
-                effect,
-            )).unwrap();
-            store.activate_collaboration_policy(
-                input.conversation_id, digest, SystemUnixClock.now_unix_milliseconds(),
-            ).unwrap();
+            let digest = store
+                .store_collaboration_policy_bundle(&bundle_with_work_permission(
+                    CollaborationPolicyLimits::new(Some(3_600_000), None, None, Some(1)).unwrap(),
+                    effect,
+                ))
+                .unwrap();
+            store
+                .activate_collaboration_policy(
+                    input.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap();
             let payload = serde_json::to_vec(&json!({
                 "conversationId": crate::mcp::encode_hex(input.conversation_id.as_bytes()),
                 "requestMessageId": crate::mcp::encode_hex(input.request_message_id.as_bytes()),
                 "continuationMessageId": crate::mcp::encode_hex(response.as_bytes()),
                 "notificationId": crate::mcp::encode_hex(input.notification_id.as_bytes()),
                 "leaseGeneration": input.lease_generation,
-            })).unwrap();
+            }))
+            .unwrap();
             for harness in [HarnessKind::Generic, HarnessKind::Copilot] {
                 let authorization: serde_json::Value = serde_json::from_slice(
                     &authorize_collaboration_turn_with_lease(
-                        store, &grant(harness), input.consumer_id, Some(input.lease_id),
-                        fixture.device_id, &payload,
-                    ).unwrap(),
-                ).unwrap();
+                        store,
+                        &grant(harness),
+                        input.consumer_id,
+                        Some(input.lease_id),
+                        fixture.device_id,
+                        &payload,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
                 let expected = harness == HarnessKind::Copilot
                     && effect == Some(CollaborationPolicyEffect::Allow);
                 assert_eq!(authorization["outcome"] == "authorized", expected);
@@ -4354,29 +4375,57 @@ mod collaboration_policy_tests {
                     continue;
                 }
                 assert_eq!(authorization["workAllowed"], true);
-                assert_eq!(authorization["continuationMessageId"],
-                    crate::mcp::encode_hex(response.as_bytes()));
+                assert_eq!(
+                    authorization["continuationMessageId"],
+                    crate::mcp::encode_hex(response.as_bytes())
+                );
                 let action_request = |action: &str| EvaluateCollaborationActionRequest {
                     conversation_id: crate::mcp::encode_hex(input.conversation_id.as_bytes()),
                     policy_digest: crate::mcp::encode_hex(digest.as_bytes()),
-                    action: action.to_string(), resource: None, message_id: None,
-                    reply_to_message_id: None, text: None,
+                    action: action.to_string(),
+                    resource: None,
+                    message_id: None,
+                    reply_to_message_id: None,
+                    text: None,
                     request_message_id: crate::mcp::encode_hex(input.request_message_id.as_bytes()),
                     attempt: 1,
                 };
-                assert!(matches!(evaluate_collaboration_action_request(
-                    store, &grant(harness), input.consumer_id, fixture.device_id,
-                    action_request("session.work"),
-                ).unwrap(), CollaborationActionEvaluation::AllowWork));
-                assert!(matches!(evaluate_collaboration_action_request(
-                    store, &grant(harness), input.consumer_id, fixture.device_id,
-                    action_request("conversation.reply"),
-                ).unwrap(), CollaborationActionEvaluation::Deny("continuation_reply_not_requested")));
-                store.deactivate_collaboration_policy(input.conversation_id).unwrap();
-                assert!(matches!(evaluate_collaboration_action_request(
-                    store, &grant(harness), input.consumer_id, fixture.device_id,
-                    action_request("session.work"),
-                ).unwrap(), CollaborationActionEvaluation::Deny("policy_inactive")));
+                assert!(matches!(
+                    evaluate_collaboration_action_request(
+                        store,
+                        &grant(harness),
+                        input.consumer_id,
+                        fixture.device_id,
+                        action_request("session.work"),
+                    )
+                    .unwrap(),
+                    CollaborationActionEvaluation::AllowWork
+                ));
+                assert!(matches!(
+                    evaluate_collaboration_action_request(
+                        store,
+                        &grant(harness),
+                        input.consumer_id,
+                        fixture.device_id,
+                        action_request("conversation.reply"),
+                    )
+                    .unwrap(),
+                    CollaborationActionEvaluation::Deny("continuation_reply_not_requested")
+                ));
+                store
+                    .deactivate_collaboration_policy(input.conversation_id)
+                    .unwrap();
+                assert!(matches!(
+                    evaluate_collaboration_action_request(
+                        store,
+                        &grant(harness),
+                        input.consumer_id,
+                        fixture.device_id,
+                        action_request("session.work"),
+                    )
+                    .unwrap(),
+                    CollaborationActionEvaluation::Deny("policy_inactive")
+                ));
             }
         }
     }
