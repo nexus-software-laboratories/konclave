@@ -75,9 +75,12 @@ export type AutomaticTurnEvent = Omit<DeliveredEvent, 'payload'> & {
 };
 
 export function isAutomaticTurnEvent(event: DeliveredEvent): event is AutomaticTurnEvent {
-  return event.payload.kind === 'directed-request' ||
+  return (
+    event.payload.kind === 'directed-request' ||
     (event.payload.kind === 'application-text' &&
-      event.payload.messageId !== undefined && event.payload.replyToMessageId !== undefined);
+      event.payload.messageId !== undefined &&
+      event.payload.replyToMessageId !== undefined)
+  );
 }
 
 export function turnRequestMessageId(event: AutomaticTurnEvent): Buffer {

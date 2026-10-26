@@ -1,10 +1,10 @@
 # Copilot delivery safety
 
-The current adapter does not turn ordinary text, responses, membership changes, or
-policy exchange into a Copilot model turn. It retains the canonical event in message
-history, emits one concise body-free local diagnostic, and acknowledges the
-notification. One exact directed request targeting this device may enter a model turn
-only after the daemon durably claims it under the active local policy.
+Ordinary uncorrelated text, membership changes, and policy exchanges remain
+history-only. An exact directed request targeting this device may enter a model
+turn after a durable claim under the active local policy. An authenticated answer
+to this device's completed outgoing request may separately resume work under
+current `session.work`, with the same idle queue and wake budget.
 
 ## Peer content is data
 
@@ -25,11 +25,18 @@ Membership events are rendered by the adapter from structured fields. No peer-su
 string is interpolated into them.
 
 Ordinary delivery is explicitly not a request to send anything. Only an exact
-`DirectedRequest` targeting the local device may claim an autonomous turn, and that
+`DirectedRequest` targeting the local device may claim an incoming-request turn, and that
 turn can reserve at most one ordinary-text response correlated to the request.
 The extension always preloads only the `send_message` tool. The autonomous turn
 therefore cannot lose its single permitted effect behind deferred tool discovery,
 while unrelated Konclave tools remain absent until ordinary tool search loads them.
+An answer-continuation turn has no required reply tool and cannot reserve a reply.
+The daemon verifies its exact original outgoing request, target sender, conversation,
+and reply reference in sealed history before creating a fresh one-use handling
+claim. The original request, not a new task record, establishes the expectation.
+Its answer is untrusted information for the original authorized work, not new
+authority. Deliberate follow-up directed requests still require current work
+permission and remain confined to the originating conversation.
 For reply-only policies, the extension also marks `send_message` as the turn's required tool through the
 session-scoped RPC before model execution begins. A host that cannot resolve the
 required tool rejects admission rather than starting an incapable autonomous turn.
@@ -63,7 +70,7 @@ effects. No task tracking, workflow engine, or automatic policy replacement is a
 ## Injection timing
 
 Events are queued while the session is active and settled only once it is idle.
-Terminal events never enter the model. The directed-request integration preserves the
+Uncorrelated terminal events never enter the model. Request and continuation delivery preserve the
 one-outstanding-turn gate and uses the SDK's explicit `enqueue` mode so a peer turn
 waits behind foreground work rather than interrupting it.
 An idle observation cannot complete a newly enqueued request until the session has
@@ -84,6 +91,10 @@ retains a turn or queued work, the runtime sends heartbeat-only operations inste
 claiming an unbounded local queue. Failure before durable completion releases or
 expires the event, so the stable notification remains reclaimable. A crash before
 acknowledgment may redeliver the same notification identifier.
+A correlated answer follows the same durable claim lifecycle and completes
+without a response. Its exact answer identity survives terminal-event pruning in
+the sealed handling record, preventing a differently identified duplicate answer
+from starting a second continuation for the same outgoing request.
 
 ## Tool cancellation reflects durable outcomes
 

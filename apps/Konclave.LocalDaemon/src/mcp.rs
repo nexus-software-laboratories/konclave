@@ -1550,7 +1550,7 @@ impl StdioServer {
 
     #[tool(
         name = "send_directed_request",
-        description = "Encrypt, journal, and submit one request to an exact capable target device. Omit target_device_id only for one remote member; its response is terminal."
+        description = "Encrypt, journal, and submit one request to an exact capable target device. Omit target_device_id only for one remote member. An exact answer may resume current locally authorized work; it does not request another reply."
     )]
     async fn send_directed_request(
         &self,

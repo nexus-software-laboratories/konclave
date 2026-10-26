@@ -125,20 +125,28 @@ function coordinator(state: Harness, budget?: WakeBudget) {
 describe('untrusted content framing', () => {
   it('resumes an authorized correlated answer once without requiring or manufacturing a reply', async () => {
     const state = harness();
-    const answer = event({ payload: {
-      kind: 'application-text', messageId: Buffer.alloc(16, 9),
-      replyToMessageId: Buffer.alloc(16, 8), text: 'contract feedback',
-    } });
+    const answer = event({
+      payload: {
+        kind: 'application-text',
+        messageId: Buffer.alloc(16, 9),
+        replyToMessageId: Buffer.alloc(16, 8),
+        text: 'contract feedback',
+      },
+    });
     const authorization = {
-      ...authorizationFor(requestEvent()), workAllowed: true,
+      ...authorizationFor(requestEvent()),
+      workAllowed: true,
       continuationMessageId: '09'.repeat(16),
     };
     const send = vi.fn().mockResolvedValue('continuation-prompt');
     const complete = vi.fn().mockResolvedValue('completed-no-response');
     const delivery = createDeliveryCoordinator({
-      channel: state.channel, session: { send }, diagnostics: { error: vi.fn() },
+      channel: state.channel,
+      session: { send },
+      diagnostics: { error: vi.fn() },
       authorizeTurn: async () => authorization,
-      completeAuthorizedTurn: complete, canCompleteAuthorizedTurn: () => true,
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => true,
     });
     delivery.enqueue([answer]);
     await delivery.flush();
@@ -165,13 +173,22 @@ describe('untrusted content framing', () => {
     const send = vi.fn();
     const authorizeTurn = vi.fn().mockResolvedValue(null);
     const delivery = createDeliveryCoordinator({
-      channel: state.channel, session: { send }, diagnostics: { error: vi.fn() },
-      authorizeTurn, completeAuthorizedTurn: vi.fn(),
+      channel: state.channel,
+      session: { send },
+      diagnostics: { error: vi.fn() },
+      authorizeTurn,
+      completeAuthorizedTurn: vi.fn(),
     });
-    delivery.enqueue([event({ payload: {
-      kind: 'application-text', messageId: Buffer.alloc(16, 9),
-      replyToMessageId: Buffer.alloc(16, 8), text: 'ordinary reply',
-    } })]);
+    delivery.enqueue([
+      event({
+        payload: {
+          kind: 'application-text',
+          messageId: Buffer.alloc(16, 9),
+          replyToMessageId: Buffer.alloc(16, 8),
+          text: 'ordinary reply',
+        },
+      }),
+    ]);
     await delivery.markIdle();
     expect(authorizeTurn).toHaveBeenCalledOnce();
     expect(send).not.toHaveBeenCalled();

@@ -114,9 +114,8 @@ function parseTurnAuthorization(
     return null;
   }
   const requestMessageId = turnRequestMessageId(event).toString('hex');
-  const continuationMessageId = event.payload.kind === 'application-text'
-    ? event.payload.messageId.toString('hex')
-    : undefined;
+  const continuationMessageId =
+    event.payload.kind === 'application-text' ? event.payload.messageId.toString('hex') : undefined;
   if (
     value.outcome !== 'authorized' ||
     typeof value.policyDigest !== 'string' ||
@@ -229,11 +228,6 @@ function toolAction(toolName: string, workAllowed: boolean): ToolAction | null {
   if (!action) {
     return null;
   }
-  if (authorization.continuationMessageId !== undefined &&
-    action.action === 'conversation.reply') {
-    return deny('continuation_reply_not_requested',
-      'A correlated answer resumes local work; it does not request another reply.');
-  }
   return action.kind === 'reply'
     ? { action: 'conversation.reply', conversationBound: true }
     : { action: peerWorkAction, conversationBound: action.conversationBound };
@@ -341,6 +335,15 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
           const action = toolAction(input.toolName, authorization.workAllowed === true);
           if (!action) {
             return deny('tool_unmapped', 'The active Konclave policy does not map this tool.');
+          }
+          if (
+            authorization.continuationMessageId !== undefined &&
+            action.action === 'conversation.reply'
+          ) {
+            return deny(
+              'continuation_reply_not_requested',
+              'A correlated answer resumes local work; it does not request another reply.',
+            );
           }
           const rawToolArguments = toolArgumentRecord(input.toolArgs);
           if (!rawToolArguments) {

@@ -2,8 +2,8 @@ use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveDomainCore::{
     AdapterConsumerId, AdapterLeaseId, ApplicationContent, CollaborationPolicyDigest,
     ConversationId, DeviceId, EnvelopeId, MAX_TEXT_BODY_BYTES, MessageId, NotificationId,
-    RequestHandlingObservation,
-    ResponseContinuationDirection, ResponseContinuationMessage, validate_response_continuation,
+    RequestHandlingObservation, ResponseContinuationDirection, ResponseContinuationMessage,
+    validate_response_continuation,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use zeroize::Zeroizing;
@@ -234,7 +234,8 @@ fn initialize_schema(
 
 impl ProfileStore {
     pub(super) fn initialize_response_continuation_schema(&self) -> Result<(), ProfileStoreError> {
-        let version: u32 = self.lock()?
+        let version: u32 = self
+            .lock()?
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ProfileStoreError::Storage)?;
         if version == super::PROFILE_SCHEMA_VERSION {
@@ -244,22 +245,26 @@ impl ProfileStore {
         if version != 21 {
             return Err(ProfileStoreError::UnsupportedSchema);
         }
-        let identity = self.profile_identity_for_schema_transition(
-            version, super::PROFILE_SCHEMA_VERSION,
-        )?;
+        let identity =
+            self.profile_identity_for_schema_transition(version, super::PROFILE_SCHEMA_VERSION)?;
         let mut connection = self.lock()?;
-        let transaction = connection.transaction()
+        let transaction = connection
+            .transaction()
             .map_err(|_| ProfileStoreError::Storage)?;
         if let Some(identity) = identity
-            && transaction.execute(
-                "UPDATE daemon_profile SET sealed_device_identity = ?1
+            && transaction
+                .execute(
+                    "UPDATE daemon_profile SET sealed_device_identity = ?1
                  WHERE singleton_id = 1 AND sealed_device_identity IS NOT NULL",
-                params![identity.as_bytes()],
-            ).map_err(|_| ProfileStoreError::Storage)? != 1
+                    params![identity.as_bytes()],
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                != 1
         {
             return Err(ProfileStoreError::CorruptData);
         }
-        transaction.pragma_update(None, "user_version", super::PROFILE_SCHEMA_VERSION)
+        transaction
+            .pragma_update(None, "user_version", super::PROFILE_SCHEMA_VERSION)
             .map_err(|_| ProfileStoreError::Storage)?;
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
@@ -942,7 +947,9 @@ impl ProfileStore {
             || event.conversation_id != conversation_id
             || event.kind != RemoteEventKind::ApplicationMessage
             || event.source_identifier.as_slice()
-                != continuation_message_id.unwrap_or(request_message_id).as_bytes()
+                != continuation_message_id
+                    .unwrap_or(request_message_id)
+                    .as_bytes()
             || state.status != RemoteEventStatus::Claimed
             || state.consumer_id != Some(consumer_id)
             || state.lease_id != Some(lease_id)
@@ -1720,7 +1727,10 @@ fn decode_directed_request_handling(
     bytes: &[u8],
 ) -> Result<DirectedRequestHandling, ProfileStoreError> {
     if bytes.len() < HANDLING_RECORD_FIXED_BYTES
-        || !matches!(bytes[0], HANDLING_RECORD_VERSION | CONTINUATION_RECORD_VERSION)
+        || !matches!(
+            bytes[0],
+            HANDLING_RECORD_VERSION | CONTINUATION_RECORD_VERSION
+        )
     {
         return Err(ProfileStoreError::CorruptData);
     }
@@ -1832,9 +1842,13 @@ fn handling_metadata_equal(
     left: &DirectedRequestHandling,
     right: &DirectedRequestHandling,
 ) -> bool {
-    DirectedRequestClaim { continuation_message_id: None, ..left.claim }
-        == DirectedRequestClaim { continuation_message_id: None, ..right.claim }
-        && left.state == right.state
+    DirectedRequestClaim {
+        continuation_message_id: None,
+        ..left.claim
+    } == DirectedRequestClaim {
+        continuation_message_id: None,
+        ..right.claim
+    } && left.state == right.state
         && left.response_message_id == right.response_message_id
 }
 

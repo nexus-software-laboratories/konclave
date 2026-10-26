@@ -193,9 +193,7 @@ export function createDeliveryCoordinator(
 
   const takeAutomaticTurn = (conversation: string): DeliveredEvent | null => {
     const index = queue.findIndex(
-      (event) =>
-        isAutomaticTurnEvent(event) &&
-        event.conversation.toString('hex') === conversation,
+      (event) => isAutomaticTurnEvent(event) && event.conversation.toString('hex') === conversation,
     );
     if (index < 0) {
       return null;

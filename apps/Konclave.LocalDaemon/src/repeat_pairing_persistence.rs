@@ -5,9 +5,7 @@ use KonclaveDomainCore::{
 use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use super::{
-    ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer,
-};
+use super::{ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer};
 use crate::repeat_pairing::{
     MAX_REPEAT_PAIRING_STATE_BYTES, RepeatPairingOperationState, RepeatPairingPhase,
     RepeatPairingRole, RepeatPairingStateError, repeat_pairing_transition_allowed,

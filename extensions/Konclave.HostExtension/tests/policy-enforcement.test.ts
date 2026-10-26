@@ -76,10 +76,15 @@ function activateGate(gate: CopilotPolicyGate, workAllowed = false): void {
 
 describe('Copilot collaboration policy gate', () => {
   it('requires exact native answer evidence and current work authority', async () => {
-    const answer: DeliveredEvent = { ...event(), payload: {
-      kind: 'application-text', messageId: Buffer.alloc(16, 0x77),
-      replyToMessageId: Buffer.alloc(16, 0x66), text: 'review feedback',
-    } };
+    const answer: DeliveredEvent = {
+      ...event(),
+      payload: {
+        kind: 'application-text',
+        messageId: Buffer.alloc(16, 0x77),
+        replyToMessageId: Buffer.alloc(16, 0x66),
+        text: 'review feedback',
+      },
+    };
     for (const evidence of [
       { continuationMessageId: '77'.repeat(16), workAllowed: true },
       { continuationMessageId: '78'.repeat(16), workAllowed: true },
@@ -87,35 +92,53 @@ describe('Copilot collaboration policy gate', () => {
       { continuationMessageId: '77'.repeat(16), workAllowed: false },
     ]) {
       const native = vi.fn().mockResolvedValue({
-        outcome: 'authorized', policyDigest, policyName: 'peer-work',
-        requestMessageId: '66'.repeat(16), attempt: 1, ...evidence,
+        outcome: 'authorized',
+        policyDigest,
+        policyName: 'peer-work',
+        requestMessageId: '66'.repeat(16),
+        attempt: 1,
+        ...evidence,
       });
       const gate = createCopilotPolicyGate(client(native));
       if (evidence.continuationMessageId === '77'.repeat(16) && evidence.workAllowed) {
         const decision = await gate.authorizeTurn([answer]);
         expect(decision).toMatchObject(evidence);
         expect(native).toHaveBeenCalledWith('collaboration.turn.authorize', {
-          conversationId: conversation, requestMessageId: '66'.repeat(16),
-          continuationMessageId: '77'.repeat(16), notificationId: '01'.repeat(16),
+          conversationId: conversation,
+          requestMessageId: '66'.repeat(16),
+          continuationMessageId: '77'.repeat(16),
+          notificationId: '01'.repeat(16),
           leaseGeneration: 1,
         });
         if (!decision || 'kind' in decision) {
           throw new Error('expected a continuation authorization');
         }
         gate.activate(decision);
-        gate.observePrompt(`Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${decision.turnToken}`);
-        expect(await gate.hooks.onPreToolUse?.(
-          hookInput('send_message', { conversation_id: conversation, message_id: '88'.repeat(16), text: 'ack' }),
-          { sessionId: 'session' },
-        )).toMatchObject({ permissionDecision: 'deny' });
+        gate.observePrompt(
+          `Konclave delivered 1 update\n${collaborationTurnTokenLabel}: ${decision.turnToken}`,
+        );
+        expect(
+          await gate.hooks.onPreToolUse?.(
+            hookInput('send_message', {
+              conversation_id: conversation,
+              message_id: '88'.repeat(16),
+              text: 'ack',
+            }),
+            { sessionId: 'session' },
+          ),
+        ).toMatchObject({ permissionDecision: 'deny' });
         native.mockResolvedValue({ decision: 'allow' });
-        expect(await gate.hooks.onPreToolUse?.(
-          hookInput('view', { path: 'workspace' }), { sessionId: 'session' },
-        )).not.toHaveProperty('permissionDecision');
+        expect(
+          await gate.hooks.onPreToolUse?.(hookInput('view', { path: 'workspace' }), {
+            sessionId: 'session',
+          }),
+        ).not.toHaveProperty('permissionDecision');
         native.mockResolvedValue({ decision: 'deny', reason: 'policy_changed' });
-        expect(await gate.hooks.onPreToolUse?.(
-          hookInput('view', { path: 'workspace' }), { sessionId: 'session' },
-        )).toMatchObject({ permissionDecision: 'deny' });
+        expect(
+          await gate.hooks.onPreToolUse?.(hookInput('view', { path: 'workspace' }), {
+            sessionId: 'session',
+          }),
+        ).toMatchObject({ permissionDecision: 'deny' });
       } else {
         await expect(gate.authorizeTurn([answer])).rejects.toThrow('authorization is malformed');
       }
