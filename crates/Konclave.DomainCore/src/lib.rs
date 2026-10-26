@@ -8,6 +8,7 @@ mod identifiers;
 mod message_history;
 mod model;
 mod pairing_rendezvous;
+mod response_continuation;
 mod short_code_pairing;
 mod short_code_relay;
 mod trusted_devices;
@@ -62,6 +63,10 @@ pub use model::{
 pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
+};
+pub use response_continuation::{
+    ResponseContinuationBinding, ResponseContinuationDirection, ResponseContinuationError,
+    ResponseContinuationMessage, validate_response_continuation,
 };
 pub use short_code_pairing::{
     MAX_SHORT_CODE_PAIRING_SAS, ShortCodeConfirmationEvent, ShortCodeConfirmationRecord,
