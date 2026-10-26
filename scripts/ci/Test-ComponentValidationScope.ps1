@@ -20,6 +20,7 @@ $expectedContracts = @(
     'short-code-pairing'
     'trusted-device-alias'
     'user-presence'
+    'response-continuation'
 )
 if (($contracts.Keys -join ',') -cne ($expectedContracts -join ',')) {
     throw 'Component validation contract inventory is incomplete or unordered.'
@@ -37,6 +38,7 @@ $workflowByContract = [ordered]@{
     'short-code-pairing' = 'short-code-pairing-conformance.yml'
     'trusted-device-alias' = 'trusted-device-alias-conformance.yml'
     'user-presence' = 'user-presence-conformance.yml'
+    'response-continuation' = 'response-continuation-conformance.yml'
 }
 foreach ($entry in $workflowByContract.GetEnumerator()) {
     $workflow = Get-Content -LiteralPath (
@@ -70,7 +72,7 @@ foreach ($contract in $expectedContracts) {
         -Contract $contract `
         -EventName pull_request `
         -ChangedFiles $authorizationHistoryFiles
-    $expected = $contract -ceq 'local-delivery-diagnostics'
+    $expected = $contract -cin @('local-delivery-diagnostics', 'response-continuation')
     if ($selected -ne $expected) {
         throw "Authorization history changes over-select '$contract'."
     }
@@ -134,6 +136,8 @@ $ownedCases = [ordered]@{
         'docs/adr/adr-0025-trusted-device-alias-bootstrap.md'
     'user-presence' =
         'extensions/Konclave.HostExtension/src/service/user-presence.ts'
+    'response-continuation' =
+        'crates/Konclave.DomainCore/src/response_continuation.rs'
 }
 foreach ($entry in $ownedCases.GetEnumerator()) {
     $selected = Get-ComponentValidationDecision `
