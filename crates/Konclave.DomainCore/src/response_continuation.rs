@@ -277,7 +277,11 @@ mod tests {
                 ApplicationContent::directed_request(DeviceId::from_bytes([4; 32]), "question")
                     .unwrap(),
             );
-            let response = message(response_id, reply, ApplicationContent::text("answer").unwrap());
+            let response = message(
+                response_id,
+                reply,
+                ApplicationContent::text("answer").unwrap(),
+            );
             assert_eq!(
                 validate_response_continuation(
                     DeviceId::from_bytes([5; 32]),
