@@ -1,4 +1,3 @@
-use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveDomainCore::{
     ApplicationContent, ConversationId, DeviceId, Ed25519PublicKey, PairingId,
     RepeatPairingOperationId, RepeatPairingRequest, RepeatPairingResponse, RoutingId,
@@ -7,7 +6,7 @@ use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::{
-    PROFILE_SCHEMA_VERSION, ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer,
+    ProfileStore, ProfileStoreError, from_sql_integer, to_sql_integer,
 };
 use crate::repeat_pairing::{
     MAX_REPEAT_PAIRING_STATE_BYTES, RepeatPairingOperationState, RepeatPairingPhase,
@@ -15,6 +14,7 @@ use crate::repeat_pairing::{
 };
 
 const PRIOR_PROFILE_SCHEMA_VERSION: u32 = 20;
+const REPEAT_PAIRING_SCHEMA_VERSION: u32 = 21;
 const MAX_ACTIVE_REPEAT_PAIRINGS: usize = 16;
 const MAX_REPEAT_PAIRING_RECORDS: usize = 64;
 const MAX_INTERNAL_REPEAT_PAIRING_MESSAGES: usize = MAX_REPEAT_PAIRING_RECORDS * 4;
@@ -59,49 +59,17 @@ impl ProfileStore {
             .lock()?
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ProfileStoreError::Storage)?;
-        let existing_identity = self.read_profile_blob(
-            "SELECT length(sealed_device_identity)
-             FROM daemon_profile
-             WHERE singleton_id = 1",
-            "SELECT sealed_device_identity
-             FROM daemon_profile
-             WHERE singleton_id = 1",
-        )?;
-        let opened_identity = existing_identity
-            .as_ref()
-            .map(|blob| {
-                DeviceIdentity::open_with_profile_schema_floor(
-                    &self.sealer,
-                    self.locked_profile.profile_id.as_bytes(),
-                    blob,
-                )
-                .map_err(|_| ProfileStoreError::CorruptData)
-            })
-            .transpose()?;
-        if current_version == PROFILE_SCHEMA_VERSION {
-            if let Some((_, floor)) = opened_identity
-                && floor != PROFILE_SCHEMA_VERSION
-            {
-                return Err(ProfileStoreError::CorruptData);
-            }
+        if current_version >= REPEAT_PAIRING_SCHEMA_VERSION {
+            self.profile_identity_for_schema_transition(current_version, current_version)?;
             return Ok(());
         }
         if current_version != PRIOR_PROFILE_SCHEMA_VERSION {
             return Err(ProfileStoreError::UnsupportedSchema);
         }
-        let migrated_identity = match opened_identity {
-            Some((identity, PRIOR_PROFILE_SCHEMA_VERSION)) => Some(
-                identity
-                    .seal_with_profile_schema_floor(
-                        &self.sealer,
-                        self.locked_profile.profile_id.as_bytes(),
-                        PROFILE_SCHEMA_VERSION,
-                    )
-                    .map_err(|_| ProfileStoreError::Cryptographic)?,
-            ),
-            Some(_) => return Err(ProfileStoreError::CorruptData),
-            None => None,
-        };
+        let migrated_identity = self.profile_identity_for_schema_transition(
+            PRIOR_PROFILE_SCHEMA_VERSION,
+            REPEAT_PAIRING_SCHEMA_VERSION,
+        )?;
         let sealed_count = self.seal_repeat_pairing_count(0)?;
         let mut connection = self.lock()?;
         let transaction = connection
@@ -173,7 +141,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         transaction
-            .pragma_update(None, "user_version", PROFILE_SCHEMA_VERSION)
+            .pragma_update(None, "user_version", REPEAT_PAIRING_SCHEMA_VERSION)
             .map_err(|_| ProfileStoreError::Storage)?;
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
@@ -1279,7 +1247,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, PROFILE_SCHEMA_VERSION);
+        assert_eq!(version, super::super::PROFILE_SCHEMA_VERSION);
         assert_eq!(
             migrated.load_or_create_device().unwrap().device_id(),
             device.device_id()

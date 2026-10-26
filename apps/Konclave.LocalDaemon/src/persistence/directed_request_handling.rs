@@ -3,6 +3,7 @@ use KonclaveDomainCore::{
     AdapterConsumerId, AdapterLeaseId, ApplicationContent, CollaborationPolicyDigest,
     ConversationId, DeviceId, EnvelopeId, MAX_TEXT_BODY_BYTES, MessageId, NotificationId,
     RequestHandlingObservation,
+    ResponseContinuationDirection, ResponseContinuationMessage, validate_response_continuation,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use zeroize::Zeroizing;
@@ -20,8 +21,10 @@ const HANDLING_STATE_CLAIMED: i64 = 1;
 const HANDLING_STATE_COMPLETED_RESPONSE: i64 = 2;
 const HANDLING_STATE_COMPLETED_NO_RESPONSE: i64 = 3;
 const HANDLING_RECORD_VERSION: u8 = 1;
+const CONTINUATION_RECORD_VERSION: u8 = 2;
 const HANDLING_RECORD_FIXED_BYTES: usize = 243;
-const MAX_HANDLING_RECORD_BYTES: usize = HANDLING_RECORD_FIXED_BYTES + MAX_TEXT_BODY_BYTES;
+const MAX_HANDLING_RECORD_BYTES: usize =
+    HANDLING_RECORD_FIXED_BYTES + MessageId::LENGTH + MAX_TEXT_BODY_BYTES;
 const MAX_SEALED_HANDLING_RECORD_BYTES: usize = MAX_HANDLING_RECORD_BYTES + 64;
 const HANDLING_STATE_RECORD_VERSION: u8 = 1;
 const HANDLING_STATE_RECORD_BYTES: usize = 9;
@@ -32,6 +35,7 @@ const MAX_SEALED_HANDLING_STATE_BYTES: usize = HANDLING_STATE_RECORD_BYTES + 64;
 pub(crate) struct DirectedRequestClaim {
     pub(crate) conversation_id: ConversationId,
     pub(crate) request_message_id: MessageId,
+    pub(crate) continuation_message_id: Option<MessageId>,
     pub(crate) responder_device_id: DeviceId,
     pub(crate) notification_id: NotificationId,
     pub(crate) consumer_id: AdapterConsumerId,
@@ -229,6 +233,37 @@ fn initialize_schema(
 }
 
 impl ProfileStore {
+    pub(super) fn initialize_response_continuation_schema(&self) -> Result<(), ProfileStoreError> {
+        let version: u32 = self.lock()?
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if version == super::PROFILE_SCHEMA_VERSION {
+            self.profile_identity_for_schema_transition(version, version)?;
+            return Ok(());
+        }
+        if version != 21 {
+            return Err(ProfileStoreError::UnsupportedSchema);
+        }
+        let identity = self.profile_identity_for_schema_transition(
+            version, super::PROFILE_SCHEMA_VERSION,
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if let Some(identity) = identity
+            && transaction.execute(
+                "UPDATE daemon_profile SET sealed_device_identity = ?1
+                 WHERE singleton_id = 1 AND sealed_device_identity IS NOT NULL",
+                params![identity.as_bytes()],
+            ).map_err(|_| ProfileStoreError::Storage)? != 1
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        transaction.pragma_update(None, "user_version", super::PROFILE_SCHEMA_VERSION)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)
+    }
+
     /// Opens handling metadata after the caller verifies the exact local request.
     pub(super) fn request_handling_observation_in(
         &self,
@@ -373,6 +408,7 @@ impl ProfileStore {
                 handling.claim.conversation_id,
                 handling.claim.request_message_id,
                 handling.claim.responder_device_id,
+                handling.claim.continuation_message_id,
             )?;
             if handling.state == HandlingState::CompletedResponse {
                 self.verify_completed_directed_request_response(&connection, &handling)?;
@@ -470,6 +506,22 @@ impl ProfileStore {
         &self,
         request: ClaimDirectedRequest,
     ) -> Result<DirectedRequestClaimOutcome, ProfileStoreError> {
+        self.claim_collaboration_turn(request, None)
+    }
+
+    pub(crate) fn claim_response_continuation(
+        &self,
+        request: ClaimDirectedRequest,
+        response_message_id: MessageId,
+    ) -> Result<DirectedRequestClaimOutcome, ProfileStoreError> {
+        self.claim_collaboration_turn(request, Some(response_message_id))
+    }
+
+    fn claim_collaboration_turn(
+        &self,
+        request: ClaimDirectedRequest,
+        continuation_message_id: Option<MessageId>,
+    ) -> Result<DirectedRequestClaimOutcome, ProfileStoreError> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -500,6 +552,7 @@ impl ProfileStore {
             request.lease_id,
             request.lease_generation,
             request.now_unix_milliseconds,
+            continuation_message_id,
         )?;
         let existing = match load_handling_metadata(
             &transaction,
@@ -511,6 +564,11 @@ impl ProfileStore {
             None => None,
         };
         let is_new = existing.is_none();
+        if existing.as_ref().is_some_and(|handling| {
+            handling.claim.continuation_message_id != continuation_message_id
+        }) {
+            return Err(ProfileStoreError::InvalidTransition);
+        }
         let attempt = match existing.as_ref() {
             Some(existing) => match existing.state {
                 HandlingState::CompletedResponse => {
@@ -560,6 +618,7 @@ impl ProfileStore {
         let claim = DirectedRequestClaim {
             conversation_id: request.conversation_id,
             request_message_id: request.request_message_id,
+            continuation_message_id,
             responder_device_id: request.responder_device_id,
             notification_id: request.notification_id,
             consumer_id: request.consumer_id,
@@ -642,6 +701,7 @@ impl ProfileStore {
             handling.claim.lease_id,
             handling.claim.lease_generation,
             request.now_unix_milliseconds,
+            handling.claim.continuation_message_id,
         )?;
         Ok(Some(handling.claim))
     }
@@ -759,7 +819,7 @@ impl ProfileStore {
         let ApplicationContent::Text(response_text) = content else {
             return Err(ProfileStoreError::InvalidTransition);
         };
-        if reply_to != Some(claim.request_message_id) {
+        if claim.continuation_message_id.is_some() || reply_to != Some(claim.request_message_id) {
             return Err(ProfileStoreError::InvalidTransition);
         }
         let metadata = load_handling_metadata(
@@ -843,6 +903,7 @@ impl ProfileStore {
             claim.lease_id,
             claim.lease_generation,
             now_unix_milliseconds,
+            claim.continuation_message_id,
         )?;
         Ok(())
     }
@@ -862,6 +923,7 @@ impl ProfileStore {
         lease_id: AdapterLeaseId,
         lease_generation: u64,
         now_unix_milliseconds: u64,
+        continuation_message_id: Option<MessageId>,
     ) -> Result<u64, ProfileStoreError> {
         let sequence: i64 = connection
             .query_row(
@@ -879,7 +941,8 @@ impl ProfileStore {
         if event.notification_id != notification_id
             || event.conversation_id != conversation_id
             || event.kind != RemoteEventKind::ApplicationMessage
-            || event.source_identifier.as_slice() != request_message_id.as_bytes()
+            || event.source_identifier.as_slice()
+                != continuation_message_id.unwrap_or(request_message_id).as_bytes()
             || state.status != RemoteEventStatus::Claimed
             || state.consumer_id != Some(consumer_id)
             || state.lease_id != Some(lease_id)
@@ -898,9 +961,13 @@ impl ProfileStore {
             conversation_id,
             request_message_id,
             responder_device_id,
+            continuation_message_id,
         )?;
         if history_cursor != event.relay_cursor || history_sender != event.sender {
             return Err(ProfileStoreError::CorruptData);
+        }
+        if continuation_message_id.is_some() {
+            require_current_conversation_member(connection, conversation_id, history_sender)?;
         }
         Ok(claim_expiry)
     }
@@ -911,6 +978,7 @@ impl ProfileStore {
         conversation_id: ConversationId,
         request_message_id: MessageId,
         responder_device_id: DeviceId,
+        continuation_message_id: Option<MessageId>,
     ) -> Result<(u64, DeviceId), ProfileStoreError> {
         let routing_id: Vec<u8> = connection
             .query_row(
@@ -928,6 +996,37 @@ impl ProfileStore {
         let history = self
             .load_history_record(connection, conversation_id, routing_id, request_message_id)?
             .ok_or(ProfileStoreError::OperationNotFound)?;
+        if let Some(response_message_id) = continuation_message_id {
+            let response = self
+                .load_history_record(connection, conversation_id, routing_id, response_message_id)?
+                .ok_or(ProfileStoreError::OperationNotFound)?;
+            let direction = |direction| match direction {
+                MessageDirection::Inbound => ResponseContinuationDirection::Inbound,
+                MessageDirection::Outbound => ResponseContinuationDirection::Outbound,
+            };
+            validate_response_continuation(
+                responder_device_id,
+                ResponseContinuationMessage {
+                    conversation: conversation_id,
+                    sender: history.sender,
+                    direction: direction(history.direction),
+                    complete: history.complete,
+                    message: &history.message,
+                },
+                ResponseContinuationMessage {
+                    conversation: conversation_id,
+                    sender: response.sender,
+                    direction: direction(response.direction),
+                    complete: response.complete,
+                    message: &response.message,
+                },
+            )
+            .map_err(|_| ProfileStoreError::InvalidTransition)?;
+            return Ok((
+                response.cursor.ok_or(ProfileStoreError::CorruptData)?,
+                response.sender,
+            ));
+        }
         let ApplicationContent::DirectedRequest(request) = history.message.content() else {
             return Err(ProfileStoreError::InvalidTransition);
         };
@@ -1401,6 +1500,7 @@ fn decode_handling_metadata(
     )?;
     Ok(DirectedRequestHandling {
         claim: DirectedRequestClaim {
+            continuation_message_id: None,
             conversation_id: ConversationId::from_slice(
                 &metadata
                     .conversation_id
@@ -1532,7 +1632,9 @@ fn encode_directed_request_handling(
         && handling
             .response_expires_at_unix_seconds
             .is_some_and(|expiry| expiry > 0);
-    if response_length > MAX_TEXT_BODY_BYTES
+    if handling.claim.continuation_message_id.is_some()
+        && handling.state == HandlingState::CompletedResponse
+        || response_length > MAX_TEXT_BODY_BYTES
         || (handling.state == HandlingState::CompletedResponse) != response_present
         || (handling.state != HandlingState::CompletedResponse)
             && (handling.response_message_id.is_some()
@@ -1545,7 +1647,11 @@ fn encode_directed_request_handling(
         return Err(ProfileStoreError::CorruptData);
     }
     let mut encoded = Vec::with_capacity(HANDLING_RECORD_FIXED_BYTES + response_length);
-    encoded.push(HANDLING_RECORD_VERSION);
+    encoded.push(if handling.claim.continuation_message_id.is_some() {
+        CONTINUATION_RECORD_VERSION
+    } else {
+        HANDLING_RECORD_VERSION
+    });
     encoded.extend_from_slice(handling.claim.conversation_id.as_bytes());
     encoded.extend_from_slice(handling.claim.request_message_id.as_bytes());
     encoded.extend_from_slice(handling.claim.responder_device_id.as_bytes());
@@ -1601,6 +1707,9 @@ fn encode_directed_request_handling(
             .map_err(|_| ProfileStoreError::CorruptData)?
             .to_be_bytes(),
     );
+    if let Some(response_message_id) = handling.claim.continuation_message_id {
+        encoded.extend_from_slice(response_message_id.as_bytes());
+    }
     if let Some(response_text) = response_text {
         encoded.extend_from_slice(response_text);
     }
@@ -1610,7 +1719,9 @@ fn encode_directed_request_handling(
 fn decode_directed_request_handling(
     bytes: &[u8],
 ) -> Result<DirectedRequestHandling, ProfileStoreError> {
-    if bytes.len() < HANDLING_RECORD_FIXED_BYTES || bytes[0] != HANDLING_RECORD_VERSION {
+    if bytes.len() < HANDLING_RECORD_FIXED_BYTES
+        || !matches!(bytes[0], HANDLING_RECORD_VERSION | CONTINUATION_RECORD_VERSION)
+    {
         return Err(ProfileStoreError::CorruptData);
     }
     let mut rest = &bytes[1..];
@@ -1646,6 +1757,14 @@ fn decode_directed_request_handling(
     let response_expires_at_unix_seconds = u64::from_be_bytes(take_array(&mut rest)?);
     let response_length = usize::try_from(u32::from_be_bytes(take_array(&mut rest)?))
         .map_err(|_| ProfileStoreError::CorruptData)?;
+    let continuation_message_id = if bytes[0] == CONTINUATION_RECORD_VERSION {
+        Some(MessageId::from_bytes(take_array(&mut rest)?))
+    } else {
+        None
+    };
+    if continuation_message_id.is_some() && state == HandlingState::CompletedResponse {
+        return Err(ProfileStoreError::CorruptData);
+    }
     if response_length > MAX_TEXT_BODY_BYTES || rest.len() != response_length {
         return Err(ProfileStoreError::CorruptData);
     }
@@ -1678,6 +1797,7 @@ fn decode_directed_request_handling(
     let claim = DirectedRequestClaim {
         conversation_id,
         request_message_id,
+        continuation_message_id,
         responder_device_id,
         notification_id,
         consumer_id,
@@ -1712,7 +1832,8 @@ fn handling_metadata_equal(
     left: &DirectedRequestHandling,
     right: &DirectedRequestHandling,
 ) -> bool {
-    left.claim == right.claim
+    DirectedRequestClaim { continuation_message_id: None, ..left.claim }
+        == DirectedRequestClaim { continuation_message_id: None, ..right.claim }
         && left.state == right.state
         && left.response_message_id == right.response_message_id
 }

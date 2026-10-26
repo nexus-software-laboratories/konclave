@@ -2119,6 +2119,7 @@ struct AuthorizeCollaborationTurnRequest {
     request_message_id: String,
     notification_id: String,
     lease_generation: u64,
+    continuation_message_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2163,6 +2164,7 @@ struct CollaborationTurnAuthorizationResult {
     request_message_id: Option<String>,
     attempt: Option<u32>,
     work_allowed: bool,
+    continuation_message_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2214,6 +2216,8 @@ fn authorize_collaboration_turn(
         serde_json::from_slice(payload).map_err(|_| "invalid_request".to_string())?;
     let conversation_id = parse_collaboration_conversation_id(&request.conversation_id)?;
     let request_message_id = parse_collaboration_message_id(&request.request_message_id)?;
+    let continuation_message_id = request.continuation_message_id.as_deref()
+        .map(parse_collaboration_message_id).transpose()?;
     let notification_id = crate::mcp::decode_hex::<16>(&request.notification_id)
         .map(NotificationId::from_bytes)
         .map_err(|_| "invalid_request".to_string())?;
@@ -2261,7 +2265,10 @@ fn authorize_collaboration_turn(
     };
     let context = copilot_collaboration_policy_context(active.bundle())?;
     let policy_request = CollaborationPolicyEvaluationRequest::new(
-        CollaborationPolicyTarget::new("conversation.reply", None)
+        CollaborationPolicyTarget::new(
+            if continuation_message_id.is_some() { "session.work" } else { "conversation.reply" },
+            None,
+        )
             .map_err(|_| "internal".to_string())?,
         CollaborationPolicyCost::new(0, 0, 1),
         false,
@@ -2274,7 +2281,7 @@ fn authorize_collaboration_turn(
     );
     match decision {
         CollaborationPolicyDecision::Allow => {
-            let claim = match store.claim_directed_request(ClaimDirectedRequest {
+            let claim_request = ClaimDirectedRequest {
                 conversation_id,
                 request_message_id,
                 responder_device_id: local_device,
@@ -2284,7 +2291,12 @@ fn authorize_collaboration_turn(
                 lease_generation: request.lease_generation,
                 policy_digest: active.digest(),
                 now_unix_milliseconds: SystemUnixClock.now_unix_milliseconds(),
-            }) {
+            };
+            let claim_result = match continuation_message_id {
+                Some(response) => store.claim_response_continuation(claim_request, response),
+                None => store.claim_directed_request(claim_request),
+            };
+            let claim = match claim_result {
                 Ok(outcome) => outcome,
                 Err(
                     crate::persistence::ProfileStoreError::InvalidTransition
@@ -2548,6 +2560,9 @@ fn evaluate_collaboration_action_request(
                     "harness_control_missing",
                 ));
             }
+            if directed_request_claim.continuation_message_id.is_some() {
+                return Ok(CollaborationActionEvaluation::Deny("continuation_reply_not_requested"));
+            }
             let message_id = request
                 .message_id
                 .as_deref()
@@ -2647,6 +2662,8 @@ fn encode_collaboration_turn_authorization(
         false
     };
     serde_json::to_vec(&CollaborationTurnAuthorizationResult {
+        continuation_message_id: claim.and_then(|claim| claim.continuation_message_id)
+            .map(|id| crate::mcp::encode_hex(id.as_bytes())),
         outcome,
         reason,
         policy_digest: active.map(|policy| crate::mcp::encode_hex(policy.digest().as_bytes())),
@@ -3094,6 +3111,7 @@ struct DeliveryEventResult {
 enum DeliveryPayloadResult {
     ApplicationText {
         message_id: String,
+        reply_to_message_id: Option<String>,
         text: String,
     },
     DirectedRequest {
@@ -3286,6 +3304,8 @@ fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
             RemoteEventPayload::ApplicationMessage(message) => match message.content() {
                 ApplicationContent::Text(text) => DeliveryPayloadResult::ApplicationText {
                     message_id: crate::mcp::encode_hex(message.message_id().as_bytes()),
+                    reply_to_message_id: message.reply_to()
+                        .map(|id| crate::mcp::encode_hex(id.as_bytes())),
                     text: text.clone(),
                 },
                 ApplicationContent::DirectedRequest(request) => {
@@ -4861,6 +4881,7 @@ mod collaboration_policy_tests {
             reply_to_message_id: Some(reply_to_message_id),
             text: Zeroizing::new("aligned".to_string()),
             directed_request_claim: DirectedRequestClaim {
+                continuation_message_id: None,
                 conversation_id,
                 request_message_id: reply_to_message_id,
                 responder_device_id: DeviceId::from_bytes([6; DeviceId::LENGTH]),

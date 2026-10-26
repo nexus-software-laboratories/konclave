@@ -69,3 +69,55 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: ./scripts/ci/Test-ComponentValidationScope.ps1
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw |
+            ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - name: Install Node
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: response-continuation-conformance
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Prepare submitted formatting evidence
+        if: steps.scope.outputs.run == 'true'
+        id: format
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix extensions/Konclave.HostExtension
+          npm run format --prefix extensions/Konclave.HostExtension
+          cargo fmt --package KonclaveLocalDaemon
+          git diff --binary --output="$RUNNER_TEMP/response-continuation-format.patch"
+      - name: Retain submitted formatting evidence
+        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: response-continuation-format
+          path: ${{ runner.temp }}/response-continuation-format.patch
+          if-no-files-found: error
+          retention-days: 1
+      - name: Verify continuation hooks and idle delivery
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run lint
+          npm run typecheck
+          npm run test:unit -- tests/adapter-delivery.test.ts tests/policy-enforcement.test.ts tests/delivery-runtime.test.ts tests/extension-runtime.test.ts
+      - name: Verify durable continuation and current policy admission
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package KonclaveLocalDaemon --lib response_continuation
+          cargo test --locked --package KonclaveLocalDaemon --lib directed_request
+          cargo test --locked --package KonclaveLocalDaemon --lib local_service::tests
+          cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
+          git diff --exit-code

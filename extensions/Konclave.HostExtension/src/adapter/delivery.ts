@@ -4,6 +4,7 @@ import {
   type CollaborationTurnAuthorization,
   type CollaborationTurnDecision,
   maxClaimBatch,
+  isAutomaticTurnEvent,
   type AdapterChannel,
   type AdapterResponse,
   type DeliveredEvent,
@@ -177,7 +178,7 @@ export function createDeliveryCoordinator(
     const taken: DeliveredEvent[] = [];
     for (let index = 0; index < queue.length;) {
       const event = queue[index];
-      if (!event || event.payload.kind === 'directed-request') {
+      if (!event || isAutomaticTurnEvent(event)) {
         index += 1;
         continue;
       }
@@ -190,10 +191,10 @@ export function createDeliveryCoordinator(
     return taken;
   };
 
-  const takeDirectedRequest = (conversation: string): DeliveredEvent | null => {
+  const takeAutomaticTurn = (conversation: string): DeliveredEvent | null => {
     const index = queue.findIndex(
       (event) =>
-        event.payload.kind === 'directed-request' &&
+        isAutomaticTurnEvent(event) &&
         event.conversation.toString('hex') === conversation,
     );
     if (index < 0) {
@@ -213,7 +214,7 @@ export function createDeliveryCoordinator(
     const seen = new Set<string>();
     for (const event of queue) {
       if (
-        event.payload.kind === 'directed-request' &&
+        isAutomaticTurnEvent(event) &&
         (deferredUntil.get(event.notificationId.toString('hex')) ?? 0) > now
       ) {
         continue;
@@ -334,7 +335,7 @@ export function createDeliveryCoordinator(
       return;
     }
 
-    const request = takeDirectedRequest(conversation);
+    const request = takeAutomaticTurn(conversation);
     if (!request) {
       return;
     }
@@ -342,7 +343,7 @@ export function createDeliveryCoordinator(
     outstanding = true;
     const notificationKey = request.notificationId.toString('hex');
     if (
-      request.payload.kind !== 'directed-request' ||
+      !isAutomaticTurnEvent(request) ||
       request.payload.text.length > budget.maxCharactersPerTurn
     ) {
       options.diagnostics.error(

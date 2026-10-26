@@ -66,7 +66,7 @@ pub(crate) mod short_code_pairing;
 #[path = "trusted_device_persistence.rs"]
 mod trusted_device;
 
-const PROFILE_SCHEMA_VERSION: u32 = 21;
+const PROFILE_SCHEMA_VERSION: u32 = 22;
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -503,6 +503,10 @@ impl LockedProfile {
         profile_open_step(
             "repeat_pairing_schema",
             store.initialize_repeat_pairing_schema(),
+        )?;
+        profile_open_step(
+            "response_continuation_schema",
+            store.initialize_response_continuation_schema(),
         )?;
         profile_open_step("short_code_pairings", store.verify_short_code_pairings())?;
         profile_open_step("trusted_devices", store.verify_trusted_device_bindings())?;
@@ -3204,6 +3208,32 @@ impl ProfileStore {
             return Err(ProfileStoreError::Storage);
         }
         Ok(identity)
+    }
+
+    pub(super) fn profile_identity_for_schema_transition(
+        &self,
+        from: u32,
+        to: u32,
+    ) -> Result<Option<SealedBlob>, ProfileStoreError> {
+        let existing = self.read_profile_blob(
+            "SELECT length(sealed_device_identity) FROM daemon_profile WHERE singleton_id = 1",
+            "SELECT sealed_device_identity FROM daemon_profile WHERE singleton_id = 1",
+        )?;
+        existing.map(|blob| {
+            let (identity, floor) = DeviceIdentity::open_with_profile_schema_floor(
+                &self.sealer,
+                self.locked_profile.profile_id.as_bytes(),
+                &blob,
+            ).map_err(|_| ProfileStoreError::CorruptData)?;
+            if floor != from {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            identity.seal_with_profile_schema_floor(
+                &self.sealer,
+                self.locked_profile.profile_id.as_bytes(),
+                to,
+            ).map_err(|_| ProfileStoreError::Cryptographic)
+        }).transpose()
     }
 
     /// Stores one normalized relay endpoint and sealed bearer credential.
@@ -9450,7 +9480,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION | 20 | 19 | 18 | 17 | 16 => return Ok(()),
+        PROFILE_SCHEMA_VERSION | 21 | 20 | 19 | 18 | 17 | 16 => return Ok(()),
         15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
@@ -11938,11 +11968,18 @@ mod tests {
     }
 
     fn remote_membership_fixture(name: &str) -> (ConversationFixture, DeviceId) {
+        remote_membership_fixture_with_clock(name, Arc::new(SystemUnixClock))
+    }
+
+    fn remote_membership_fixture_with_clock(
+        name: &str,
+        clock: Arc<dyn UnixClock>,
+    ) -> (ConversationFixture, DeviceId) {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse(name).unwrap();
         let store = LockedProfile::acquire(root.path(), profile_id.clone())
             .unwrap()
-            .open_store(sealer())
+            .open_store_with_clock(sealer(), clock)
             .unwrap();
         let local = store.load_or_create_device().unwrap();
         let remote = DeviceIdentity::generate().unwrap();
@@ -12333,6 +12370,147 @@ mod tests {
             .activate_collaboration_policy(fixture.conversation_id, digest, 100)
             .unwrap();
         digest
+    }
+
+    fn response_continuation_fixture(
+        name: &str,
+    ) -> (ConversationFixture, ClaimDirectedRequest, MessageId) {
+        let (fixture, remote) = remote_membership_fixture_with_clock(
+            name, Arc::new(MutableClock(AtomicU64::new(1_000))),
+        );
+        let digest = activate_request_reply_policy(&fixture);
+        let request_message_id = MessageId::from_bytes([81; 16]);
+        let reservation = fixture.store.reserve_outbound_application(
+            fixture.conversation_id, request_message_id, EnvelopeId::from_bytes([82; 16]),
+        ).unwrap();
+        let request = ApplicationMessage::new(
+            ProtocolVersion::application_v1(), request_message_id, reservation.sender_counter,
+            1_000, None, ApplicationContent::directed_request(remote, "review the contract").unwrap(),
+        ).unwrap();
+        fixture.store.store_outbound_message(
+            reservation, fixture.routing_id, fixture.device_id, 0, &request,
+        ).unwrap();
+        let envelope = relay_envelope(fixture.routing_id, 82, b"request");
+        fixture.store.store_outbound_envelope(reservation, &envelope).unwrap();
+        let accepted = StoredRelayEnvelope::new(envelope, 1).unwrap();
+        fixture.store.mark_outbox_accepted(&accepted).unwrap();
+        fixture.store.record_inbox_envelope(&accepted).unwrap();
+        fixture.store.save_inbox_message(
+            fixture.conversation_id, 1, fixture.device_id, 0, &request,
+        ).unwrap();
+        fixture.store.complete_inbox(fixture.conversation_id, 1).unwrap();
+        fixture.store.set_adapter_delivery_enabled(fixture.conversation_id, true).unwrap();
+        let response_message_id = MessageId::from_bytes([83; 16]);
+        let response = ApplicationMessage::new(
+            ProtocolVersion::application_v1(), response_message_id, 1, 1_000,
+            Some(request_message_id), ApplicationContent::text("contract feedback").unwrap(),
+        ).unwrap();
+        fixture.store.record_inbox_envelope(&StoredRelayEnvelope::new(
+            relay_envelope(fixture.routing_id, 84, b"answer"), 2,
+        ).unwrap()).unwrap();
+        fixture.store.save_inbox_message(
+            fixture.conversation_id, 2, remote, 0, &response,
+        ).unwrap();
+        let notification_id = NotificationId::from_bytes([85; 16]);
+        fixture.store.complete_inbox_with_notification(
+            fixture.conversation_id, 2, notification_id,
+        ).unwrap();
+        let consumer_id = AdapterConsumerId::from_bytes([86; 16]);
+        let lease_id = AdapterLeaseId::from_bytes([87; 16]);
+        fixture.store.acquire_adapter_consumer(consumer_id, lease_id, 1_000, 10_000).unwrap();
+        let events = fixture.store.claim_remote_events(
+            consumer_id, lease_id, 1_000, 9_000, 1,
+        ).unwrap();
+        assert_eq!(events.len(), 1);
+        let claim = ClaimDirectedRequest {
+            conversation_id: fixture.conversation_id,
+            request_message_id,
+            responder_device_id: fixture.device_id,
+            notification_id,
+            consumer_id,
+            lease_id,
+            lease_generation: events[0].lease_generation,
+            policy_digest: digest,
+            now_unix_milliseconds: 1_000,
+        };
+        (fixture, claim, response_message_id)
+    }
+
+    #[test]
+    fn response_continuation_is_once_per_outbound_request_and_survives_event_pruning() {
+        let (fixture, input, response_message_id) = response_continuation_fixture("continuation-once");
+        let claim = match fixture.store.claim_response_continuation(input, response_message_id).unwrap() {
+            DirectedRequestClaimOutcome::Claimed(claim) => claim,
+            outcome => panic!("expected continuation claim, got {outcome:?}"),
+        };
+        assert_eq!(claim.continuation_message_id, Some(response_message_id));
+        assert_eq!(fixture.store.claim_response_continuation(input, response_message_id).unwrap(),
+            DirectedRequestClaimOutcome::Claimed(claim));
+        assert_eq!(fixture.store.claim_directed_request(input).err(),
+            Some(ProfileStoreError::InvalidAdapterLease));
+        let active = ActiveDirectedRequestClaim {
+            conversation_id: input.conversation_id, request_message_id: input.request_message_id,
+            responder_device_id: input.responder_device_id, consumer_id: input.consumer_id,
+            attempt: 1, policy_digest: input.policy_digest, now_unix_milliseconds: 1_000,
+        };
+        assert_eq!(fixture.store.active_directed_request_claim(active).unwrap(), Some(claim));
+        fixture.store.complete_directed_request_without_response(CompleteDirectedRequest {
+            conversation_id: input.conversation_id, request_message_id: input.request_message_id,
+            responder_device_id: input.responder_device_id, consumer_id: input.consumer_id,
+            attempt: 1, policy_digest: input.policy_digest,
+        }).unwrap();
+        assert_eq!(fixture.store.claim_response_continuation(input, response_message_id).unwrap(),
+            DirectedRequestClaimOutcome::CompletedNoResponse);
+        assert_eq!(fixture.store.active_directed_request_claim(active).unwrap(), None);
+        fixture.store.acknowledge_remote_event(
+            input.notification_id, input.consumer_id, input.lease_id, input.lease_generation, 1_000,
+        ).unwrap();
+        assert_eq!(fixture.store.prune_terminal_remote_events(16).unwrap(), 1);
+        let closed = fixture.close();
+        let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id).unwrap()
+            .open_store(sealer()).unwrap();
+        reopened.verify_directed_request_handlings().unwrap();
+    }
+
+    #[test]
+    fn response_continuation_rejects_forged_history_policy_and_lease_bindings() {
+        let (fixture, input, response) = response_continuation_fixture("continuation-refusals");
+        for changed in [
+            ClaimDirectedRequest { request_message_id: response, ..input },
+            ClaimDirectedRequest { notification_id: NotificationId::from_bytes([99; 16]), ..input },
+            ClaimDirectedRequest { lease_generation: input.lease_generation + 1, ..input },
+            ClaimDirectedRequest { policy_digest: CollaborationPolicyDigest::from_bytes([99; 32]), ..input },
+        ] {
+            assert!(fixture.store.claim_response_continuation(changed, response).is_err());
+        }
+        assert!(fixture.store.claim_response_continuation(
+            input, MessageId::from_bytes([99; 16]),
+        ).is_err());
+        assert!(matches!(fixture.store.claim_response_continuation(input, response).unwrap(),
+            DirectedRequestClaimOutcome::Claimed(_)));
+    }
+
+    #[test]
+    fn response_continuation_migration_preserves_identity_and_rejects_schema_rollback() {
+        for floor in [21, 22] {
+            let fixture = conversation_fixture("continuation-schema");
+            let device = fixture.device_id;
+            let identity = fixture.store.profile_identity_for_schema_transition(22, floor).unwrap().unwrap();
+            {
+                let connection = fixture.store.lock().unwrap();
+                connection.execute("UPDATE daemon_profile SET sealed_device_identity = ?1",
+                    params![identity.as_bytes()]).unwrap();
+                connection.pragma_update(None, "user_version", 21).unwrap();
+            }
+            let closed = fixture.close();
+            let result = LockedProfile::acquire(closed.root.path(), closed.profile_id).unwrap()
+                .open_store(sealer());
+            if floor == 21 {
+                assert_eq!(result.unwrap().load_or_create_device().unwrap().device_id(), device);
+            } else {
+                assert_eq!(result.err(), Some(ProfileStoreError::CorruptData));
+            }
+        }
     }
 
     fn reserve_directed_response_fixture(

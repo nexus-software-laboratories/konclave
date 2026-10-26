@@ -2427,6 +2427,7 @@ mod tests {
             consumer_id,
             not_after_unix_milliseconds: 2_000,
             directed_request_claim: DirectedRequestClaim {
+                continuation_message_id: None,
                 conversation_id: conversation.conversation_id,
                 request_message_id: MessageId::from_bytes([41; MessageId::LENGTH]),
                 responder_device_id: coordinator.device_id().unwrap(),

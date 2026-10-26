@@ -25,7 +25,12 @@ export type DeliveredRole = 'administrator' | 'member';
 export type DeliveredPolicyResponseOutcome = 'accepted' | 'rejected';
 
 export type DeliveredPayload =
-  | { readonly kind: 'application-text'; readonly messageId?: Buffer; readonly text: string }
+  | {
+      readonly kind: 'application-text';
+      readonly messageId?: Buffer;
+      readonly replyToMessageId?: Buffer;
+      readonly text: string;
+    }
   | {
       readonly kind: 'directed-request';
       readonly messageId: Buffer;
@@ -60,6 +65,27 @@ export interface DeliveredEvent {
   readonly payload: DeliveredPayload;
 }
 
+export type AutomaticTurnEvent = Omit<DeliveredEvent, 'payload'> & {
+  readonly payload:
+    | Extract<DeliveredPayload, { readonly kind: 'directed-request' }>
+    | (Extract<DeliveredPayload, { readonly kind: 'application-text' }> & {
+        readonly messageId: Buffer;
+        readonly replyToMessageId: Buffer;
+      });
+};
+
+export function isAutomaticTurnEvent(event: DeliveredEvent): event is AutomaticTurnEvent {
+  return event.payload.kind === 'directed-request' ||
+    (event.payload.kind === 'application-text' &&
+      event.payload.messageId !== undefined && event.payload.replyToMessageId !== undefined);
+}
+
+export function turnRequestMessageId(event: AutomaticTurnEvent): Buffer {
+  return event.payload.kind === 'directed-request'
+    ? event.payload.messageId
+    : event.payload.replyToMessageId;
+}
+
 export interface CollaborationTurnClaim {
   readonly conversation: string;
   readonly policyDigest: string;
@@ -71,6 +97,7 @@ export interface CollaborationTurnAuthorization extends CollaborationTurnClaim {
   readonly policyName: string;
   readonly turnToken: string;
   readonly workAllowed?: boolean;
+  readonly continuationMessageId?: string;
 }
 
 export type CollaborationTurnDecision =
