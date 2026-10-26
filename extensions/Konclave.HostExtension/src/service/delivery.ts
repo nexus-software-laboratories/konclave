@@ -69,6 +69,9 @@ function payload(value: unknown): DeliveredPayload {
       return {
         kind: 'application-text',
         messageId: Buffer.from(hex(value.messageId, hex16), 'hex'),
+        ...(value.replyToMessageId === null || value.replyToMessageId === undefined
+          ? {}
+          : { replyToMessageId: Buffer.from(hex(value.replyToMessageId, hex16), 'hex') }),
         text: message,
       };
     }

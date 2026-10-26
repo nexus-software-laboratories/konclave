@@ -21,6 +21,7 @@
     "Generic client conformance",
     "Local delivery diagnostics conformance",
     "Profile lifecycle conformance",
+    "Response continuation conformance",
     "Installer lifecycle conformance",
     "Marketplace conformance",
     "Pairing rendezvous conformance",
@@ -86,6 +87,7 @@
         "generic-client-conformance",
         "local-delivery-diagnostics-conformance",
         "profile-lifecycle-conformance",
+        "response-continuation-conformance",
         "resolve-installer-scope",
         "installer-lifecycle-conformance",
         "marketplace-conformance",
@@ -115,6 +117,17 @@
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/response-continuation-conformance.yml",
+      "roles": [
+        "merge-gate"
+      ],
+      "draftBehavior": "full",
+      "requiredChecks": [
+        "Response continuation conformance"
+      ]
+    },
     {
       "source": "project",
       "path": ".github/workflows/workflow-syntax.yml",

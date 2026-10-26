@@ -123,6 +123,78 @@ function coordinator(state: Harness, budget?: WakeBudget) {
 }
 
 describe('untrusted content framing', () => {
+  it('resumes an authorized correlated answer once without requiring or manufacturing a reply', async () => {
+    const state = harness();
+    const answer = event({
+      payload: {
+        kind: 'application-text',
+        messageId: Buffer.alloc(16, 9),
+        replyToMessageId: Buffer.alloc(16, 8),
+        text: 'contract feedback',
+      },
+    });
+    const authorization = {
+      ...authorizationFor(requestEvent()),
+      workAllowed: true,
+      continuationMessageId: '09'.repeat(16),
+    };
+    const send = vi.fn().mockResolvedValue('continuation-prompt');
+    const complete = vi.fn().mockResolvedValue('completed-no-response');
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: { send },
+      diagnostics: { error: vi.fn() },
+      authorizeTurn: async () => authorization,
+      completeAuthorizedTurn: complete,
+      canCompleteAuthorizedTurn: () => true,
+    });
+    delivery.enqueue([answer]);
+    await delivery.flush();
+    expect(send).not.toHaveBeenCalled();
+    await delivery.markIdle();
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0]?.[0]).not.toHaveProperty('requiredTool');
+    const framed: unknown = send.mock.calls[0]?.[0]?.prompt;
+    if (typeof framed !== 'string') {
+      throw new Error('expected a continuation prompt');
+    }
+    expect(framed).toContain('Resume the original locally authorized work');
+    expect(framed).toContain('Do not send an automatic acknowledgement or reply');
+    expect(framed).not.toContain('Send one final correlated response');
+    expect(state.requests).toHaveLength(0);
+    await delivery.markIdle();
+    expect(complete).toHaveBeenCalledWith(authorization);
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('retains an unapproved correlated answer without starting a turn', async () => {
+    const state = harness();
+    const send = vi.fn();
+    const authorizeTurn = vi.fn().mockResolvedValue(null);
+    const delivery = createDeliveryCoordinator({
+      channel: state.channel,
+      session: { send },
+      diagnostics: { error: vi.fn() },
+      authorizeTurn,
+      completeAuthorizedTurn: vi.fn(),
+    });
+    delivery.enqueue([
+      event({
+        payload: {
+          kind: 'application-text',
+          messageId: Buffer.alloc(16, 9),
+          replyToMessageId: Buffer.alloc(16, 8),
+          text: 'ordinary reply',
+        },
+      }),
+    ]);
+    await delivery.markIdle();
+    expect(authorizeTurn).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
+    expect(state.requests).toMatchObject([{ kind: 'acknowledge' }]);
+  });
+
   it('explains local work authority without converting peer content into permission authority', () => {
     const authorization = { ...authorizationFor(requestEvent()), workAllowed: true };
     const framed = frameDelivery(

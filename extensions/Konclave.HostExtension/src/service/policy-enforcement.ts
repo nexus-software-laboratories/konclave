@@ -3,11 +3,12 @@ import { randomBytes } from 'node:crypto';
 import type { SessionHooks } from '@github/copilot-sdk';
 
 import type {
+  AutomaticTurnEvent,
   CollaborationTurnAuthorization,
   CollaborationTurnDecision,
   DeliveredEvent,
-  DeliveredPayload,
 } from '../adapter/session.js';
+import { isAutomaticTurnEvent, turnRequestMessageId } from '../adapter/session.js';
 import {
   collaborationAuthorizationArgument,
   collaborationReplyToolName,
@@ -43,10 +44,6 @@ interface ToolAction {
   readonly action: string;
   readonly conversationBound: boolean;
 }
-
-type DirectedRequestEvent = Omit<DeliveredEvent, 'payload'> & {
-  readonly payload: Extract<DeliveredPayload, { readonly kind: 'directed-request' }>;
-};
 
 export interface CopilotPolicyGate {
   readonly hooks: SessionHooks;
@@ -84,10 +81,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function isDirectedRequestEvent(event: DeliveredEvent): event is DirectedRequestEvent {
-  return event.payload.kind === 'directed-request';
-}
-
 function boundedString(value: unknown, maximum: number, label: string): string {
   if (
     typeof value !== 'string' ||
@@ -101,7 +94,7 @@ function boundedString(value: unknown, maximum: number, label: string): string {
 
 function parseTurnAuthorization(
   value: unknown,
-  event: DirectedRequestEvent,
+  event: AutomaticTurnEvent,
 ): CollaborationTurnDecision | null {
   if (!isRecord(value)) {
     throw new Error('the local service collaboration authorization is malformed');
@@ -120,12 +113,17 @@ function parseTurnAuthorization(
     }
     return null;
   }
-  const requestMessageId = event.payload.messageId.toString('hex');
+  const requestMessageId = turnRequestMessageId(event).toString('hex');
+  const continuationMessageId =
+    event.payload.kind === 'application-text' ? event.payload.messageId.toString('hex') : undefined;
   if (
     value.outcome !== 'authorized' ||
     typeof value.policyDigest !== 'string' ||
     !hex32.test(value.policyDigest) ||
     value.requestMessageId !== requestMessageId ||
+    (continuationMessageId === undefined
+      ? value.continuationMessageId !== null && value.continuationMessageId !== undefined
+      : value.continuationMessageId !== continuationMessageId || value.workAllowed !== true) ||
     !Number.isSafeInteger(value.attempt) ||
     (value.attempt as number) < 1 ||
     (value.attempt as number) > 16
@@ -140,6 +138,7 @@ function parseTurnAuthorization(
     attempt: value.attempt as number,
     turnToken: randomBytes(16).toString('hex'),
     ...(parsePeerWorkPermission(value.workAllowed) ? { workAllowed: true } : {}),
+    ...(continuationMessageId === undefined ? {} : { continuationMessageId }),
   };
 }
 
@@ -337,6 +336,15 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
           if (!action) {
             return deny('tool_unmapped', 'The active Konclave policy does not map this tool.');
           }
+          if (
+            authorization.continuationMessageId !== undefined &&
+            action.action === 'conversation.reply'
+          ) {
+            return deny(
+              'continuation_reply_not_requested',
+              'A correlated answer resumes local work; it does not request another reply.',
+            );
+          }
           const rawToolArguments = toolArgumentRecord(input.toolArgs);
           if (!rawToolArguments) {
             return deny('tool_arguments_malformed', 'Konclave tool arguments are malformed.');
@@ -452,13 +460,16 @@ export function createCopilotPolicyGate(client: LocalServiceClient): CopilotPoli
     },
     authorizeTurn(events) {
       const first = events[0];
-      if (!first || events.length !== 1 || !isDirectedRequestEvent(first)) {
+      if (!first || events.length !== 1 || !isAutomaticTurnEvent(first)) {
         return Promise.resolve(null);
       }
       return client
         .request(collaborationOperations.authorizeTurn, {
           conversationId: first.conversation.toString('hex'),
-          requestMessageId: first.payload.messageId.toString('hex'),
+          requestMessageId: turnRequestMessageId(first).toString('hex'),
+          ...(first.payload.kind === 'application-text'
+            ? { continuationMessageId: first.payload.messageId.toString('hex') }
+            : {}),
           notificationId: first.notificationId.toString('hex'),
           leaseGeneration: first.leaseGeneration,
         })

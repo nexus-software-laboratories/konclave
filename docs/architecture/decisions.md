@@ -28,10 +28,13 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0025: Bootstrap repeat pairing through an existing authenticated conversation](../adr/adr-0025-trusted-device-alias-bootstrap.md)
 - [ADR 0026: Explain message delivery through authenticated local metadata](../adr/adr-0026-local-delivery-diagnostics.md)
 - [ADR 0027: Retain explicit service trust and defer automatic LAN discovery](../adr/adr-0027-lan-service-discovery.md)
-- [ADR 0029: Permit locally authorized ordinary peer work](../adr/adr-0029-locally-authorized-peer-work.md)
+- [ADR 0030: Continue locally authorized work on exact correlated answers](../adr/adr-0030-correlated-response-continuation.md)
 
 ## Superseded records
 
+- [ADR 0029: Permit locally authorized ordinary peer work](../adr/adr-0029-locally-authorized-peer-work.md) —
+  its blanket response-wake prohibition is replaced by ADR 0030; explicit local
+  work authority and exact native effect checks are preserved.
 - [ADR 0012: Separate deterministic collaboration policy from directed request content](../adr/adr-0012-structured-directed-collaboration-requests.md) —
   its unconditional reply-only tool restriction is replaced by ADR 0029; deterministic
   policy and terminal-response separation are preserved.

@@ -1,6 +1,6 @@
 ---
 title: Permit locally authorized ordinary peer work
-status: Accepted
+status: Superseded
 date: 2026-10-24
 authors:
   - Konclave maintainers
@@ -11,7 +11,8 @@ tags:
 supersedes:
   - adr-0012-structured-directed-collaboration-requests
   - adr-0028-external-recipe-composition
-superseded_by: []
+superseded_by:
+  - adr-0030-correlated-response-continuation
 ---
 
 # Permit locally authorized ordinary peer work

@@ -88,6 +88,17 @@ function Get-ComponentValidationContracts {
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff|validation)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
             '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
         )
+        'response-continuation' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/response-continuation-conformance\.yml$'
+            '^crates/Konclave\.DomainCore/'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/.*|tests/.*)$'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/.*|tests/.*)$'
+            '^fixtures/local-service/'
+            '^docs/(?:development/(?:collaboration-policies|copilot-delivery-safety)|adr/adr-0030-correlated-response-continuation|security/threat-model)\.md$'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'short-code-pairing' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'

@@ -337,9 +337,10 @@ advertise it; legacy bindings remain readable but unsupported, so existing
 conversations must establish fully capable membership before using the sender path.
 The shared local-service and manual-history contracts preserve the request kind,
 target, body, and request message identifier.
-Ordinary text and other terminal updates likewise remain in history and produce only
-a concise local diagnostic; they do not start a model turn or consume the autonomous
-turn budget.
+Ordinary uncorrelated text and other terminal updates remain history-only. An exact
+authenticated answer to this device's completed outgoing directed request can
+continue local work under current `session.work`; it is not another request for a
+reply. Request and continuation turns both consume the autonomous wake budget.
 The closed binary adapter protocol projects it into a daemon-authored
 unsupported-content notice without exposing the body, so an older adapter fails
 visibly rather than treating the request as ordinary actionable text.
@@ -363,14 +364,46 @@ Peer content remains quoted inside the untrusted collaborator boundary. A locall
 active binding can authorize only the structured actions its statements, local
 authority, and harness evidence all permit.
 
-The shared service authorizes an autonomous turn only for an exact inbound
+The shared service authorizes an incoming-request turn only for an exact inbound
 `DirectedRequest` targeting the local device. Authorization requires the request's
 message and notification identifiers, delivery lease generation, live Copilot
 consumer, active policy digest, and positive `conversation.reply` decision. Before it
 returns authorization, profile schema version 18 atomically creates or reclaims a
 sealed handling attempt bound to that exact delivery claim. Ordinary text, policy
 exchange records, membership events, completed requests, stale claims, and requests
-targeting another device cannot authorize a turn.
+targeting another device cannot authorize an incoming-request turn.
+
+### Correlated answer continuation
+
+A text answer may instead authorize a fresh continuation under current
+`session.work`, never merely `conversation.reply`. The daemon verifies the original
+completed outgoing directed request, local authorship, same conversation, exact
+authenticated target sender, distinct answer identifier, and exact `reply_to`
+against sealed history. Both devices must still be current members, and the exact
+notification, Copilot consumer, policy digest, and delivery lease must be live.
+The adapter's projected reply reference is not admission authority.
+
+The original outgoing request is the correlation record; no task registry is
+created. Profile schema 22 seals the exact answer identifier into a distinct
+handling claim keyed by original request and local device, preserving older
+handling records and advancing the authenticated rollback floor. A second answer
+cannot start another continuation for the same request. Restart verification does
+not depend on terminal notifications remaining in the delivery queue.
+
+The continuation prompt tells the requester to use the answer for its original
+authorized work. It does not require `send_message`, authorize an acknowledgement,
+or revive a completed incoming-request claim. Native and hook enforcement deny a
+continuation's reply effect. An explicit follow-up directed request in the same
+conversation is permitted only as ordinary work under current policy and normal
+Copilot permissions. Both human- and agent-originated outgoing requests qualify;
+their encrypted message contract is identical.
+
+Reply-only policies remain reply-only. Missing or denied work authority retains
+the answer in history without starting a turn. Revocation, replacement, expiry, or
+lease loss deny subsequent tools. Completion records `completed-no-response`.
+No outgoing task-cancellation API or exactly-once external effects are implied.
+See [ADR 0030](../adr/adr-0030-correlated-response-continuation.md) for the decision
+and retained anti-loop boundaries.
 
 The profile's single live delivery consumer and the handling claim enforce
 one active autonomous request turn for that consumer. A second request remains
