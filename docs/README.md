@@ -34,6 +34,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0027: Explicit service trust and LAN discovery](adr/adr-0027-lan-service-discovery.md)
 - [ADR 0028: External recipe composition](adr/adr-0028-external-recipe-composition.md)
 - [ADR 0029: Locally authorized peer work](adr/adr-0029-locally-authorized-peer-work.md)
+- [ADR 0030: Correlated response continuation](adr/adr-0030-correlated-response-continuation.md)
 
 ## Protocol
 

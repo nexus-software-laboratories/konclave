@@ -119,5 +119,6 @@ jobs:
           cargo test --locked --package KonclaveLocalDaemon --lib response_continuation
           cargo test --locked --package KonclaveLocalDaemon --lib directed_request
           cargo test --locked --package KonclaveLocalDaemon --lib local_service::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib copilot_tool_contract_fixture_matches_the_router
           cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
           git diff --exit-code

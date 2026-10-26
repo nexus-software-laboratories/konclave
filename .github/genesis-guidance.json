@@ -215,6 +215,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0030-correlated-response-continuation.md",
+        "title": "ADR 0030: Correlated response continuation",
+        "section": "Architecture",
+        "order": 300,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
