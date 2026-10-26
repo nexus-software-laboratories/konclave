@@ -7,11 +7,12 @@ use KonclaveCryptographicCore::{
     LocalServiceIdentity, derive_local_service_session_consumer_id, verify_local_service_signature,
 };
 use KonclaveDomainCore::{
-    AdapterConsumerId, ApplicationContent, CollaborationPolicyBundle, CollaborationPolicyCost,
-    CollaborationPolicyDecision, CollaborationPolicyEffect, CollaborationPolicyEvaluationContext,
-    CollaborationPolicyEvaluationRequest, CollaborationPolicyResponseOutcome,
-    CollaborationPolicyTarget, CollaborationPolicyUsage, ConversationId, ConversationRole,
-    DeviceId, Ed25519Signature, NotificationId, evaluate_collaboration_policy,
+    AdapterConsumerId, AdapterLeaseId, ApplicationContent, CollaborationPolicyBundle,
+    CollaborationPolicyCost, CollaborationPolicyDecision, CollaborationPolicyEffect,
+    CollaborationPolicyEvaluationContext, CollaborationPolicyEvaluationRequest,
+    CollaborationPolicyResponseOutcome, CollaborationPolicyTarget, CollaborationPolicyUsage,
+    ConversationId, ConversationRole, DeviceId, Ed25519Signature, NotificationId,
+    evaluate_collaboration_policy,
 };
 use KonclaveLocalAuthorizationStore::{
     AuthorizationGeneration, GrantIssuanceKey, UserPresenceCredentialRecord,
@@ -4048,13 +4049,14 @@ mod collaboration_policy_tests {
     use zeroize::Zeroizing;
 
     use super::{
-        CollaborationActionEvaluation, EvaluateCollaborationActionRequest,
-        authorize_collaboration_turn_with_lease, evaluate_collaboration_action_request,
-        CollaborationAuthorizedSendRequest, CollaborationSendAuthorization,
-        CollaborationSendCandidate, SystemUnixClock, UnixClock, authorize_collaboration_turn,
+        CollaborationActionEvaluation, CollaborationAuthorizedSendRequest,
+        CollaborationSendAuthorization, CollaborationSendCandidate,
+        EvaluateCollaborationActionRequest, SystemUnixClock, UnixClock,
+        authorize_collaboration_turn, authorize_collaboration_turn_with_lease,
         complete_collaboration_turn, consume_collaboration_send_authorization,
-        evaluate_collaboration_action, is_command_operation, is_tool_operation,
-        issue_collaboration_action_evaluation, operation_error_code, required_capability,
+        evaluate_collaboration_action, evaluate_collaboration_action_request, is_command_operation,
+        is_tool_operation, issue_collaboration_action_evaluation, operation_error_code,
+        required_capability,
     };
     use crate::adapter::DeliveryAttachment;
     use crate::conversation::tests::open_coordinator;

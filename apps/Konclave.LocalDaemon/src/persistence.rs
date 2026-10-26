@@ -12396,12 +12396,14 @@ mod tests {
     fn response_continuation_fixture_with_answer(
         name: &str,
         now: u64,
-        transform_answer: impl FnOnce(ApplicationMessage, DeviceId, DeviceId) -> (ApplicationMessage, DeviceId),
+        transform_answer: impl FnOnce(
+            ApplicationMessage,
+            DeviceId,
+            DeviceId,
+        ) -> (ApplicationMessage, DeviceId),
     ) -> (ConversationFixture, ClaimDirectedRequest, MessageId) {
-        let (fixture, remote) = remote_membership_fixture_with_clock(
-            name,
-            Arc::new(MutableClock(AtomicU64::new(now))),
-        );
+        let (fixture, remote) =
+            remote_membership_fixture_with_clock(name, Arc::new(MutableClock(AtomicU64::new(now))));
         let digest = activate_request_reply_policy(&fixture);
         let request_message_id = MessageId::from_bytes([81; 16]);
         let reservation = fixture
@@ -12573,34 +12575,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fixture.store.prune_terminal_remote_events(16).unwrap(), 1);
-        let sender = fixture.store.load_history(input.conversation_id, 0, 10).unwrap()
-            .messages[1].sender;
+        let sender = fixture
+            .store
+            .load_history(input.conversation_id, 0, 10)
+            .unwrap()
+            .messages[1]
+            .sender;
         let duplicate = ApplicationMessage::new(
-            ProtocolVersion::application_v1(), MessageId::from_bytes([88; 16]), 2, 1_000,
-            Some(input.request_message_id), ApplicationContent::text("another answer").unwrap(),
-        ).unwrap();
-        fixture.store.record_inbox_envelope(&StoredRelayEnvelope::new(
-            relay_envelope(fixture.routing_id, 89, b"second answer"), 3,
-        ).unwrap()).unwrap();
-        fixture.store.save_inbox_message(
-            input.conversation_id, 3, sender, 0, &duplicate,
-        ).unwrap();
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([88; 16]),
+            2,
+            1_000,
+            Some(input.request_message_id),
+            ApplicationContent::text("another answer").unwrap(),
+        )
+        .unwrap();
+        fixture
+            .store
+            .record_inbox_envelope(
+                &StoredRelayEnvelope::new(
+                    relay_envelope(fixture.routing_id, 89, b"second answer"),
+                    3,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        fixture
+            .store
+            .save_inbox_message(input.conversation_id, 3, sender, 0, &duplicate)
+            .unwrap();
         let notification_id = NotificationId::from_bytes([90; 16]);
-        fixture.store.complete_inbox_with_notification(
-            input.conversation_id, 3, notification_id,
-        ).unwrap();
-        let events = fixture.store.claim_remote_events(
-            input.consumer_id, input.lease_id, 1_000, 9_000, 1,
-        ).unwrap();
+        fixture
+            .store
+            .complete_inbox_with_notification(input.conversation_id, 3, notification_id)
+            .unwrap();
+        let events = fixture
+            .store
+            .claim_remote_events(input.consumer_id, input.lease_id, 1_000, 9_000, 1)
+            .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(fixture.store.claim_response_continuation(
-            ClaimDirectedRequest { notification_id,
-                lease_generation: events[0].lease_generation, ..input },
-            duplicate.message_id(),
-        ).err(), Some(ProfileStoreError::InvalidTransition));
-        fixture.store.acknowledge_remote_event(
-            notification_id, input.consumer_id, input.lease_id, events[0].lease_generation, 1_000,
-        ).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .claim_response_continuation(
+                    ClaimDirectedRequest {
+                        notification_id,
+                        lease_generation: events[0].lease_generation,
+                        ..input
+                    },
+                    duplicate.message_id(),
+                )
+                .err(),
+            Some(ProfileStoreError::InvalidTransition)
+        );
+        fixture
+            .store
+            .acknowledge_remote_event(
+                notification_id,
+                input.consumer_id,
+                input.lease_id,
+                events[0].lease_generation,
+                1_000,
+            )
+            .unwrap();
         assert_eq!(fixture.store.prune_terminal_remote_events(16).unwrap(), 1);
         let closed = fixture.close();
         let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id)
@@ -12614,29 +12651,50 @@ mod tests {
     fn response_continuation_rejects_forged_history_policy_and_lease_bindings() {
         let (fixture, input, response) = response_continuation_fixture("continuation-refusals");
         for (changed, expected) in [
-            (ClaimDirectedRequest {
-                request_message_id: response,
-                ..input
-            }, ProfileStoreError::InvalidTransition),
-            (ClaimDirectedRequest {
-                notification_id: NotificationId::from_bytes([99; 16]),
-                ..input
-            }, ProfileStoreError::OperationNotFound),
-            (ClaimDirectedRequest {
-                lease_generation: input.lease_generation + 1,
-                ..input
-            }, ProfileStoreError::InvalidAdapterLease),
-            (ClaimDirectedRequest {
-                policy_digest: CollaborationPolicyDigest::from_bytes([99; 32]),
-                ..input
-            }, ProfileStoreError::CollaborationPolicyReplacementMismatch),
+            (
+                ClaimDirectedRequest {
+                    request_message_id: response,
+                    ..input
+                },
+                ProfileStoreError::InvalidTransition,
+            ),
+            (
+                ClaimDirectedRequest {
+                    notification_id: NotificationId::from_bytes([99; 16]),
+                    ..input
+                },
+                ProfileStoreError::OperationNotFound,
+            ),
+            (
+                ClaimDirectedRequest {
+                    lease_generation: input.lease_generation + 1,
+                    ..input
+                },
+                ProfileStoreError::InvalidAdapterLease,
+            ),
+            (
+                ClaimDirectedRequest {
+                    policy_digest: CollaborationPolicyDigest::from_bytes([99; 32]),
+                    ..input
+                },
+                ProfileStoreError::CollaborationPolicyReplacementMismatch,
+            ),
         ] {
-            assert_eq!(fixture.store.claim_response_continuation(changed, response).err(),
-                Some(expected));
+            assert_eq!(
+                fixture
+                    .store
+                    .claim_response_continuation(changed, response)
+                    .err(),
+                Some(expected)
+            );
         }
-        assert_eq!(fixture.store.claim_response_continuation(
-            input, MessageId::from_bytes([99; 16]),
-        ).err(), Some(ProfileStoreError::InvalidAdapterLease));
+        assert_eq!(
+            fixture
+                .store
+                .claim_response_continuation(input, MessageId::from_bytes([99; 16]),)
+                .err(),
+            Some(ProfileStoreError::InvalidAdapterLease)
+        );
         assert!(matches!(
             fixture
                 .store
@@ -12650,7 +12708,9 @@ mod tests {
     fn response_continuation_rejects_wrong_sender_reference_and_answer_kind_in_sealed_history() {
         for refusal in ["sender", "reference", "kind", "missing-reference"] {
             let (fixture, input, response) = response_continuation_fixture_with_answer(
-                "continuation-history-refusals", 1_000, |message, sender, local| {
+                "continuation-history-refusals",
+                1_000,
+                |message, sender, local| {
                     let reply_to = match refusal {
                         "reference" => Some(MessageId::from_bytes([99; 16])),
                         "missing-reference" => None,
@@ -12661,14 +12721,32 @@ mod tests {
                     } else {
                         ApplicationContent::text("answer").unwrap()
                     };
-                    (ApplicationMessage::new(
-                        message.version(), message.message_id(), message.sender_counter(),
-                        message.sent_at_unix_milliseconds(), reply_to, content,
-                    ).unwrap(), if refusal == "sender" { DeviceId::from_bytes([99; 32]) } else { sender })
+                    (
+                        ApplicationMessage::new(
+                            message.version(),
+                            message.message_id(),
+                            message.sender_counter(),
+                            message.sent_at_unix_milliseconds(),
+                            reply_to,
+                            content,
+                        )
+                        .unwrap(),
+                        if refusal == "sender" {
+                            DeviceId::from_bytes([99; 32])
+                        } else {
+                            sender
+                        },
+                    )
                 },
             );
-            assert_eq!(fixture.store.claim_response_continuation(input, response).err(),
-                Some(ProfileStoreError::InvalidTransition), "{refusal}");
+            assert_eq!(
+                fixture
+                    .store
+                    .claim_response_continuation(input, response)
+                    .err(),
+                Some(ProfileStoreError::InvalidTransition),
+                "{refusal}"
+            );
         }
     }
 
