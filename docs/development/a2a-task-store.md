@@ -181,6 +181,7 @@ The draft-full `A2A task-store conformance` check executes:
 
 ```shell
 cargo fmt --package KonclaveA2ATaskStore --package KonclaveA2ATaskStoreSqlite -- --check
+cargo test --locked --package KonclaveA2ATaskStore --no-default-features
 cargo test --locked --package KonclaveA2ATaskStore --all-features
 cargo test --locked --package KonclaveA2ATaskStoreSqlite
 cargo clippy --locked --package KonclaveA2ATaskStore --package KonclaveA2ATaskStoreSqlite --all-targets --all-features -- -D warnings
