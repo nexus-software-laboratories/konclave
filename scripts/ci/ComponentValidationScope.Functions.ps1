@@ -80,7 +80,9 @@ function Get-ComponentValidationContracts {
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
             '^\.github/workflows/native-storage-conformance\.yml$'
-            '^crates/Konclave\.(?:SecretStorage|CryptographicCore|DomainCore|ProtocolContracts)/'
+            '^crates/Konclave\.(?:SecretStorage|CryptographicCore|DomainCore|ProtocolContracts|RelayAuthentication|WindowsSecurity)/'
+            '^proto/konclave/protocol/'
+            '^fixtures/protocol/'
             '^docs/(?:development/secret-storage|adr/adr-0002-sealed-local-secret-custody)\.md$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )

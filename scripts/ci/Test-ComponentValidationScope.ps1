@@ -134,8 +134,16 @@ $ownedCases = [ordered]@{
         'scripts/installation/Install-Konclave.ps1'
     'local-delivery-diagnostics' =
         'crates/Konclave.DomainCore/src/delivery_diagnostics.rs'
-    'native-storage' =
+    'native-storage' = @(
         'crates/Konclave.SecretStorage/src/shared_mls_storage.rs'
+        'crates/Konclave.CryptographicCore/src/mls.rs'
+        'crates/Konclave.DomainCore/src/lib.rs'
+        'crates/Konclave.ProtocolContracts/src/lib.rs'
+        'crates/Konclave.RelayAuthentication/src/lib.rs'
+        'crates/Konclave.WindowsSecurity/src/lib.rs'
+        'proto/konclave/protocol/v1/application.proto'
+        'fixtures/protocol/v1/conversation-state.bin'
+    )
     'profile-lifecycle' =
         'apps/Konclave.LocalDaemon/src/profile_lifecycle.rs'
     'pairing-rendezvous' =
