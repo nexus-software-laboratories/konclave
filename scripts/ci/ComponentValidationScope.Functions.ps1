@@ -76,6 +76,16 @@ function Get-ComponentValidationContracts {
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-command|runtime)\.ts|src/adapter/runtime\.ts|src/service/(?:client|tools|commands|failure-diagnostics|delivery-diagnostics|operations|validation)\.ts|tests/(?:delivery-diagnostics|failure-diagnostics|generic-command|service-client|thin-client|delivery-runtime|extension-runtime)\.test\.ts)$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
+        'native-storage' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/native-storage-conformance\.yml$'
+            '^crates/Konclave\.(?:SecretStorage|CryptographicCore|DomainCore|ProtocolContracts|RelayAuthentication|WindowsSecurity)/'
+            '^proto/konclave/protocol/'
+            '^fixtures/protocol/'
+            '^docs/(?:development/secret-storage|adr/adr-0002-sealed-local-secret-custody)\.md$'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'profile-lifecycle' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'

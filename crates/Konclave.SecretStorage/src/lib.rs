@@ -9,6 +9,7 @@ mod mls_storage;
 mod native;
 mod owner_file;
 mod sealed_blob;
+mod shared_mls_storage;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 
@@ -31,5 +32,6 @@ pub use owner_file::{
 pub use sealed_blob::{
     MAX_SECRET_PLAINTEXT_BYTES, SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
 };
+pub use shared_mls_storage::SealedMlsStorageHandle;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SealedSqliteMlsStorage;

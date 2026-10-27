@@ -253,7 +253,7 @@ const fn backend_failure(operation: &'static str) -> SecretStorageError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -261,7 +261,7 @@ mod tests {
     use crate::ExternalWrappingKeyProvider;
 
     #[derive(Clone, Default)]
-    struct MemoryStorage {
+    pub(crate) struct MemoryStorage {
         data: Arc<Mutex<MemoryData>>,
     }
 
@@ -339,7 +339,7 @@ mod tests {
         }
     }
 
-    fn storage() -> (SealedMlsStorage<MemoryStorage>, MemoryStorage) {
+    pub(crate) fn storage() -> (SealedMlsStorage<MemoryStorage>, MemoryStorage) {
         let inner = MemoryStorage::default();
         let sealer =
             SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([7; 32])).unwrap();
