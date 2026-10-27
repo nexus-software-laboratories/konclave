@@ -16,9 +16,11 @@ use KonclaveA2ATaskStore::{
     A2ATaskArtifact, A2ATaskArtifactListPage, A2ATaskCreation, A2ATaskKey, A2ATaskListCursor,
     A2ATaskListPage, A2ATaskListQuery, A2ATaskMessage, A2ATaskMessageRole, A2ATaskPruneOutcome,
     A2ATaskRecord, A2ATaskSnapshot, A2ATaskStore, A2ATaskStoreError, A2ATaskStreamUpdates,
-    A2ATaskTransition, A2ATaskWithArtifacts, A2ATerminalReason, AppendA2ATaskRecordOutcome,
-    CreateA2ATaskOutcome, StoredA2ATaskArtifact, StoredA2ATaskMessage, StoredA2ATaskStatus,
-    TransitionA2ATaskOutcome,
+    A2ATaskTransition, A2ATaskTransitionPlan, A2ATaskWithArtifacts, A2ATerminalReason,
+    AppendA2ATaskRecordOutcome, CreateA2ATaskOutcome, StoredA2ATaskArtifact, StoredA2ATaskMessage,
+    StoredA2ATaskStatus, TransitionA2ATaskOutcome, a2a_task_state_is_terminal,
+    a2a_task_status_reason_is_valid, plan_a2a_task_transition, validate_a2a_task_shape,
+    validate_a2a_task_status_history,
 };
 use KonclaveDomainCore::{ConversationId, DeviceId, MessageId};
 use rusqlite::config::DbConfig;
@@ -278,7 +280,7 @@ impl A2ASqliteTaskStore {
             }
             return Err(A2ATaskStoreError::Conflict);
         }
-        if is_terminal(task.state())
+        if a2a_task_state_is_terminal(task.state())
             || task.content_pruned()
             || (require_working && task.state() != A2ATaskState::Working)
         {
@@ -458,27 +460,24 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| A2ATaskStoreError::Storage)?;
         let current = load_task(&transaction, transition.key())?;
-        if current.generation() != transition.expected_generation() {
-            if transition
-                .expected_generation()
-                .checked_add(1)
-                .is_some_and(|generation| generation == current.generation())
-                && current.state() == transition.state()
-                && terminal_reasons_equal(current.terminal_reason(), transition.terminal_reason())
-            {
-                transaction
-                    .commit()
-                    .map_err(|_| A2ATaskStoreError::Storage)?;
-                return Ok(TransitionA2ATaskOutcome::Existing(current));
-            }
-            return Err(A2ATaskStoreError::Conflict);
+        let plan = plan_a2a_task_transition(&current, &transition)?;
+        if plan == A2ATaskTransitionPlan::Existing {
+            transaction
+                .commit()
+                .map_err(|_| A2ATaskStoreError::Storage)?;
+            return Ok(TransitionA2ATaskOutcome::Existing(current));
         }
-        validate_transition(&transaction, &current, &transition)?;
+        if plan == A2ATaskTransitionPlan::RequireCompletionEvidence {
+            plan.validate_completion_evidence(has_completion_evidence(
+                &transaction,
+                current.key(),
+            )?)?;
+        }
         let generation = current
             .generation()
             .checked_add(1)
             .ok_or(A2ATaskStoreError::CorruptData)?;
-        let terminal = is_terminal(transition.state());
+        let terminal = a2a_task_state_is_terminal(transition.state());
         let (terminal_at, content_expires_at, tombstone_expires_at) = if terminal {
             let terminal_at = transition.occurred_at_unix_milliseconds();
             (
@@ -578,7 +577,7 @@ impl A2ATaskStore for A2ASqliteTaskStore {
             }
             return Err(A2ATaskStoreError::Conflict);
         }
-        if is_terminal(task.state()) || task.content_pruned() {
+        if a2a_task_state_is_terminal(task.state()) || task.content_pruned() {
             return Err(A2ATaskStoreError::InvalidTransition);
         }
         let count = record_count(&transaction, "a2a_task_message", message.key())?;
@@ -1175,7 +1174,7 @@ fn load_task_optional(
     }
     let state = state_from_code(row.8)?;
     let terminal_at = row.12.map(from_sql).transpose()?;
-    validate_task_shape(
+    validate_a2a_task_shape(
         state,
         from_sql(row.9)?,
         from_sql(row.11)?,
@@ -1263,49 +1262,6 @@ fn verify_context_binding(
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the complete durable task-state shape remains explicit"
-)]
-fn validate_task_shape(
-    state: A2ATaskState,
-    generation: u64,
-    updated_at: u64,
-    terminal_at: Option<u64>,
-    terminal_reason: Option<&A2ATerminalReason>,
-    content_pruned: bool,
-    content_expires_at: Option<u64>,
-    tombstone_expires_at: Option<u64>,
-) -> Result<(), A2ATaskStoreError> {
-    let terminal = is_terminal(state);
-    if generation > 2
-        || (terminal
-            && (terminal_at != Some(updated_at)
-                || content_expires_at.is_none()
-                || tombstone_expires_at.is_none()
-                || terminal_at > content_expires_at
-                || content_expires_at > tombstone_expires_at))
-        || (!terminal
-            && (terminal_at.is_some()
-                || terminal_reason.is_some()
-                || content_pruned
-                || content_expires_at.is_some()
-                || tombstone_expires_at.is_some()))
-        || (state == A2ATaskState::Completed && terminal_reason.is_some())
-        || (matches!(
-            state,
-            A2ATaskState::Failed | A2ATaskState::Rejected | A2ATaskState::Canceled
-        ) && terminal_reason.is_none())
-        || matches!(
-            state,
-            A2ATaskState::InputRequired | A2ATaskState::AuthRequired
-        )
-    {
-        return Err(A2ATaskStoreError::CorruptData);
-    }
-    Ok(())
-}
-
 fn verify_status_history(
     connection: &Connection,
     task: &A2ATaskRecord,
@@ -1338,49 +1294,21 @@ fn verify_status_history(
         .map_err(|_| A2ATaskStoreError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| A2ATaskStoreError::Storage)?;
-    let expected_length = task
-        .generation()
-        .checked_add(1)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or(A2ATaskStoreError::CorruptData)?;
-    if rows.len() != expected_length || rows.is_empty() || rows.len() > 3 {
-        return Err(A2ATaskStoreError::CorruptData);
-    }
-    let mut previous_state = None;
-    let mut previous_time = 0;
-    for (index, row) in rows.iter().enumerate() {
-        let generation = from_sql(row.0)?;
-        let state = state_from_code(row.1)?;
-        let reason = row
-            .2
-            .as_ref()
-            .map(|value| A2ATerminalReason::parse(value.clone()))
-            .transpose()
-            .map_err(|_| A2ATaskStoreError::CorruptData)?;
-        let occurred_at = from_sql(row.3)?;
-        if generation != u64::try_from(index).map_err(|_| A2ATaskStoreError::CorruptData)?
-            || occurred_at < previous_time
-            || (index == 0
-                && (state != A2ATaskState::Submitted
-                    || reason.is_some()
-                    || occurred_at != task.created_at_unix_milliseconds()))
-            || !valid_status_reason(state, reason.as_ref())
-            || previous_state.is_some_and(|previous| !allowed_state_transition(previous, state))
-        {
-            return Err(A2ATaskStoreError::CorruptData);
-        }
-        previous_state = Some(state);
-        previous_time = occurred_at;
-    }
-    let last = rows.last().ok_or(A2ATaskStoreError::CorruptData)?;
-    if state_from_code(last.1)? != task.state()
-        || from_sql(last.0)? != task.generation()
-        || from_sql(last.3)? != task.updated_at_unix_milliseconds()
-        || last.2.as_deref() != task.terminal_reason().map(A2ATerminalReason::as_str)
-    {
-        return Err(A2ATaskStoreError::CorruptData);
-    }
-    Ok(())
+    let statuses = rows
+        .into_iter()
+        .map(|(generation, state, reason, occurred_at)| {
+            Ok(StoredA2ATaskStatus::new(
+                from_sql(generation)?,
+                state_from_code(state)?,
+                reason
+                    .map(A2ATerminalReason::parse)
+                    .transpose()
+                    .map_err(|_| A2ATaskStoreError::CorruptData)?,
+                from_sql(occurred_at)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, A2ATaskStoreError>>()?;
+    validate_a2a_task_status_history(task, &statuses)
 }
 
 fn load_status_updates(
@@ -1432,7 +1360,7 @@ fn load_status_updates(
             .map_err(|_| A2ATaskStoreError::CorruptData)?;
         let occurred_at = from_sql(row.3)?;
         if generation != expected_generation
-            || !valid_status_reason(state, terminal_reason.as_ref())
+            || !a2a_task_status_reason_is_valid(state, terminal_reason.as_ref())
         {
             return Err(A2ATaskStoreError::CorruptData);
         }
@@ -1449,105 +1377,27 @@ fn load_status_updates(
     Ok(updates)
 }
 
-const fn allowed_state_transition(previous: A2ATaskState, next: A2ATaskState) -> bool {
-    match previous {
-        A2ATaskState::Submitted => matches!(
-            next,
-            A2ATaskState::Working
-                | A2ATaskState::Completed
-                | A2ATaskState::Failed
-                | A2ATaskState::Rejected
-                | A2ATaskState::Canceled
-        ),
-        A2ATaskState::Working => matches!(
-            next,
-            A2ATaskState::Completed
-                | A2ATaskState::Failed
-                | A2ATaskState::Rejected
-                | A2ATaskState::Canceled
-        ),
-        _ => false,
-    }
-}
-
-fn valid_status_reason(state: A2ATaskState, reason: Option<&A2ATerminalReason>) -> bool {
-    match state {
-        A2ATaskState::Submitted | A2ATaskState::Working | A2ATaskState::Completed => {
-            reason.is_none()
-        }
-        A2ATaskState::Failed | A2ATaskState::Canceled | A2ATaskState::Rejected => reason.is_some(),
-        A2ATaskState::InputRequired | A2ATaskState::AuthRequired => false,
-    }
-}
-
-fn validate_transition(
+fn has_completion_evidence(
     connection: &Connection,
-    current: &A2ATaskRecord,
-    transition: &A2ATaskTransition,
-) -> Result<(), A2ATaskStoreError> {
-    if is_terminal(current.state()) {
-        return Err(A2ATaskStoreError::InvalidTransition);
-    }
-    let allowed = match current.state() {
-        A2ATaskState::Submitted => matches!(
-            transition.state(),
-            A2ATaskState::Working
-                | A2ATaskState::Completed
-                | A2ATaskState::Failed
-                | A2ATaskState::Rejected
-                | A2ATaskState::Canceled
-        ),
-        A2ATaskState::Working => matches!(
-            transition.state(),
-            A2ATaskState::Completed
-                | A2ATaskState::Failed
-                | A2ATaskState::Rejected
-                | A2ATaskState::Canceled
-        ),
-        _ => false,
-    };
-    if !allowed
-        || transition.occurred_at_unix_milliseconds() < current.updated_at_unix_milliseconds()
-    {
-        return Err(A2ATaskStoreError::InvalidTransition);
-    }
-    match transition.state() {
-        A2ATaskState::Completed if transition.terminal_reason().is_some() => {
-            return Err(A2ATaskStoreError::InvalidTransition);
-        }
-        A2ATaskState::Failed | A2ATaskState::Rejected | A2ATaskState::Canceled
-            if transition.terminal_reason().is_none() =>
-        {
-            return Err(A2ATaskStoreError::InvalidTransition);
-        }
-        A2ATaskState::Working if transition.terminal_reason().is_some() => {
-            return Err(A2ATaskStoreError::InvalidTransition);
-        }
-        _ => {}
-    }
-    if transition.state() == A2ATaskState::Completed {
-        let evidence: bool = connection
-            .query_row(
-                "SELECT EXISTS (
+    key: &A2ATaskKey,
+) -> Result<bool, A2ATaskStoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS (
                     SELECT 1 FROM a2a_task_message
                     WHERE agent_id = ?1 AND tenant_id = ?2 AND task_id = ?3 AND role = 2
                     UNION ALL
                     SELECT 1 FROM a2a_task_artifact
                     WHERE agent_id = ?1 AND tenant_id = ?2 AND task_id = ?3 AND complete = 1
                  )",
-                params![
-                    current.key().agent_id().as_str(),
-                    tenant_value(current.key()),
-                    current.key().task_id().as_str()
-                ],
-                |row| row.get(0),
-            )
-            .map_err(|_| A2ATaskStoreError::Storage)?;
-        if !evidence {
-            return Err(A2ATaskStoreError::InvalidTransition);
-        }
-    }
-    Ok(())
+            params![
+                key.agent_id().as_str(),
+                tenant_value(key),
+                key.task_id().as_str()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| A2ATaskStoreError::Storage)
 }
 
 fn insert_status(
@@ -2366,23 +2216,6 @@ fn task_key_from_storage(
         },
         A2ATaskId::parse(task_id).map_err(|_| A2ATaskStoreError::CorruptData)?,
     ))
-}
-
-fn terminal_reasons_equal(
-    left: Option<&A2ATerminalReason>,
-    right: Option<&A2ATerminalReason>,
-) -> bool {
-    left.map(A2ATerminalReason::as_str) == right.map(A2ATerminalReason::as_str)
-}
-
-const fn is_terminal(state: A2ATaskState) -> bool {
-    matches!(
-        state,
-        A2ATaskState::Completed
-            | A2ATaskState::Failed
-            | A2ATaskState::Canceled
-            | A2ATaskState::Rejected
-    )
 }
 
 const fn state_code(state: A2ATaskState) -> i64 {

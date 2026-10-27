@@ -7,6 +7,9 @@ mod policy;
 mod record;
 mod store;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 pub use error::A2ATaskStoreError;
 pub use model::{
     A2ATaskArtifact, A2ATaskCreation, A2ATaskKey, A2ATaskMessage, A2ATaskMessageRole,
