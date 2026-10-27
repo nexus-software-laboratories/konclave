@@ -16,6 +16,7 @@ $expectedContracts = @(
     'generic-client'
     'installer-lifecycle'
     'local-delivery-diagnostics'
+    'native-storage'
     'profile-lifecycle'
     'pairing-rendezvous'
     'response-continuation'
@@ -35,6 +36,7 @@ $workflowByContract = [ordered]@{
     'generic-client' = 'generic-client-conformance.yml'
     'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
     'local-delivery-diagnostics' = 'local-delivery-diagnostics-conformance.yml'
+    'native-storage' = 'native-storage-conformance.yml'
     'profile-lifecycle' = 'profile-lifecycle-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
     'short-code-pairing' = 'short-code-pairing-conformance.yml'
@@ -132,6 +134,8 @@ $ownedCases = [ordered]@{
         'scripts/installation/Install-Konclave.ps1'
     'local-delivery-diagnostics' =
         'crates/Konclave.DomainCore/src/delivery_diagnostics.rs'
+    'native-storage' =
+        'crates/Konclave.SecretStorage/src/shared_mls_storage.rs'
     'profile-lifecycle' =
         'apps/Konclave.LocalDaemon/src/profile_lifecycle.rs'
     'pairing-rendezvous' =
