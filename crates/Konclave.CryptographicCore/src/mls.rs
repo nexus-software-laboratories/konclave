@@ -12,7 +12,7 @@ use KonclaveProtocolContracts::v1::{
     encode_conversation_state, encode_membership_change, encode_membership_commit_bundle,
     encode_membership_control,
 };
-use KonclaveSecretStorage::SealedSqliteMlsStorage;
+use KonclaveSecretStorage::SealedMlsStorageHandle;
 use mls_rs::client::MlsError;
 use mls_rs::client_builder::{
     BaseConfig, PaddingMode, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider,
@@ -76,7 +76,7 @@ enum KonclaveStorage {
         groups: mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage,
         key_packages: mls_rs::storage_provider::in_memory::InMemoryKeyPackageStorage,
     },
-    Persistent(SealedSqliteMlsStorage),
+    Persistent(SealedMlsStorageHandle),
 }
 
 impl KonclaveStorage {
@@ -218,16 +218,19 @@ impl MlsConversationClient {
         Self::new_with_storage(material, KonclaveStorage::memory())
     }
 
-    /// Creates an MLS client backed by sealed SQLite group and KeyPackage storage.
+    /// Creates an MLS client over explicitly supplied sealed group/KeyPackage storage.
+    ///
+    /// Existing SQLite adapters remain accepted. Generic sealed backends use the
+    /// same project sealing boundary without a local-profile path in this API.
     ///
     /// # Errors
     ///
     /// Returns a typed cryptographic error when client configuration fails.
     pub fn with_storage(
         material: crate::ConversationSigningMaterial,
-        storage: SealedSqliteMlsStorage,
+        storage: impl Into<SealedMlsStorageHandle>,
     ) -> Result<Self, KonclaveCryptographicError> {
-        Self::new_with_storage(material, KonclaveStorage::Persistent(storage))
+        Self::new_with_storage(material, KonclaveStorage::Persistent(storage.into()))
     }
 
     fn new_with_storage(
@@ -2313,6 +2316,25 @@ const fn mls_failure(operation: &'static str) -> KonclaveCryptographicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_client_accepts_an_explicit_sealed_non_sqlite_backend() {
+        use KonclaveSecretStorage::{ExternalWrappingKeyProvider, SealedMlsStorage, SecretSealer};
+
+        let device = DeviceIdentity::generate().unwrap();
+        let conversation_id = ConversationId::from_bytes([76; ConversationId::LENGTH]);
+        let material = device
+            .create_conversation_signing_material(conversation_id)
+            .unwrap();
+        let sealer =
+            SecretSealer::from_provider(ExternalWrappingKeyProvider::from_bytes([42; 32])).unwrap();
+        let storage =
+            SealedMlsStorageHandle::from(SealedMlsStorage::new(KonclaveStorage::memory(), sealer));
+        let client = MlsConversationClient::with_storage(material, storage.clone()).unwrap();
+        let group = client.create_group().unwrap();
+        assert_eq!(group.epoch(), 0);
+        assert!(storage.contains_group(conversation_id.as_bytes()).unwrap());
+    }
 
     #[test]
     fn membership_authorization_digest_vector_is_stable() {

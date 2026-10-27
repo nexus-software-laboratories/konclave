@@ -53,14 +53,23 @@ by generating a replacement key for an existing profile.
 backend and commits one group-state update plus all epoch changes in a single SQLite
 transaction. SQLite rows never contain a wrapping key or private MLS byte.
 
+`SealedMlsStorageHandle` shares an already-sealed backend through one owned
+synchronous handle. Construction accepts `SealedMlsStorage<S>` or the existing
+SQLite adapter, not an arbitrary unsealed provider. Clones share the backend and
+wrapping-key ownership rather than copying keys. A poisoned storage owner fails
+closed. Hosts still own backend atomicity, durability and blocking execution.
+
 `ConversationSigningMaterial` seals the conversation-scoped signature key together
 with its authenticated device-root binding. Its associated data binds the local
 profile and conversation identifiers. Reopening verifies the binding signature,
 conversation identifier, and signing private/public key relationship before mls-rs
 receives the key.
 
-`MlsConversationClient::with_storage` configures the same sealed SQLite adapter as
-both the mls-rs KeyPackage repository and group-state storage. The cryptographic
+`MlsConversationClient::with_storage` accepts a supplied sealed handle or any
+project sealed adapter convertible into it. Existing SQLite calls remain valid;
+generic sealed backends no longer require a SQLite/local-profile type in this
+constructor. It configures that same backend as both the mls-rs KeyPackage repository
+and group-state storage. The cryptographic
 wrapper persists:
 
 - new and joined groups before returning them;
@@ -104,3 +113,10 @@ The default feature set tests native custody plus SQLite. CI also tests:
 Cryptographic integration tests additionally reopen signing material, KeyPackages,
 groups, pending joins, pending commits, application ratchets, and removed-device
 tombstones across independent SQLite handles.
+
+The draft-full `Native storage conformance` gate tests external-provider and SQLite
+sealed-storage modes, shared-handle ownership/failure behavior, and cryptographic
+client integration. A sealed in-memory backend proves composition, not process
+durability. This storage seam does not itself extract the daemon's conversation
+journals, membership recovery, authorization or application orchestration into a
+complete standalone native session.

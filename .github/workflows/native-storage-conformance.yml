@@ -69,3 +69,11 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
         run: ./scripts/ci/Test-ComponentValidationScope.ps1
+      - name: Verify native cryptographic client integration
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --package KonclaveCryptographicCore -- --check
+          cargo test --locked --package KonclaveCryptographicCore
+          cargo clippy --locked --package KonclaveCryptographicCore --all-targets -- -D warnings
