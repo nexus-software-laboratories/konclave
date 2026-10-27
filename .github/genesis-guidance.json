@@ -222,6 +222,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0031-embeddable-durable-native-client.md",
+        "title": "ADR 0031: Embeddable durable native client",
+        "section": "Architecture",
+        "order": 310,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
