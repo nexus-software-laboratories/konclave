@@ -14,6 +14,15 @@ function Get-ComponentValidationContracts {
             '^third_party/a2a/'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
+        'a2a-task-store' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/a2a-task-store-conformance\.yml$'
+            '^crates/Konclave\.(?:A2AContracts|A2ADomain|A2ATaskStore|A2ATaskStoreSqlite|BoundedDocuments|DomainCore)/'
+            '^docs/(?:development/a2a-task-store|adr/adr-0014-a2a-task-projection-store)\.md$'
+            '^third_party/a2a/'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'client-runtime-config' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'

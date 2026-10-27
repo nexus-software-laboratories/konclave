@@ -10,6 +10,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $contracts = Get-ComponentValidationContracts
 $expectedContracts = @(
     'a2a-discovery'
+    'a2a-task-store'
     'client-runtime-config'
     'external-recipes'
     'generic-client'
@@ -28,6 +29,7 @@ if (($contracts.Keys -join ',') -cne ($expectedContracts -join ',')) {
 
 $workflowByContract = [ordered]@{
     'a2a-discovery' = 'a2a-discovery-conformance.yml'
+    'a2a-task-store' = 'a2a-task-store-conformance.yml'
     'client-runtime-config' = 'client-runtime-config-conformance.yml'
     'external-recipes' = 'recipe-conformance.yml'
     'generic-client' = 'generic-client-conformance.yml'
@@ -116,6 +118,10 @@ foreach ($path in @(
 $ownedCases = [ordered]@{
     'a2a-discovery' =
         'crates/Konclave.A2ADiscovery/src/catalog.rs'
+    'a2a-task-store' = @(
+        'crates/Konclave.A2ATaskStore/src/policy.rs'
+        'crates/Konclave.BoundedDocuments/src/lib.rs'
+    )
     'client-runtime-config' =
         'extensions/Konclave.HostExtension/src/service/config.ts'
     'external-recipes' =
@@ -140,14 +146,31 @@ $ownedCases = [ordered]@{
         'crates/Konclave.DomainCore/src/response_continuation.rs'
 }
 foreach ($entry in $ownedCases.GetEnumerator()) {
-    $selected = Get-ComponentValidationDecision `
-        -Contract $entry.Key `
-        -EventName pull_request `
-        -ChangedFiles @($entry.Value)
-    if (-not $selected) {
-        throw "Owned component change did not select '$($entry.Key)'."
+    foreach ($ownedPath in @($entry.Value)) {
+        $selected = Get-ComponentValidationDecision `
+            -Contract $entry.Key `
+            -EventName pull_request `
+            -ChangedFiles @($ownedPath)
+        if (-not $selected) {
+            throw "Owned component change did not select '$($entry.Key)': $ownedPath"
+        }
+        Write-Output "owned change: contract=$($entry.Key), path=$ownedPath, run=True"
     }
-    Write-Output "owned change: contract=$($entry.Key), run=True"
+}
+
+foreach ($path in @(
+    'crates/Konclave.A2ATaskStore/src/policy.rs'
+    'crates/Konclave.A2ATaskStoreSqlite/tests/store.rs'
+)) {
+    foreach ($contract in $expectedContracts) {
+        $selected = Get-ComponentValidationDecision `
+            -Contract $contract `
+            -EventName pull_request `
+            -ChangedFiles @($path)
+        if ($selected -ne ($contract -ceq 'a2a-task-store')) {
+            throw "Task-store changes over-select '$contract': $path"
+        }
+    }
 }
 
 foreach ($path in @(

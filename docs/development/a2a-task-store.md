@@ -10,7 +10,8 @@ store and its public SQLite reference. ADR 0014 owns the durable decision and tr
 - the synchronous semantic store trait;
 - task keys, creation, transitions, messages, canonical artifact records, terminal
   reasons, and retention outcomes;
-- domain-separated task, message, and artifact identity digests; and
+- domain-separated task, message, and artifact identity digests;
+- pure transition, retry, durable-shape, and status-history policy; and
 - persistence result types that contain no generated A2A DTO.
 
 `Konclave.A2ATaskStoreSqlite` owns schema version `1` and the complete single-gateway
@@ -97,6 +98,37 @@ digest. Gateway paths accept only deterministic bytes produced by the ADR 0017
 artifact validator; the store still never parses generated A2A DTOs or dereferences a
 URL.
 
+## Shared policy and adapter conformance
+
+`plan_a2a_task_transition` operates on the current record selected inside the
+adapter's write transaction. It first reconciles the immediately preceding exact
+retry, preserving the original timestamp and avoiding any query for already-pruned
+completion evidence. A new transition then receives either `Apply` or
+`RequireCompletionEvidence`. The latter requires an Agent-role message or complete
+artifact for the exact task, read under that same transaction and checked through
+`validate_completion_evidence` before publication.
+
+The shared shape, status-reason, and complete-history validators consume already
+decoded, bounded persistence facts. They do not authorize a tenant, verify native
+membership, acquire a lock, query a database, validate an immutable identity digest,
+or replace context-binding checks. Each adapter retains those responsibilities.
+SQLite uses these decisions without changing its schema or transaction boundaries.
+
+The optional `test-support` feature exports `assert_a2a_task_store_contract` and
+`A2ATaskStoreContractFixture`. A consumer supplies a fresh isolated fixture for each
+case and maps the shared test limits into its backend configuration. Opening the
+fixture again must create a fresh handle to the same committed state, not reset
+storage or return an in-memory copy. Fixtures own cleanup after all handles have
+been dropped. The feature has no default activation and is intended only for tests.
+
+The shared runner executes the extracted semantic cases plus pruned-completion retry
+recovery. It includes real independent-handle generation races, absent/present tenant
+and context isolation, both completion-evidence alternatives, foreign/user/incomplete
+evidence rejection, snapshots, exact/conflicting retries, capacity and retention.
+SQLite-specific schema, configuration, file, and corruption cases remain in the
+SQLite package. One runner assertion represents the shared cases in Cargo's test
+count; extracting them does not remove their assertions.
+
 ## SQLite behavior
 
 The adapter:
@@ -145,7 +177,19 @@ and orphaned context binding are removed.
 
 ## Verification
 
-The SQLite suite covers:
+The draft-full `A2A task-store conformance` check executes:
+
+```shell
+cargo fmt --package KonclaveA2ATaskStore --package KonclaveA2ATaskStoreSqlite -- --check
+cargo test --locked --package KonclaveA2ATaskStore --no-default-features
+cargo test --locked --package KonclaveA2ATaskStore --all-features
+cargo test --locked --package KonclaveA2ATaskStoreSqlite
+cargo clippy --locked --package KonclaveA2ATaskStore --package KonclaveA2ATaskStoreSqlite --all-targets --all-features -- -D warnings
+pwsh ./scripts/ci/Test-ComponentValidationScope.ps1
+```
+
+The SQLite reference runs the shared suite through its fixture, alongside its own
+database-specific cases. Together they cover:
 
 - exact create retry, changed-content conflict, and process reopen;
 - context, agent, tenant, conversation, and target isolation;

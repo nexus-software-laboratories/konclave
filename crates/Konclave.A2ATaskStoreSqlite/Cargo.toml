@@ -14,4 +14,5 @@ sha2.workspace = true
 
 [dev-dependencies]
 KonclaveA2AContracts = { path = "../Konclave.A2AContracts" }
+KonclaveA2ATaskStore = { path = "../Konclave.A2ATaskStore", features = ["test-support"] }
 tempfile = "3.27.0"
