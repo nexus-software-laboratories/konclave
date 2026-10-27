@@ -105,6 +105,11 @@ official SDK provenance. Exact A2A identities are selected by release tag so a f
 protocol or SDK upgrade adds a verifier profile without changing the meaning of an
 older immutable manifest.
 
+`protocol-v1.0.0-alpha.3` is an additive source/SDK snapshot with the same v1 wire
+and upstream A2A profile. It publishes the shared task-store lifecycle policy and
+optional portable adapter assertions, binds the current schema and dependency
+snapshot, and does not claim a new backend or daemon-independent native runtime.
+
 Continuous integration checks out a shallow revision without tags, so a locally
 missing tag does not prove that a release is unpublished. The verifier asks the
 origin remote, shallow-fetches the exact release tag when it exists, and fails closed
