@@ -338,7 +338,7 @@
       "conformanceProfile": {
         "path": "conformance/a2a/tck-v1.0.1.json",
         "bytes": 14082,
-        "sha256": "a94caee59d5f432ff2d1f128260f2550e4db652c98c05e721b532f3d57d0adfc",
+        "sha256": "7bbfbf75c30fb61aab1ed10ca633692c571214fc9691f146da09127605459a03",
         "supportedMustRequirements": 35,
         "inapplicablePasses": 2,
         "allowedFailures": 18,
