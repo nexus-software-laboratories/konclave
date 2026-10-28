@@ -214,7 +214,9 @@ fn application_failure_code(error: &ApplicationServiceError) -> &'static str {
         ApplicationServiceError::Relay(error) => client_failure_code(error),
         ApplicationServiceError::Conversation(error) => conversation_failure_code(error),
         ApplicationServiceError::PolicyStorage(error) => profile_store_failure_code(error),
-        ApplicationServiceError::Task | ApplicationServiceError::Worker(_) => "application_worker_failed",
+        ApplicationServiceError::Task | ApplicationServiceError::Worker(_) => {
+            "application_worker_failed"
+        }
         ApplicationServiceError::Protocol => "application_protocol_failure",
         ApplicationServiceError::LocalPolicyProposal => "application_local_policy_proposal",
         ApplicationServiceError::PolicyProposalMismatch => "application_policy_proposal_mismatch",

@@ -1,26 +1,25 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
-use KonclaveClientLibrary::native::{
-    NativeApplicationRequest, NativeSession, NativeSessionError, NativeSessionHost,
-    validate_native_acknowledgment,
-};
 pub(crate) use KonclaveClientLibrary::native::{
     NativeAcceptedMembership as SentMembership, NativeReplayBatch as ReplayBatch,
     NativeSentApplication as SentApplication,
 };
+use KonclaveClientLibrary::native::{
+    NativeApplicationRequest, NativeSession, NativeSessionError, NativeSessionHost,
+    validate_native_acknowledgment,
+};
+use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
 use KonclaveCryptographicCore::{
     MlsWelcome, derive_collaboration_policy_digest,
     derive_collaboration_policy_proposal_message_id,
     derive_collaboration_policy_response_message_id,
 };
 use KonclaveDomainCore::{
-    AcknowledgeRequest, ApplicationContent, CollaborationPolicyDigest,
-    CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
-    CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
-    ConversationRole, DeviceId, JoinProof, MessageId, ReplayPage,
-    ReplayRequest,
+    AcknowledgeRequest, ApplicationContent, CollaborationPolicyDigest, CollaborationPolicyProposal,
+    CollaborationPolicyProposalId, CollaborationPolicyResponse, CollaborationPolicyResponseOutcome,
+    CollaborationPolicyRevocation, ConversationId, ConversationRole, DeviceId, JoinProof,
+    MessageId, ReplayPage, ReplayRequest,
 };
 use KonclaveProtocolContracts::v1::{
     decode_collaboration_policy_bundle, decode_join_proof, encode_collaboration_policy_bundle,
@@ -30,15 +29,15 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use crate::activity::ProfileActivityGuard;
-use crate::native_session::DaemonNativeHost;
-use crate::native_workers::{NativeWorkerError, NativeWorkers};
 use crate::conversation::{
     ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
     MembershipRequestState,
 };
+use crate::native_session::DaemonNativeHost;
+use crate::native_workers::{NativeWorkerError, NativeWorkers};
 use crate::persistence::{
-    CollaborationActionAuthorization, CollaborationPolicyActivationOperation,
-    HistoryPage, ProfileStoreError, StoredCollaborationPolicyProposal,
+    CollaborationActionAuthorization, CollaborationPolicyActivationOperation, HistoryPage,
+    ProfileStoreError, StoredCollaborationPolicyProposal,
 };
 
 /// Outbound application input with caller-supplied display and expiry times.
@@ -369,20 +368,22 @@ where
             request.proposal_id,
         );
         let store = self.conversations.store();
-        let (operation, canonical_bundle) = self.workers.run(move || {
-            let operation = store.collaboration_policy_proposal_operation(
-                request.conversation_id,
-                message_id,
-                request.proposal_id,
-            )?;
-            let bundle = store
-                .collaboration_policy_bundle(operation.policy_digest)?
-                .ok_or(ProfileStoreError::CorruptData)?;
-            let canonical_bundle = encode_collaboration_policy_bundle(&bundle)
-                .map_err(|_| ProfileStoreError::CorruptData)?;
-            Ok::<_, ProfileStoreError>((operation, canonical_bundle))
-        })
-        .await??;
+        let (operation, canonical_bundle) = self
+            .workers
+            .run(move || {
+                let operation = store.collaboration_policy_proposal_operation(
+                    request.conversation_id,
+                    message_id,
+                    request.proposal_id,
+                )?;
+                let bundle = store
+                    .collaboration_policy_bundle(operation.policy_digest)?
+                    .ok_or(ProfileStoreError::CorruptData)?;
+                let canonical_bundle = encode_collaboration_policy_bundle(&bundle)
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+                Ok::<_, ProfileStoreError>((operation, canonical_bundle))
+            })
+            .await??;
         let proposal = CollaborationPolicyProposal::new(
             request.proposal_id,
             operation.policy_digest,
@@ -560,20 +561,34 @@ where
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
         let native = self.native_submission().await?;
-        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
-        if let Some(existing) = Self::find_add_member(&native, conversation_id, &join_proof).await? {
+        native
+            .session
+            .retry_applications_with_gate(now_unix_seconds, &native.gate)
+            .await?;
+        if let Some(existing) = Self::find_add_member(&native, conversation_id, &join_proof).await?
+        {
             return Self::resume_membership(&native, existing).await;
         }
-        native.session.retry_memberships_with_gate(&native.gate).await?;
-        let prepared = native.host.run(move |conversations| {
-            conversations.prepare_add_member(
-                conversation_id,
-                join_proof,
-                now_unix_seconds,
-                expires_at_unix_seconds,
-            )
-        }).await?;
-        native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into)
+        native
+            .session
+            .retry_memberships_with_gate(&native.gate)
+            .await?;
+        let prepared = native
+            .host
+            .run(move |conversations| {
+                conversations.prepare_add_member(
+                    conversation_id,
+                    join_proof,
+                    now_unix_seconds,
+                    expires_at_unix_seconds,
+                )
+            })
+            .await?;
+        native
+            .session
+            .submit_membership_with_gate(prepared, &native.gate)
+            .await
+            .map_err(Into::into)
     }
 
     /// Resumes an exact add-member journal without creating one when no request was
@@ -589,7 +604,10 @@ where
         now_unix_seconds: u64,
     ) -> Result<Option<SentMembership>, ApplicationServiceError> {
         let native = self.native_submission().await?;
-        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
+        native
+            .session
+            .retry_applications_with_gate(now_unix_seconds, &native.gate)
+            .await?;
         match Self::find_add_member(&native, conversation_id, join_proof).await? {
             Some(existing) => Self::resume_membership(&native, existing).await.map(Some),
             None => Ok(None),
@@ -609,20 +627,38 @@ where
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
         let native = self.native_submission().await?;
-        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
-        if let Some(existing) = native.host.run(move |conversations| {
-            conversations.resume_remove_member(conversation_id, device_id)
-        })
-        .await?
+        native
+            .session
+            .retry_applications_with_gate(now_unix_seconds, &native.gate)
+            .await?;
+        if let Some(existing) = native
+            .host
+            .run(move |conversations| {
+                conversations.resume_remove_member(conversation_id, device_id)
+            })
+            .await?
         {
             return Self::resume_membership(&native, existing).await;
         }
-        native.session.retry_memberships_with_gate(&native.gate).await?;
-        let prepared = native.host.run(move |conversations| {
-            conversations.prepare_remove_member(conversation_id, device_id, expires_at_unix_seconds)
-        })
-        .await?;
-        native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into)
+        native
+            .session
+            .retry_memberships_with_gate(&native.gate)
+            .await?;
+        let prepared = native
+            .host
+            .run(move |conversations| {
+                conversations.prepare_remove_member(
+                    conversation_id,
+                    device_id,
+                    expires_at_unix_seconds,
+                )
+            })
+            .await?;
+        native
+            .session
+            .submit_membership_with_gate(prepared, &native.gate)
+            .await
+            .map_err(Into::into)
     }
 
     /// Changes one member role through a durable encrypted membership commit.
@@ -639,25 +675,39 @@ where
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
         let native = self.native_submission().await?;
-        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
-        if let Some(existing) = native.host.run(move |conversations| {
-            conversations.resume_change_role(conversation_id, device_id, role)
-        })
-        .await?
+        native
+            .session
+            .retry_applications_with_gate(now_unix_seconds, &native.gate)
+            .await?;
+        if let Some(existing) = native
+            .host
+            .run(move |conversations| {
+                conversations.resume_change_role(conversation_id, device_id, role)
+            })
+            .await?
         {
             return Self::resume_membership(&native, existing).await;
         }
-        native.session.retry_memberships_with_gate(&native.gate).await?;
-        let prepared = native.host.run(move |conversations| {
-            conversations.prepare_change_role(
-                conversation_id,
-                device_id,
-                role,
-                expires_at_unix_seconds,
-            )
-        })
-        .await?;
-        native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into)
+        native
+            .session
+            .retry_memberships_with_gate(&native.gate)
+            .await?;
+        let prepared = native
+            .host
+            .run(move |conversations| {
+                conversations.prepare_change_role(
+                    conversation_id,
+                    device_id,
+                    role,
+                    expires_at_unix_seconds,
+                )
+            })
+            .await?;
+        native
+            .session
+            .submit_membership_with_gate(prepared, &native.gate)
+            .await
+            .map_err(Into::into)
     }
 
     /// Verifies one relay Commit receipt and accepts its encrypted Welcome.
@@ -702,7 +752,8 @@ where
         let after_cursor = cursor
             .checked_sub(1)
             .ok_or(ApplicationServiceError::Protocol)?;
-        let routing_id = native.host
+        let routing_id = native
+            .host
             .run(move |conversations| conversations.pending_join_route(conversation_id))
             .await?;
         let page = self
@@ -722,14 +773,16 @@ where
             return Err(ApplicationServiceError::InvalidRelayResponse);
         }
         let receipt = receipt.clone();
-        native.host.run(move |conversations| {
-            if retain_pending_join {
-                conversations.accept_pairing_welcome(conversation_id, &welcome, &receipt)
-            } else {
-                conversations.accept_welcome(conversation_id, &welcome, &receipt)
-            }
-        })
-        .await
+        native
+            .host
+            .run(move |conversations| {
+                if retain_pending_join {
+                    conversations.accept_pairing_welcome(conversation_id, &welcome, &receipt)
+                } else {
+                    conversations.accept_welcome(conversation_id, &welcome, &receipt)
+                }
+            })
+            .await
     }
 
     /// Retries every bounded ready envelope in deterministic journal order.
@@ -746,7 +799,9 @@ where
         now_unix_seconds: u64,
     ) -> Result<usize, ApplicationServiceError> {
         let native = self.native_submission().await?;
-        native.session.retry_ready_with_gate(now_unix_seconds, &native.gate)
+        native
+            .session
+            .retry_ready_with_gate(now_unix_seconds, &native.gate)
             .await
             .map_err(Into::into)
     }
@@ -792,14 +847,17 @@ where
         let mut watch = self.transport.connect_watch(request).await?;
         let page = watch.next_page().await?;
         let processed = match self.operation_admission() {
-            Ok(admission) => self.process_page(
-                admission,
-                conversation_id,
-                routing_id,
-                after_cursor,
-                page,
-                now_unix_seconds,
-            ).await,
+            Ok(admission) => {
+                self.process_page(
+                    admission,
+                    conversation_id,
+                    routing_id,
+                    after_cursor,
+                    page,
+                    now_unix_seconds,
+                )
+                .await
+            }
             Err(error) => Err(error),
         };
         let closed = watch.close().await;
@@ -843,11 +901,16 @@ where
         let (request, routing_id, mut after_cursor) = {
             let admission = match self.operation_admission() {
                 Ok(admission) => admission,
-                Err(ApplicationServiceError::ProfileClosing) => return Ok(WatchConnectionExit::Shutdown),
+                Err(ApplicationServiceError::ProfileClosing) => {
+                    return Ok(WatchConnectionExit::Shutdown);
+                }
                 Err(error) => return Err(error),
             };
             let host = self.native_host(Arc::clone(&admission), None);
-            if !host.run(move |conversations| conversations.is_local_member(conversation_id)).await? {
+            if !host
+                .run(move |conversations| conversations.is_local_member(conversation_id))
+                .await?
+            {
                 return Ok(WatchConnectionExit::LocalMemberRemoved);
             }
             self.replay_request(conversation_id, 100, admission).await?
@@ -876,10 +939,12 @@ where
             // a second admission, so an admitted page never waits on the gate again.
             let admission = match self.operation_admission() {
                 Ok(admission) => admission,
-                Err(ApplicationServiceError::ProfileClosing) => return Ok(clean_watch_exit(
-                    watch_session.close().await,
-                    WatchConnectionExit::Shutdown,
-                )),
+                Err(ApplicationServiceError::ProfileClosing) => {
+                    return Ok(clean_watch_exit(
+                        watch_session.close().await,
+                        WatchConnectionExit::Shutdown,
+                    ));
+                }
                 Err(error) => return Err(error),
             };
             observe_page(&page);
@@ -894,7 +959,8 @@ where
             )
             .await?;
             after_cursor = next_cursor;
-            let still_member = self.native_host(admission, None)
+            let still_member = self
+                .native_host(admission, None)
                 .run(move |conversations| conversations.is_local_member(conversation_id))
                 .await?;
             if !still_member {
@@ -917,7 +983,8 @@ where
         limit: usize,
     ) -> Result<Vec<ConversationId>, ApplicationServiceError> {
         let conversations = self.conversations.clone();
-        self.workers.run(move || conversations.conversation_ids(after, limit))
+        self.workers
+            .run(move || conversations.conversation_ids(after, limit))
             .await?
             .map_err(Into::into)
     }
@@ -932,7 +999,8 @@ where
         conversation_id: ConversationId,
     ) -> Result<bool, ApplicationServiceError> {
         let conversations = self.conversations.clone();
-        self.workers.run(move || conversations.is_local_member(conversation_id))
+        self.workers
+            .run(move || conversations.is_local_member(conversation_id))
             .await?
             .map_err(Into::into)
     }
@@ -943,8 +1011,10 @@ where
         limit: u32,
         admission: Arc<ProfileActivityGuard>,
     ) -> Result<(ReplayRequest, KonclaveDomainCore::RoutingId, u64), ApplicationServiceError> {
-        let (routing_id, after_cursor) = self.native_host(admission, None)
-            .replay_position(conversation_id).await?;
+        let (routing_id, after_cursor) = self
+            .native_host(admission, None)
+            .replay_position(conversation_id)
+            .await?;
         let request = ReplayRequest::new(routing_id, after_cursor, limit)
             .map_err(|_| ApplicationServiceError::Protocol)?;
         Ok((request, routing_id, after_cursor))
@@ -974,7 +1044,13 @@ where
         now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
         self.native_session(self.native_host(admission, None))
-            .process_page(conversation_id, routing_id, after_cursor, page, now_unix_seconds)
+            .process_page(
+                conversation_id,
+                routing_id,
+                after_cursor,
+                page,
+                now_unix_seconds,
+            )
             .await
             .map_err(Into::into)
     }
@@ -991,11 +1067,10 @@ where
         limit: usize,
     ) -> Result<HistoryPage, ApplicationServiceError> {
         let conversations = self.conversations.clone();
-        self.workers.run(move || {
-            conversations.history(conversation_id, after_cursor, limit)
-        })
-        .await?
-        .map_err(Into::into)
+        self.workers
+            .run(move || conversations.history(conversation_id, after_cursor, limit))
+            .await?
+            .map_err(Into::into)
     }
 
     async fn find_add_member(
@@ -1007,10 +1082,12 @@ where
             &encode_join_proof(join_proof).map_err(|_| ApplicationServiceError::Protocol)?,
         )
         .map_err(|_| ApplicationServiceError::Protocol)?;
-        native.host.run(move |conversations| {
-            conversations.resume_add_member(conversation_id, &proof_for_lookup)
-        })
-        .await
+        native
+            .host
+            .run(move |conversations| {
+                conversations.resume_add_member(conversation_id, &proof_for_lookup)
+            })
+            .await
     }
 
     async fn resume_membership(
@@ -1018,7 +1095,11 @@ where
         existing: MembershipRequestState,
     ) -> Result<SentMembership, ApplicationServiceError> {
         match existing {
-            MembershipRequestState::Ready(prepared) => native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into),
+            MembershipRequestState::Ready(prepared) => native
+                .session
+                .submit_membership_with_gate(prepared, &native.gate)
+                .await
+                .map_err(Into::into),
             MembershipRequestState::Applied(accepted) => Ok(accepted),
         }
     }
@@ -1044,7 +1125,7 @@ pub(crate) fn validate_replay_page(
     after_cursor: u64,
     page: &ReplayPage,
 ) -> Result<(), ApplicationServiceError> {
-    validate_native_replay_page(after_cursor, page)
+    KonclaveClientLibrary::native::validate_native_replay_page(after_cursor, page)
         .map_err(|_| ApplicationServiceError::InvalidRelayResponse)
 }
 
@@ -1184,7 +1265,6 @@ mod tests {
     use KonclaveClientLibrary::{
         RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
     };
-    use KonclaveClientLibrary::native::validate_native_replay_page;
     use KonclaveDomainCore::{
         AcknowledgeRequest, AdapterConsumerId, AdapterLeaseId, ApplicationContent,
         CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
@@ -1212,23 +1292,54 @@ mod tests {
     #[test]
     fn native_failure_mapping_preserves_every_finite_daemon_category() {
         for (error, expected) in [
-            (NativeSessionError::Host(ApplicationServiceError::PolicyProposalMismatch), ApplicationServiceError::PolicyProposalMismatch),
-            (NativeSessionError::Relay(KonclaveClientError::TransportUnavailable), ApplicationServiceError::Relay(KonclaveClientError::TransportUnavailable)),
-            (NativeSessionError::Protocol, ApplicationServiceError::Protocol),
-            (NativeSessionError::IdempotencyConflict, ApplicationServiceError::IdempotencyConflict),
-            (NativeSessionError::OutboundExpired, ApplicationServiceError::OutboundExpired),
-            (NativeSessionError::OutboundRemoved, ApplicationServiceError::OutboundRemoved),
-            (NativeSessionError::InvalidRelayResponse, ApplicationServiceError::InvalidRelayResponse),
+            (
+                NativeSessionError::Host(ApplicationServiceError::PolicyProposalMismatch),
+                ApplicationServiceError::PolicyProposalMismatch,
+            ),
+            (
+                NativeSessionError::Relay(KonclaveClientError::TransportUnavailable),
+                ApplicationServiceError::Relay(KonclaveClientError::TransportUnavailable),
+            ),
+            (
+                NativeSessionError::Protocol,
+                ApplicationServiceError::Protocol,
+            ),
+            (
+                NativeSessionError::IdempotencyConflict,
+                ApplicationServiceError::IdempotencyConflict,
+            ),
+            (
+                NativeSessionError::OutboundExpired,
+                ApplicationServiceError::OutboundExpired,
+            ),
+            (
+                NativeSessionError::OutboundRemoved,
+                ApplicationServiceError::OutboundRemoved,
+            ),
+            (
+                NativeSessionError::InvalidRelayResponse,
+                ApplicationServiceError::InvalidRelayResponse,
+            ),
         ] {
             let mapped = ApplicationServiceError::from(error);
-            assert_eq!(std::mem::discriminant(&mapped), std::mem::discriminant(&expected));
+            assert_eq!(
+                std::mem::discriminant(&mapped),
+                std::mem::discriminant(&expected)
+            );
         }
-        assert!(matches!(ApplicationServiceError::from(NativeWorkerError::Closed), ApplicationServiceError::ProfileClosing));
-        assert!(matches!(ApplicationServiceError::from(NativeWorkerError::Task), ApplicationServiceError::Worker(NativeWorkerError::Task)));
+        assert!(matches!(
+            ApplicationServiceError::from(NativeWorkerError::Closed),
+            ApplicationServiceError::ProfileClosing
+        ));
+        assert!(matches!(
+            ApplicationServiceError::from(NativeWorkerError::Task),
+            ApplicationServiceError::Worker(NativeWorkerError::Task)
+        ));
         let mapped = ApplicationServiceError::from(NativeWorkerError::UnobservedOperation(
             Box::new(ConversationCoordinatorError::StateUnavailable),
         ));
-        let ApplicationServiceError::Worker(NativeWorkerError::UnobservedOperation(cause)) = mapped else {
+        let ApplicationServiceError::Worker(NativeWorkerError::UnobservedOperation(cause)) = mapped
+        else {
             panic!("native callback error source was not preserved");
         };
         assert!(cause.is::<ConversationCoordinatorError>());
@@ -1238,12 +1349,22 @@ mod tests {
     async fn admitted_native_operation_finishes_after_closing_without_readmitting() {
         let (_root, alice, _bob, conversation_id, _device) = paired_coordinators();
         let service = ApplicationService::new(alice.clone(), RecordingRelay::new(false));
-        let scoped = service.with_admission(Arc::new(alice.activity().try_begin().unwrap())).unwrap();
+        let scoped = service
+            .with_admission(Arc::new(alice.activity().try_begin().unwrap()))
+            .unwrap();
         alice.activity().begin_closing();
-        let sent = scoped.send(request(conversation_id, "admitted native operation")).await.unwrap();
+        let sent = scoped
+            .send(request(conversation_id, "admitted native operation"))
+            .await
+            .unwrap();
         assert_eq!(sent.conversation_id, conversation_id);
         assert_eq!(alice.activity().in_flight(), 1);
-        assert!(matches!(service.send(request(conversation_id, "new operation")).await, Err(ApplicationServiceError::ProfileClosing)));
+        assert!(matches!(
+            service
+                .send(request(conversation_id, "new operation"))
+                .await,
+            Err(ApplicationServiceError::ProfileClosing)
+        ));
         drop(scoped);
         assert_eq!(alice.activity().in_flight(), 0);
         service.shutdown_native_workers().await.unwrap();

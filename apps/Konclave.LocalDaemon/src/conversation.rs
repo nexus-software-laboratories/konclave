@@ -1,10 +1,9 @@
+pub(crate) use KonclaveClientLibrary::native::{
+    NativeAcceptedMembership as AcceptedMembership, OpenConversation, PreparedApplication,
+    PreparedMembership, ProcessedApplication, ProcessedMembership,
+};
 use KonclaveClientLibrary::native::{
     NativeApplicationRequest, NativeConversationError, NativeConversationProcessor,
-};
-pub(crate) use KonclaveClientLibrary::native::{
-    NativeAcceptedMembership as AcceptedMembership, OpenConversation,
-    PreparedApplication, PreparedMembership, ProcessedApplication,
-    ProcessedMembership,
 };
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};

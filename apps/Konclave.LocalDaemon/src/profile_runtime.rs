@@ -467,22 +467,25 @@ mod tests {
         ProfileHost, ProfileHostOptions, ProfileRunState, ProfileServices,
         legacy_adapter_attachment,
     };
-    use crate::runtime::initialize_profile;
     use crate::application::ApplicationService;
     use crate::conversation::ConversationCoordinatorError;
     use crate::native_workers::NativeWorkerError;
+    use crate::runtime::initialize_profile;
     use crate::test_support::{TestProfileRoot, TestRelay};
 
     async fn assert_native_callback_shutdown(failure: bool, component_finishes_first: bool) {
         let token = [88; RelayAccessCredential::LENGTH];
         let relay = TestRelay::start_static(token).await;
         let root = TestProfileRoot::new();
-        let mut runtime = initialize_profile(root.config("native-ownership")).await.unwrap();
+        let mut runtime = initialize_profile(root.config("native-ownership"))
+            .await
+            .unwrap();
         let activity = runtime.conversations.activity().clone();
         let transport = RelayClient::new(
             RelayEndpoint::parse(&relay.endpoint).unwrap(),
             RelayAccessCredential::from_bytes(token),
-        ).unwrap();
+        )
+        .unwrap();
         let applications = ApplicationService::new(runtime.conversations.clone(), transport);
         let workers = applications.worker_owner_for_test();
         runtime.applications = Some(applications);
@@ -491,29 +494,33 @@ mod tests {
         let (release, blocked) = std::sync::mpsc::channel();
         let requester_workers = workers.clone();
         let requester = tokio::spawn(async move {
-            requester_workers.run(move || {
-                entered.send(()).unwrap();
-                blocked.recv().unwrap();
-                drop(admission);
-                if failure {
-                    Err(ConversationCoordinatorError::StateUnavailable)
-                } else {
-                    Ok(())
-                }
-            }).await
+            requester_workers
+                .run(move || {
+                    entered.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    drop(admission);
+                    if failure {
+                        Err(ConversationCoordinatorError::StateUnavailable)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
         });
         running.await.unwrap();
         requester.abort();
         assert!(requester.await.unwrap_err().is_cancelled());
         let (finished, finishing) = oneshot::channel();
         let options = ProfileHostOptions::default().with_attachment(Box::new(
-            move |_: &ProfileServices, mut stop| Box::pin(async move {
-                tokio::select! {
-                    _ = finishing => {}
-                    _ = stop.changed() => {}
-                }
-                Ok(())
-            }),
+            move |_: &ProfileServices, mut stop| {
+                Box::pin(async move {
+                    tokio::select! {
+                        _ = finishing => {}
+                        _ = stop.changed() => {}
+                    }
+                    Ok(())
+                })
+            },
         ));
         let host = ProfileHost::start(runtime, options).unwrap();
         let state = host.watch_run_state();
@@ -533,7 +540,8 @@ mod tests {
         poll_fn(|context| {
             assert!(matches!(joined.as_mut().poll(context), Poll::Pending));
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         release.send(()).unwrap();
         let result = joined.await;
         if failure {
@@ -545,7 +553,9 @@ mod tests {
             assert_eq!(*state.borrow(), ProfileRunState::Stopped);
         }
         assert!(matches!(
-            workers.run(|| Ok::<_, ConversationCoordinatorError>(())).await,
+            workers
+                .run(|| Ok::<_, ConversationCoordinatorError>(()))
+                .await,
             Err(NativeWorkerError::Closed)
         ));
         assert_eq!(activity.in_flight(), 0);
