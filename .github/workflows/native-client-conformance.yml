@@ -68,6 +68,10 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: cargo test --locked --package KonclaveClientLibrary --lib native::session_tests
+      - name: Verify durable native example storage foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --test native_service_storage
       - name: Verify owned native worker foundation
         if: steps.scope.outputs.run == 'true'
         shell: bash

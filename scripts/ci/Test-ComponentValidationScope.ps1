@@ -138,6 +138,8 @@ $ownedCases = [ordered]@{
         'crates/Konclave.DomainCore/src/delivery_diagnostics.rs'
     'native-client' = @(
         'crates/Konclave.ClientLibrary/src/native/processor.rs'
+        'crates/Konclave.ClientLibrary/examples/native_service/storage.rs'
+        'crates/Konclave.ClientLibrary/tests/native_service_storage.rs'
         'crates/Konclave.CryptographicCore/src/mls.rs'
         'crates/Konclave.SecretStorage/src/shared_mls_storage.rs'
         'crates/Konclave.ProtocolContracts/src/lib.rs'
