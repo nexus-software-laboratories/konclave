@@ -60,9 +60,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveClientLibrary -- --check
+          trap 'git diff -- crates/Konclave.ClientLibrary' EXIT
+          cargo fmt --package KonclaveClientLibrary
           cargo test --locked --package KonclaveClientLibrary --lib native::
           cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
+      - name: Verify native relay session foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --lib native::session_tests
       - name: Verify shared daemon native processing
         if: steps.scope.outputs.run == 'true'
         shell: bash
@@ -75,6 +80,10 @@ jobs:
           cargo test --locked --package KonclaveLocalDaemon --lib persistence::tests
           cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
           git diff --exit-code -- apps/Konclave.LocalDaemon
+      - name: Verify formatting leaves no source delta
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: git diff --exit-code -- crates/Konclave.ClientLibrary apps/Konclave.LocalDaemon
       - name: Verify conservative component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
