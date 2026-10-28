@@ -19,7 +19,26 @@ use fs4::{FileExt, TryLockError};
 const LOCK: &str = "native-service.lock";
 const GENERATION: &str = "native-service.generation";
 const SNAPSHOT: &str = "native-service.snapshot";
+const MLS_SNAPSHOT: &str = "native-service.mls";
 const MAGIC: &[u8; 8] = b"KNSGEN01";
+
+/// Fixed independent snapshots sharing the same exclusive owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotKind {
+    /// Application journal snapshot; preserves the original filename.
+    Journal,
+    /// Project-sealed MLS backing snapshot.
+    Mls,
+}
+
+impl SnapshotKind {
+    const fn filename(self) -> &'static str {
+        match self {
+            Self::Journal => SNAPSHOT,
+            Self::Mls => MLS_SNAPSHOT,
+        }
+    }
+}
 
 /// Hard ceiling, independently of any caller's codec or record limits.
 pub const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
@@ -112,11 +131,14 @@ impl ServiceStorage {
                 if !fresh_lock {
                     return Err(StorageError::InvalidGeneration);
                 }
-                match std::fs::symlink_metadata(directory.join(SNAPSHOT)) {
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-                    Ok(_) => return Err(StorageError::InvalidGeneration),
-                    Err(error) => return Err(error.into()),
+                for kind in [SnapshotKind::Journal, SnapshotKind::Mls] {
+                    match std::fs::symlink_metadata(directory.join(kind.filename())) {
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Ok(_) => return Err(StorageError::InvalidGeneration),
+                        Err(error) => return Err(error.into()),
+                    }
                 }
+                0
             }
             Err(error) => return Err(error),
         };
@@ -159,8 +181,20 @@ impl ServiceStorage {
     /// # Errors
     /// Rejects released/stale leases, oversized/nonregular files, and I/O failures.
     pub fn read_snapshot(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_slot(SnapshotKind::Journal)
+    }
+
+    /// Reads one fixed slot under the shared generation/release fence.
+    ///
+    /// # Errors
+    /// Returns ownership, bounded-file, allocation, or sanitized I/O failures.
+    pub fn read_slot(&self, kind: SnapshotKind) -> Result<Option<Vec<u8>>, StorageError> {
         let _owner = self.owned()?;
-        let mut file = match File::open(self.lease.directory.join(SNAPSHOT)) {
+        self.read_slot_owned(kind)
+    }
+
+    fn read_slot_owned(&self, kind: SnapshotKind) -> Result<Option<Vec<u8>>, StorageError> {
+        let mut file = match File::open(self.lease.directory.join(kind.filename())) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -192,11 +226,44 @@ impl ServiceStorage {
     /// Rejects stale ownership, oversize input, and I/O/sync failures. A failure
     /// after replacement may mean the new snapshot is visible; do not assume rollback.
     pub fn replace_snapshot(&self, bytes: &[u8]) -> Result<(), StorageError> {
-        self.replace_with(bytes, || {}, || {})
+        self.replace_slot(SnapshotKind::Journal, bytes)
+    }
+
+    /// Atomically replaces one fixed slot without changing any other slot.
+    ///
+    /// # Errors
+    /// Returns ownership, size, or I/O failures; post-replacement failures do not
+    /// imply rollback. There is no transaction spanning multiple slots.
+    pub fn replace_slot(&self, kind: SnapshotKind, bytes: &[u8]) -> Result<(), StorageError> {
+        self.replace_with(kind, bytes, || {}, || {})
+    }
+
+    /// Reloads, transforms, and atomically replaces one slot under the exact owner mutex.
+    ///
+    /// The closure must not reenter this owner. An error leaves the snapshot unchanged
+    /// unless replacement itself reports a post-commit sync failure.
+    ///
+    /// # Errors
+    /// Propagates closure errors and converts ownership, size, allocation, and I/O
+    /// failures into `E`. No independent snapshot cache is maintained.
+    pub fn update_slot<R, E: From<StorageError>>(
+        &self,
+        kind: SnapshotKind,
+        update: impl FnOnce(Option<&[u8]>) -> Result<(Vec<u8>, R), E>,
+    ) -> Result<R, E> {
+        let _owner = self.owned()?;
+        let current = self.read_slot_owned(kind)?;
+        let (bytes, result) = update(current.as_deref())?;
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(StorageError::TooLarge.into());
+        }
+        replace_file(&self.lease.directory, kind.filename(), &bytes)?;
+        Ok(result)
     }
 
     fn replace_with(
         &self,
+        kind: SnapshotKind,
         bytes: &[u8],
         admitted: impl FnOnce(),
         committed: impl FnOnce(),
@@ -206,7 +273,7 @@ impl ServiceStorage {
             return Err(StorageError::TooLarge);
         }
         admitted();
-        replace_file(&self.lease.directory, SNAPSHOT, bytes)?;
+        replace_file(&self.lease.directory, kind.filename(), bytes)?;
         committed();
         Ok(())
     }
@@ -234,7 +301,7 @@ impl ServiceStorage {
         admitted: impl FnOnce(),
         committed: impl FnOnce(),
     ) -> Result<(), StorageError> {
-        self.replace_with(bytes, admitted, committed)
+        self.replace_with(SnapshotKind::Journal, bytes, admitted, committed)
     }
 
     #[cfg(test)]

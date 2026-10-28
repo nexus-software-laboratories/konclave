@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use fs4::FileExt;
-use storage::{MAX_SNAPSHOT_BYTES, ServiceStorage, StorageError};
+use storage::{MAX_SNAPSHOT_BYTES, ServiceStorage, SnapshotKind, StorageError};
 use tempfile::TempDir;
 
 const GENERATION: &str = "native-service.generation";
@@ -25,6 +25,94 @@ fn generation(value: u64) -> [u8; 16] {
     record[..8].copy_from_slice(b"KNSGEN01");
     record[8..].copy_from_slice(&value.to_be_bytes());
     record
+}
+
+#[test]
+fn fixed_slots_are_independent_and_share_release_and_generation() {
+    let directory = directory();
+    let owner = ServiceStorage::open(directory.path()).unwrap();
+    owner.replace_snapshot(b"journal").unwrap();
+    owner.replace_slot(SnapshotKind::Mls, b"sealed mls").unwrap();
+    assert_eq!(owner.read_snapshot().unwrap().unwrap(), b"journal");
+    assert_eq!(
+        owner.read_slot(SnapshotKind::Mls).unwrap().unwrap(),
+        b"sealed mls"
+    );
+    let clone = owner.clone();
+    owner.release().unwrap();
+    let reopened = ServiceStorage::open(directory.path()).unwrap();
+    for kind in [SnapshotKind::Journal, SnapshotKind::Mls] {
+        assert_eq!(clone.read_slot(kind), Err(StorageError::Released));
+        assert_eq!(
+            clone.replace_slot(kind, b"stale"),
+            Err(StorageError::Released)
+        );
+        assert_eq!(
+            clone.update_slot(kind, |_| Ok::<_, StorageError>((vec![], ()))),
+            Err(StorageError::Released)
+        );
+    }
+    assert_eq!(reopened.read_snapshot().unwrap().unwrap(), b"journal");
+    assert_eq!(
+        reopened.read_slot(SnapshotKind::Mls).unwrap().unwrap(),
+        b"sealed mls"
+    );
+}
+
+#[test]
+fn fresh_initialization_rejects_either_orphan_slot() {
+    for filename in [SNAPSHOT, "native-service.mls"] {
+        let directory = directory();
+        fs::write(directory.path().join(filename), b"orphan").unwrap();
+        assert!(matches!(
+            ServiceStorage::open(directory.path()),
+            Err(StorageError::InvalidGeneration)
+        ));
+    }
+}
+
+#[test]
+fn shared_owner_updates_reload_without_lost_writes() {
+    let directory = directory();
+    let owner = ServiceStorage::open(directory.path()).unwrap();
+    let (admitted_tx, admitted_rx) = mpsc::channel();
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let first = owner.clone();
+    let worker = thread::spawn(move || {
+        first.update_slot(SnapshotKind::Mls, |current| {
+            assert!(current.is_none());
+            admitted_tx.send(()).unwrap();
+            continue_rx.recv().unwrap();
+            Ok::<_, StorageError>((b"first".to_vec(), ()))
+        })
+    });
+    admitted_rx.recv().unwrap();
+    let second = owner.clone();
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let competitor = thread::spawn(move || {
+        attempt_tx.send(()).unwrap();
+        second.update_slot(SnapshotKind::Mls, |current| {
+            let mut next = current.unwrap().to_vec();
+            next.extend_from_slice(b" second");
+            Ok::<_, StorageError>((next, ()))
+        })
+    });
+    attempt_rx.recv().unwrap();
+    continue_tx.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    competitor.join().unwrap().unwrap();
+    assert_eq!(
+        owner.read_slot(SnapshotKind::Mls).unwrap().unwrap(),
+        b"first second"
+    );
+    let rejected = owner.update_slot(SnapshotKind::Mls, |_| {
+        Err::<(Vec<u8>, ()), _>(StorageError::InvalidFile)
+    });
+    assert_eq!(rejected, Err(StorageError::InvalidFile));
+    assert_eq!(
+        owner.read_slot(SnapshotKind::Mls).unwrap().unwrap(),
+        b"first second"
+    );
 }
 
 #[test]
