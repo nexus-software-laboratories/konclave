@@ -190,6 +190,12 @@ struct PendingMembership {
     accepted_cursor: Option<u64>,
 }
 
+struct MembershipInboxRow {
+    stored: StoredRelayEnvelope,
+    transition: Option<(DeviceId, PendingMembership)>,
+    complete: bool,
+}
+
 struct Rows {
     counter: u64,
     cursor: u64,
@@ -199,6 +205,7 @@ struct Rows {
     envelope: Option<RelayEnvelope>,
     inbox: Option<InboxRow>,
     membership: Option<PendingMembership>,
+    membership_inbox: Option<MembershipInboxRow>,
     notifications: Vec<(NotificationId, u64)>,
     fail: Option<&'static str>,
     events: Vec<&'static str>,
@@ -260,6 +267,7 @@ impl Journal {
                 envelope: None,
                 inbox: None,
                 membership: None,
+                membership_inbox: None,
                 notifications: vec![],
                 fail: None,
                 events: vec![],
@@ -321,6 +329,29 @@ impl Journal {
             welcome: pending.welcome.clone(),
             status: pending.status,
             accepted_cursor: pending.accepted_cursor,
+        }
+    }
+
+    fn open_membership_inbox(&self, inbox: &MembershipInboxRow) -> MembershipInboxOperation {
+        let Some((sender, pending)) = &inbox.transition else {
+            return MembershipInboxOperation::Received {
+                stored: inbox.stored.clone(),
+            };
+        };
+        let opened = self.open_membership(pending);
+        let transition = StoredMembershipTransition {
+            stored: inbox.stored.clone(),
+            sender: *sender,
+            parent_epoch: opened.parent_epoch,
+            operation_id: opened.operation_id,
+            control: opened.control,
+            next_state: opened.next_state,
+            bindings: opened.bindings,
+        };
+        if inbox.complete {
+            MembershipInboxOperation::Complete(transition)
+        } else {
+            MembershipInboxOperation::TransitionSaved(transition)
         }
     }
 
@@ -472,11 +503,15 @@ impl NativeConversationJournal for Journal {
         &self,
         id: ConversationId,
     ) -> Result<Option<MembershipInboxOperation>, Fault> {
-        let _rows = self.step("membership-inbox")?;
+        let rows = self.step("membership-inbox")?;
         if id != self.id {
             return Err(Fault::Conflict);
         }
-        Ok(None)
+        Ok(rows
+            .membership_inbox
+            .as_ref()
+            .filter(|inbox| !inbox.complete)
+            .map(|inbox| self.open_membership_inbox(inbox)))
     }
 
     fn reserve_application(
@@ -702,15 +737,38 @@ impl NativeConversationJournal for Journal {
     }
     fn record_membership_inbox_envelope(
         &self,
-        _: &StoredRelayEnvelope,
+        stored: &StoredRelayEnvelope,
     ) -> Result<ConversationId, Fault> {
-        Err(Fault::Unsupported)
+        let mut rows = self.step("record-membership")?;
+        if stored.envelope().routing_id() != self.route {
+            return Err(Fault::Conflict);
+        }
+        if let Some(inbox) = &rows.membership_inbox {
+            if inbox.stored != *stored {
+                return Err(Fault::Conflict);
+            }
+        } else {
+            if stored.cursor() != rows.cursor + 1 {
+                return Err(Fault::Conflict);
+            }
+            rows.membership_inbox = Some(MembershipInboxRow {
+                stored: stored.clone(),
+                transition: None,
+                complete: false,
+            });
+        }
+        Ok(self.id)
     }
     fn membership_outbox_for_envelope(
         &self,
-        _: EnvelopeId,
+        id: EnvelopeId,
     ) -> Result<Option<MembershipOutbox>, Fault> {
-        Err(Fault::Unsupported)
+        let rows = self.step("find-membership")?;
+        Ok(rows
+            .membership
+            .as_ref()
+            .filter(|pending| pending.envelope.envelope_id() == id)
+            .map(|pending| self.open_membership(pending)))
     }
     fn mark_membership_outbox_accepted(
         &self,
@@ -735,31 +793,81 @@ impl NativeConversationJournal for Journal {
     }
     fn membership_inbox_operation(
         &self,
-        _: ConversationId,
-        _: u64,
+        id: ConversationId,
+        cursor: u64,
     ) -> Result<MembershipInboxOperation, Fault> {
-        Err(Fault::Unsupported)
+        let rows = self.step("read-membership-inbox")?;
+        let inbox = rows.membership_inbox.as_ref().ok_or(Fault::Conflict)?;
+        if id != self.id || cursor != inbox.stored.cursor() {
+            return Err(Fault::Conflict);
+        }
+        Ok(self.open_membership_inbox(inbox))
     }
     fn save_membership_inbox_transition(
         &self,
-        _: ConversationId,
-        _: u64,
-        _: DeviceId,
-        _: u64,
-        _: MembershipOperationId,
-        _: &[u8],
-        _: &ConversationState,
-        _: &[DeviceCredentialBinding],
+        id: ConversationId,
+        cursor: u64,
+        sender: DeviceId,
+        parent: u64,
+        operation: MembershipOperationId,
+        control: &[u8],
+        next: &ConversationState,
+        bindings: &[DeviceCredentialBinding],
     ) -> Result<(), Fault> {
-        Err(Fault::Unsupported)
+        let mut rows = self.step("save-membership-inbox")?;
+        let inbox = rows.membership_inbox.as_mut().ok_or(Fault::Conflict)?;
+        if id != self.id || cursor != inbox.stored.cursor() || inbox.transition.is_some() {
+            return Err(Fault::Conflict);
+        }
+        inbox.transition = Some((
+            sender,
+            self.seal_membership(
+                operation,
+                id,
+                parent,
+                inbox.stored.envelope(),
+                control,
+                next,
+                bindings,
+                None,
+            )?,
+        ));
+        if rows.fail == Some("save-membership-after") {
+            rows.fail = None;
+            return Err(Fault::Injected);
+        }
+        Ok(())
     }
     fn complete_membership_inbox_with_notification(
         &self,
-        _: ConversationId,
-        _: u64,
-        _: NotificationId,
+        id: ConversationId,
+        cursor: u64,
+        notification: NotificationId,
     ) -> Result<u64, Fault> {
-        Err(Fault::Unsupported)
+        let mut rows = self.step("complete-membership-inbox")?;
+        if id != self.id
+            || cursor != rows.cursor + 1
+            || rows
+                .notifications
+                .iter()
+                .any(|(n, c)| *n == notification || *c == cursor)
+        {
+            return Err(Fault::Conflict);
+        }
+        if rows.notifications.len() >= LIMIT {
+            return Err(Fault::Bound);
+        }
+        let inbox = rows.membership_inbox.as_mut().ok_or(Fault::Conflict)?;
+        let (_, pending) = inbox.transition.as_ref().ok_or(Fault::Conflict)?;
+        if inbox.stored.cursor() != cursor || inbox.complete {
+            return Err(Fault::Conflict);
+        }
+        *self.policy.lock().unwrap() = pending.next.clone();
+        *self.bindings.lock().unwrap() = pending.bindings.clone();
+        inbox.complete = true;
+        rows.cursor = cursor;
+        rows.notifications.push((notification, cursor));
+        Ok(cursor)
     }
     fn store_membership_outbox(
         &self,
@@ -772,23 +880,52 @@ impl NativeConversationJournal for Journal {
         bindings: &[DeviceCredentialBinding],
         welcome: Option<&[u8]>,
     ) -> Result<(), Fault> {
+        let mut rows = self.step("store-membership")?;
+        if rows.membership.is_some() {
+            return Err(Fault::Conflict);
+        }
+        rows.membership = Some(self.seal_membership(
+            operation, id, parent, envelope, control, next, bindings, welcome,
+        )?);
+        Ok(())
+    }
+}
+
+impl Journal {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fixture seals the same exact membership checkpoint fields in both directions"
+    )]
+    fn seal_membership(
+        &self,
+        operation: MembershipOperationId,
+        id: ConversationId,
+        parent: u64,
+        envelope: &RelayEnvelope,
+        control: &[u8],
+        next: &ConversationState,
+        bindings: &[DeviceCredentialBinding],
+        welcome: Option<&[u8]>,
+    ) -> Result<PendingMembership, Fault> {
         if control.len() > MAX_BYTES
             || bindings.len() > LIMIT
             || welcome.is_some_and(|bytes| bytes.len() > MAX_BYTES)
         {
             return Err(Fault::Bound);
         }
-        let mut rows = self.step("store-membership")?;
         if id != self.id
             || envelope.routing_id() != self.route
             || envelope.expected_parent_epoch() != Some(parent)
             || parent.checked_add(1) != Some(next.epoch())
             || next.conversation_id() != id
-            || rows.membership.is_some()
         {
             return Err(Fault::Conflict);
         }
-        rows.membership = Some(PendingMembership {
+        let encoded_next = Zeroizing::new(encode_conversation_state(next).unwrap());
+        if encoded_next.len() > MAX_BYTES {
+            return Err(Fault::Bound);
+        }
+        Ok(PendingMembership {
             operation,
             parent,
             envelope: envelope.clone(),
@@ -803,7 +940,7 @@ impl NativeConversationJournal for Journal {
                 .sealer
                 .seal(
                     &Self::context(SecretRecordKind::ConversationPolicyState, id.as_bytes()),
-                    &encode_conversation_state(next).unwrap(),
+                    &encoded_next,
                 )
                 .unwrap(),
             bindings: bindings
@@ -823,8 +960,7 @@ impl NativeConversationJournal for Journal {
             welcome: welcome.map(<[u8]>::to_vec),
             status: MembershipOutboxStatus::Ready,
             accepted_cursor: None,
-        });
-        Ok(())
+        })
     }
 }
 
@@ -867,6 +1003,13 @@ impl Fixture {
     }
 
     fn joiner(&self) -> (DeviceIdentity, MlsConversationClient, JoinProof) {
+        self.joiner_with_role(ConversationRole::Member)
+    }
+
+    fn joiner_with_role(
+        &self,
+        role: ConversationRole,
+    ) -> (DeviceIdentity, MlsConversationClient, JoinProof) {
         let bob = DeviceIdentity::generate().unwrap();
         let mut client = bob.create_conversation_client(self.journal.id).unwrap();
         let stored = self.journal.load_conversation(self.journal.id).unwrap();
@@ -878,7 +1021,7 @@ impl Fixture {
                 self.journal.id,
                 self.journal.route,
                 bob.device_id(),
-                ConversationRole::Member,
+                role,
                 100,
             )
             .unwrap();
@@ -886,6 +1029,55 @@ impl Fixture {
             .create_join_proof(&bob, invitation, alice.public_key(), 1)
             .unwrap();
         (bob, client, proof)
+    }
+
+    fn incoming_membership(
+        &self,
+    ) -> (
+        StoredRelayEnvelope,
+        ConversationState,
+        DeviceId,
+        MembershipOperationId,
+    ) {
+        let (bob, client, proof) = self.joiner_with_role(ConversationRole::Administrator);
+        let prepared = self
+            .processor()
+            .prepare_add_member(self.journal.id, proof, 1, 100)
+            .unwrap();
+        let welcome =
+            KonclaveCryptographicCore::MlsWelcome::from_bytes(prepared.welcome.as_ref().unwrap())
+                .unwrap();
+        self.journal
+            .mark_membership_outbox_accepted(
+                &StoredRelayEnvelope::new(prepared.envelope, 1).unwrap(),
+            )
+            .unwrap();
+        drop(self.processor().open(self.journal.id).unwrap());
+        let mut group = client.join_group(&welcome).unwrap();
+        let outbound = group
+            .create_change_role_commit(
+                self.device.lock().unwrap().device_id(),
+                ConversationRole::Member,
+            )
+            .unwrap();
+        let operation = outbound.authorization().operation_id();
+        let next = outbound.next_state().clone();
+        let envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            self.journal.route,
+            EnvelopeId::from_bytes([12; 16]),
+            DeliveryClass::GroupCommit,
+            Some(1),
+            100,
+            outbound.encode_bundle().unwrap(),
+        )
+        .unwrap();
+        (
+            StoredRelayEnvelope::new(envelope, 1).unwrap(),
+            next,
+            bob.device_id(),
+            operation,
+        )
     }
 
     fn incoming(&self) -> StoredRelayEnvelope {
@@ -1362,4 +1554,263 @@ fn pending_mls_commit_without_exact_membership_journal_fails_closed() {
         fixture.processor().open(fixture.journal.id),
         Err(NativeConversationError::MissingMembershipJournal)
     ));
+}
+
+#[test]
+fn saved_remote_membership_recovers_both_mls_persistence_windows_and_exact_replay() {
+    for boundary in ["save-membership-after", "complete-membership-inbox"] {
+        let fixture = Fixture::new();
+        let (stored, expected, sender, operation) = fixture.incoming_membership();
+        let previous = fixture.journal.load_conversation(fixture.journal.id).unwrap().state;
+        fixture.journal.rows.lock().unwrap().fail = Some(boundary);
+        assert!(matches!(
+            fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+            Err(NativeConversationError::Journal(Fault::Injected))
+        ));
+        assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == previous);
+        let checkpoint = fixture.journal.load_conversation(fixture.journal.id).unwrap();
+        let durable_state = if boundary == "save-membership-after" {
+            previous.clone()
+        } else {
+            expected.clone()
+        };
+        let client = MlsConversationClient::with_storage(
+            checkpoint.signing_material,
+            fixture.storage.clone(),
+        )
+        .unwrap();
+        let persisted = client
+            .restore_group(durable_state.clone(), checkpoint.bindings, None)
+            .unwrap();
+        assert!(persisted.state() == &durable_state);
+        drop(persisted);
+        let expected_bindings = fixture
+            .journal
+            .load_conversation(fixture.journal.id)
+            .unwrap()
+            .bindings
+            .into_iter()
+            .map(|binding| binding.binding().clone())
+            .collect::<Vec<_>>();
+        {
+            let rows = fixture.journal.rows.lock().unwrap();
+            assert_eq!(rows.cursor, 0);
+            assert!(rows.notifications.is_empty());
+            let inbox = rows.membership_inbox.as_ref().unwrap();
+            assert!(!inbox.complete);
+            assert!(inbox.stored == stored);
+            let (saved_sender, pending) = inbox.transition.as_ref().unwrap();
+            let opened = fixture.journal.open_membership(pending);
+            assert_eq!(*saved_sender, sender);
+            assert_eq!(opened.operation_id, operation);
+            assert_eq!(opened.parent_epoch, 1);
+            assert!(opened.envelope == *stored.envelope());
+            assert!(opened.next_state == expected);
+            assert_eq!(opened.bindings.len(), 2);
+            assert!(
+                opened
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.binding())
+                    .eq(expected_bindings.iter())
+            );
+            let position = |name| rows.events.iter().position(|event| *event == name).unwrap();
+            assert!(position("record-membership") < position("save-membership-inbox"));
+        }
+        let recovered = fixture
+            .processor()
+            .process_inbound_membership(fixture.journal.id, &stored, 2)
+            .unwrap();
+        assert!(recovered.duplicate);
+        assert_eq!(recovered.sender, sender);
+        assert_eq!(recovered.operation_id, operation);
+        assert_eq!(recovered.cursor, 1);
+        assert_eq!(recovered.epoch, 2);
+        assert!(!recovered.removed_self);
+        assert!(fixture.processor().open(fixture.journal.id).unwrap().group.state() == &expected);
+        assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == expected);
+        let duplicate = fixture
+            .processor()
+            .process_inbound_membership(fixture.journal.id, &stored, 3)
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.operation_id, operation);
+        let rows = fixture.journal.rows.lock().unwrap();
+        assert_eq!(rows.cursor, 1);
+        assert_eq!(rows.notifications.len(), 1);
+        assert!(rows.membership_inbox.as_ref().unwrap().complete);
+    }
+}
+
+#[test]
+fn authenticated_but_wrong_saved_membership_policy_is_rejected_in_both_windows() {
+    for boundary in ["save-membership-after", "complete-membership-inbox"] {
+        let fixture = Fixture::new();
+        let (stored, expected, sender, operation) = fixture.incoming_membership();
+        let previous = fixture.journal.load_conversation(fixture.journal.id).unwrap().state;
+        fixture.journal.rows.lock().unwrap().fail = Some(boundary);
+        assert!(matches!(
+            fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+            Err(NativeConversationError::Journal(Fault::Injected))
+        ));
+        let wrong_authorization = MembershipAuthorization::new(
+            ProtocolVersion::application_v1(),
+            fixture.journal.id,
+            1,
+            operation,
+            MembershipChange::ChangeRole(ChangeMemberRole::new(sender, ConversationRole::Member)),
+        );
+        let wrong = previous
+            .apply_membership_authorization(sender, &wrong_authorization, 2)
+            .unwrap();
+        assert_eq!(wrong.epoch(), expected.epoch());
+        assert!(wrong != expected);
+        {
+            let mut rows = fixture.journal.rows.lock().unwrap();
+            let (_, pending) = rows
+                .membership_inbox
+                .as_mut()
+                .unwrap()
+                .transition
+                .as_mut()
+                .unwrap();
+            let opened = fixture.journal.open_membership(pending);
+            let bindings = opened
+                .bindings
+                .iter()
+                .map(|binding| binding.binding().clone())
+                .collect::<Vec<_>>();
+            *pending = fixture
+                .journal
+                .seal_membership(
+                    opened.operation_id,
+                    fixture.journal.id,
+                    opened.parent_epoch,
+                    &opened.envelope,
+                    &opened.control,
+                    &wrong,
+                    &bindings,
+                    None,
+                )
+                .unwrap();
+            assert!(fixture.journal.open_membership(pending).next_state == wrong);
+        }
+        let result = fixture
+            .processor()
+            .process_inbound_membership(fixture.journal.id, &stored, 2);
+        assert!(if boundary == "save-membership-after" {
+            matches!(result, Err(NativeConversationError::StateMismatch))
+        } else {
+            matches!(result, Err(NativeConversationError::Cryptographic))
+        });
+        assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == previous);
+        let rows = fixture.journal.rows.lock().unwrap();
+        assert_eq!(rows.cursor, 0);
+        assert!(rows.notifications.is_empty());
+        assert!(!rows.membership_inbox.as_ref().unwrap().complete);
+    }
+}
+
+#[test]
+fn authenticated_but_wrong_saved_membership_control_is_rejected_before_completion() {
+    let fixture = Fixture::new();
+    let (stored, expected, sender, operation) = fixture.incoming_membership();
+    let previous = fixture.journal.load_conversation(fixture.journal.id).unwrap().state;
+    fixture.journal.rows.lock().unwrap().fail = Some("save-membership-after");
+    assert!(matches!(
+        fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+        Err(NativeConversationError::Journal(Fault::Injected))
+    ));
+    let wrong_authorization = MembershipAuthorization::new(
+        ProtocolVersion::application_v1(),
+        fixture.journal.id,
+        1,
+        operation,
+        MembershipChange::ChangeRole(ChangeMemberRole::new(sender, ConversationRole::Member)),
+    );
+    let wrong_control = Zeroizing::new(
+        KonclaveProtocolContracts::v1::encode_membership_control(&wrong_authorization, None).unwrap(),
+    );
+    {
+        let mut rows = fixture.journal.rows.lock().unwrap();
+        let (_, pending) = rows
+            .membership_inbox
+            .as_mut()
+            .unwrap()
+            .transition
+            .as_mut()
+            .unwrap();
+        let opened = fixture.journal.open_membership(pending);
+        assert!(opened.control.as_slice() != wrong_control.as_slice());
+        let bindings = opened
+            .bindings
+            .iter()
+            .map(|binding| binding.binding().clone())
+            .collect::<Vec<_>>();
+        *pending = fixture
+            .journal
+            .seal_membership(
+                operation,
+                fixture.journal.id,
+                1,
+                &opened.envelope,
+                &wrong_control,
+                &expected,
+                &bindings,
+                None,
+            )
+            .unwrap();
+        assert!(
+            fixture.journal.open_membership(pending).control.as_slice() == wrong_control.as_slice()
+        );
+    }
+    assert!(matches!(
+        fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 2),
+        Err(NativeConversationError::StateMismatch)
+    ));
+    assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == previous);
+    let rows = fixture.journal.rows.lock().unwrap();
+    assert_eq!(rows.cursor, 0);
+    assert!(rows.notifications.is_empty());
+    assert!(!rows.membership_inbox.as_ref().unwrap().complete);
+}
+
+#[test]
+fn saved_membership_rejects_changed_envelope_route_and_cursor_without_completion() {
+    let fixture = Fixture::new();
+    let (stored, _, _, _) = fixture.incoming_membership();
+    fixture.journal.rows.lock().unwrap().fail = Some("save-membership-after");
+    assert!(matches!(
+        fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+        Err(NativeConversationError::Journal(Fault::Injected))
+    ));
+    for (route, cursor, expiry) in [
+        (RoutingId::from_bytes([15; 32]), 1, 100),
+        (fixture.journal.route, 2, 100),
+        (fixture.journal.route, 1, 101),
+    ] {
+        let original = stored.envelope();
+        let altered = StoredRelayEnvelope::new(
+            RelayEnvelope::new(
+                original.version(),
+                route,
+                original.envelope_id(),
+                DeliveryClass::GroupCommit,
+                original.expected_parent_epoch(),
+                expiry,
+                original.payload().to_vec(),
+            )
+            .unwrap(),
+            cursor,
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture.processor().process_inbound_membership(fixture.journal.id, &altered, 2),
+            Err(NativeConversationError::Journal(Fault::Conflict))
+        ));
+    }
+    let rows = fixture.journal.rows.lock().unwrap();
+    assert_eq!(rows.cursor, 0);
+    assert!(rows.notifications.is_empty());
+    assert!(rows.membership_inbox.as_ref().unwrap().stored == stored);
 }
