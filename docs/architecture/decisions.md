@@ -30,6 +30,10 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0027: Retain explicit service trust and defer automatic LAN discovery](../adr/adr-0027-lan-service-discovery.md)
 - [ADR 0030: Continue locally authorized work on exact correlated answers](../adr/adr-0030-correlated-response-continuation.md)
 
+## Proposed records
+
+- [ADR 0031: Share durable native conversation processing through injected journal ports](../adr/adr-0031-embeddable-durable-native-client.md)
+
 ## Superseded records
 
 - [ADR 0029: Permit locally authorized ordinary peer work](../adr/adr-0029-locally-authorized-peer-work.md) —
