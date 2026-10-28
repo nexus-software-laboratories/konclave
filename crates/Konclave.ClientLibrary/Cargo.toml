@@ -21,7 +21,7 @@ reqwest.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.53.1", features = ["net", "time"] }
+tokio = { version = "1.53.1", features = ["net", "sync", "time"] }
 tokio-tungstenite.workspace = true
 tower-service.workspace = true
 url.workspace = true

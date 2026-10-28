@@ -7,9 +7,13 @@
 
 mod journal;
 mod processor;
+mod session;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod session_tests;
 
 pub use journal::*;
 pub use processor::*;
+pub use session::*;
