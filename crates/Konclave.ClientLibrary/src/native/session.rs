@@ -357,12 +357,10 @@ impl<H: NativeSessionHost, T: RelayTransport> NativeSession<H, T> {
         Ok(())
     }
 
-    async fn retry_applications_locked(&self, now: u64) -> Result<usize, NativeSessionError<H::Error>> {
-        let mut accepted = 0usize;
-        Ok(accepted)
-    }
-
-    async fn retry_memberships_locked(&self) -> Result<usize, NativeSessionError<H::Error>> {
+    async fn retry_applications_locked(
+        &self,
+        now: u64,
+    ) -> Result<usize, NativeSessionError<H::Error>> {
         let mut accepted = 0usize;
         for pending in self
             .host
@@ -407,6 +405,11 @@ impl<H: NativeSessionHost, T: RelayTransport> NativeSession<H, T> {
                 .checked_add(1)
                 .ok_or(NativeSessionError::Protocol)?;
         }
+        Ok(accepted)
+    }
+
+    async fn retry_memberships_locked(&self) -> Result<usize, NativeSessionError<H::Error>> {
+        let mut accepted = 0usize;
         for pending in self
             .host
             .ready_memberships()

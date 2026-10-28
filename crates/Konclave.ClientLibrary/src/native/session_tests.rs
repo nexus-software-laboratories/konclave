@@ -463,7 +463,9 @@ async fn externally_held_gate_rejects_all_foreign_gate_operations_before_effects
         Err(NativeSessionError::Protocol)
     ));
     assert!(matches!(
-        session.submit_membership_with_gate(membership(6), &foreign).await,
+        session
+            .submit_membership_with_gate(membership(6), &foreign)
+            .await,
         Err(NativeSessionError::Protocol)
     ));
     assert!(relay.0.lock().unwrap().accepted.is_empty());
@@ -490,7 +492,10 @@ async fn shared_gate_preserves_application_then_exact_membership_retry_and_welco
         .memberships
         .push((copy_membership(&prepared), None));
     assert_eq!(
-        session.retry_applications_with_gate(1, &held).await.unwrap(),
+        session
+            .retry_applications_with_gate(1, &held)
+            .await
+            .unwrap(),
         1
     );
     let first = session
@@ -504,10 +509,7 @@ async fn shared_gate_preserves_application_then_exact_membership_retry_and_welco
     assert_eq!(first.cursor, 2);
     assert_eq!(exact.cursor, first.cursor);
     assert_eq!(exact.welcome, Some(vec![6]));
-    assert_eq!(
-        session.retry_memberships_with_gate(&held).await.unwrap(),
-        0
-    );
+    assert_eq!(session.retry_memberships_with_gate(&held).await.unwrap(), 0);
     assert_eq!(relay.0.lock().unwrap().accepted.len(), 2);
 }
 
