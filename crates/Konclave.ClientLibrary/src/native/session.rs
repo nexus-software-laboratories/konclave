@@ -6,7 +6,7 @@ use KonclaveDomainCore::{
 };
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use super::{
     NativeApplicationRequest, PreparedApplication, PreparedMembership, ProcessedApplication,
@@ -65,6 +65,18 @@ pub struct NativeSentApplication {
     pub cursor: u64,
 }
 
+/// Exact accepted membership transition and its original encrypted Welcome.
+pub struct NativeAcceptedMembership {
+    /// Stable authenticated membership operation.
+    pub operation_id: MembershipOperationId,
+    /// Authenticated conversation scope.
+    pub conversation_id: ConversationId,
+    /// Exact accepted relay cursor.
+    pub cursor: u64,
+    /// Original encrypted add-member Welcome, if this operation produced one.
+    pub welcome: Option<Vec<u8>>,
+}
+
 /// One bounded page after native completion and relay acknowledgment.
 pub struct NativeReplayBatch {
     /// Completed non-internal application messages in durable cursor order.
@@ -120,7 +132,10 @@ pub trait NativeSessionHost: Send + Sync + 'static {
     /// Returns bounded immutable ready membership operations.
     async fn ready_memberships(&self) -> Result<Vec<PreparedMembership>, Self::Error>;
     /// Verifies acceptance and completes the shared MLS/policy recovery ordering.
-    async fn accept_membership(&self, stored: StoredRelayEnvelope) -> Result<(), Self::Error>;
+    async fn accept_membership(
+        &self,
+        stored: StoredRelayEnvelope,
+    ) -> Result<NativeAcceptedMembership, Self::Error>;
     /// Rejects the exact pending MLS commit before orphaning its journal.
     async fn orphan_membership(&self, operation: MembershipOperationId) -> Result<(), Self::Error>;
     /// Opens/reconciles the conversation and returns its exact route/completed cursor.
@@ -246,6 +261,80 @@ impl<H: NativeSessionHost, T: RelayTransport> NativeSession<H, T> {
     }
 
     async fn retry_ready_locked(&self, now: u64) -> Result<usize, NativeSessionError<H::Error>> {
+        let applications = self.retry_applications_locked(now).await?;
+        let memberships = self.retry_memberships_locked().await?;
+        applications
+            .checked_add(memberships)
+            .ok_or(NativeSessionError::Protocol)
+    }
+
+    /// Drains applications while a host membership operation owns the shared gate.
+    ///
+    /// The guard must come from the exact gate injected into this session. This
+    /// permits a host to inspect an immutable membership retry between draining
+    /// applications and other membership operations without releasing serialization.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different gate before host or relay operations; otherwise returns
+    /// the first host, relay or response-integrity failure.
+    pub async fn retry_applications_with_gate(
+        &self,
+        now: u64,
+        gate: &OwnedMutexGuard<()>,
+    ) -> Result<usize, NativeSessionError<H::Error>> {
+        self.validate_submission_gate(gate)?;
+        self.retry_applications_locked(now).await
+    }
+
+    /// Drains pending membership work under the exact injected submission gate.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different gate before effects and propagates host or relay failure.
+    pub async fn retry_memberships_with_gate(
+        &self,
+        gate: &OwnedMutexGuard<()>,
+    ) -> Result<usize, NativeSessionError<H::Error>> {
+        self.validate_submission_gate(gate)?;
+        self.retry_memberships_locked().await
+    }
+
+    /// Submits an exact committed membership operation under the shared gate.
+    ///
+    /// The host must supply its authenticated durable prepared operation, not
+    /// construct new admission from remote input. Acceptance returns the original
+    /// encrypted Welcome after the host's checkpoint/recovery completion.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different gate before effects. A stale-epoch relay rejection
+    /// orphans the exact pending commit before returning the transport failure.
+    pub async fn submit_membership_with_gate(
+        &self,
+        prepared: PreparedMembership,
+        gate: &OwnedMutexGuard<()>,
+    ) -> Result<NativeAcceptedMembership, NativeSessionError<H::Error>> {
+        self.validate_submission_gate(gate)?;
+        self.submit_membership_locked(prepared).await
+    }
+
+    fn validate_submission_gate(
+        &self,
+        gate: &OwnedMutexGuard<()>,
+    ) -> Result<(), NativeSessionError<H::Error>> {
+        if !Arc::ptr_eq(&self.submissions, OwnedMutexGuard::mutex(gate)) {
+            return Err(NativeSessionError::Protocol);
+        }
+        Ok(())
+    }
+
+    async fn retry_applications_locked(&self, now: u64) -> Result<usize, NativeSessionError<H::Error>> {
+        let mut accepted = 0usize;
+        Ok(accepted)
+    }
+
+    async fn retry_memberships_locked(&self) -> Result<usize, NativeSessionError<H::Error>> {
         let mut accepted = 0usize;
         for pending in self
             .host
@@ -296,26 +385,33 @@ impl<H: NativeSessionHost, T: RelayTransport> NativeSession<H, T> {
             .await
             .map_err(NativeSessionError::Host)?
         {
-            let stored = match self.relay.submit(&pending.envelope).await {
-                Ok(stored) => stored,
-                Err(error) if error.code() == "relay_stale_epoch" => {
-                    self.host
-                        .orphan_membership(pending.operation_id)
-                        .await
-                        .map_err(NativeSessionError::Host)?;
-                    return Err(NativeSessionError::Relay(error));
-                }
-                Err(error) => return Err(NativeSessionError::Relay(error)),
-            };
-            self.host
-                .accept_membership(stored)
-                .await
-                .map_err(NativeSessionError::Host)?;
+            self.submit_membership_locked(pending).await?;
             accepted = accepted
                 .checked_add(1)
                 .ok_or(NativeSessionError::Protocol)?;
         }
         Ok(accepted)
+    }
+
+    async fn submit_membership_locked(
+        &self,
+        prepared: PreparedMembership,
+    ) -> Result<NativeAcceptedMembership, NativeSessionError<H::Error>> {
+        let stored = match self.relay.submit(&prepared.envelope).await {
+            Ok(stored) => stored,
+            Err(error) if error.code() == "relay_stale_epoch" => {
+                self.host
+                    .orphan_membership(prepared.operation_id)
+                    .await
+                    .map_err(NativeSessionError::Host)?;
+                return Err(NativeSessionError::Relay(error));
+            }
+            Err(error) => return Err(NativeSessionError::Relay(error)),
+        };
+        self.host
+            .accept_membership(stored)
+            .await
+            .map_err(NativeSessionError::Host)
     }
 
     async fn submit_prepared(

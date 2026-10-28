@@ -59,6 +59,8 @@ fn envelope(id: u8) -> RelayEnvelope {
 #[derive(Default)]
 struct HostState {
     applications: Vec<NativeOutboundApplication>,
+    memberships: Vec<(PreparedMembership, Option<u64>)>,
+    orphaned: Vec<MembershipOperationId>,
     cursor: u64,
     fail_cursor: Option<u64>,
     removed: bool,
@@ -216,13 +218,51 @@ impl NativeSessionHost for Host {
     }
 
     async fn ready_memberships(&self) -> Result<Vec<PreparedMembership>, HostError> {
-        Ok(vec![])
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .memberships
+            .iter()
+            .filter(|(_, cursor)| cursor.is_none())
+            .map(|(prepared, _)| copy_membership(prepared))
+            .collect())
     }
-    async fn accept_membership(&self, _: StoredRelayEnvelope) -> Result<(), HostError> {
-        Err(HostError::Unsupported)
+    async fn accept_membership(
+        &self,
+        stored: StoredRelayEnvelope,
+    ) -> Result<NativeAcceptedMembership, HostError> {
+        let mut state = self.0.lock().unwrap();
+        let (prepared, cursor) = state
+            .memberships
+            .iter_mut()
+            .find(|(prepared, _)| prepared.envelope == *stored.envelope())
+            .ok_or(HostError::Conflict)?;
+        if cursor.is_some_and(|cursor| cursor != stored.cursor()) {
+            return Err(HostError::Conflict);
+        }
+        *cursor = Some(stored.cursor());
+        Ok(NativeAcceptedMembership {
+            operation_id: prepared.operation_id,
+            conversation_id: prepared.conversation_id,
+            cursor: stored.cursor(),
+            welcome: prepared.welcome.clone(),
+        })
     }
-    async fn orphan_membership(&self, _: MembershipOperationId) -> Result<(), HostError> {
-        Err(HostError::Unsupported)
+    async fn orphan_membership(&self, operation: MembershipOperationId) -> Result<(), HostError> {
+        let mut state = self.0.lock().unwrap();
+        if !state
+            .memberships
+            .iter()
+            .any(|(prepared, cursor)| prepared.operation_id == operation && cursor.is_none())
+        {
+            return Err(HostError::Conflict);
+        }
+        state
+            .memberships
+            .retain(|(prepared, _)| prepared.operation_id != operation);
+        state.orphaned.push(operation);
+        Ok(())
     }
     async fn replay_position(
         &self,
@@ -286,6 +326,7 @@ struct RelayState {
     replay: Vec<StoredRelayEnvelope>,
     acknowledgments: Vec<AcknowledgeRequest>,
     fail_submit: bool,
+    stale_membership: bool,
     wrong_acceptance: bool,
     wrong_ack: bool,
 }
@@ -300,6 +341,12 @@ impl RelayTransport for Relay {
         submitted: &RelayEnvelope,
     ) -> Result<StoredRelayEnvelope, KonclaveClientError> {
         let mut state = self.0.lock().unwrap();
+        if state.stale_membership && submitted.delivery_class() == DeliveryClass::GroupCommit {
+            return Err(KonclaveClientError::RelayRejected {
+                status: 409,
+                relay_code: "relay_stale_epoch".to_owned(),
+            });
+        }
         if state.fail_submit {
             state.fail_submit = false;
             return Err(KonclaveClientError::TransportUnavailable);
@@ -368,6 +415,123 @@ fn fixture() -> (Arc<Host>, Arc<Relay>, NativeSession<Host, Relay>) {
         Arc::new(tokio::sync::Mutex::new(())),
     );
     (host, relay, session)
+}
+
+fn membership(id: u8) -> PreparedMembership {
+    PreparedMembership {
+        operation_id: MembershipOperationId::from_bytes([id; 16]),
+        conversation_id: CONVERSATION,
+        parent_epoch: 0,
+        envelope: RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            ROUTE,
+            EnvelopeId::from_bytes([id; 16]),
+            DeliveryClass::GroupCommit,
+            Some(0),
+            100,
+            vec![id],
+        )
+        .unwrap(),
+        welcome: Some(vec![id]),
+    }
+}
+
+fn copy_membership(prepared: &PreparedMembership) -> PreparedMembership {
+    PreparedMembership {
+        operation_id: prepared.operation_id,
+        conversation_id: prepared.conversation_id,
+        parent_epoch: prepared.parent_epoch,
+        envelope: prepared.envelope.clone(),
+        welcome: prepared.welcome.clone(),
+    }
+}
+
+#[tokio::test]
+async fn externally_held_gate_rejects_all_foreign_gate_operations_before_effects() {
+    let (host, relay, session) = fixture();
+    let foreign = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
+    assert!(matches!(
+        session.retry_applications_with_gate(1, &foreign).await,
+        Err(NativeSessionError::Protocol)
+    ));
+    assert!(matches!(
+        session.retry_memberships_with_gate(&foreign).await,
+        Err(NativeSessionError::Protocol)
+    ));
+    assert!(matches!(
+        session.submit_membership_with_gate(membership(6), &foreign).await,
+        Err(NativeSessionError::Protocol)
+    ));
+    assert!(relay.0.lock().unwrap().accepted.is_empty());
+    assert!(host.0.lock().unwrap().orphaned.is_empty());
+}
+
+#[tokio::test]
+async fn shared_gate_preserves_application_then_exact_membership_retry_and_welcome() {
+    let host = Arc::new(Host::default());
+    let relay = Arc::new(Relay::default());
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let session = NativeSession::new(host.clone(), relay.clone(), gate.clone());
+    host.prepare_application(request(4)).await.unwrap();
+    let prepared = membership(6);
+    host.0
+        .lock()
+        .unwrap()
+        .memberships
+        .push((copy_membership(&prepared), None));
+    let held = gate.lock_owned().await;
+    assert_eq!(
+        session.retry_applications_with_gate(1, &held).await.unwrap(),
+        1
+    );
+    let first = session
+        .submit_membership_with_gate(copy_membership(&prepared), &held)
+        .await
+        .unwrap();
+    let exact = session
+        .submit_membership_with_gate(prepared, &held)
+        .await
+        .unwrap();
+    assert_eq!(first.cursor, 2);
+    assert_eq!(exact.cursor, first.cursor);
+    assert_eq!(exact.welcome, Some(vec![6]));
+    assert_eq!(
+        session.retry_memberships_with_gate(&held).await.unwrap(),
+        0
+    );
+    assert_eq!(relay.0.lock().unwrap().accepted.len(), 2);
+}
+
+#[tokio::test]
+async fn stale_membership_orphans_only_the_exact_unaccepted_operation() {
+    let host = Arc::new(Host::default());
+    let relay = Arc::new(Relay::default());
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let session = NativeSession::new(host.clone(), relay.clone(), gate.clone());
+    for id in [6, 7] {
+        host.0
+            .lock()
+            .unwrap()
+            .memberships
+            .push((membership(id), None));
+    }
+    relay.0.lock().unwrap().stale_membership = true;
+    let held = gate.lock_owned().await;
+    assert!(matches!(
+        session.submit_membership_with_gate(membership(6), &held).await,
+        Err(NativeSessionError::Relay(error)) if error.code() == "relay_stale_epoch"
+    ));
+    let state = host.0.lock().unwrap();
+    assert_eq!(
+        state.orphaned,
+        vec![MembershipOperationId::from_bytes([6; 16])]
+    );
+    assert_eq!(state.memberships.len(), 1);
+    assert_eq!(
+        state.memberships[0].0.operation_id,
+        MembershipOperationId::from_bytes([7; 16])
+    );
+    assert!(relay.0.lock().unwrap().accepted.is_empty());
 }
 
 #[tokio::test]
