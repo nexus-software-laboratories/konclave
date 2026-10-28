@@ -16,6 +16,7 @@ $expectedContracts = @(
     'generic-client'
     'installer-lifecycle'
     'local-delivery-diagnostics'
+    'native-client'
     'native-storage'
     'profile-lifecycle'
     'pairing-rendezvous'
@@ -36,6 +37,7 @@ $workflowByContract = [ordered]@{
     'generic-client' = 'generic-client-conformance.yml'
     'installer-lifecycle' = 'installer-lifecycle-conformance.yml'
     'local-delivery-diagnostics' = 'local-delivery-diagnostics-conformance.yml'
+    'native-client' = 'native-client-conformance.yml'
     'native-storage' = 'native-storage-conformance.yml'
     'profile-lifecycle' = 'profile-lifecycle-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
@@ -134,6 +136,19 @@ $ownedCases = [ordered]@{
         'scripts/installation/Install-Konclave.ps1'
     'local-delivery-diagnostics' =
         'crates/Konclave.DomainCore/src/delivery_diagnostics.rs'
+    'native-client' = @(
+        'crates/Konclave.ClientLibrary/src/native/processor.rs'
+        'crates/Konclave.CryptographicCore/src/mls.rs'
+        'crates/Konclave.SecretStorage/src/shared_mls_storage.rs'
+        'crates/Konclave.ProtocolContracts/src/lib.rs'
+        'crates/Konclave.RelayAuthentication/src/lib.rs'
+        'crates/Konclave.ProtectedHttp/src/lib.rs'
+        'crates/Konclave.WindowsSecurity/src/lib.rs'
+        'proto/konclave/protocol/v1/application.proto'
+        'apps/Konclave.LocalDaemon/src/conversation.rs'
+        'apps/Konclave.LocalDaemon/src/persistence.rs'
+        'apps/Konclave.LocalDaemon/src/application.rs'
+    )
     'native-storage' = @(
         'crates/Konclave.SecretStorage/src/shared_mls_storage.rs'
         'crates/Konclave.CryptographicCore/src/mls.rs'

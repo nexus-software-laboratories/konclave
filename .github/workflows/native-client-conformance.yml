@@ -1,0 +1,70 @@
+name: Native client conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: native-client-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-client-conformance:
+    name: Native client conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout component validation scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: .ci-scope
+          sparse-checkout: |
+            scripts/ci/ComponentValidationScope.Functions.ps1
+            scripts/ci/Resolve-ComponentValidationScope.ps1
+          sparse-checkout-cone-mode: false
+      - name: Resolve native client scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          ./.ci-scope/scripts/ci/Resolve-ComponentValidationScope.ps1 `
+            -Contract 'native-client' `
+            -EventName $env:EVENT_NAME `
+            -PullRequestNumber ([int]$env:PULL_REQUEST_NUMBER)
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Install Rust
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+      - name: Verify native conversation foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --package KonclaveClientLibrary
+          cargo test --locked --package KonclaveClientLibrary --lib native::
+          cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
+          git diff --exit-code -- crates/Konclave.ClientLibrary
+      - name: Verify conservative component relevance
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: ./scripts/ci/Test-ComponentValidationScope.ps1
