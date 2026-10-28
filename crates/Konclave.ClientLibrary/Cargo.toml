@@ -31,6 +31,7 @@ zeroize.workspace = true
 KonclaveCommunityRelay = { path = "../../apps/Konclave.CommunityRelay" }
 KonclaveRelayCore = { path = "../Konclave.RelayCore" }
 axum = "0.8.9"
+fs4.workspace = true
 mls-rs-core.workspace = true
 serde_json.workspace = true
 tempfile = "3.27.0"
