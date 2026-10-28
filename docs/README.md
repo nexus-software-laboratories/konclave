@@ -61,6 +61,7 @@ This map lists the documentation contributed by the selected project shape.
 - [A2A conformance profile](development/a2a-conformance.md)
 - [Sealed secret storage](development/secret-storage.md)
 - [Opaque relay storage](development/relay-storage.md)
+- [Explicit native client composition](development/native-client.md)
 - [Outbound relay client](development/relay-client.md)
 - [Daemon profiles and recovery](development/daemon-profiles.md)
 - [Local message delivery diagnostics](development/local-delivery-diagnostics.md)

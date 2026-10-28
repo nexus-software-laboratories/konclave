@@ -327,6 +327,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/development/native-client.md",
+        "title": "Explicit native client composition",
+        "section": "Development",
+        "order": 29,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/relay-client.md",
         "title": "Outbound relay client",
         "section": "Development",
