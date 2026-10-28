@@ -84,7 +84,7 @@ function Get-ComponentValidationContracts {
             '^apps/Konclave\.CommunityRelay/'
             '^proto/konclave/protocol/'
             '^fixtures/protocol/'
-            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:lib|conversation|native_journal|persistence|application)\.rs|src/persistence/)'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/|tests/)'
             '^docs/(?:development/(?:native-client|secret-storage)|adr/adr-0031-embeddable-durable-native-client)\.md$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )

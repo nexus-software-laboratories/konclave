@@ -68,13 +68,20 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: cargo test --locked --package KonclaveClientLibrary --lib native::session_tests
-      - name: Verify shared daemon native processing
+      - name: Verify owned native worker foundation
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           trap 'git diff -- apps/Konclave.LocalDaemon' EXIT
           cargo fmt --package KonclaveLocalDaemon
+          cargo test --locked --package KonclaveLocalDaemon --lib native_workers::tests
+      - name: Verify shared daemon native processing
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'git diff -- apps/Konclave.LocalDaemon' EXIT
           cargo test --locked --package KonclaveLocalDaemon --lib conversation::tests
           cargo test --locked --package KonclaveLocalDaemon --lib application::tests
           cargo test --locked --package KonclaveLocalDaemon --lib persistence::tests
