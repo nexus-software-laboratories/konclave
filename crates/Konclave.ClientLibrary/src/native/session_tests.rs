@@ -451,6 +451,10 @@ async fn externally_held_gate_rejects_all_foreign_gate_operations_before_effects
     let (host, relay, session) = fixture();
     let foreign = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
     assert!(matches!(
+        session.send_with_gate(request(4), 1, &foreign).await,
+        Err(NativeSessionError::Protocol)
+    ));
+    assert!(matches!(
         session.retry_applications_with_gate(1, &foreign).await,
         Err(NativeSessionError::Protocol)
     ));
@@ -464,6 +468,7 @@ async fn externally_held_gate_rejects_all_foreign_gate_operations_before_effects
     ));
     assert!(relay.0.lock().unwrap().accepted.is_empty());
     assert!(host.0.lock().unwrap().orphaned.is_empty());
+    assert_eq!(host.0.lock().unwrap().prepared, 0);
 }
 
 #[tokio::test]
@@ -472,14 +477,18 @@ async fn shared_gate_preserves_application_then_exact_membership_retry_and_welco
     let relay = Arc::new(Relay::default());
     let gate = Arc::new(tokio::sync::Mutex::new(()));
     let session = NativeSession::new(host.clone(), relay.clone(), gate.clone());
-    host.prepare_application(request(4)).await.unwrap();
+    let held = gate.lock_owned().await;
+    relay.0.lock().unwrap().fail_submit = true;
+    assert!(matches!(
+        session.send_with_gate(request(4), 1, &held).await,
+        Err(NativeSessionError::Relay(_))
+    ));
     let prepared = membership(6);
     host.0
         .lock()
         .unwrap()
         .memberships
         .push((copy_membership(&prepared), None));
-    let held = gate.lock_owned().await;
     assert_eq!(
         session.retry_applications_with_gate(1, &held).await.unwrap(),
         1

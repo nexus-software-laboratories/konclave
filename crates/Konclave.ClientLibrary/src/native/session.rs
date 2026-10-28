@@ -201,6 +201,34 @@ impl<H: NativeSessionHost, T: RelayTransport> NativeSession<H, T> {
         now: u64,
     ) -> Result<NativeSentApplication, NativeSessionError<H::Error>> {
         let _submission = self.submissions.lock().await;
+        self.send_locked(request, now).await
+    }
+
+    /// Sends under the exact shared gate retained by a host operation owner.
+    ///
+    /// A host with blocking workers can retain an `Arc` of this owned guard in
+    /// each worker so cancellation cannot release serialization before the
+    /// underlying synchronous operation completes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different gate before effects; otherwise returns the same
+    /// admission, retry, relay and evidence failures as [`Self::send`].
+    pub async fn send_with_gate(
+        &self,
+        request: NativeApplicationRequest<H::Authorization>,
+        now: u64,
+        gate: &OwnedMutexGuard<()>,
+    ) -> Result<NativeSentApplication, NativeSessionError<H::Error>> {
+        self.validate_submission_gate(gate)?;
+        self.send_locked(request, now).await
+    }
+
+    async fn send_locked(
+        &self,
+        request: NativeApplicationRequest<H::Authorization>,
+        now: u64,
+    ) -> Result<NativeSentApplication, NativeSessionError<H::Error>> {
         if let Some(existing) = self
             .host
             .outbound_application(request.conversation_id, request.message_id)
