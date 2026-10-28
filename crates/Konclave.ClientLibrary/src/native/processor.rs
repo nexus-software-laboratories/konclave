@@ -1007,7 +1007,8 @@ fn processed_membership(
     }
 }
 
-fn directed_request_recipients_support(
+/// Classifies whether the exact target and every current remote member support requests.
+pub fn directed_request_recipients_support(
     state: &ConversationState,
     local_device: DeviceId,
     target: DeviceId,
@@ -1023,7 +1024,12 @@ fn directed_request_recipients_support(
             .all(&mut supports_directed_requests)
 }
 
-fn decrypt_application<E>(
+/// Decrypts and validates one native application against its MLS-authenticated sender.
+///
+/// # Errors
+///
+/// Returns protocol or cryptographic failure without completing journal state.
+pub fn decrypt_application<E>(
     group: &mut MlsConversation,
     envelope: &RelayEnvelope,
 ) -> Result<(DeviceId, ApplicationMessage), NativeConversationError<E>> {
@@ -1042,7 +1048,12 @@ fn decrypt_application<E>(
     Ok((sender, message))
 }
 
-fn verify_application_content<E>(
+/// Verifies authenticated content that carries an independently signed policy proposal.
+///
+/// # Errors
+///
+/// Returns cryptographic failure for a contradictory signature or canonical digest.
+pub fn verify_application_content<E>(
     content: &ApplicationContent,
 ) -> Result<(), NativeConversationError<E>> {
     if let ApplicationContent::CollaborationPolicyProposal(proposal) = content {

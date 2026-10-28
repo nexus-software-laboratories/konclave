@@ -63,6 +63,18 @@ jobs:
           cargo fmt --package KonclaveClientLibrary -- --check
           cargo test --locked --package KonclaveClientLibrary --lib native::
           cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
+      - name: Verify shared daemon native processing
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'git diff -- apps/Konclave.LocalDaemon' EXIT
+          cargo fmt --package KonclaveLocalDaemon
+          cargo test --locked --package KonclaveLocalDaemon --lib conversation::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib application::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib persistence::tests
+          cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
+          git diff --exit-code -- apps/Konclave.LocalDaemon
       - name: Verify conservative component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh

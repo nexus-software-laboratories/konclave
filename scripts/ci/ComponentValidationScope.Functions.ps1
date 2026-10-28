@@ -80,10 +80,11 @@ function Get-ComponentValidationContracts {
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
             '^\.github/workflows/native-client-conformance\.yml$'
-            '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|SecretStorage|DomainCore|ProtocolContracts|RelayAuthentication|ProtectedHttp|WindowsSecurity)/'
+            '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|SecretStorage|DomainCore|ProtocolContracts|RelayAuthentication|ProtectedHttp|WindowsSecurity|RelayCore|BoundedDocuments|CollaborationPolicies|AdapterSdk|AdapterTransport|LocalAuthorizationStore|LocalFraming|LocalServiceClient|LocalServiceTransport|UserPresence)/'
+            '^apps/Konclave\.CommunityRelay/'
             '^proto/konclave/protocol/'
             '^fixtures/protocol/'
-            '^apps/Konclave\.LocalDaemon/(?:src/(?:conversation|persistence|application)\.rs|src/persistence/)'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:lib|conversation|native_journal|persistence|application)\.rs|src/persistence/)'
             '^docs/(?:development/(?:native-client|secret-storage)|adr/adr-0031-embeddable-durable-native-client)\.md$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )

@@ -11,6 +11,7 @@ mod authorization_runtime;
 mod clock;
 #[allow(dead_code)]
 mod conversation;
+mod native_journal;
 #[allow(dead_code)]
 mod health;
 #[allow(dead_code)]
