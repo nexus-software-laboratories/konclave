@@ -239,7 +239,10 @@ impl ServiceStorage {
 
     #[cfg(test)]
     /// Observes release inside the same synchronization scope as production release.
-    pub(crate) fn release_with_test_gate(&self, released: impl FnOnce()) -> Result<(), StorageError> {
+    pub(crate) fn release_with_test_gate(
+        &self,
+        released: impl FnOnce(),
+    ) -> Result<(), StorageError> {
         self.release_with(released)
     }
 }

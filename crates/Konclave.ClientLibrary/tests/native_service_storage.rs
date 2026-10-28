@@ -56,7 +56,9 @@ fn persists_replaces_reopens_and_invalidates_every_old_clone() {
     assert_eq!(owner.generation().unwrap(), 1);
     assert_eq!(owner.read_snapshot().unwrap(), None);
     let old = owner.clone();
-    owner.replace_snapshot(b"opaque sealed fixture one").unwrap();
+    owner
+        .replace_snapshot(b"opaque sealed fixture one")
+        .unwrap();
     assert!(matches!(
         ServiceStorage::open(directory.path()),
         Err(StorageError::Busy)
@@ -155,7 +157,10 @@ fn bounds_reads_before_allocation_and_writes_before_replacement() {
     let owner = ServiceStorage::open(directory.path()).unwrap();
     owner.replace_snapshot(b"unchanged").unwrap();
     let oversized = vec![0; MAX_SNAPSHOT_BYTES + 1];
-    assert_eq!(owner.replace_snapshot(&oversized), Err(StorageError::TooLarge));
+    assert_eq!(
+        owner.replace_snapshot(&oversized),
+        Err(StorageError::TooLarge)
+    );
     assert_eq!(owner.read_snapshot().unwrap().unwrap(), b"unchanged");
     let snapshot = OpenOptions::new()
         .write(true)
@@ -235,7 +240,10 @@ fn stale_generation_is_checked_on_both_read_and_write() {
     let owner = ServiceStorage::open(directory.path()).unwrap();
     fs::write(directory.path().join(GENERATION), generation(2)).unwrap();
     assert_eq!(owner.read_snapshot(), Err(StorageError::Released));
-    assert_eq!(owner.replace_snapshot(b"stale"), Err(StorageError::Released));
+    assert_eq!(
+        owner.replace_snapshot(b"stale"),
+        Err(StorageError::Released)
+    );
     fs::write(directory.path().join(GENERATION), b"bad").unwrap();
     assert_eq!(owner.read_snapshot(), Err(StorageError::InvalidGeneration));
     assert_eq!(
@@ -278,15 +286,14 @@ fn poisoned_ownership_never_degrades_to_an_unfenced_write() {
     let owner = ServiceStorage::open(directory.path()).unwrap();
     let writer = owner.clone();
     let failed = thread::spawn(move || {
-        writer.replace_with_test_gate(
-            b"opaque",
-            || panic!("injected ownership failure"),
-            || {},
-        )
+        writer.replace_with_test_gate(b"opaque", || panic!("injected ownership failure"), || {})
     });
     assert!(failed.join().is_err());
     assert_eq!(owner.read_snapshot(), Err(StorageError::Poisoned));
-    assert_eq!(owner.replace_snapshot(b"opaque"), Err(StorageError::Poisoned));
+    assert_eq!(
+        owner.replace_snapshot(b"opaque"),
+        Err(StorageError::Poisoned)
+    );
     assert_eq!(owner.release(), Err(StorageError::Poisoned));
     assert!(matches!(
         ServiceStorage::open(directory.path()),
