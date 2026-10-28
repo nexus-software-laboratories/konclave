@@ -1561,14 +1561,30 @@ fn saved_remote_membership_recovers_both_mls_persistence_windows_and_exact_repla
     for boundary in ["save-membership-after", "complete-membership-inbox"] {
         let fixture = Fixture::new();
         let (stored, expected, sender, operation) = fixture.incoming_membership();
-        let previous = fixture.journal.load_conversation(fixture.journal.id).unwrap().state;
+        let previous = fixture
+            .journal
+            .load_conversation(fixture.journal.id)
+            .unwrap()
+            .state;
         fixture.journal.rows.lock().unwrap().fail = Some(boundary);
         assert!(matches!(
-            fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+            fixture
+                .processor()
+                .process_inbound_membership(fixture.journal.id, &stored, 1),
             Err(NativeConversationError::Journal(Fault::Injected))
         ));
-        assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == previous);
-        let checkpoint = fixture.journal.load_conversation(fixture.journal.id).unwrap();
+        assert!(
+            fixture
+                .journal
+                .load_conversation(fixture.journal.id)
+                .unwrap()
+                .state
+                == previous
+        );
+        let checkpoint = fixture
+            .journal
+            .load_conversation(fixture.journal.id)
+            .unwrap();
         let durable_state = if boundary == "save-membership-after" {
             previous.clone()
         } else {
@@ -1627,8 +1643,23 @@ fn saved_remote_membership_recovers_both_mls_persistence_windows_and_exact_repla
         assert_eq!(recovered.cursor, 1);
         assert_eq!(recovered.epoch, 2);
         assert!(!recovered.removed_self);
-        assert!(fixture.processor().open(fixture.journal.id).unwrap().group.state() == &expected);
-        assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == expected);
+        assert!(
+            fixture
+                .processor()
+                .open(fixture.journal.id)
+                .unwrap()
+                .group
+                .state()
+                == &expected
+        );
+        assert!(
+            fixture
+                .journal
+                .load_conversation(fixture.journal.id)
+                .unwrap()
+                .state
+                == expected
+        );
         let duplicate = fixture
             .processor()
             .process_inbound_membership(fixture.journal.id, &stored, 3)
@@ -1647,10 +1678,16 @@ fn authenticated_but_wrong_saved_membership_policy_is_rejected_in_both_windows()
     for boundary in ["save-membership-after", "complete-membership-inbox"] {
         let fixture = Fixture::new();
         let (stored, expected, sender, operation) = fixture.incoming_membership();
-        let previous = fixture.journal.load_conversation(fixture.journal.id).unwrap().state;
+        let previous = fixture
+            .journal
+            .load_conversation(fixture.journal.id)
+            .unwrap()
+            .state;
         fixture.journal.rows.lock().unwrap().fail = Some(boundary);
         assert!(matches!(
-            fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+            fixture
+                .processor()
+                .process_inbound_membership(fixture.journal.id, &stored, 1),
             Err(NativeConversationError::Journal(Fault::Injected))
         ));
         let wrong_authorization = MembershipAuthorization::new(
@@ -1703,7 +1740,14 @@ fn authenticated_but_wrong_saved_membership_policy_is_rejected_in_both_windows()
         } else {
             matches!(result, Err(NativeConversationError::Cryptographic))
         });
-        assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == previous);
+        assert!(
+            fixture
+                .journal
+                .load_conversation(fixture.journal.id)
+                .unwrap()
+                .state
+                == previous
+        );
         let rows = fixture.journal.rows.lock().unwrap();
         assert_eq!(rows.cursor, 0);
         assert!(rows.notifications.is_empty());
@@ -1715,10 +1759,16 @@ fn authenticated_but_wrong_saved_membership_policy_is_rejected_in_both_windows()
 fn authenticated_but_wrong_saved_membership_control_is_rejected_before_completion() {
     let fixture = Fixture::new();
     let (stored, expected, sender, operation) = fixture.incoming_membership();
-    let previous = fixture.journal.load_conversation(fixture.journal.id).unwrap().state;
+    let previous = fixture
+        .journal
+        .load_conversation(fixture.journal.id)
+        .unwrap()
+        .state;
     fixture.journal.rows.lock().unwrap().fail = Some("save-membership-after");
     assert!(matches!(
-        fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+        fixture
+            .processor()
+            .process_inbound_membership(fixture.journal.id, &stored, 1),
         Err(NativeConversationError::Journal(Fault::Injected))
     ));
     let wrong_authorization = MembershipAuthorization::new(
@@ -1729,7 +1779,8 @@ fn authenticated_but_wrong_saved_membership_control_is_rejected_before_completio
         MembershipChange::ChangeRole(ChangeMemberRole::new(sender, ConversationRole::Member)),
     );
     let wrong_control = Zeroizing::new(
-        KonclaveProtocolContracts::v1::encode_membership_control(&wrong_authorization, None).unwrap(),
+        KonclaveProtocolContracts::v1::encode_membership_control(&wrong_authorization, None)
+            .unwrap(),
     );
     {
         let mut rows = fixture.journal.rows.lock().unwrap();
@@ -1765,10 +1816,19 @@ fn authenticated_but_wrong_saved_membership_control_is_rejected_before_completio
         );
     }
     assert!(matches!(
-        fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 2),
+        fixture
+            .processor()
+            .process_inbound_membership(fixture.journal.id, &stored, 2),
         Err(NativeConversationError::StateMismatch)
     ));
-    assert!(fixture.journal.load_conversation(fixture.journal.id).unwrap().state == previous);
+    assert!(
+        fixture
+            .journal
+            .load_conversation(fixture.journal.id)
+            .unwrap()
+            .state
+            == previous
+    );
     let rows = fixture.journal.rows.lock().unwrap();
     assert_eq!(rows.cursor, 0);
     assert!(rows.notifications.is_empty());
@@ -1781,7 +1841,9 @@ fn saved_membership_rejects_changed_envelope_route_and_cursor_without_completion
     let (stored, _, _, _) = fixture.incoming_membership();
     fixture.journal.rows.lock().unwrap().fail = Some("save-membership-after");
     assert!(matches!(
-        fixture.processor().process_inbound_membership(fixture.journal.id, &stored, 1),
+        fixture
+            .processor()
+            .process_inbound_membership(fixture.journal.id, &stored, 1),
         Err(NativeConversationError::Journal(Fault::Injected))
     ));
     for (route, cursor, expiry) in [
@@ -1805,7 +1867,9 @@ fn saved_membership_rejects_changed_envelope_route_and_cursor_without_completion
         )
         .unwrap();
         assert!(matches!(
-            fixture.processor().process_inbound_membership(fixture.journal.id, &altered, 2),
+            fixture
+                .processor()
+                .process_inbound_membership(fixture.journal.id, &altered, 2),
             Err(NativeConversationError::Journal(Fault::Conflict))
         ));
     }

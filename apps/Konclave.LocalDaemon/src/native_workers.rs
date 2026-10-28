@@ -83,7 +83,9 @@ impl NativeWorkers {
         self.capacity.close();
         let mut failure = None;
         while let Some(joined) = state.tasks.join_next().await {
-            let outcome = joined.map_err(|_| NativeWorkerError::Task).and_then(|result| result);
+            let outcome = joined
+                .map_err(|_| NativeWorkerError::Task)
+                .and_then(|result| result);
             if let Err(error) = outcome {
                 failure.get_or_insert(error);
             }
@@ -128,7 +130,14 @@ mod tests {
     #[tokio::test]
     async fn operation_results_and_failures_remain_distinct_from_worker_failures() {
         let workers = NativeWorkers::new();
-        assert_eq!(workers.run(|| Ok::<_, OperationFailure>(7)).await.unwrap().unwrap(), 7);
+        assert_eq!(
+            workers
+                .run(|| Ok::<_, OperationFailure>(7))
+                .await
+                .unwrap()
+                .unwrap(),
+            7
+        );
         assert!(matches!(
             workers.run(|| Err::<(), _>(OperationFailure)).await,
             Ok(Err(OperationFailure))
@@ -144,10 +153,12 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&called);
         assert!(matches!(
-            clone.run(move || {
-                observed.store(true, Ordering::SeqCst);
-                Ok::<_, OperationFailure>(())
-            }).await,
+            clone
+                .run(move || {
+                    observed.store(true, Ordering::SeqCst);
+                    Ok::<_, OperationFailure>(())
+                })
+                .await,
             Err(NativeWorkerError::Closed)
         ));
         assert!(!called.load(Ordering::SeqCst));
@@ -165,13 +176,15 @@ mod tests {
         let held = Arc::new(AtomicBool::new(true));
         let guard = CapturedGuard(Arc::clone(&held));
         let request = tokio::spawn(async move {
-            worker_owner.run(move || {
-                let _guard = guard;
-                entered.send(()).unwrap();
-                blocked.recv().unwrap();
-                observed.store(true, Ordering::SeqCst);
-                Ok::<_, OperationFailure>(())
-            }).await
+            worker_owner
+                .run(move || {
+                    let _guard = guard;
+                    entered.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    observed.store(true, Ordering::SeqCst);
+                    Ok::<_, OperationFailure>(())
+                })
+                .await
         });
         running.await.unwrap();
         request.abort();
@@ -182,7 +195,8 @@ mod tests {
         poll_fn(|context| {
             assert!(shutdown.as_mut().poll(context).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         assert!(!finished.load(Ordering::SeqCst));
         assert!(held.load(Ordering::SeqCst));
         release.send(()).unwrap();
@@ -198,11 +212,13 @@ mod tests {
         let (entered, running) = oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
         let first = tokio::spawn(async move {
-            worker_owner.run(move || {
-                entered.send(()).unwrap();
-                blocked.recv().unwrap();
-                Ok::<_, OperationFailure>(())
-            }).await
+            worker_owner
+                .run(move || {
+                    entered.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    Ok::<_, OperationFailure>(())
+                })
+                .await
         });
         running.await.unwrap();
         let called = Arc::new(AtomicBool::new(false));
@@ -215,7 +231,8 @@ mod tests {
         poll_fn(|context| {
             assert!(second.as_mut().poll(context).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         assert!(!called.load(Ordering::SeqCst));
         release.send(()).unwrap();
         first.await.unwrap().unwrap().unwrap();
@@ -228,12 +245,15 @@ mod tests {
     async fn panic_is_reported_to_the_request_and_observed_again_when_joined() {
         let workers = NativeWorkers::new();
         assert!(matches!(
-            workers.run(|| -> Result<(), OperationFailure> {
-                panic!("synthetic worker panic")
-            }).await,
+            workers
+                .run(|| -> Result<(), OperationFailure> { panic!("synthetic worker panic") })
+                .await,
             Err(NativeWorkerError::Task)
         ));
-        assert!(matches!(workers.shutdown().await, Err(NativeWorkerError::Task)));
+        assert!(matches!(
+            workers.shutdown().await,
+            Err(NativeWorkerError::Task)
+        ));
     }
 
     #[tokio::test]
@@ -243,11 +263,13 @@ mod tests {
         let (entered, running) = oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
         let request = tokio::spawn(async move {
-            worker_owner.run(move || {
-                entered.send(()).unwrap();
-                blocked.recv().unwrap();
-                Err::<(), _>(OperationFailure)
-            }).await
+            worker_owner
+                .run(move || {
+                    entered.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    Err::<(), _>(OperationFailure)
+                })
+                .await
         });
         running.await.unwrap();
         request.abort();
