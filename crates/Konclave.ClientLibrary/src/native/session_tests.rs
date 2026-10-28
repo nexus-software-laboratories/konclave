@@ -459,6 +459,10 @@ async fn externally_held_gate_rejects_all_foreign_gate_operations_before_effects
         Err(NativeSessionError::Protocol)
     ));
     assert!(matches!(
+        session.retry_ready_with_gate(1, &foreign).await,
+        Err(NativeSessionError::Protocol)
+    ));
+    assert!(matches!(
         session.retry_memberships_with_gate(&foreign).await,
         Err(NativeSessionError::Protocol)
     ));
@@ -510,6 +514,7 @@ async fn shared_gate_preserves_application_then_exact_membership_retry_and_welco
     assert_eq!(exact.cursor, first.cursor);
     assert_eq!(exact.welcome, Some(vec![6]));
     assert_eq!(session.retry_memberships_with_gate(&held).await.unwrap(), 0);
+    assert_eq!(session.retry_ready_with_gate(1, &held).await.unwrap(), 0);
     assert_eq!(relay.0.lock().unwrap().accepted.len(), 2);
 }
 

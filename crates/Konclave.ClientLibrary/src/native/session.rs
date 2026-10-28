@@ -288,6 +288,21 @@ impl<H: NativeSessionHost, T: RelayTransport> NativeSession<H, T> {
         self.retry_ready_locked(now).await
     }
 
+    /// Retries all ready work under submission ownership retained by the host.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different gate before effects; otherwise propagates the same
+    /// failures as [`Self::retry_ready`].
+    pub async fn retry_ready_with_gate(
+        &self,
+        now: u64,
+        gate: &OwnedMutexGuard<()>,
+    ) -> Result<usize, NativeSessionError<H::Error>> {
+        self.validate_submission_gate(gate)?;
+        self.retry_ready_locked(now).await
+    }
+
     async fn retry_ready_locked(&self, now: u64) -> Result<usize, NativeSessionError<H::Error>> {
         let applications = self.retry_applications_locked(now).await?;
         let memberships = self.retry_memberships_locked().await?;
