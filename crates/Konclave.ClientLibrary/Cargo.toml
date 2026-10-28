@@ -31,6 +31,7 @@ zeroize.workspace = true
 KonclaveCommunityRelay = { path = "../../apps/Konclave.CommunityRelay" }
 KonclaveRelayCore = { path = "../Konclave.RelayCore" }
 axum = "0.8.9"
+mls-rs-core.workspace = true
 serde_json.workspace = true
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

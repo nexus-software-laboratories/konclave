@@ -11,6 +11,7 @@ mod error;
 mod health;
 mod http;
 mod installation;
+pub mod native;
 mod pairing;
 mod pairing_rendezvous;
 mod protected_http;

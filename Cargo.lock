@@ -244,6 +244,7 @@ dependencies = [
  "futures-util",
  "hyper-util",
  "log",
+ "mls-rs-core",
  "reqwest",
  "rustix",
  "serde_json",
