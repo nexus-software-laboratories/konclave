@@ -25,6 +25,8 @@ mod local_service;
 mod mcp;
 mod native_journal;
 #[allow(dead_code)]
+mod native_workers;
+#[allow(dead_code)]
 mod observability;
 #[allow(dead_code)]
 mod pairing;
