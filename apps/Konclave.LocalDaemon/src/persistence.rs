@@ -1,5 +1,7 @@
 pub(crate) use KonclaveClientLibrary::native::{
-    StoredConversation, OutboundReservation, MembershipOutboxStatus, MembershipOutbox, StoredMembershipTransition, MembershipInboxOperation, StoredApplicationMessage, MessageDirection, InboxOperation,
+    InboxOperation, MembershipInboxOperation, MembershipOutbox, MembershipOutboxStatus,
+    MessageDirection, OutboundReservation, StoredApplicationMessage, StoredConversation,
+    StoredMembershipTransition,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;

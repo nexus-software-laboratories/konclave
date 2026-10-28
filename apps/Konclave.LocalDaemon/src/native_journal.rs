@@ -4,7 +4,8 @@ use KonclaveClientLibrary::native::{
 };
 use KonclaveDomainCore::{
     ApplicationMessage, ConversationId, ConversationState, DeviceCredentialBinding, DeviceId,
-    EnvelopeId, MembershipOperationId, NotificationId, RelayEnvelope, RoutingId, StoredRelayEnvelope,
+    EnvelopeId, MembershipOperationId, NotificationId, RelayEnvelope, RoutingId,
+    StoredRelayEnvelope,
 };
 
 use crate::persistence::{CollaborationActionAuthorization, ProfileStore, ProfileStoreError};
@@ -53,12 +54,21 @@ impl NativeConversationJournal for ProfileStore {
     ) -> Result<OutboundReservation, Self::Error> {
         if request.policy_operation {
             self.reserve_outbound_collaboration_policy_application(
-                request.conversation_id, request.message_id, envelope, &request.content, request.reply_to,
+                request.conversation_id,
+                request.message_id,
+                envelope,
+                &request.content,
+                request.reply_to,
             )
         } else if let Some(authorization) = request.authorization {
             self.reserve_outbound_collaboration_action(
-                request.conversation_id, request.message_id, envelope, authorization,
-                &request.content, request.reply_to, request.sent_at_unix_milliseconds,
+                request.conversation_id,
+                request.message_id,
+                envelope,
+                authorization,
+                &request.content,
+                request.reply_to,
+                request.sent_at_unix_milliseconds,
                 request.expires_at_unix_seconds,
             )
         } else {
@@ -112,7 +122,15 @@ impl NativeConversationJournal for ProfileStore {
         id: ConversationId,
         stored: &StoredRelayEnvelope,
     ) -> Result<Option<StoredApplicationMessage>, Self::Error> {
-        ProfileStore::outbound_history_message(self, id, stored)
+        ProfileStore::outbound_history_message(self, id, stored).map(|message| {
+            message.map(|message| StoredApplicationMessage {
+                cursor: message.cursor,
+                envelope_id: message.envelope_id,
+                sender: message.sender,
+                epoch: message.epoch,
+                message: message.message,
+            })
+        })
     }
 
     fn save_inbox_message(
@@ -184,7 +202,9 @@ impl NativeConversationJournal for ProfileStore {
         next: &ConversationState,
         bindings: &[DeviceCredentialBinding],
     ) -> Result<(), Self::Error> {
-        ProfileStore::save_membership_inbox_transition(self, id, cursor, sender, parent, operation, control, next, bindings)
+        ProfileStore::save_membership_inbox_transition(
+            self, id, cursor, sender, parent, operation, control, next, bindings,
+        )
     }
 
     fn complete_membership_inbox_with_notification(
@@ -207,6 +227,8 @@ impl NativeConversationJournal for ProfileStore {
         bindings: &[DeviceCredentialBinding],
         welcome: Option<&[u8]>,
     ) -> Result<(), Self::Error> {
-        ProfileStore::store_membership_outbox(self, operation, id, parent, envelope, control, next, bindings, welcome)
+        ProfileStore::store_membership_outbox(
+            self, operation, id, parent, envelope, control, next, bindings, welcome,
+        )
     }
 }

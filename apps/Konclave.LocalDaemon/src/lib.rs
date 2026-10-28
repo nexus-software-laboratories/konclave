@@ -11,7 +11,6 @@ mod authorization_runtime;
 mod clock;
 #[allow(dead_code)]
 mod conversation;
-mod native_journal;
 #[allow(dead_code)]
 mod health;
 #[allow(dead_code)]
@@ -24,6 +23,7 @@ mod local_failure_log;
 mod local_service;
 #[allow(dead_code)]
 mod mcp;
+mod native_journal;
 #[allow(dead_code)]
 mod observability;
 #[allow(dead_code)]

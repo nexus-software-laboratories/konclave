@@ -1,7 +1,10 @@
-pub(crate) use KonclaveClientLibrary::native::{
-    PreparedApplication, PreparedMembership, ProcessedApplication, ProcessedMembership, OpenConversation,
+use KonclaveClientLibrary::native::{
+    NativeApplicationRequest, NativeConversationError, NativeConversationProcessor,
 };
-use KonclaveClientLibrary::native::{NativeApplicationRequest, NativeConversationError, NativeConversationProcessor};
+pub(crate) use KonclaveClientLibrary::native::{
+    OpenConversation, PreparedApplication, PreparedMembership, ProcessedApplication,
+    ProcessedMembership,
+};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
@@ -11,36 +14,35 @@ use KonclaveCryptographicCore::{
 };
 #[cfg(test)]
 use KonclaveCryptographicCore::{MlsApplicationMessage, MlsCommit, MlsConversation};
-#[cfg(test)]
-use KonclaveDomainCore::{ApplicationMessage, EnvelopeId};
 use KonclaveDomainCore::{
     ApplicationContent, ConversationId, ConversationRole, ConversationState,
-    DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Invitation,
-    JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus,
-    MessageHistoryQuery, MessageId, PairingControl, PairingId, PairingMessageId,
-    PairingStage, ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId,
-    StoredRelayEnvelope, TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
-    TrustedDeviceBindingStatus, TrustedDeviceEvidence, TrustedDeviceResolution,
-    resolve_trusted_device, trusted_device_binding_status,
+    DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Invitation, JoinProof,
+    KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus, MessageHistoryQuery,
+    MessageId, PairingControl, PairingId, PairingMessageId, PairingStage, ProtocolVersion,
+    RelayEnvelope, RepeatPairingOperationId, RoutingId, StoredRelayEnvelope, TrustedDeviceAlias,
+    TrustedDeviceAliasDecision, TrustedDeviceBinding, TrustedDeviceBindingStatus,
+    TrustedDeviceEvidence, TrustedDeviceResolution, resolve_trusted_device,
+    trusted_device_binding_status,
 };
-use KonclaveProtocolContracts::v1::{decode_membership_control, encode_join_proof};
+#[cfg(test)]
+use KonclaveDomainCore::{ApplicationMessage, EnvelopeId};
 #[cfg(test)]
 use KonclaveProtocolContracts::v1::decode_membership_commit_bundle;
+use KonclaveProtocolContracts::v1::{decode_membership_control, encode_join_proof};
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use thiserror::Error;
 
 use crate::activity::ProfileActivity;
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::pairing::PairingOperationState;
+#[cfg(test)]
+use crate::persistence::MembershipInboxOperation;
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
     CollaborationActionAuthorization, ConversationInsertOptions, ExpireOutboundResult, HistoryPage,
-    MAX_CONVERSATION_PAGE_SIZE, MembershipOutboxStatus,
-    OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
-    StoredOutboundApplication,
+    MAX_CONVERSATION_PAGE_SIZE, MembershipOutboxStatus, OutboundReservation, PendingOutbox,
+    ProfileStore, ProfileStoreError, StoredOutboundApplication,
 };
-#[cfg(test)]
-use crate::persistence::MembershipInboxOperation;
 
 const MAX_RECOVERED_PAIRINGS: usize = 32;
 const MAX_TRUSTED_DEVICE_EVIDENCE: usize = 4_096;
@@ -72,11 +74,13 @@ pub(crate) struct ConversationCoordinator {
 }
 
 impl ConversationCoordinator {
-
     fn native_processor(&self) -> NativeConversationProcessor<'_, ProfileStore> {
-        NativeConversationProcessor::new(self.store.as_ref(), self.mls_storage.clone(), self.device.as_ref())
+        NativeConversationProcessor::new(
+            self.store.as_ref(),
+            self.mls_storage.clone(),
+            self.device.as_ref(),
+        )
     }
-
 
     /// Creates a coordinator that owns the profile lock through `store`.
     pub(crate) fn new(
@@ -383,7 +387,9 @@ impl ConversationCoordinator {
         &self,
         conversation_id: ConversationId,
     ) -> Result<OpenConversation, ConversationCoordinatorError> {
-        self.native_processor().open(conversation_id).map_err(Into::into)
+        self.native_processor()
+            .open(conversation_id)
+            .map_err(Into::into)
     }
 
     /// Reconciles safe startup states before accepting new operations.
@@ -1223,18 +1229,22 @@ impl ConversationCoordinator {
         &self,
         request: PrepareApplicationRequest,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
-        let _operation = self.operations.lock()
+        let _operation = self
+            .operations
+            .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        self.native_processor().prepare_application(NativeApplicationRequest {
-            conversation_id: request.conversation_id,
-            message_id: request.message_id,
-            content: request.content,
-            reply_to: request.reply_to,
-            authorization: request.collaboration_action_authorization,
-            sent_at_unix_milliseconds: request.sent_at_unix_milliseconds,
-            expires_at_unix_seconds: request.expires_at_unix_seconds,
-            policy_operation: request.policy_operation,
-        }).map_err(Into::into)
+        self.native_processor()
+            .prepare_application(NativeApplicationRequest {
+                conversation_id: request.conversation_id,
+                message_id: request.message_id,
+                content: request.content,
+                reply_to: request.reply_to,
+                authorization: request.collaboration_action_authorization,
+                sent_at_unix_milliseconds: request.sent_at_unix_milliseconds,
+                expires_at_unix_seconds: request.expires_at_unix_seconds,
+                policy_operation: request.policy_operation,
+            })
+            .map_err(Into::into)
     }
 
     /// Loads one ready, accepted, or terminal outbound request by stable message ID.
@@ -1260,7 +1270,15 @@ impl ConversationCoordinator {
         sent_at_unix_milliseconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
-        self.native_processor().prepare_reserved_application(reservation, content, reply_to, sent_at_unix_milliseconds, expires_at_unix_seconds).map_err(Into::into)
+        self.native_processor()
+            .prepare_reserved_application(
+                reservation,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+            )
+            .map_err(Into::into)
     }
 
     /// Creates and journals one add-member commit before relay transmission.
@@ -1275,9 +1293,18 @@ impl ConversationCoordinator {
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        let _operation = self.operations.lock()
+        let _operation = self
+            .operations
+            .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        self.native_processor().prepare_add_member(conversation_id, join_proof, now_unix_seconds, expires_at_unix_seconds).map_err(Into::into)
+        self.native_processor()
+            .prepare_add_member(
+                conversation_id,
+                join_proof,
+                now_unix_seconds,
+                expires_at_unix_seconds,
+            )
+            .map_err(Into::into)
     }
 
     /// Creates and journals one remove-member commit before relay transmission.
@@ -1291,9 +1318,13 @@ impl ConversationCoordinator {
         device_id: DeviceId,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        let _operation = self.operations.lock()
+        let _operation = self
+            .operations
+            .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        self.native_processor().prepare_remove_member(conversation_id, device_id, expires_at_unix_seconds).map_err(Into::into)
+        self.native_processor()
+            .prepare_remove_member(conversation_id, device_id, expires_at_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Creates and journals one role-change commit before relay transmission.
@@ -1308,12 +1339,14 @@ impl ConversationCoordinator {
         role: ConversationRole,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        let _operation = self.operations.lock()
+        let _operation = self
+            .operations
+            .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        self.native_processor().prepare_change_role(conversation_id, device_id, role, expires_at_unix_seconds).map_err(Into::into)
+        self.native_processor()
+            .prepare_change_role(conversation_id, device_id, role, expires_at_unix_seconds)
+            .map_err(Into::into)
     }
-
-
 
     /// Loads bounded ready envelopes for idempotent relay retry.
     ///
@@ -1551,7 +1584,9 @@ impl ConversationCoordinator {
         &self,
         operation_id: MembershipOperationId,
     ) -> Result<(), ConversationCoordinatorError> {
-        self.native_processor().orphan_membership(operation_id).map_err(Into::into)
+        self.native_processor()
+            .orphan_membership(operation_id)
+            .map_err(Into::into)
     }
 
     /// Loads one bounded cursor-ordered page of completed local history.
@@ -1657,9 +1692,13 @@ impl ConversationCoordinator {
         stored: &StoredRelayEnvelope,
         now_unix_seconds: u64,
     ) -> Result<ProcessedApplication, ConversationCoordinatorError> {
-        let _operation = self.operations.lock()
+        let _operation = self
+            .operations
+            .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        self.native_processor().process_inbound_application(conversation_id, stored, now_unix_seconds).map_err(Into::into)
+        self.native_processor()
+            .process_inbound_application(conversation_id, stored, now_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Journals and applies one encrypted membership Commit relay envelope.
@@ -1677,15 +1716,15 @@ impl ConversationCoordinator {
         stored: &StoredRelayEnvelope,
         now_unix_seconds: u64,
     ) -> Result<ProcessedMembership, ConversationCoordinatorError> {
-        let _operation = self.operations.lock()
+        let _operation = self
+            .operations
+            .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        self.native_processor().process_inbound_membership(conversation_id, stored, now_unix_seconds).map_err(Into::into)
+        self.native_processor()
+            .process_inbound_membership(conversation_id, stored, now_unix_seconds)
+            .map_err(Into::into)
     }
-
-
 }
-
-
 
 struct PrepareApplicationRequest {
     conversation_id: ConversationId,
@@ -1785,7 +1824,6 @@ pub(crate) enum ConversationCoordinatorError {
     Unauthorized,
 }
 
-
 impl From<NativeConversationError<ProfileStoreError>> for ConversationCoordinatorError {
     fn from(error: NativeConversationError<ProfileStoreError>) -> Self {
         match error {
@@ -1823,7 +1861,12 @@ fn directed_request_recipients_support(
     target: DeviceId,
     supports_directed_requests: impl FnMut(DeviceId) -> bool,
 ) -> bool {
-    KonclaveClientLibrary::native::directed_request_recipients_support(state, local_device, target, supports_directed_requests)
+    KonclaveClientLibrary::native::directed_request_recipients_support(
+        state,
+        local_device,
+        target,
+        supports_directed_requests,
+    )
 }
 
 #[cfg(test)]
@@ -1831,17 +1874,17 @@ fn decrypt_application(
     group: &mut MlsConversation,
     envelope: &RelayEnvelope,
 ) -> Result<(DeviceId, ApplicationMessage), ConversationCoordinatorError> {
-    KonclaveClientLibrary::native::decrypt_application::<ProfileStoreError>(group, envelope).map_err(Into::into)
+    KonclaveClientLibrary::native::decrypt_application::<ProfileStoreError>(group, envelope)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
 fn verify_application_content(
     content: &ApplicationContent,
 ) -> Result<(), ConversationCoordinatorError> {
-    KonclaveClientLibrary::native::verify_application_content::<ProfileStoreError>(content).map_err(Into::into)
+    KonclaveClientLibrary::native::verify_application_content::<ProfileStoreError>(content)
+        .map_err(Into::into)
 }
-
-
 
 #[cfg(test)]
 pub(crate) mod tests {
