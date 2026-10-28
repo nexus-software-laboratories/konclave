@@ -2,7 +2,8 @@ use KonclaveClientLibrary::native::{
     NativeApplicationRequest, NativeConversationError, NativeConversationProcessor,
 };
 pub(crate) use KonclaveClientLibrary::native::{
-    OpenConversation, PreparedApplication, PreparedMembership, ProcessedApplication,
+    NativeAcceptedMembership as AcceptedMembership, OpenConversation,
+    PreparedApplication, PreparedMembership, ProcessedApplication,
     ProcessedMembership,
 };
 use std::collections::BTreeSet;
@@ -1737,14 +1738,7 @@ struct PrepareApplicationRequest {
     policy_operation: bool,
 }
 
-/// One relay-accepted and locally applied membership transition.
-pub(crate) struct AcceptedMembership {
-    pub(crate) operation_id: MembershipOperationId,
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) cursor: u64,
-    pub(crate) welcome: Option<Vec<u8>>,
-}
-
+/// A durable membership retry before or after local acceptance.
 pub(crate) enum MembershipRequestState {
     Ready(PreparedMembership),
     Applied(AcceptedMembership),

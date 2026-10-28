@@ -2,17 +2,25 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use KonclaveClientLibrary::{KonclaveClientError, RelayTransport};
+use KonclaveClientLibrary::native::{
+    NativeApplicationRequest, NativeSession, NativeSessionError, NativeSessionHost,
+    validate_native_acknowledgment,
+};
+pub(crate) use KonclaveClientLibrary::native::{
+    NativeAcceptedMembership as SentMembership, NativeReplayBatch as ReplayBatch,
+    NativeSentApplication as SentApplication,
+};
 use KonclaveCryptographicCore::{
     MlsWelcome, derive_collaboration_policy_digest,
     derive_collaboration_policy_proposal_message_id,
     derive_collaboration_policy_response_message_id,
 };
 use KonclaveDomainCore::{
-    AcknowledgeRequest, ApplicationContent, ApplicationMessage, CollaborationPolicyDigest,
+    AcknowledgeRequest, ApplicationContent, CollaborationPolicyDigest,
     CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyResponse,
     CollaborationPolicyResponseOutcome, CollaborationPolicyRevocation, ConversationId,
-    ConversationRole, DeviceId, JoinProof, MembershipOperationId, MessageId, ReplayPage,
-    ReplayRequest, StoredRelayEnvelope,
+    ConversationRole, DeviceId, JoinProof, MessageId, ReplayPage,
+    ReplayRequest,
 };
 use KonclaveProtocolContracts::v1::{
     decode_collaboration_policy_bundle, decode_join_proof, encode_collaboration_policy_bundle,
@@ -21,13 +29,16 @@ use KonclaveProtocolContracts::v1::{
 use thiserror::Error;
 use tokio::sync::watch;
 
+use crate::activity::ProfileActivityGuard;
+use crate::native_session::DaemonNativeHost;
+use crate::native_workers::{NativeWorkerError, NativeWorkers};
 use crate::conversation::{
-    AcceptedMembership, ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
-    MembershipRequestState, PreparedApplication, PreparedMembership, ProcessedApplication,
+    ConversationCoordinator, ConversationCoordinatorError, ConversationSummary,
+    MembershipRequestState,
 };
 use crate::persistence::{
-    CollaborationActionAuthorization, CollaborationPolicyActivationOperation, ExpireOutboundResult,
-    HistoryPage, OutboundApplicationStatus, ProfileStoreError, StoredCollaborationPolicyProposal,
+    CollaborationActionAuthorization, CollaborationPolicyActivationOperation,
+    HistoryPage, ProfileStoreError, StoredCollaborationPolicyProposal,
 };
 
 /// Outbound application input with caller-supplied display and expiry times.
@@ -40,13 +51,6 @@ pub(crate) struct SendApplicationRequest {
     pub(crate) sent_at_unix_milliseconds: u64,
     pub(crate) now_unix_seconds: u64,
     pub(crate) expires_at_unix_seconds: u64,
-}
-
-/// One accepted application message and its durable relay cursor.
-pub(crate) struct SentApplication {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) message: ApplicationMessage,
-    pub(crate) cursor: u64,
 }
 
 pub(crate) struct ProposeCollaborationPolicyRequest {
@@ -93,20 +97,6 @@ pub(crate) struct SentCollaborationPolicyExchange {
     pub(crate) local_binding_changed: bool,
 }
 
-/// One accepted membership transition and optional add-member Welcome.
-pub(crate) struct SentMembership {
-    pub(crate) operation_id: MembershipOperationId,
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) cursor: u64,
-    pub(crate) welcome: Option<Vec<u8>>,
-}
-
-/// One bounded replay result after durable local completion and acknowledgment.
-pub(crate) struct ReplayBatch {
-    pub(crate) messages: Vec<ProcessedApplication>,
-    pub(crate) has_more: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WatchConnectionExit {
     Shutdown,
@@ -119,9 +109,52 @@ pub(crate) struct ApplicationService<T> {
     transport: Arc<T>,
     submissions: Arc<tokio::sync::Mutex<()>>,
     policy_operations: Arc<tokio::sync::Mutex<()>>,
+    workers: NativeWorkers,
+    admission: Option<Arc<ProfileActivityGuard>>,
+}
+
+struct NativeSubmission<T> {
+    host: Arc<DaemonNativeHost>,
+    session: NativeSession<DaemonNativeHost, T>,
+    gate: Arc<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl<T> ApplicationService<T> {
+    #[cfg(test)]
+    pub(crate) fn worker_owner_for_test(&self) -> NativeWorkers {
+        self.workers.clone()
+    }
+
+    /// Reuses one verified outer operation admission without admitting nested work.
+    pub(crate) fn with_admission(
+        &self,
+        admission: Arc<ProfileActivityGuard>,
+    ) -> Result<Self, ApplicationServiceError> {
+        if !self.conversations.activity().owns(&admission) {
+            return Err(ApplicationServiceError::Protocol);
+        }
+        let mut scoped = self.clone();
+        scoped.admission = Some(admission);
+        Ok(scoped)
+    }
+
+    fn operation_admission(&self) -> Result<Arc<ProfileActivityGuard>, ApplicationServiceError> {
+        match &self.admission {
+            Some(admission) => Ok(Arc::clone(admission)),
+            None => self
+                .conversations
+                .activity()
+                .try_begin()
+                .map(Arc::new)
+                .map_err(|_| ApplicationServiceError::ProfileClosing),
+        }
+    }
+
+    /// Closes worker admission and observes every actual native callback.
+    pub(crate) async fn shutdown_native_workers(&self) -> Result<(), ApplicationServiceError> {
+        self.workers.shutdown().await.map_err(Into::into)
+    }
+
     /// Signals when this profile joins a conversation it was not previously in.
     pub(crate) fn membership_changed(&self) -> std::sync::Arc<tokio::sync::Notify> {
         self.conversations.membership_changed()
@@ -140,6 +173,8 @@ impl<T> Clone for ApplicationService<T> {
             transport: Arc::clone(&self.transport),
             submissions: Arc::clone(&self.submissions),
             policy_operations: Arc::clone(&self.policy_operations),
+            workers: self.workers.clone(),
+            admission: self.admission.clone(),
         }
     }
 }
@@ -160,7 +195,41 @@ where
             transport,
             submissions: Arc::new(tokio::sync::Mutex::new(())),
             policy_operations: Arc::new(tokio::sync::Mutex::new(())),
+            workers: NativeWorkers::new(),
+            admission: None,
         }
+    }
+
+    fn native_host(
+        &self,
+        admission: Arc<ProfileActivityGuard>,
+        submission: Option<Arc<tokio::sync::OwnedMutexGuard<()>>>,
+    ) -> Arc<DaemonNativeHost> {
+        Arc::new(DaemonNativeHost::new(
+            self.conversations.clone(),
+            self.workers.clone(),
+            admission,
+            submission,
+        ))
+    }
+
+    fn native_session(&self, host: Arc<DaemonNativeHost>) -> NativeSession<DaemonNativeHost, T> {
+        NativeSession::new(
+            host,
+            Arc::clone(&self.transport),
+            Arc::clone(&self.submissions),
+        )
+    }
+
+    async fn native_submission(&self) -> Result<NativeSubmission<T>, ApplicationServiceError> {
+        let admission = self.operation_admission()?;
+        let gate = Arc::new(Arc::clone(&self.submissions).lock_owned().await);
+        let host = self.native_host(admission, Some(Arc::clone(&gate)));
+        Ok(NativeSubmission {
+            session: self.native_session(Arc::clone(&host)),
+            host,
+            gate,
+        })
     }
 
     async fn serialized_policy_transition<R, F>(
@@ -172,11 +241,9 @@ where
         F: FnOnce() -> Result<R, ApplicationServiceError> + Send + 'static,
     {
         let policy_operation = Arc::clone(&self.policy_operations).lock_owned().await;
-        let (policy_operation, result) =
-            tokio::task::spawn_blocking(move || (policy_operation, transition()))
-                .await
-                .map_err(|_| ApplicationServiceError::Task)?;
-        Ok((policy_operation, result?))
+        self.workers
+            .run(move || transition().map(|value| (policy_operation, value)))
+            .await?
     }
 
     /// Encrypts, journals, submits, and accepts one application message.
@@ -210,70 +277,25 @@ where
         request: SendApplicationRequest,
         policy_operation: bool,
     ) -> Result<SentApplication, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
-        let conversations = self.conversations.clone();
-        let conversation_id = request.conversation_id;
-        let message_id = request.message_id;
-        if let Some(existing) = tokio::task::spawn_blocking(move || {
-            conversations.outbound_application(conversation_id, message_id)
-        })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??
-        {
-            if !application_content_equal(existing.message.content(), &request.content)
-                || existing.message.reply_to() != request.reply_to
-            {
-                return Err(ApplicationServiceError::IdempotencyConflict);
-            }
-            return match existing.status {
-                OutboundApplicationStatus::Accepted { cursor } => Ok(SentApplication {
-                    conversation_id: existing.conversation_id,
-                    message: existing.message,
-                    cursor,
-                }),
-                OutboundApplicationStatus::Ready => {
-                    self.submit_prepared(
-                        PreparedApplication {
-                            conversation_id: existing.conversation_id,
-                            message: existing.message,
-                            envelope: existing.envelope,
-                        },
-                        request.now_unix_seconds,
-                    )
-                    .await
-                }
-                OutboundApplicationStatus::Expired => Err(ApplicationServiceError::OutboundExpired),
-                OutboundApplicationStatus::Removed => Err(ApplicationServiceError::OutboundRemoved),
-            };
-        }
-        self.retry_ready_locked(request.now_unix_seconds).await?;
-        let conversations = self.conversations.clone();
-        let prepared = tokio::task::spawn_blocking(move || {
-            if policy_operation {
-                conversations.prepare_collaboration_policy_application_with_id(
-                    request.conversation_id,
-                    request.message_id,
-                    request.content,
-                    request.reply_to,
-                    request.sent_at_unix_milliseconds,
-                    request.expires_at_unix_seconds,
-                )
-            } else {
-                conversations.prepare_application_with_id(
-                    request.conversation_id,
-                    request.message_id,
-                    request.content,
-                    request.reply_to,
-                    request.collaboration_action_authorization,
-                    request.sent_at_unix_milliseconds,
-                    request.expires_at_unix_seconds,
-                )
-            }
-        })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??;
-        self.submit_prepared(prepared, request.now_unix_seconds)
+        let native = self.native_submission().await?;
+        native
+            .session
+            .send_with_gate(
+                NativeApplicationRequest {
+                    conversation_id: request.conversation_id,
+                    message_id: request.message_id,
+                    content: request.content,
+                    reply_to: request.reply_to,
+                    authorization: request.collaboration_action_authorization,
+                    sent_at_unix_milliseconds: request.sent_at_unix_milliseconds,
+                    expires_at_unix_seconds: request.expires_at_unix_seconds,
+                    policy_operation,
+                },
+                request.now_unix_seconds,
+                &native.gate,
+            )
             .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn propose_collaboration_policy(
@@ -347,7 +369,7 @@ where
             request.proposal_id,
         );
         let store = self.conversations.store();
-        let (operation, canonical_bundle) = tokio::task::spawn_blocking(move || {
+        let (operation, canonical_bundle) = self.workers.run(move || {
             let operation = store.collaboration_policy_proposal_operation(
                 request.conversation_id,
                 message_id,
@@ -360,8 +382,7 @@ where
                 .map_err(|_| ProfileStoreError::CorruptData)?;
             Ok::<_, ProfileStoreError>((operation, canonical_bundle))
         })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??;
+        .await??;
         let proposal = CollaborationPolicyProposal::new(
             request.proposal_id,
             operation.policy_digest,
@@ -538,28 +559,21 @@ where
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
-        let submission = Arc::clone(&self.submissions).lock_owned().await;
-        self.retry_application_ready_locked(now_unix_seconds)
-            .await?;
-        if let Some(existing) = self.find_add_member(conversation_id, &join_proof).await? {
-            return self.resume_membership(existing).await;
+        let native = self.native_submission().await?;
+        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
+        if let Some(existing) = Self::find_add_member(&native, conversation_id, &join_proof).await? {
+            return Self::resume_membership(&native, existing).await;
         }
-        self.retry_membership_ready_locked().await?;
-        let conversations = self.conversations.clone();
-        let (submission, prepared) = tokio::task::spawn_blocking(move || {
-            let prepared = conversations.prepare_add_member(
+        native.session.retry_memberships_with_gate(&native.gate).await?;
+        let prepared = native.host.run(move |conversations| {
+            conversations.prepare_add_member(
                 conversation_id,
                 join_proof,
                 now_unix_seconds,
                 expires_at_unix_seconds,
-            );
-            (submission, prepared)
-        })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)?;
-        let _submission = submission;
-        let prepared = prepared?;
-        self.submit_membership(prepared).await
+            )
+        }).await?;
+        native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into)
     }
 
     /// Resumes an exact add-member journal without creating one when no request was
@@ -574,11 +588,10 @@ where
         join_proof: &JoinProof,
         now_unix_seconds: u64,
     ) -> Result<Option<SentMembership>, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
-        self.retry_application_ready_locked(now_unix_seconds)
-            .await?;
-        match self.find_add_member(conversation_id, join_proof).await? {
-            Some(existing) => self.resume_membership(existing).await.map(Some),
+        let native = self.native_submission().await?;
+        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
+        match Self::find_add_member(&native, conversation_id, join_proof).await? {
+            Some(existing) => Self::resume_membership(&native, existing).await.map(Some),
             None => Ok(None),
         }
     }
@@ -595,26 +608,21 @@ where
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
-        self.retry_application_ready_locked(now_unix_seconds)
-            .await?;
-        let conversations = self.conversations.clone();
-        if let Some(existing) = tokio::task::spawn_blocking(move || {
+        let native = self.native_submission().await?;
+        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
+        if let Some(existing) = native.host.run(move |conversations| {
             conversations.resume_remove_member(conversation_id, device_id)
         })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??
+        .await?
         {
-            return self.resume_membership(existing).await;
+            return Self::resume_membership(&native, existing).await;
         }
-        self.retry_membership_ready_locked().await?;
-        let conversations = self.conversations.clone();
-        let prepared = tokio::task::spawn_blocking(move || {
+        native.session.retry_memberships_with_gate(&native.gate).await?;
+        let prepared = native.host.run(move |conversations| {
             conversations.prepare_remove_member(conversation_id, device_id, expires_at_unix_seconds)
         })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??;
-        self.submit_membership(prepared).await
+        .await?;
+        native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into)
     }
 
     /// Changes one member role through a durable encrypted membership commit.
@@ -630,21 +638,17 @@ where
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<SentMembership, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
-        self.retry_application_ready_locked(now_unix_seconds)
-            .await?;
-        let conversations = self.conversations.clone();
-        if let Some(existing) = tokio::task::spawn_blocking(move || {
+        let native = self.native_submission().await?;
+        native.session.retry_applications_with_gate(now_unix_seconds, &native.gate).await?;
+        if let Some(existing) = native.host.run(move |conversations| {
             conversations.resume_change_role(conversation_id, device_id, role)
         })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??
+        .await?
         {
-            return self.resume_membership(existing).await;
+            return Self::resume_membership(&native, existing).await;
         }
-        self.retry_membership_ready_locked().await?;
-        let conversations = self.conversations.clone();
-        let prepared = tokio::task::spawn_blocking(move || {
+        native.session.retry_memberships_with_gate(&native.gate).await?;
+        let prepared = native.host.run(move |conversations| {
             conversations.prepare_change_role(
                 conversation_id,
                 device_id,
@@ -652,9 +656,8 @@ where
                 expires_at_unix_seconds,
             )
         })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??;
-        self.submit_membership(prepared).await
+        .await?;
+        native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into)
     }
 
     /// Verifies one relay Commit receipt and accepts its encrypted Welcome.
@@ -695,15 +698,13 @@ where
         cursor: u64,
         retain_pending_join: bool,
     ) -> Result<ConversationSummary, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
+        let native = self.native_submission().await?;
         let after_cursor = cursor
             .checked_sub(1)
             .ok_or(ApplicationServiceError::Protocol)?;
-        let conversations = self.conversations.clone();
-        let routing_id =
-            tokio::task::spawn_blocking(move || conversations.pending_join_route(conversation_id))
-                .await
-                .map_err(|_| ApplicationServiceError::Task)??;
+        let routing_id = native.host
+            .run(move |conversations| conversations.pending_join_route(conversation_id))
+            .await?;
         let page = self
             .transport
             .replay(
@@ -721,8 +722,7 @@ where
             return Err(ApplicationServiceError::InvalidRelayResponse);
         }
         let receipt = receipt.clone();
-        let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || {
+        native.host.run(move |conversations| {
             if retain_pending_join {
                 conversations.accept_pairing_welcome(conversation_id, &welcome, &receipt)
             } else {
@@ -730,8 +730,6 @@ where
             }
         })
         .await
-        .map_err(|_| ApplicationServiceError::Task)?
-        .map_err(Into::into)
     }
 
     /// Retries every bounded ready envelope in deterministic journal order.
@@ -747,8 +745,10 @@ where
         &self,
         now_unix_seconds: u64,
     ) -> Result<usize, ApplicationServiceError> {
-        let _submission = self.submissions.lock().await;
-        self.retry_ready_locked(now_unix_seconds).await
+        let native = self.native_submission().await?;
+        native.session.retry_ready_with_gate(now_unix_seconds, &native.gate)
+            .await
+            .map_err(Into::into)
     }
 
     /// Replays, processes, and acknowledges one bounded page for a conversation.
@@ -766,29 +766,11 @@ where
         limit: u32,
         now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
-        // Recovery is one of the operations ADR 0008 retains a profile for. Admission
-        // is refused once the profile is closing, so this never starts work against
-        // stores a closer is about to drop. The durable cursor is unchanged, so the
-        // same replay is exact when the profile is opened again.
-        //
-        // This is a top-level operation: no callee takes a second admission, so an
-        // admitted replay never waits on the gate again.
-        let _admitted = self
-            .conversations
-            .activity()
-            .try_begin()
-            .map_err(|_| ApplicationServiceError::ProfileClosing)?;
-        let (request, routing_id, after_cursor) =
-            self.replay_request(conversation_id, limit).await?;
-        let page = self.transport.replay(request).await?;
-        self.process_page(
-            conversation_id,
-            routing_id,
-            after_cursor,
-            page,
-            now_unix_seconds,
-        )
-        .await
+        let admission = self.operation_admission()?;
+        self.native_session(self.native_host(admission, None))
+            .replay_once(conversation_id, limit, now_unix_seconds)
+            .await
+            .map_err(Into::into)
     }
 
     /// Waits for and processes one bounded WebSocket replay page.
@@ -804,18 +786,22 @@ where
         conversation_id: ConversationId,
         now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
-        let (request, routing_id, after_cursor) = self.replay_request(conversation_id, 100).await?;
+        let (request, routing_id, after_cursor) = self
+            .replay_request(conversation_id, 100, self.operation_admission()?)
+            .await?;
         let mut watch = self.transport.connect_watch(request).await?;
         let page = watch.next_page().await?;
-        let processed = self
-            .process_page(
+        let processed = match self.operation_admission() {
+            Ok(admission) => self.process_page(
+                admission,
                 conversation_id,
                 routing_id,
                 after_cursor,
                 page,
                 now_unix_seconds,
-            )
-            .await;
+            ).await,
+            Err(error) => Err(error),
+        };
         let closed = watch.close().await;
         match processed {
             Err(error) => Err(error),
@@ -854,11 +840,18 @@ where
     where
         F: FnMut(&ReplayPage),
     {
-        if !self.is_local_member(conversation_id).await? {
-            return Ok(WatchConnectionExit::LocalMemberRemoved);
-        }
-        let (request, routing_id, mut after_cursor) =
-            self.replay_request(conversation_id, 100).await?;
+        let (request, routing_id, mut after_cursor) = {
+            let admission = match self.operation_admission() {
+                Ok(admission) => admission,
+                Err(ApplicationServiceError::ProfileClosing) => return Ok(WatchConnectionExit::Shutdown),
+                Err(error) => return Err(error),
+            };
+            let host = self.native_host(Arc::clone(&admission), None);
+            if !host.run(move |conversations| conversations.is_local_member(conversation_id)).await? {
+                return Ok(WatchConnectionExit::LocalMemberRemoved);
+            }
+            self.replay_request(conversation_id, 100, admission).await?
+        };
         self.acknowledge_cursor(routing_id, after_cursor).await?;
         let mut watch_session = self.transport.connect_watch(request).await?;
         loop {
@@ -881,15 +874,18 @@ where
             //
             // This is a top-level operation: nothing reached from `process_page` takes
             // a second admission, so an admitted page never waits on the gate again.
-            let Ok(admitted) = self.conversations.activity().try_begin() else {
-                return Ok(clean_watch_exit(
+            let admission = match self.operation_admission() {
+                Ok(admission) => admission,
+                Err(ApplicationServiceError::ProfileClosing) => return Ok(clean_watch_exit(
                     watch_session.close().await,
                     WatchConnectionExit::Shutdown,
-                ));
+                )),
+                Err(error) => return Err(error),
             };
             observe_page(&page);
             let next_cursor = page.next_cursor();
             self.process_page(
+                Arc::clone(&admission),
                 conversation_id,
                 routing_id,
                 after_cursor,
@@ -898,8 +894,9 @@ where
             )
             .await?;
             after_cursor = next_cursor;
-            let still_member = self.is_local_member(conversation_id).await?;
-            drop(admitted);
+            let still_member = self.native_host(admission, None)
+                .run(move |conversations| conversations.is_local_member(conversation_id))
+                .await?;
             if !still_member {
                 return Ok(clean_watch_exit(
                     watch_session.close().await,
@@ -920,9 +917,8 @@ where
         limit: usize,
     ) -> Result<Vec<ConversationId>, ApplicationServiceError> {
         let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || conversations.conversation_ids(after, limit))
-            .await
-            .map_err(|_| ApplicationServiceError::Task)?
+        self.workers.run(move || conversations.conversation_ids(after, limit))
+            .await?
             .map_err(Into::into)
     }
 
@@ -936,9 +932,8 @@ where
         conversation_id: ConversationId,
     ) -> Result<bool, ApplicationServiceError> {
         let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || conversations.is_local_member(conversation_id))
-            .await
-            .map_err(|_| ApplicationServiceError::Task)?
+        self.workers.run(move || conversations.is_local_member(conversation_id))
+            .await?
             .map_err(Into::into)
     }
 
@@ -946,12 +941,10 @@ where
         &self,
         conversation_id: ConversationId,
         limit: u32,
+        admission: Arc<ProfileActivityGuard>,
     ) -> Result<(ReplayRequest, KonclaveDomainCore::RoutingId, u64), ApplicationServiceError> {
-        let conversations = self.conversations.clone();
-        let (routing_id, after_cursor) =
-            tokio::task::spawn_blocking(move || conversations.replay_position(conversation_id))
-                .await
-                .map_err(|_| ApplicationServiceError::Task)??;
+        let (routing_id, after_cursor) = self.native_host(admission, None)
+            .replay_position(conversation_id).await?;
         let request = ReplayRequest::new(routing_id, after_cursor, limit)
             .map_err(|_| ApplicationServiceError::Protocol)?;
         Ok((request, routing_id, after_cursor))
@@ -973,55 +966,17 @@ where
 
     async fn process_page(
         &self,
+        admission: Arc<ProfileActivityGuard>,
         conversation_id: ConversationId,
         routing_id: KonclaveDomainCore::RoutingId,
         after_cursor: u64,
         page: ReplayPage,
         now_unix_seconds: u64,
     ) -> Result<ReplayBatch, ApplicationServiceError> {
-        validate_replay_page(after_cursor, &page)?;
-        let has_more = page.has_more();
-        let envelopes = page.envelopes().to_vec();
-        let last_cursor = envelopes.last().map(StoredRelayEnvelope::cursor);
-        let mut messages = Vec::with_capacity(envelopes.len());
-        for stored in envelopes {
-            let conversations = self.conversations.clone();
-            match stored.envelope().delivery_class() {
-                KonclaveDomainCore::DeliveryClass::GroupApplication => {
-                    let processed = tokio::task::spawn_blocking(move || {
-                        conversations.process_inbound_application_at(
-                            conversation_id,
-                            &stored,
-                            now_unix_seconds,
-                        )
-                    })
-                    .await
-                    .map_err(|_| ApplicationServiceError::Task)??;
-                    if !processed.message.content().is_internal() {
-                        messages.push(processed);
-                    }
-                }
-                KonclaveDomainCore::DeliveryClass::GroupCommit => {
-                    tokio::task::spawn_blocking(move || {
-                        conversations.process_inbound_membership(
-                            conversation_id,
-                            &stored,
-                            now_unix_seconds,
-                        )
-                    })
-                    .await
-                    .map_err(|_| ApplicationServiceError::Task)??;
-                }
-                _ => return Err(ApplicationServiceError::Protocol),
-            }
-        }
-        if let Some(last_cursor) = last_cursor {
-            let acknowledgment = AcknowledgeRequest::new(routing_id, last_cursor)
-                .map_err(|_| ApplicationServiceError::Protocol)?;
-            let effective = self.transport.acknowledge(acknowledgment).await?;
-            validate_acknowledgment(acknowledgment, effective)?;
-        }
-        Ok(ReplayBatch { messages, has_more })
+        self.native_session(self.native_host(admission, None))
+            .process_page(conversation_id, routing_id, after_cursor, page, now_unix_seconds)
+            .await
+            .map_err(Into::into)
     }
 
     /// Reads one bounded page of completed sent and received history.
@@ -1036,29 +991,15 @@ where
         limit: usize,
     ) -> Result<HistoryPage, ApplicationServiceError> {
         let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || {
+        self.workers.run(move || {
             conversations.history(conversation_id, after_cursor, limit)
         })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)?
+        .await?
         .map_err(Into::into)
     }
 
-    async fn retry_ready_locked(
-        &self,
-        now_unix_seconds: u64,
-    ) -> Result<usize, ApplicationServiceError> {
-        let applications = self
-            .retry_application_ready_locked(now_unix_seconds)
-            .await?;
-        let memberships = self.retry_membership_ready_locked().await?;
-        applications
-            .checked_add(memberships)
-            .ok_or(ApplicationServiceError::Protocol)
-    }
-
     async fn find_add_member(
-        &self,
+        native: &NativeSubmission<T>,
         conversation_id: ConversationId,
         join_proof: &JoinProof,
     ) -> Result<Option<MembershipRequestState>, ApplicationServiceError> {
@@ -1066,143 +1007,19 @@ where
             &encode_join_proof(join_proof).map_err(|_| ApplicationServiceError::Protocol)?,
         )
         .map_err(|_| ApplicationServiceError::Protocol)?;
-        let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || {
+        native.host.run(move |conversations| {
             conversations.resume_add_member(conversation_id, &proof_for_lookup)
         })
         .await
-        .map_err(|_| ApplicationServiceError::Task)?
-        .map_err(Into::into)
-    }
-
-    async fn retry_application_ready_locked(
-        &self,
-        now_unix_seconds: u64,
-    ) -> Result<usize, ApplicationServiceError> {
-        let conversations = self.conversations.clone();
-        let pending = tokio::task::spawn_blocking(move || conversations.ready_outbox())
-            .await
-            .map_err(|_| ApplicationServiceError::Task)??;
-        let mut accepted = 0;
-        for pending in pending {
-            let conversations = self.conversations.clone();
-            let conversation_id = pending.conversation_id;
-            let eligible = tokio::task::spawn_blocking(move || {
-                conversations.outbound_retry_eligible(conversation_id)
-            })
-            .await
-            .map_err(|_| ApplicationServiceError::Task)??;
-            if !eligible {
-                continue;
-            }
-            if pending.envelope.expires_at_unix_seconds() <= now_unix_seconds {
-                match self.expire_outbound(pending.envelope).await? {
-                    ExpireOutboundResult::Expired => continue,
-                    ExpireOutboundResult::Accepted { .. } => {
-                        accepted += 1;
-                        continue;
-                    }
-                }
-            }
-            let stored = self.transport.submit(&pending.envelope).await?;
-            self.mark_accepted(stored).await?;
-            accepted += 1;
-        }
-        Ok(accepted)
-    }
-
-    async fn retry_membership_ready_locked(&self) -> Result<usize, ApplicationServiceError> {
-        let conversations = self.conversations.clone();
-        let pending = tokio::task::spawn_blocking(move || conversations.ready_membership_outbox())
-            .await
-            .map_err(|_| ApplicationServiceError::Task)??;
-        let mut accepted = 0;
-        for pending in pending {
-            self.submit_membership(pending).await?;
-            accepted += 1;
-        }
-        Ok(accepted)
-    }
-
-    async fn submit_prepared(
-        &self,
-        prepared: PreparedApplication,
-        now_unix_seconds: u64,
-    ) -> Result<SentApplication, ApplicationServiceError> {
-        if prepared.envelope.expires_at_unix_seconds() <= now_unix_seconds {
-            return match self.expire_outbound(prepared.envelope).await? {
-                ExpireOutboundResult::Expired => Err(ApplicationServiceError::OutboundExpired),
-                ExpireOutboundResult::Accepted { cursor } => Ok(SentApplication {
-                    conversation_id: prepared.conversation_id,
-                    message: prepared.message,
-                    cursor,
-                }),
-            };
-        }
-        let stored = self.transport.submit(&prepared.envelope).await?;
-        let cursor = stored.cursor();
-        self.mark_accepted(stored).await?;
-        Ok(SentApplication {
-            conversation_id: prepared.conversation_id,
-            message: prepared.message,
-            cursor,
-        })
-    }
-
-    async fn expire_outbound(
-        &self,
-        envelope: KonclaveDomainCore::RelayEnvelope,
-    ) -> Result<ExpireOutboundResult, ApplicationServiceError> {
-        let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || conversations.expire_outbound_application(&envelope))
-            .await
-            .map_err(|_| ApplicationServiceError::Task)?
-            .map_err(Into::into)
-    }
-
-    async fn mark_accepted(
-        &self,
-        stored: StoredRelayEnvelope,
-    ) -> Result<(), ApplicationServiceError> {
-        let conversations = self.conversations.clone();
-        tokio::task::spawn_blocking(move || conversations.mark_outbox_accepted(&stored))
-            .await
-            .map_err(|_| ApplicationServiceError::Task)??;
-        Ok(())
-    }
-
-    async fn submit_membership(
-        &self,
-        prepared: PreparedMembership,
-    ) -> Result<SentMembership, ApplicationServiceError> {
-        let stored = match self.transport.submit(&prepared.envelope).await {
-            Ok(stored) => stored,
-            Err(error) if error.code() == "relay_stale_epoch" => {
-                let conversations = self.conversations.clone();
-                let operation_id = prepared.operation_id;
-                tokio::task::spawn_blocking(move || conversations.orphan_membership(operation_id))
-                    .await
-                    .map_err(|_| ApplicationServiceError::Task)??;
-                return Err(error.into());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let conversations = self.conversations.clone();
-        let accepted = tokio::task::spawn_blocking(move || {
-            conversations.mark_membership_outbox_accepted(&stored)
-        })
-        .await
-        .map_err(|_| ApplicationServiceError::Task)??;
-        Ok(sent_membership(accepted))
     }
 
     async fn resume_membership(
-        &self,
+        native: &NativeSubmission<T>,
         existing: MembershipRequestState,
     ) -> Result<SentMembership, ApplicationServiceError> {
         match existing {
-            MembershipRequestState::Ready(prepared) => self.submit_membership(prepared).await,
-            MembershipRequestState::Applied(accepted) => Ok(sent_membership(accepted)),
+            MembershipRequestState::Ready(prepared) => native.session.submit_membership_with_gate(prepared, &native.gate).await.map_err(Into::into),
+            MembershipRequestState::Applied(accepted) => Ok(accepted),
         }
     }
 }
@@ -1218,38 +1035,17 @@ pub(crate) fn validate_acknowledgment(
     requested: AcknowledgeRequest,
     effective: AcknowledgeRequest,
 ) -> Result<(), ApplicationServiceError> {
-    if effective.routing_id() != requested.routing_id() || effective.cursor() < requested.cursor() {
-        return Err(ApplicationServiceError::InvalidRelayResponse);
-    }
-    Ok(())
+    validate_native_acknowledgment(requested, effective)
+        .map_err(|_| ApplicationServiceError::InvalidRelayResponse)
 }
 
+#[cfg(test)]
 pub(crate) fn validate_replay_page(
     after_cursor: u64,
     page: &ReplayPage,
 ) -> Result<(), ApplicationServiceError> {
-    let mut expected_cursor = after_cursor;
-    for stored in page.envelopes() {
-        expected_cursor = expected_cursor
-            .checked_add(1)
-            .ok_or(ApplicationServiceError::InvalidRelayResponse)?;
-        if stored.cursor() != expected_cursor {
-            return Err(ApplicationServiceError::InvalidRelayResponse);
-        }
-    }
-    if page.next_cursor() != expected_cursor {
-        return Err(ApplicationServiceError::InvalidRelayResponse);
-    }
-    Ok(())
-}
-
-fn sent_membership(accepted: AcceptedMembership) -> SentMembership {
-    SentMembership {
-        operation_id: accepted.operation_id,
-        conversation_id: accepted.conversation_id,
-        cursor: accepted.cursor,
-        welcome: accepted.welcome,
-    }
+    validate_native_replay_page(after_cursor, page)
+        .map_err(|_| ApplicationServiceError::InvalidRelayResponse)
 }
 
 fn policy_send_request(
@@ -1287,10 +1083,6 @@ fn validate_collaboration_policy_response_target(
     Ok(())
 }
 
-fn application_content_equal(left: &ApplicationContent, right: &ApplicationContent) -> bool {
-    left == right
-}
-
 /// Stable application-service failures.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -1301,6 +1093,8 @@ pub(crate) enum ApplicationServiceError {
     Relay(#[from] KonclaveClientError),
     #[error("blocking application task failed")]
     Task,
+    #[error("blocking application task failed")]
+    Worker(#[source] NativeWorkerError),
     #[error("application request is invalid")]
     Protocol,
     #[error("collaboration-policy storage operation failed")]
@@ -1323,6 +1117,29 @@ pub(crate) enum ApplicationServiceError {
     WatchCapacityExceeded,
     #[error("the profile is closing and admits no further operations")]
     ProfileClosing,
+}
+
+impl From<NativeWorkerError> for ApplicationServiceError {
+    fn from(error: NativeWorkerError) -> Self {
+        match error {
+            NativeWorkerError::Closed => Self::ProfileClosing,
+            error => Self::Worker(error),
+        }
+    }
+}
+
+impl From<NativeSessionError<ApplicationServiceError>> for ApplicationServiceError {
+    fn from(error: NativeSessionError<ApplicationServiceError>) -> Self {
+        match error {
+            NativeSessionError::Host(error) => error,
+            NativeSessionError::Relay(error) => Self::Relay(error),
+            NativeSessionError::Protocol => Self::Protocol,
+            NativeSessionError::IdempotencyConflict => Self::IdempotencyConflict,
+            NativeSessionError::OutboundExpired => Self::OutboundExpired,
+            NativeSessionError::OutboundRemoved => Self::OutboundRemoved,
+            NativeSessionError::InvalidRelayResponse => Self::InvalidRelayResponse,
+        }
+    }
 }
 
 /// Reports a clean watch exit regardless of how the close frame fared.
@@ -1367,11 +1184,13 @@ mod tests {
     use KonclaveClientLibrary::{
         RelayAccessCredential, RelayClient, RelayEndpoint, RelayWatchSession,
     };
+    use KonclaveClientLibrary::native::validate_native_replay_page;
     use KonclaveDomainCore::{
         AcknowledgeRequest, AdapterConsumerId, AdapterLeaseId, ApplicationContent,
         CollaborationPolicyBundle, CollaborationPolicyEffect, CollaborationPolicyLimits,
         CollaborationPolicyProposal, CollaborationPolicyProposalId, CollaborationPolicyStatement,
         DeliveryClass, EnvelopeId, ProtocolVersion, RelayEnvelope, ReplayPage, ReplayRequest,
+        StoredRelayEnvelope,
     };
     use KonclaveProtocolContracts::v1::encode_collaboration_policy_bundle;
     use KonclaveSecretStorage::{
@@ -1389,6 +1208,60 @@ mod tests {
         ProfileId, ProfileStoreError,
     };
     use crate::test_support::TestRelay;
+
+    #[test]
+    fn native_failure_mapping_preserves_every_finite_daemon_category() {
+        for (error, expected) in [
+            (NativeSessionError::Host(ApplicationServiceError::PolicyProposalMismatch), ApplicationServiceError::PolicyProposalMismatch),
+            (NativeSessionError::Relay(KonclaveClientError::TransportUnavailable), ApplicationServiceError::Relay(KonclaveClientError::TransportUnavailable)),
+            (NativeSessionError::Protocol, ApplicationServiceError::Protocol),
+            (NativeSessionError::IdempotencyConflict, ApplicationServiceError::IdempotencyConflict),
+            (NativeSessionError::OutboundExpired, ApplicationServiceError::OutboundExpired),
+            (NativeSessionError::OutboundRemoved, ApplicationServiceError::OutboundRemoved),
+            (NativeSessionError::InvalidRelayResponse, ApplicationServiceError::InvalidRelayResponse),
+        ] {
+            let mapped = ApplicationServiceError::from(error);
+            assert_eq!(std::mem::discriminant(&mapped), std::mem::discriminant(&expected));
+        }
+        assert!(matches!(ApplicationServiceError::from(NativeWorkerError::Closed), ApplicationServiceError::ProfileClosing));
+        assert!(matches!(ApplicationServiceError::from(NativeWorkerError::Task), ApplicationServiceError::Worker(NativeWorkerError::Task)));
+        let mapped = ApplicationServiceError::from(NativeWorkerError::UnobservedOperation(
+            Box::new(ConversationCoordinatorError::StateUnavailable),
+        ));
+        let ApplicationServiceError::Worker(NativeWorkerError::UnobservedOperation(cause)) = mapped else {
+            panic!("native callback error source was not preserved");
+        };
+        assert!(cause.is::<ConversationCoordinatorError>());
+    }
+
+    #[tokio::test]
+    async fn admitted_native_operation_finishes_after_closing_without_readmitting() {
+        let (_root, alice, _bob, conversation_id, _device) = paired_coordinators();
+        let service = ApplicationService::new(alice.clone(), RecordingRelay::new(false));
+        let scoped = service.with_admission(Arc::new(alice.activity().try_begin().unwrap())).unwrap();
+        alice.activity().begin_closing();
+        let sent = scoped.send(request(conversation_id, "admitted native operation")).await.unwrap();
+        assert_eq!(sent.conversation_id, conversation_id);
+        assert_eq!(alice.activity().in_flight(), 1);
+        assert!(matches!(service.send(request(conversation_id, "new operation")).await, Err(ApplicationServiceError::ProfileClosing)));
+        drop(scoped);
+        assert_eq!(alice.activity().in_flight(), 0);
+        service.shutdown_native_workers().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_foreign_profile_admission_is_rejected_before_native_effects() {
+        let (_root, alice, bob, _conversation_id, _device) = paired_coordinators();
+        let service = ApplicationService::new(alice.clone(), RecordingRelay::new(false));
+        assert!(matches!(
+            service.with_admission(Arc::new(bob.activity().try_begin().unwrap())),
+            Err(ApplicationServiceError::Protocol)
+        ));
+        assert_eq!(alice.activity().in_flight(), 0);
+        assert_eq!(bob.activity().in_flight(), 0);
+        assert!(service.transport.envelopes.lock().unwrap().is_empty());
+        service.shutdown_native_workers().await.unwrap();
+    }
 
     struct RecordingRelay {
         cursor: AtomicU64,

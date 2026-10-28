@@ -96,12 +96,21 @@ that future is cancelled, even though a blocking operation can still be running.
 `send_with_gate` permits retaining an `Arc` of the exact owned guard across that
 boundary without reacquiring or replacing the endpoint's submission mutex.
 
+The daemon's `ApplicationService` uses this shared session for application send,
+membership submission, replay and watch-page processing. Its native host retains
+the actual profile admission and submission guard in every blocking callback.
+Pairing sweeps propagate their original admission rather than admitting nested
+work after closing has started. Profile supervision joins the shared callback
+owner before publishing its final state, including component-failure exits;
+cancelling an individual requester does not detach its callback or hide its error.
+
 ## Qualification and adapter evidence
 
 The focused `Native client conformance` workflow runs on drafts. It directly
 executes native processor tests, relay/session classifier and orchestration tests,
-and daemon conversation/application/persistence tests, with format, Clippy and
-conservative dependency relevance checks.
+and daemon conversation/application/persistence tests. Direct host, activity,
+pairing, watch, diagnostics and profile-supervision selections cover daemon
+integration, with format, Clippy and conservative dependency relevance checks.
 
 The bounded sealed in-memory processor fixture proves actual MLS composition and
 checkpoint decisions, not process durability. The separate fake host/relay tests

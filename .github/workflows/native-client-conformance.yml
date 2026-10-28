@@ -89,6 +89,14 @@ jobs:
           cargo test --locked --package KonclaveLocalDaemon --lib conversation::tests
           cargo test --locked --package KonclaveLocalDaemon --lib application::tests
           cargo test --locked --package KonclaveLocalDaemon --lib persistence::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib native_session::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib activity::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib profile_runtime::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib profile_supervisor::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib pairing_service::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib pairing_supervisor::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib local_failure_diagnostics::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib service::tests
           cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
           git diff --exit-code -- apps/Konclave.LocalDaemon
       - name: Verify formatting leaves no source delta

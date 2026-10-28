@@ -47,6 +47,11 @@ impl Default for ProfileActivity {
 }
 
 impl ProfileActivity {
+    /// Verifies an existing admission belongs to this exact profile gate.
+    pub(crate) fn owns(&self, admission: &ProfileActivityGuard) -> bool {
+        Arc::ptr_eq(&self.state, &admission.state)
+    }
+
     /// Admits one operation unless the profile is closing.
     ///
     /// The check and the count increment happen in one atomic transition, so an
@@ -169,6 +174,26 @@ impl Drop for ProfileActivityGuard {
 mod tests {
     use super::{ProfileActivity, ProfileActivityError};
     use std::time::Duration;
+
+    #[test]
+    fn existing_admission_is_bound_to_the_exact_shared_gate() {
+        let activity = ProfileActivity::default();
+        let same = activity.clone();
+        let other = ProfileActivity::default();
+        let admitted = activity.try_begin().unwrap();
+        let foreign = other.try_begin().unwrap();
+        for (gate, admission, expected) in [
+            (&activity, &admitted, true),
+            (&same, &admitted, true),
+            (&other, &admitted, false),
+            (&activity, &foreign, false),
+        ] {
+            assert_eq!(gate.owns(admission), expected);
+        }
+        activity.begin_closing();
+        assert!(activity.owns(&admitted));
+        assert_eq!(activity.in_flight(), 1);
+    }
 
     #[test]
     fn an_operation_is_counted_only_while_its_guard_lives() {

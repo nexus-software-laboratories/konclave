@@ -212,7 +212,13 @@ impl ProfileHost {
             tasks.spawn(async move { attached.await.context(ProfileComponent::Attachment) });
         }
 
-        let tasks = tokio::spawn(supervise(tasks, stop_tx.clone(), state_tx));
+        let tasks = tokio::spawn(supervise(
+            tasks,
+            stop_tx.clone(),
+            state_tx,
+            services.activity().clone(),
+            services.applications.clone(),
+        ));
         Ok(Self {
             services,
             stop: stop_tx,
@@ -249,9 +255,11 @@ impl ProfileHost {
         self.request_stop();
         let tasks = self
             .tasks
-            .take()
+            .as_mut()
             .context("the profile task set was already joined")?;
-        join_profile_tasks(tasks.await)
+        let joined = tasks.await;
+        self.tasks = None;
+        join_profile_tasks(joined)
     }
 
     /// Runs until the owning process requests shutdown or the task set ends first.
@@ -346,17 +354,20 @@ fn legacy_adapter_attachment(adapter_config: Option<AdapterLaunchConfig>) -> Pro
 /// One component finishing means this profile is stopping: the compatibility host
 /// ends when its stdio peer disconnects, and a permanent relay or pairing failure
 /// must not leave a half-supervised profile behind. Remaining components are asked to
-/// stop and are drained within a bounded deadline, so the profile lock and its
-/// databases are always released.
+/// stop within the component deadline. Actual native callbacks are then joined
+/// before final state publication and persistence ownership release.
 async fn supervise(
     mut tasks: JoinSet<anyhow::Result<()>>,
     stop: watch::Sender<bool>,
     state: watch::Sender<ProfileRunState>,
+    activity: ProfileActivity,
+    applications: Option<ApplicationService<RelayClient>>,
 ) -> anyhow::Result<()> {
     let mut failures = Vec::new();
     if let Some(joined) = tasks.join_next().await {
         record_failure(joined, &mut failures);
     }
+    activity.begin_closing();
     let _ = stop.send(true);
     let drained = timeout(PROFILE_SHUTDOWN_TIMEOUT, async {
         while let Some(joined) = tasks.join_next().await {
@@ -369,6 +380,14 @@ async fn supervise(
         failures.push(anyhow::anyhow!(
             "profile task set exceeded its shutdown deadline"
         ));
+    }
+    if let Err(error) = activity.wait_drained(PROFILE_SHUTDOWN_TIMEOUT).await {
+        failures.push(anyhow::Error::new(error).context("draining admitted profile operations"));
+    }
+    if let Some(applications) = applications {
+        if let Err(error) = applications.shutdown_native_workers().await {
+            failures.push(anyhow::Error::new(error).context("joining native application workers"));
+        }
     }
 
     match aggregate_failures(failures) {
@@ -437,8 +456,11 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
     use std::time::Duration;
 
+    use KonclaveClientLibrary::{RelayAccessCredential, RelayClient, RelayEndpoint};
     use tokio::sync::{oneshot, watch};
 
     use super::{
@@ -446,7 +468,100 @@ mod tests {
         legacy_adapter_attachment,
     };
     use crate::runtime::initialize_profile;
-    use crate::test_support::TestProfileRoot;
+    use crate::application::ApplicationService;
+    use crate::conversation::ConversationCoordinatorError;
+    use crate::native_workers::NativeWorkerError;
+    use crate::test_support::{TestProfileRoot, TestRelay};
+
+    async fn assert_native_callback_shutdown(failure: bool, component_finishes_first: bool) {
+        let token = [88; RelayAccessCredential::LENGTH];
+        let relay = TestRelay::start_static(token).await;
+        let root = TestProfileRoot::new();
+        let mut runtime = initialize_profile(root.config("native-ownership")).await.unwrap();
+        let activity = runtime.conversations.activity().clone();
+        let transport = RelayClient::new(
+            RelayEndpoint::parse(&relay.endpoint).unwrap(),
+            RelayAccessCredential::from_bytes(token),
+        ).unwrap();
+        let applications = ApplicationService::new(runtime.conversations.clone(), transport);
+        let workers = applications.worker_owner_for_test();
+        runtime.applications = Some(applications);
+        let admission = (!failure).then(|| activity.try_begin().unwrap());
+        let (entered, running) = oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let requester_workers = workers.clone();
+        let requester = tokio::spawn(async move {
+            requester_workers.run(move || {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+                drop(admission);
+                if failure {
+                    Err(ConversationCoordinatorError::StateUnavailable)
+                } else {
+                    Ok(())
+                }
+            }).await
+        });
+        running.await.unwrap();
+        requester.abort();
+        assert!(requester.await.unwrap_err().is_cancelled());
+        let (finished, finishing) = oneshot::channel();
+        let options = ProfileHostOptions::default().with_attachment(Box::new(
+            move |_: &ProfileServices, mut stop| Box::pin(async move {
+                tokio::select! {
+                    _ = finishing => {}
+                    _ = stop.changed() => {}
+                }
+                Ok(())
+            }),
+        ));
+        let host = ProfileHost::start(runtime, options).unwrap();
+        let state = host.watch_run_state();
+        if component_finishes_first {
+            finished.send(()).unwrap();
+        } else {
+            host.request_stop();
+        }
+        activity.wait_closing().await;
+        assert_eq!(*state.borrow(), ProfileRunState::Running);
+        let mut joined: std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> =
+            if component_finishes_first {
+                Box::pin(host.run_until(std::future::pending()))
+            } else {
+                Box::pin(host.shutdown())
+            };
+        poll_fn(|context| {
+            assert!(matches!(joined.as_mut().poll(context), Poll::Pending));
+            Poll::Ready(())
+        }).await;
+        release.send(()).unwrap();
+        let result = joined.await;
+        if failure {
+            let error = result.unwrap_err();
+            assert!(format!("{error:#}").contains("cancelled native operation failed"));
+            assert!(matches!(*state.borrow(), ProfileRunState::Failed(_)));
+        } else {
+            result.unwrap();
+            assert_eq!(*state.borrow(), ProfileRunState::Stopped);
+        }
+        assert!(matches!(
+            workers.run(|| Ok::<_, ConversationCoordinatorError>(())).await,
+            Err(NativeWorkerError::Closed)
+        ));
+        assert_eq!(activity.in_flight(), 0);
+        root.wait_until_unlocked("native-ownership").await;
+        relay.stop().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_cancelled_native_callbacks_before_publishing_stopped() {
+        assert_native_callback_shutdown(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn component_completed_first_still_joins_and_reports_native_callback_failure() {
+        assert_native_callback_shutdown(true, true).await;
+    }
 
     #[tokio::test]
     async fn a_host_exposes_its_bound_profile_services() {
@@ -502,13 +617,17 @@ mod tests {
     async fn every_component_failure_is_reported_not_only_the_first() {
         let root = TestProfileRoot::new();
         let runtime = initialize_profile(root.config("aggregate")).await.unwrap();
+        let (first, observed) = oneshot::channel();
         let options = ProfileHostOptions::default()
-            .with_attachment(Box::new(|_: &ProfileServices, _| {
-                Box::pin(async move { Err(anyhow::anyhow!("first attachment failed")) })
-            }))
-            .with_attachment(Box::new(|_: &ProfileServices, _| {
+            .with_attachment(Box::new(move |_: &ProfileServices, _| {
                 Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    first.send(()).unwrap();
+                    Err(anyhow::anyhow!("first attachment failed"))
+                })
+            }))
+            .with_attachment(Box::new(move |_: &ProfileServices, _| {
+                Box::pin(async move {
+                    observed.await.unwrap();
                     Err(anyhow::anyhow!("second attachment failed"))
                 })
             }));
