@@ -1,8 +1,8 @@
 use KonclaveCryptographicCore::{ConversationSigningMaterial, VerifiedDeviceCredentialBinding};
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, ConversationState, DeviceCredentialBinding,
-    DeviceId, EnvelopeId, MembershipOperationId, MessageId, NotificationId, RelayEnvelope, RoutingId,
-    StoredRelayEnvelope,
+    ApplicationContent, ApplicationMessage, ConversationId, ConversationState,
+    DeviceCredentialBinding, DeviceId, EnvelopeId, MembershipOperationId, MessageId,
+    NotificationId, RelayEnvelope, RoutingId, StoredRelayEnvelope,
 };
 use zeroize::Zeroizing;
 
@@ -187,7 +187,10 @@ pub enum InboxOperation {
 ///
 /// Every method propagates operational failures through `Error`. No method may
 /// convert failed authentication, unavailable ownership or storage into absence.
-#[allow(clippy::too_many_arguments, reason = "journal checkpoints preserve exact existing atomic fields")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "journal checkpoints preserve exact existing atomic fields"
+)]
 pub trait NativeConversationJournal {
     /// Stable host storage/authority failures; error formatting must exclude secrets.
     type Error: std::error::Error + Send + Sync + 'static;
@@ -197,47 +200,140 @@ pub trait NativeConversationJournal {
     /// Opens and verifies the exact conversation.
     fn load_conversation(&self, id: ConversationId) -> Result<StoredConversation, Self::Error>;
     /// Returns at most one authenticated live outbound membership operation.
-    fn active_membership_outbox(&self, id: ConversationId) -> Result<Option<MembershipOutbox>, Self::Error>;
+    fn active_membership_outbox(
+        &self,
+        id: ConversationId,
+    ) -> Result<Option<MembershipOutbox>, Self::Error>;
     /// Returns at most one authenticated incomplete inbound membership operation.
-    fn active_membership_inbox(&self, id: ConversationId) -> Result<Option<MembershipInboxOperation>, Self::Error>;
+    fn active_membership_inbox(
+        &self,
+        id: ConversationId,
+    ) -> Result<Option<MembershipInboxOperation>, Self::Error>;
     /// Opens the exact membership intent, rejecting scope/identity mismatch.
-    fn load_membership_outbox(&self, id: MembershipOperationId) -> Result<MembershipOutbox, Self::Error>;
+    fn load_membership_outbox(
+        &self,
+        id: MembershipOperationId,
+    ) -> Result<MembershipOutbox, Self::Error>;
     /// Promotes the exact accepted next policy after verified MLS persistence.
     fn complete_membership_outbox(&self, id: MembershipOperationId) -> Result<(), Self::Error>;
     /// Terminalizes the exact operation after rejecting pending MLS state.
     fn orphan_membership_outbox(&self, id: MembershipOperationId) -> Result<(), Self::Error>;
     /// Atomically admits and reserves one new operation under current authority.
-    fn reserve_application(&self, request: &NativeApplicationRequest<Self::Authorization>, envelope: EnvelopeId) -> Result<OutboundReservation, Self::Error>;
+    fn reserve_application(
+        &self,
+        request: &NativeApplicationRequest<Self::Authorization>,
+        envelope: EnvelopeId,
+    ) -> Result<OutboundReservation, Self::Error>;
     /// Saves exact protected plaintext and sender metadata for one reservation.
-    fn store_outbound_message(&self, reservation: OutboundReservation, route: RoutingId, sender: DeviceId, epoch: u64, message: &ApplicationMessage) -> Result<(), Self::Error>;
+    fn store_outbound_message(
+        &self,
+        reservation: OutboundReservation,
+        route: RoutingId,
+        sender: DeviceId,
+        epoch: u64,
+        message: &ApplicationMessage,
+    ) -> Result<(), Self::Error>;
     /// Makes the exact sealed envelope ready before any network submission.
-    fn store_outbound_envelope(&self, reservation: OutboundReservation, envelope: &RelayEnvelope) -> Result<(), Self::Error>;
+    fn store_outbound_envelope(
+        &self,
+        reservation: OutboundReservation,
+        envelope: &RelayEnvelope,
+    ) -> Result<(), Self::Error>;
     /// Abandons incomplete work without rolling back or reusing its counter.
-    fn abandon_outbound_application(&self, reservation: OutboundReservation) -> Result<(), Self::Error>;
+    fn abandon_outbound_application(
+        &self,
+        reservation: OutboundReservation,
+    ) -> Result<(), Self::Error>;
     /// Journals one exact ciphertext/cursor observation before decryption.
-    fn record_inbox_envelope(&self, stored: &StoredRelayEnvelope) -> Result<ConversationId, Self::Error>;
+    fn record_inbox_envelope(
+        &self,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<ConversationId, Self::Error>;
     /// Opens the exact authenticated inbox state.
-    fn inbox_operation(&self, id: ConversationId, cursor: u64) -> Result<InboxOperation, Self::Error>;
+    fn inbox_operation(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+    ) -> Result<InboxOperation, Self::Error>;
     /// Proves a local echo from immutable exact-envelope outbox evidence.
-    fn outbound_history_message(&self, id: ConversationId, stored: &StoredRelayEnvelope) -> Result<Option<StoredApplicationMessage>, Self::Error>;
+    fn outbound_history_message(
+        &self,
+        id: ConversationId,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<Option<StoredApplicationMessage>, Self::Error>;
     /// Atomically saves protected plaintext and deduplication before MLS persistence.
-    fn save_inbox_message(&self, id: ConversationId, cursor: u64, sender: DeviceId, epoch: u64, message: &ApplicationMessage) -> Result<(), Self::Error>;
+    fn save_inbox_message(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+        sender: DeviceId,
+        epoch: u64,
+        message: &ApplicationMessage,
+    ) -> Result<(), Self::Error>;
     /// Atomically completes exact application evidence and contiguous notification.
-    fn complete_inbox_with_notification_at(&self, id: ConversationId, cursor: u64, notification: NotificationId, now: u64) -> Result<u64, Self::Error>;
+    fn complete_inbox_with_notification_at(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+        notification: NotificationId,
+        now: u64,
+    ) -> Result<u64, Self::Error>;
     /// Journals one exact membership ciphertext before processing.
-    fn record_membership_inbox_envelope(&self, stored: &StoredRelayEnvelope) -> Result<ConversationId, Self::Error>;
+    fn record_membership_inbox_envelope(
+        &self,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<ConversationId, Self::Error>;
     /// Finds exact outbound membership evidence, not merely a matching ID.
-    fn membership_outbox_for_envelope(&self, id: EnvelopeId) -> Result<Option<MembershipOutbox>, Self::Error>;
+    fn membership_outbox_for_envelope(
+        &self,
+        id: EnvelopeId,
+    ) -> Result<Option<MembershipOutbox>, Self::Error>;
     /// Records acceptance only for the exact journaled membership envelope.
-    fn mark_membership_outbox_accepted(&self, stored: &StoredRelayEnvelope) -> Result<MembershipOperationId, Self::Error>;
+    fn mark_membership_outbox_accepted(
+        &self,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<MembershipOperationId, Self::Error>;
     /// Completes an authenticated self-echo without attempting self-decryption.
-    fn complete_membership_echo(&self, stored: &StoredRelayEnvelope, device: DeviceId) -> Result<MembershipOperationId, Self::Error>;
+    fn complete_membership_echo(
+        &self,
+        stored: &StoredRelayEnvelope,
+        device: DeviceId,
+    ) -> Result<MembershipOperationId, Self::Error>;
     /// Opens the exact authenticated membership inbox state.
-    fn membership_inbox_operation(&self, id: ConversationId, cursor: u64) -> Result<MembershipInboxOperation, Self::Error>;
+    fn membership_inbox_operation(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+    ) -> Result<MembershipInboxOperation, Self::Error>;
     /// Saves control and complete next policy before applying the MLS transition.
-    fn save_membership_inbox_transition(&self, id: ConversationId, cursor: u64, sender: DeviceId, parent: u64, operation: MembershipOperationId, control: &[u8], next: &ConversationState, bindings: &[DeviceCredentialBinding]) -> Result<(), Self::Error>;
+    fn save_membership_inbox_transition(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+        sender: DeviceId,
+        parent: u64,
+        operation: MembershipOperationId,
+        control: &[u8],
+        next: &ConversationState,
+        bindings: &[DeviceCredentialBinding],
+    ) -> Result<(), Self::Error>;
     /// Promotes verified next policy and completes only the contiguous cursor.
-    fn complete_membership_inbox_with_notification(&self, id: ConversationId, cursor: u64, notification: NotificationId) -> Result<u64, Self::Error>;
+    fn complete_membership_inbox_with_notification(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+        notification: NotificationId,
+    ) -> Result<u64, Self::Error>;
     /// Saves complete protected outbound membership intent before transmission.
-    fn store_membership_outbox(&self, operation: MembershipOperationId, id: ConversationId, parent: u64, envelope: &RelayEnvelope, control: &[u8], next: &ConversationState, bindings: &[DeviceCredentialBinding], welcome: Option<&[u8]>) -> Result<(), Self::Error>;
+    fn store_membership_outbox(
+        &self,
+        operation: MembershipOperationId,
+        id: ConversationId,
+        parent: u64,
+        envelope: &RelayEnvelope,
+        control: &[u8],
+        next: &ConversationState,
+        bindings: &[DeviceCredentialBinding],
+        welcome: Option<&[u8]>,
+    ) -> Result<(), Self::Error>;
 }

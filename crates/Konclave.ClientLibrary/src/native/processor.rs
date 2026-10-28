@@ -1,14 +1,14 @@
 use std::sync::Mutex;
 
 use KonclaveCryptographicCore::{
-    DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit,
-    MlsConversation, MlsConversationClient, OutboundMembershipCommit,
-    verify_collaboration_policy_proposal, verify_device_credential_binding,
+    DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit, MlsConversation,
+    MlsConversationClient, OutboundMembershipCommit, verify_collaboration_policy_proposal,
+    verify_device_credential_binding,
 };
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState, DeliveryClass,
-    DeviceId, EnvelopeId, JoinProof, MembershipOperationId, MessageId, NotificationId,
-    ProtocolVersion, RelayEnvelope, RoutingId, StoredRelayEnvelope,
+    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
+    DeliveryClass, DeviceId, EnvelopeId, JoinProof, MembershipOperationId, MessageId,
+    NotificationId, ProtocolVersion, RelayEnvelope, RoutingId, StoredRelayEnvelope,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_membership_commit_bundle, decode_membership_control,
@@ -41,17 +41,25 @@ impl<'a, J: NativeConversationJournal> NativeConversationProcessor<'a, J> {
         mls_storage: impl Into<KonclaveSecretStorage::SealedMlsStorageHandle>,
         device: &'a Mutex<DeviceIdentity>,
     ) -> Self {
-        Self { store: journal, mls_storage: mls_storage.into(), device }
+        Self {
+            store: journal,
+            mls_storage: mls_storage.into(),
+            device,
+        }
     }
 
     fn device_id(&self) -> Result<DeviceId, NativeConversationError<J::Error>> {
-        self.device.lock()
+        self.device
+            .lock()
             .map(|device| device.device_id())
             .map_err(|_| NativeConversationError::StateUnavailable)
     }
 
-    fn generate_notification_id(&self) -> Result<NotificationId, NativeConversationError<J::Error>> {
-        self.device.lock()
+    fn generate_notification_id(
+        &self,
+    ) -> Result<NotificationId, NativeConversationError<J::Error>> {
+        self.device
+            .lock()
             .map_err(|_| NativeConversationError::StateUnavailable)?
             .generate_notification_id()
             .map_err(|_| NativeConversationError::Cryptographic)
@@ -73,7 +81,10 @@ impl<'a, J: NativeConversationJournal> NativeConversationProcessor<'a, J> {
             let stored = self.store.load_conversation(request.conversation_id)?;
             let local = self.device_id()?;
             if !directed_request_recipients_support(
-                &stored.state, local, directed.target_device_id(), |device| {
+                &stored.state,
+                local,
+                directed.target_device_id(),
+                |device| {
                     stored.bindings.iter().any(|binding| {
                         binding.binding().device_id() == device
                             && binding.binding().supports_directed_requests()
@@ -83,14 +94,19 @@ impl<'a, J: NativeConversationJournal> NativeConversationProcessor<'a, J> {
                 return Err(NativeConversationError::DirectedRequestUnsupported);
             }
         }
-        let envelope = self.device.lock()
+        let envelope = self
+            .device
+            .lock()
             .map_err(|_| NativeConversationError::StateUnavailable)?
             .generate_envelope_id()
             .map_err(|_| NativeConversationError::Cryptographic)?;
         let reservation = self.store.reserve_application(&request, envelope)?;
         match self.prepare_reserved_application(
-            reservation, request.content, request.reply_to,
-            request.sent_at_unix_milliseconds, request.expires_at_unix_seconds,
+            reservation,
+            request.content,
+            request.reply_to,
+            request.sent_at_unix_milliseconds,
+            request.expires_at_unix_seconds,
         ) {
             Ok(prepared) => Ok(prepared),
             Err(error) => {
@@ -274,8 +290,7 @@ impl<'a, J: NativeConversationJournal> NativeConversationProcessor<'a, J> {
         )
         .map_err(|_| NativeConversationError::Protocol)?;
         let plaintext = Zeroizing::new(
-            encode_application_message(&message)
-                .map_err(|_| NativeConversationError::Protocol)?,
+            encode_application_message(&message).map_err(|_| NativeConversationError::Protocol)?,
         );
         let mut conversation = self.open(reservation.conversation_id)?;
         let sender = self.device_id()?;

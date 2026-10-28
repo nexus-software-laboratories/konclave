@@ -60,10 +60,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveClientLibrary
+          cargo fmt --package KonclaveClientLibrary -- --check
           cargo test --locked --package KonclaveClientLibrary --lib native::
           cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
-          git diff --exit-code -- crates/Konclave.ClientLibrary
       - name: Verify conservative component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
