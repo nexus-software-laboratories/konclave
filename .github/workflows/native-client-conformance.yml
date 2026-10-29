@@ -62,7 +62,7 @@ jobs:
           set -euo pipefail
           trap 'git diff -- crates/Konclave.ClientLibrary' EXIT
           cargo fmt --package KonclaveClientLibrary
-          git diff --exit-code -- crates/Konclave.ClientLibrary
+          git diff --exit-code --quiet -- crates/Konclave.ClientLibrary
           cargo test --locked --package KonclaveClientLibrary --lib native::
           cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
       - name: Verify native relay session foundation

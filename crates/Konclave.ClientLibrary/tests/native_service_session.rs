@@ -350,8 +350,19 @@ impl RelayTransport for OpaqueRelay {
     ) -> Result<AcknowledgeRequest, KonclaveClientError> {
         // Client-side observation at acknowledgment entry, not relay key custody.
         let (journal, conversation) = self.completion.as_ref().unwrap();
-        assert!(journal.load_conversation(*conversation).unwrap().replay_cursor >= request.cursor());
-        assert!(journal.notification_evidence(*conversation, request.cursor()).unwrap().is_some());
+        assert!(
+            journal
+                .load_conversation(*conversation)
+                .unwrap()
+                .replay_cursor
+                >= request.cursor()
+        );
+        assert!(
+            journal
+                .notification_evidence(*conversation, request.cursor())
+                .unwrap()
+                .is_some()
+        );
         let mut state = self.state.lock().unwrap();
         if request.routing_id() != self.route || state.acknowledgments.len() == 64 {
             return Err(KonclaveClientError::InvalidResponse);
@@ -676,7 +687,9 @@ fn unsupported_runtime_fails_without_mutating_authenticated_evidence() {
         .unwrap();
     assert!(matches!(
         unsupported.block_on(
-            requester.host.prepare_application(requester.request(responder.device))
+            requester
+                .host
+                .prepare_application(requester.request(responder.device))
         ),
         Err(host::ServiceHostError::UnsupportedRuntime)
     ));
