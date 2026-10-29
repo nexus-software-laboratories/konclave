@@ -119,6 +119,34 @@ correctness. A production adapter still needs direct atomicity, sealing, restart
 claim-race and stale-writer tests against its actual durable backend. Existing
 daemon SQLite tests qualify the daemon adapter, not an unrelated service database.
 
+### Bounded service storage building blocks
+
+The `examples/native_service` storage capsule requires an existing,
+operator-controlled local directory with OS locking and atomic replacement.
+`ServiceStorage` clones share one actual lock and generation fence for both the
+Journal and MLS slots. Releasing that owner invalidates its clones; reopening
+acquires a new generation. The generation fences concurrent writers, not an
+authorized restore of older valid storage.
+
+`ServiceMlsStorage` combines that owner with an explicitly supplied `SecretSealer`
+and stable endpoint namespace. Only the existing project-sealed MLS handle escapes
+its private backing implementation. Both individual provider records and the
+bounded backing snapshot are project-sealed; failed authentication or unavailable
+ownership never becomes an empty provider.
+
+Slot replacement is atomic independently. There is no transaction spanning the
+journal and MLS snapshots. Files are synced before replacement and Unix also syncs
+the directory. Windows provides atomic visibility and file sync, **not power-loss
+durability**. Directory mutation by another actor, deletion and coherent rollback
+remain outside these guarantees. A production database needs its own qualified
+ownership, freshness and durability contract rather than copying this example's
+filesystem assumptions.
+
+The direct storage and MLS test targets qualify these building blocks separately;
+they do not establish an integrated durable native session. Pure service-authority
+tests likewise do not prove that a concrete journal commits policy, a live claim
+and complete immutable response intent atomically.
+
 For A2A consumers, keep `A2ATaskSubmitter` as the gateway seam. Native endpoint
 composition is not a fake local-service JSON facade, and an ordinary A2A HTTP edge
 still terminates plaintext as described by
