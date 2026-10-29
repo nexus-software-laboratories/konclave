@@ -147,6 +147,54 @@ they do not establish an integrated durable native session. Pure service-authori
 tests likewise do not prove that a concrete journal commits policy, a live claim
 and complete immutable response intent atomically.
 
+### Bounded service-owned session example
+
+The [service host](../../crates/Konclave.ClientLibrary/examples/native_service/host.rs)
+uses the same `NativeConversationProcessor` and `NativeSession` as the daemon, with
+an explicitly opened identity, sealed non-SQLite MLS and
+[`ServiceJournal`](../../crates/Konclave.ClientLibrary/examples/native_service/journal.rs).
+It never calls local-service RPC. Its journal reloads an authenticated bounded
+snapshot under the common storage owner; current policy, an exact live claim,
+counter reservation and immutable response intent commit together.
+
+The example's membership is explicitly preprovisioned and immutable. Membership
+mutation fails as unsupported. Retained counters, intents, inbox evidence and
+claims are never pruned or recycled; capacity exhaustion denies new work.
+`pending_claim` reads an existing live claim only after the caller has drained its
+previous handler. It does not issue a concurrent handling lease. New response
+reservation still checks current authority and consumes that claim once.
+
+Unlike the daemon's owned blocking workers, this bounded host starts no tasks.
+Callbacks execute inline through `block_in_place` on a checked multi-thread Tokio
+runtime. This avoids detached callbacks and a separate worker lifecycle, but
+requires that runtime and cannot interrupt a synchronous callback midway through
+its poll. All producers must share the same host and submission gate. The caller
+must stop admission and own/drain complete session futures, including network
+awaits, **before** releasing storage. The callback mutex does not drain those
+futures. Unsupported runtimes and poisoned owners fail explicitly.
+
+Run the executable
+[service-session example target](../../crates/Konclave.ClientLibrary/tests/native_service_session.rs)
+from the repository root:
+
+```sh
+cargo test --locked --package KonclaveClientLibrary --test native_service_session
+```
+
+The fixture establishes genuine signed invitation, JoinProof, Commit and Welcome
+state for two independently owned endpoints, then explicitly provisions a fixed
+post-join checkpoint. It does not exercise relay membership acceptance or a live
+pairing ceremony. Its injected bounded relay handles opaque ciphertext only; it is
+not HTTP, relay-authentication or WebSocket qualification.
+
+The scenarios cover exact request/responder/reply binding, live-claim reopen,
+original terminal intent recovered in a separate fenced process after revocation,
+uncertain acceptance followed by exact ciphertext retry, both saved-inbox receiver
+ratchet checkpoints, retained notification evidence and callback cancellation.
+Synthetic custody exists only in the test fixture, never as a host default.
+Storage guarantees and Windows power-loss limitations remain those stated above;
+this is not a production database or a coherent-rollback detector.
+
 For A2A consumers, keep `A2ATaskSubmitter` as the gateway seam. Native endpoint
 composition is not a fake local-service JSON facade, and an ordinary A2A HTTP edge
 still terminates plaintext as described by

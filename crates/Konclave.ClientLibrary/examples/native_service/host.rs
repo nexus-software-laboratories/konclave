@@ -313,10 +313,9 @@ impl NativeSessionHost for ServiceNativeHost {
                 .ok_or(ServiceHostError::Evidence)?;
             self.scope(original.reservation.conversation_id)?;
             // NativeSession has already established the exact expiry boundary.
-            Ok(self.journal.expire_outbound(
-                original.reservation,
-                envelope.expires_at_unix_seconds(),
-            )?)
+            Ok(self
+                .journal
+                .expire_outbound(original.reservation, envelope.expires_at_unix_seconds())?)
         })
     }
 
@@ -348,7 +347,10 @@ impl NativeSessionHost for ServiceNativeHost {
         self.run(|_, _| Err(ServiceHostError::Unsupported))
     }
 
-    async fn orphan_membership(&self, _operation: MembershipOperationId) -> Result<(), Self::Error> {
+    async fn orphan_membership(
+        &self,
+        _operation: MembershipOperationId,
+    ) -> Result<(), Self::Error> {
         self.run(|_, _| Err(ServiceHostError::Unsupported))
     }
 
