@@ -76,6 +76,18 @@ function Get-ComponentValidationContracts {
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/(?:client-api|generic-command|runtime)\.ts|src/adapter/runtime\.ts|src/service/(?:client|tools|commands|failure-diagnostics|delivery-diagnostics|operations|validation)\.ts|tests/(?:delivery-diagnostics|failure-diagnostics|generic-command|service-client|thin-client|delivery-runtime|extension-runtime)\.test\.ts)$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
+        'native-client' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/native-client-conformance\.yml$'
+            '^crates/Konclave\.(?:ClientLibrary|CryptographicCore|SecretStorage|DomainCore|ProtocolContracts|RelayAuthentication|ProtectedHttp|WindowsSecurity|RelayCore|BoundedDocuments|CollaborationPolicies|AdapterSdk|AdapterTransport|LocalAuthorizationStore|LocalFraming|LocalServiceClient|LocalServiceTransport|UserPresence)/'
+            '^apps/Konclave\.CommunityRelay/'
+            '^proto/konclave/protocol/'
+            '^fixtures/protocol/'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/|tests/)'
+            '^docs/(?:development/(?:native-client|secret-storage)|adr/adr-0031-embeddable-durable-native-client)\.md$'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'native-storage' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'

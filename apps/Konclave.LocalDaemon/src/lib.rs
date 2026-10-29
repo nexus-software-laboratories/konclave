@@ -23,6 +23,9 @@ mod local_failure_log;
 mod local_service;
 #[allow(dead_code)]
 mod mcp;
+mod native_journal;
+mod native_session;
+mod native_workers;
 #[allow(dead_code)]
 mod observability;
 #[allow(dead_code)]

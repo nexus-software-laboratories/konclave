@@ -11,6 +11,7 @@
     "A2A discovery conformance",
     "A2A task-store conformance",
     "Native storage conformance",
+    "Native client conformance",
     "Adapter conformance",
     "Actions storage conformance",
     "Agent plugin conformance",
@@ -72,6 +73,7 @@
         "a2a-discovery-conformance",
         "a2a-task-store-conformance",
         "native-storage-conformance",
+        "native-client-conformance",
         "adapter-conformance",
         "actions-storage-conformance",
         "agent-plugin-conformance",
@@ -121,6 +123,13 @@
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/native-client-conformance.yml",
+      "roles": ["merge-gate"],
+      "draftBehavior": "full",
+      "requiredChecks": ["Native client conformance"]
+    },
     {
       "source": "project",
       "path": ".github/workflows/native-storage-conformance.yml",

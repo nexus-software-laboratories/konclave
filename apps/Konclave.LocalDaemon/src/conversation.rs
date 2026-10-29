@@ -1,39 +1,47 @@
+pub(crate) use KonclaveClientLibrary::native::{
+    NativeAcceptedMembership as AcceptedMembership, OpenConversation, PreparedApplication,
+    PreparedMembership, ProcessedApplication, ProcessedMembership,
+};
+use KonclaveClientLibrary::native::{
+    NativeApplicationRequest, NativeConversationError, NativeConversationProcessor,
+};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use KonclaveClientLibrary::{PairingCapability, RelayEndpoint};
 use KonclaveCryptographicCore::{
-    DeviceIdentity, KonclaveCryptographicError, MlsApplicationMessage, MlsCommit, MlsConversation,
-    MlsConversationClient, MlsWelcome, OutboundMembershipCommit,
-    verify_collaboration_policy_proposal, verify_device_credential_binding,
+    DeviceIdentity, MlsConversationClient, MlsWelcome, verify_device_credential_binding,
 };
+#[cfg(test)]
+use KonclaveCryptographicCore::{MlsApplicationMessage, MlsCommit, MlsConversation};
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
-    DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
-    JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus,
-    MessageHistoryQuery, MessageId, NotificationId, PairingControl, PairingId, PairingMessageId,
-    PairingStage, ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId,
-    StoredRelayEnvelope, TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
-    TrustedDeviceBindingStatus, TrustedDeviceEvidence, TrustedDeviceResolution,
-    resolve_trusted_device, trusted_device_binding_status,
+    ApplicationContent, ConversationId, ConversationRole, ConversationState,
+    DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Invitation, JoinProof,
+    KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus, MessageHistoryQuery,
+    MessageId, PairingControl, PairingId, PairingMessageId, PairingStage, ProtocolVersion,
+    RelayEnvelope, RepeatPairingOperationId, RoutingId, StoredRelayEnvelope, TrustedDeviceAlias,
+    TrustedDeviceAliasDecision, TrustedDeviceBinding, TrustedDeviceBindingStatus,
+    TrustedDeviceEvidence, TrustedDeviceResolution, resolve_trusted_device,
+    trusted_device_binding_status,
 };
-use KonclaveProtocolContracts::v1::{
-    decode_application_message, decode_membership_commit_bundle, decode_membership_control,
-    encode_application_message, encode_join_proof, encode_membership_control,
-};
+#[cfg(test)]
+use KonclaveDomainCore::{ApplicationMessage, EnvelopeId};
+#[cfg(test)]
+use KonclaveProtocolContracts::v1::decode_membership_commit_bundle;
+use KonclaveProtocolContracts::v1::{decode_membership_control, encode_join_proof};
 use KonclaveSecretStorage::SealedSqliteMlsStorage;
 use thiserror::Error;
-use zeroize::Zeroizing;
 
 use crate::activity::ProfileActivity;
 use crate::clock::{SystemUnixClock, UnixClock};
 use crate::pairing::PairingOperationState;
+#[cfg(test)]
+use crate::persistence::MembershipInboxOperation;
 use crate::persistence::pairing::{PairingPhase, PairingRole};
 use crate::persistence::{
     CollaborationActionAuthorization, ConversationInsertOptions, ExpireOutboundResult, HistoryPage,
-    InboxOperation, MAX_CONVERSATION_PAGE_SIZE, MembershipInboxOperation, MembershipOutboxStatus,
-    MessageDirection, OutboundReservation, PendingOutbox, ProfileStore, ProfileStoreError,
-    StoredMembershipTransition, StoredOutboundApplication,
+    MAX_CONVERSATION_PAGE_SIZE, MembershipOutboxStatus, OutboundReservation, PendingOutbox,
+    ProfileStore, ProfileStoreError, StoredOutboundApplication,
 };
 
 const MAX_RECOVERED_PAIRINGS: usize = 32;
@@ -66,6 +74,14 @@ pub(crate) struct ConversationCoordinator {
 }
 
 impl ConversationCoordinator {
+    fn native_processor(&self) -> NativeConversationProcessor<'_, ProfileStore> {
+        NativeConversationProcessor::new(
+            self.store.as_ref(),
+            self.mls_storage.clone(),
+            self.device.as_ref(),
+        )
+    }
+
     /// Creates a coordinator that owns the profile lock through `store`.
     pub(crate) fn new(
         store: ProfileStore,
@@ -239,14 +255,6 @@ impl ConversationCoordinator {
             .is_some())
     }
 
-    fn generate_notification_id(&self) -> Result<NotificationId, ConversationCoordinatorError> {
-        self.device
-            .lock()
-            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
-            .generate_notification_id()
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)
-    }
-
     /// Creates and persists one initial administrator conversation.
     ///
     /// Profile state is written before MLS state. If MLS persistence is interrupted,
@@ -379,146 +387,9 @@ impl ConversationCoordinator {
         &self,
         conversation_id: ConversationId,
     ) -> Result<OpenConversation, ConversationCoordinatorError> {
-        let stored = self.store.load_conversation(conversation_id)?;
-        let pending = self.store.active_membership_outbox(conversation_id)?;
-        let inbound = self.store.active_membership_inbox(conversation_id)?;
-        let has_group = self
-            .mls_storage
-            .contains_group(conversation_id.as_bytes())
-            .map_err(|_| ConversationCoordinatorError::SecretStorage)?;
-        if let Some(MembershipInboxOperation::TransitionSaved(transition)) = inbound {
-            if pending.is_some() || !has_group || transition.parent_epoch != stored.state.epoch() {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-            let routing_id = stored.routing_id;
-            let replay_cursor = stored.replay_cursor;
-            let client = MlsConversationClient::with_storage(
-                stored.signing_material,
-                self.mls_storage.clone(),
-            )
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            if let Ok(group) = client.restore_group(stored.state, stored.bindings, None) {
-                return Ok(OpenConversation {
-                    routing_id,
-                    replay_cursor,
-                    group,
-                });
-            }
-            let stored = self.store.load_conversation(conversation_id)?;
-            let client = MlsConversationClient::with_storage(
-                stored.signing_material,
-                self.mls_storage.clone(),
-            )
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let group = client
-                .restore_group(transition.next_state, transition.bindings, None)
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let notification_id = self.generate_notification_id()?;
-            let replay_cursor = self.store.complete_membership_inbox_with_notification(
-                conversation_id,
-                transition.stored.cursor(),
-                notification_id,
-            )?;
-            return Ok(OpenConversation {
-                routing_id,
-                replay_cursor,
-                group,
-            });
-        }
-        let group = if !has_group {
-            if pending.is_some() {
-                return Err(ConversationCoordinatorError::MissingMlsState);
-            }
-            if stored.state.epoch() != 0 {
-                return Err(ConversationCoordinatorError::MissingMlsState);
-            }
-            let client = MlsConversationClient::with_storage(
-                stored.signing_material,
-                self.mls_storage.clone(),
-            )
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let expected_state = stored.state;
-            let group = client
-                .create_group()
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            if group.state() != &expected_state {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-            group
-        } else if let Some(pending) = pending {
-            if pending.parent_epoch != stored.state.epoch()
-                || pending.parent_epoch.checked_add(1) != Some(pending.next_state.epoch())
-            {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-            let operation_id = pending.operation_id;
-            let status = pending.status;
-            let client = MlsConversationClient::with_storage(
-                stored.signing_material,
-                self.mls_storage.clone(),
-            )
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            match client.restore_group(stored.state, pending.bindings, Some(pending.next_state)) {
-                Ok(mut group) => {
-                    if status == MembershipOutboxStatus::Accepted {
-                        group
-                            .accept_pending_commit()
-                            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                        self.store.complete_membership_outbox(operation_id)?;
-                    }
-                    group
-                }
-                Err(_) if status == MembershipOutboxStatus::Accepted => {
-                    let stored = self.store.load_conversation(conversation_id)?;
-                    let pending = self.store.load_membership_outbox(operation_id)?;
-                    let client = MlsConversationClient::with_storage(
-                        stored.signing_material,
-                        self.mls_storage.clone(),
-                    )
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                    let group = client
-                        .restore_group(pending.next_state, pending.bindings, None)
-                        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                    self.store.complete_membership_outbox(operation_id)?;
-                    group
-                }
-                Err(_) if status == MembershipOutboxStatus::Ready => {
-                    let stored = self.store.load_conversation(conversation_id)?;
-                    let client = MlsConversationClient::with_storage(
-                        stored.signing_material,
-                        self.mls_storage.clone(),
-                    )
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                    let group = client
-                        .restore_group(stored.state, stored.bindings, None)
-                        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                    if group.has_pending_membership_commit() {
-                        return Err(ConversationCoordinatorError::StateMismatch);
-                    }
-                    self.store.orphan_membership_outbox(operation_id)?;
-                    group
-                }
-                Err(_) => return Err(ConversationCoordinatorError::StateMismatch),
-            }
-        } else {
-            let client = MlsConversationClient::with_storage(
-                stored.signing_material,
-                self.mls_storage.clone(),
-            )
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let group = client
-                .restore_group(stored.state, stored.bindings, None)
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            if group.has_pending_membership_commit() {
-                return Err(ConversationCoordinatorError::MissingMembershipJournal);
-            }
-            group
-        };
-        Ok(OpenConversation {
-            routing_id: stored.routing_id,
-            replay_cursor: stored.replay_cursor,
-            group,
-        })
+        self.native_processor()
+            .open(conversation_id)
+            .map_err(Into::into)
     }
 
     /// Reconciles safe startup states before accepting new operations.
@@ -1362,70 +1233,18 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        if let ApplicationContent::DirectedRequest(directed_request) = &request.content {
-            let conversation = self.store.load_conversation(request.conversation_id)?;
-            let target = directed_request.target_device_id();
-            let local_device = self.device_id()?;
-            if !directed_request_recipients_support(
-                &conversation.state,
-                local_device,
-                target,
-                |device_id| {
-                    conversation.bindings.iter().any(|binding| {
-                        binding.binding().device_id() == device_id
-                            && binding.binding().supports_directed_requests()
-                    })
-                },
-            ) {
-                return Err(ConversationCoordinatorError::DirectedRequestUnsupported);
-            }
-        }
-        let envelope_id = self
-            .device
-            .lock()
-            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
-            .generate_envelope_id()
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        let reservation = if request.policy_operation {
-            self.store
-                .reserve_outbound_collaboration_policy_application(
-                    request.conversation_id,
-                    request.message_id,
-                    envelope_id,
-                    &request.content,
-                    request.reply_to,
-                )?
-        } else if let Some(authorization) = request.collaboration_action_authorization {
-            self.store.reserve_outbound_collaboration_action(
-                request.conversation_id,
-                request.message_id,
-                envelope_id,
-                authorization,
-                &request.content,
-                request.reply_to,
-                request.sent_at_unix_milliseconds,
-                request.expires_at_unix_seconds,
-            )?
-        } else {
-            self.store.reserve_outbound_application(
-                request.conversation_id,
-                request.message_id,
-                envelope_id,
-            )?
-        };
-        match self.prepare_reserved_application(
-            reservation,
-            request.content,
-            request.reply_to,
-            request.sent_at_unix_milliseconds,
-            request.expires_at_unix_seconds,
-        ) {
-            Ok(prepared) => Ok(prepared),
-            Err(error) => {
-                self.store.abandon_outbound_application(reservation)?;
-                Err(error)
-            }
-        }
+        self.native_processor()
+            .prepare_application(NativeApplicationRequest {
+                conversation_id: request.conversation_id,
+                message_id: request.message_id,
+                content: request.content,
+                reply_to: request.reply_to,
+                authorization: request.collaboration_action_authorization,
+                sent_at_unix_milliseconds: request.sent_at_unix_milliseconds,
+                expires_at_unix_seconds: request.expires_at_unix_seconds,
+                policy_operation: request.policy_operation,
+            })
+            .map_err(Into::into)
     }
 
     /// Loads one ready, accepted, or terminal outbound request by stable message ID.
@@ -1451,50 +1270,15 @@ impl ConversationCoordinator {
         sent_at_unix_milliseconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedApplication, ConversationCoordinatorError> {
-        verify_application_content(&content)?;
-        let message = ApplicationMessage::new(
-            ProtocolVersion::application_v1(),
-            reservation.message_id,
-            reservation.sender_counter,
-            sent_at_unix_milliseconds,
-            reply_to,
-            content,
-        )
-        .map_err(|_| ConversationCoordinatorError::Protocol)?;
-        let plaintext = Zeroizing::new(
-            encode_application_message(&message)
-                .map_err(|_| ConversationCoordinatorError::Protocol)?,
-        );
-        let mut conversation = self.open_unlocked(reservation.conversation_id)?;
-        let sender = self.device_id()?;
-        let epoch = conversation.group.epoch();
-        let ciphertext = conversation
-            .group
-            .encrypt_application_message(&plaintext)
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        let envelope = RelayEnvelope::new(
-            ProtocolVersion::application_v1(),
-            conversation.routing_id,
-            reservation.envelope_id,
-            DeliveryClass::GroupApplication,
-            None,
-            expires_at_unix_seconds,
-            ciphertext.into_bytes(),
-        )
-        .map_err(|_| ConversationCoordinatorError::Protocol)?;
-        self.store.store_outbound_message(
-            reservation,
-            conversation.routing_id,
-            sender,
-            epoch,
-            &message,
-        )?;
-        self.store.store_outbound_envelope(reservation, &envelope)?;
-        Ok(PreparedApplication {
-            conversation_id: reservation.conversation_id,
-            message,
-            envelope,
-        })
+        self.native_processor()
+            .prepare_reserved_application(
+                reservation,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+            )
+            .map_err(Into::into)
     }
 
     /// Creates and journals one add-member commit before relay transmission.
@@ -1509,11 +1293,18 @@ impl ConversationCoordinator {
         now_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        self.prepare_membership(
-            conversation_id,
-            expires_at_unix_seconds,
-            |group, envelope_id| group.create_add_commit(join_proof, envelope_id, now_unix_seconds),
-        )
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.native_processor()
+            .prepare_add_member(
+                conversation_id,
+                join_proof,
+                now_unix_seconds,
+                expires_at_unix_seconds,
+            )
+            .map_err(Into::into)
     }
 
     /// Creates and journals one remove-member commit before relay transmission.
@@ -1527,9 +1318,13 @@ impl ConversationCoordinator {
         device_id: DeviceId,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group, _| {
-            group.create_remove_commit(device_id)
-        })
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.native_processor()
+            .prepare_remove_member(conversation_id, device_id, expires_at_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Creates and journals one role-change commit before relay transmission.
@@ -1544,96 +1339,13 @@ impl ConversationCoordinator {
         role: ConversationRole,
         expires_at_unix_seconds: u64,
     ) -> Result<PreparedMembership, ConversationCoordinatorError> {
-        self.prepare_membership(conversation_id, expires_at_unix_seconds, |group, _| {
-            group.create_change_role_commit(device_id, role)
-        })
-    }
-
-    fn prepare_membership(
-        &self,
-        conversation_id: ConversationId,
-        expires_at_unix_seconds: u64,
-        create: impl FnOnce(
-            &mut MlsConversation,
-            EnvelopeId,
-        ) -> Result<OutboundMembershipCommit, KonclaveCryptographicError>,
-    ) -> Result<PreparedMembership, ConversationCoordinatorError> {
         let _operation = self
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        let envelope_id = self
-            .device
-            .lock()
-            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
-            .generate_envelope_id()
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        let mut conversation = self.open_unlocked(conversation_id)?;
-        let parent_epoch = conversation.group.epoch();
-        let outbound = create(&mut conversation.group, envelope_id)
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        let operation_id = outbound.authorization().operation_id();
-        let control = Zeroizing::new(
-            encode_membership_control(outbound.authorization(), outbound.join_proof())
-                .map_err(|_| ConversationCoordinatorError::Protocol)?,
-        );
-        let payload = outbound
-            .encode_bundle()
-            .map_err(|_| ConversationCoordinatorError::Protocol)?;
-        let envelope = RelayEnvelope::new(
-            ProtocolVersion::application_v1(),
-            conversation.routing_id,
-            envelope_id,
-            DeliveryClass::GroupCommit,
-            Some(parent_epoch),
-            expires_at_unix_seconds,
-            payload,
-        )
-        .map_err(|_| ConversationCoordinatorError::Protocol)?;
-        let stored = self.store.load_conversation(conversation_id)?;
-        let mut bindings = stored
-            .bindings
-            .iter()
-            .map(|binding| binding.binding().clone())
-            .collect::<Vec<_>>();
-        if let Some(join_proof) = outbound.join_proof() {
-            let binding = join_proof.credential().clone();
-            verify_device_credential_binding(&binding)
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            if !bindings
-                .iter()
-                .any(|existing| existing.device_id() == binding.device_id())
-            {
-                bindings.push(binding);
-            }
-        }
-        let welcome = outbound
-            .welcome()
-            .map(|welcome| welcome.as_bytes().to_vec());
-        let journaled = self.store.store_membership_outbox(
-            operation_id,
-            conversation_id,
-            parent_epoch,
-            &envelope,
-            &control,
-            outbound.next_state(),
-            &bindings,
-            welcome.as_deref(),
-        );
-        if let Err(error) = journaled {
-            conversation
-                .group
-                .reject_pending_commit()
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            return Err(error.into());
-        }
-        Ok(PreparedMembership {
-            operation_id,
-            conversation_id,
-            parent_epoch,
-            envelope,
-            welcome,
-        })
+        self.native_processor()
+            .prepare_change_role(conversation_id, device_id, role, expires_at_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Loads bounded ready envelopes for idempotent relay retry.
@@ -1872,29 +1584,9 @@ impl ConversationCoordinator {
         &self,
         operation_id: MembershipOperationId,
     ) -> Result<(), ConversationCoordinatorError> {
-        let initial = self.store.load_membership_outbox(operation_id)?;
-        let mut conversation = self.open_unlocked(initial.conversation_id)?;
-        let pending = self.store.load_membership_outbox(operation_id)?;
-        if pending.status == MembershipOutboxStatus::Orphaned {
-            return if conversation.group.has_pending_membership_commit() {
-                Err(ConversationCoordinatorError::StateMismatch)
-            } else {
-                Ok(())
-            };
-        }
-        if pending.status != MembershipOutboxStatus::Ready
-            || conversation.group.state().epoch() != pending.parent_epoch
-        {
-            return Err(ConversationCoordinatorError::StateMismatch);
-        }
-        if conversation.group.has_pending_membership_commit() {
-            conversation
-                .group
-                .reject_pending_commit()
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        }
-        self.store.orphan_membership_outbox(operation_id)?;
-        Ok(())
+        self.native_processor()
+            .orphan_membership(operation_id)
+            .map_err(Into::into)
     }
 
     /// Loads one bounded cursor-ordered page of completed local history.
@@ -2004,173 +1696,9 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        let mut conversation = self.open_unlocked(conversation_id)?;
-        if conversation.routing_id != stored.envelope().routing_id() {
-            return Err(ConversationCoordinatorError::StateMismatch);
-        }
-        let recorded_conversation = self.store.record_inbox_envelope(stored)?;
-        if recorded_conversation != conversation_id {
-            return Err(ConversationCoordinatorError::StateMismatch);
-        }
-        match self
-            .store
-            .inbox_operation(conversation_id, stored.cursor())?
-        {
-            InboxOperation::Received { stored } => {
-                if let Some(outbound) = self
-                    .store
-                    .outbound_history_message(conversation_id, &stored)?
-                {
-                    self.store.save_inbox_message(
-                        conversation_id,
-                        stored.cursor(),
-                        outbound.sender,
-                        outbound.epoch,
-                        &outbound.message,
-                    )?;
-                    let notification_id = self.generate_notification_id()?;
-                    self.store.complete_inbox_with_notification_at(
-                        conversation_id,
-                        stored.cursor(),
-                        notification_id,
-                        now_unix_seconds,
-                    )?;
-                    return Ok(ProcessedApplication {
-                        conversation_id,
-                        cursor: stored.cursor(),
-                        envelope_id: stored.envelope().envelope_id(),
-                        sender: outbound.sender,
-                        epoch: outbound.epoch,
-                        message: outbound.message,
-                        direction: MessageDirection::Outbound,
-                        duplicate: true,
-                    });
-                }
-                let epoch = conversation.group.epoch();
-                let (sender, message) =
-                    decrypt_application(&mut conversation.group, stored.envelope())?;
-                self.store.save_inbox_message(
-                    conversation_id,
-                    stored.cursor(),
-                    sender,
-                    epoch,
-                    &message,
-                )?;
-                conversation
-                    .group
-                    .persist()
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                let notification_id = self.generate_notification_id()?;
-                self.store.complete_inbox_with_notification_at(
-                    conversation_id,
-                    stored.cursor(),
-                    notification_id,
-                    now_unix_seconds,
-                )?;
-                Ok(ProcessedApplication {
-                    conversation_id,
-                    cursor: stored.cursor(),
-                    envelope_id: stored.envelope().envelope_id(),
-                    sender,
-                    epoch,
-                    message,
-                    direction: MessageDirection::Inbound,
-                    duplicate: false,
-                })
-            }
-            InboxOperation::MessageSaved { stored, message } => {
-                if let Some(outbound) = self
-                    .store
-                    .outbound_history_message(conversation_id, &stored)?
-                {
-                    if outbound.sender != message.sender
-                        || outbound.epoch != message.epoch
-                        || !application_messages_equal(&outbound.message, &message.message)?
-                    {
-                        return Err(ConversationCoordinatorError::StateMismatch);
-                    }
-                    let notification_id = self.generate_notification_id()?;
-                    self.store.complete_inbox_with_notification_at(
-                        conversation_id,
-                        stored.cursor(),
-                        notification_id,
-                        now_unix_seconds,
-                    )?;
-                    return Ok(ProcessedApplication {
-                        conversation_id,
-                        cursor: stored.cursor(),
-                        envelope_id: stored.envelope().envelope_id(),
-                        sender: message.sender,
-                        epoch: message.epoch,
-                        message: message.message,
-                        direction: MessageDirection::Outbound,
-                        duplicate: true,
-                    });
-                }
-                if conversation.group.epoch() != message.epoch {
-                    return Err(ConversationCoordinatorError::StateMismatch);
-                }
-                let ciphertext = MlsApplicationMessage::from_bytes(stored.envelope().payload())
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                match conversation.group.decrypt_application_message(&ciphertext) {
-                    Ok(decrypted) => {
-                        let decoded = decode_application_message(decrypted.plaintext())
-                            .map_err(|_| ConversationCoordinatorError::Protocol)?;
-                        if decrypted.authenticated_sender() != message.sender
-                            || !application_messages_equal(&decoded, &message.message)?
-                        {
-                            return Err(ConversationCoordinatorError::StateMismatch);
-                        }
-                        conversation
-                            .group
-                            .persist()
-                            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                    }
-                    Err(KonclaveCryptographicError::ApplicationMessageAlreadyProcessed) => {}
-                    Err(_) => {
-                        return Err(ConversationCoordinatorError::Cryptographic);
-                    }
-                }
-                let notification_id = self.generate_notification_id()?;
-                self.store.complete_inbox_with_notification_at(
-                    conversation_id,
-                    stored.cursor(),
-                    notification_id,
-                    now_unix_seconds,
-                )?;
-                Ok(ProcessedApplication {
-                    conversation_id,
-                    cursor: stored.cursor(),
-                    envelope_id: stored.envelope().envelope_id(),
-                    sender: message.sender,
-                    epoch: message.epoch,
-                    message: message.message,
-                    direction: MessageDirection::Inbound,
-                    duplicate: true,
-                })
-            }
-            InboxOperation::Complete { stored, message } => {
-                let direction = if self
-                    .store
-                    .outbound_history_message(conversation_id, &stored)?
-                    .is_some()
-                {
-                    MessageDirection::Outbound
-                } else {
-                    MessageDirection::Inbound
-                };
-                Ok(ProcessedApplication {
-                    conversation_id,
-                    cursor: stored.cursor(),
-                    envelope_id: stored.envelope().envelope_id(),
-                    sender: message.sender,
-                    epoch: message.epoch,
-                    message: message.message,
-                    direction,
-                    duplicate: true,
-                })
-            }
-        }
+        self.native_processor()
+            .process_inbound_application(conversation_id, stored, now_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Journals and applies one encrypted membership Commit relay envelope.
@@ -2192,230 +1720,10 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
-        let recorded_conversation = self.store.record_membership_inbox_envelope(stored)?;
-        if recorded_conversation != conversation_id {
-            return Err(ConversationCoordinatorError::StateMismatch);
-        }
-        if let Some(outbox) = self
-            .store
-            .membership_outbox_for_envelope(stored.envelope().envelope_id())?
-        {
-            if outbox.envelope != *stored.envelope() || outbox.conversation_id != conversation_id {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-            if outbox.status == MembershipOutboxStatus::Ready {
-                self.store.mark_membership_outbox_accepted(stored)?;
-            }
-            let conversation = self.open_unlocked(conversation_id)?;
-            if conversation.group.state() != &outbox.next_state {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-            let operation_id = self
-                .store
-                .complete_membership_echo(stored, self.device_id()?)?;
-            return Ok(ProcessedMembership {
-                conversation_id,
-                cursor: stored.cursor(),
-                operation_id,
-                sender: self.device_id()?,
-                epoch: outbox.next_state.epoch(),
-                removed_self: outbox.next_state.member(self.device_id()?).is_none(),
-                duplicate: true,
-            });
-        }
-        if let Some(local) = self.store.active_membership_outbox(conversation_id)? {
-            if local.parent_epoch
-                == stored
-                    .envelope()
-                    .expected_parent_epoch()
-                    .unwrap_or(u64::MAX)
-                && local.status == MembershipOutboxStatus::Ready
-            {
-                self.orphan_membership_unlocked(local.operation_id)?;
-            } else {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-        }
-        match self
-            .store
-            .membership_inbox_operation(conversation_id, stored.cursor())?
-        {
-            MembershipInboxOperation::Received { stored } => {
-                let mut conversation = self.open_unlocked(conversation_id)?;
-                if conversation.routing_id != stored.envelope().routing_id()
-                    || conversation.group.epoch()
-                        != stored
-                            .envelope()
-                            .expected_parent_epoch()
-                            .ok_or(ConversationCoordinatorError::Protocol)?
-                {
-                    return Err(ConversationCoordinatorError::StateMismatch);
-                }
-                let bundle = decode_membership_commit_bundle(stored.envelope().payload())
-                    .map_err(|_| ConversationCoordinatorError::Protocol)?;
-                let encrypted_control =
-                    MlsApplicationMessage::from_bytes(bundle.encrypted_control())
-                        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                let decrypted = conversation
-                    .group
-                    .decrypt_application_message(&encrypted_control)
-                    .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                let sender = decrypted.authenticated_sender();
-                let (authorization, join_proof) = decode_membership_control(decrypted.plaintext())
-                    .map_err(|_| ConversationCoordinatorError::Protocol)?;
-                let next_epoch = conversation
-                    .group
-                    .epoch()
-                    .checked_add(1)
-                    .ok_or(ConversationCoordinatorError::StateMismatch)?;
-                let next_state = conversation
-                    .group
-                    .state()
-                    .apply_membership_authorization(sender, &authorization, next_epoch)
-                    .map_err(|_| ConversationCoordinatorError::StateMismatch)?;
-                let current = self.store.load_conversation(conversation_id)?;
-                let mut bindings = current
-                    .bindings
-                    .iter()
-                    .map(|binding| binding.binding().clone())
-                    .collect::<Vec<_>>();
-                if let Some(proof) = &join_proof {
-                    let binding = proof.credential().clone();
-                    verify_device_credential_binding(&binding)
-                        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-                    if !bindings
-                        .iter()
-                        .any(|existing| existing.device_id() == binding.device_id())
-                    {
-                        bindings.push(binding);
-                    }
-                }
-                self.store.save_membership_inbox_transition(
-                    conversation_id,
-                    stored.cursor(),
-                    sender,
-                    authorization.parent_epoch(),
-                    authorization.operation_id(),
-                    decrypted.plaintext(),
-                    &next_state,
-                    &bindings,
-                )?;
-                let transition = match self
-                    .store
-                    .membership_inbox_operation(conversation_id, stored.cursor())?
-                {
-                    MembershipInboxOperation::TransitionSaved(transition) => transition,
-                    _ => return Err(ConversationCoordinatorError::StateMismatch),
-                };
-                self.process_saved_membership(
-                    &mut conversation.group,
-                    transition,
-                    now_unix_seconds,
-                    false,
-                )
-            }
-            MembershipInboxOperation::TransitionSaved(_transition) => {
-                let mut conversation = self.open_unlocked(conversation_id)?;
-                match self
-                    .store
-                    .membership_inbox_operation(conversation_id, stored.cursor())?
-                {
-                    MembershipInboxOperation::Complete(complete) => {
-                        Ok(processed_membership(complete, self.device_id()?, true))
-                    }
-                    MembershipInboxOperation::TransitionSaved(saved) => self
-                        .process_saved_membership(
-                            &mut conversation.group,
-                            saved,
-                            now_unix_seconds,
-                            true,
-                        ),
-                    _ => Err(ConversationCoordinatorError::StateMismatch),
-                }
-            }
-            MembershipInboxOperation::Complete(transition) => {
-                Ok(processed_membership(transition, self.device_id()?, true))
-            }
-        }
+        self.native_processor()
+            .process_inbound_membership(conversation_id, stored, now_unix_seconds)
+            .map_err(Into::into)
     }
-
-    fn process_saved_membership(
-        &self,
-        group: &mut MlsConversation,
-        transition: StoredMembershipTransition,
-        now_unix_seconds: u64,
-        duplicate: bool,
-    ) -> Result<ProcessedMembership, ConversationCoordinatorError> {
-        if group.epoch() != transition.parent_epoch {
-            return Err(ConversationCoordinatorError::StateMismatch);
-        }
-        let bundle = decode_membership_commit_bundle(transition.stored.envelope().payload())
-            .map_err(|_| ConversationCoordinatorError::Protocol)?;
-        if duplicate {
-            let encrypted_control = MlsApplicationMessage::from_bytes(bundle.encrypted_control())
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            let decrypted = group
-                .decrypt_application_message(&encrypted_control)
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-            if decrypted.authenticated_sender() != transition.sender
-                || decrypted.plaintext() != transition.control.as_slice()
-            {
-                return Err(ConversationCoordinatorError::StateMismatch);
-            }
-        }
-        let commit = MlsCommit::from_bytes(bundle.mls_commit())
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        let (authorization, join_proof) = decode_membership_control(&transition.control)
-            .map_err(|_| ConversationCoordinatorError::Protocol)?;
-        let applied = group
-            .process_membership_commit(&commit, authorization, join_proof, now_unix_seconds)
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-        if applied.authenticated_sender() != transition.sender
-            || applied.epoch() != transition.next_state.epoch()
-            || group.state() != &transition.next_state
-        {
-            return Err(ConversationCoordinatorError::StateMismatch);
-        }
-        let notification_id = self.generate_notification_id()?;
-        self.store.complete_membership_inbox_with_notification(
-            transition.next_state.conversation_id(),
-            transition.stored.cursor(),
-            notification_id,
-        )?;
-        Ok(ProcessedMembership {
-            conversation_id: transition.next_state.conversation_id(),
-            cursor: transition.stored.cursor(),
-            operation_id: transition.operation_id,
-            sender: transition.sender,
-            epoch: applied.epoch(),
-            removed_self: applied.removed_self(),
-            duplicate,
-        })
-    }
-}
-
-fn processed_membership(
-    transition: StoredMembershipTransition,
-    self_device_id: DeviceId,
-    duplicate: bool,
-) -> ProcessedMembership {
-    let self_removed = transition.next_state.member(self_device_id).is_none();
-    ProcessedMembership {
-        conversation_id: transition.next_state.conversation_id(),
-        cursor: transition.stored.cursor(),
-        operation_id: transition.operation_id,
-        sender: transition.sender,
-        epoch: transition.next_state.epoch(),
-        removed_self: self_removed,
-        duplicate,
-    }
-}
-
-/// One sender-ratcheted application message and its sealed relay envelope.
-pub(crate) struct PreparedApplication {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) message: ApplicationMessage,
-    pub(crate) envelope: RelayEnvelope,
 }
 
 struct PrepareApplicationRequest {
@@ -2429,23 +1737,7 @@ struct PrepareApplicationRequest {
     policy_operation: bool,
 }
 
-/// One pending MLS membership transition and its opaque relay envelope.
-pub(crate) struct PreparedMembership {
-    pub(crate) operation_id: MembershipOperationId,
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) parent_epoch: u64,
-    pub(crate) envelope: RelayEnvelope,
-    pub(crate) welcome: Option<Vec<u8>>,
-}
-
-/// One relay-accepted and locally applied membership transition.
-pub(crate) struct AcceptedMembership {
-    pub(crate) operation_id: MembershipOperationId,
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) cursor: u64,
-    pub(crate) welcome: Option<Vec<u8>>,
-}
-
+/// A durable membership retry before or after local acceptance.
 pub(crate) enum MembershipRequestState {
     Ready(PreparedMembership),
     Applied(AcceptedMembership),
@@ -2459,37 +1751,11 @@ pub(crate) struct InvitationPackage {
     pub(crate) peer_bindings: Vec<DeviceCredentialBinding>,
 }
 
-/// One authenticated application message recovered from a relay cursor.
-pub(crate) struct ProcessedApplication {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) cursor: u64,
-    pub(crate) envelope_id: EnvelopeId,
-    pub(crate) sender: DeviceId,
-    pub(crate) epoch: u64,
-    pub(crate) message: ApplicationMessage,
-    pub(crate) direction: MessageDirection,
-    pub(crate) duplicate: bool,
+trait OpenConversationSummary {
+    fn summary(&self) -> ConversationSummary;
 }
 
-/// One authenticated membership transition recovered from a relay cursor.
-pub(crate) struct ProcessedMembership {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) cursor: u64,
-    pub(crate) operation_id: MembershipOperationId,
-    pub(crate) sender: DeviceId,
-    pub(crate) epoch: u64,
-    pub(crate) removed_self: bool,
-    pub(crate) duplicate: bool,
-}
-
-/// One opened MLS conversation and its opaque relay route.
-pub(crate) struct OpenConversation {
-    pub(crate) routing_id: RoutingId,
-    pub(crate) replay_cursor: u64,
-    pub(crate) group: MlsConversation,
-}
-
-impl OpenConversation {
+impl OpenConversationSummary for OpenConversation {
     fn summary(&self) -> ConversationSummary {
         ConversationSummary {
             conversation_id: self.group.state().conversation_id(),
@@ -2551,6 +1817,22 @@ pub(crate) enum ConversationCoordinatorError {
     Unauthorized,
 }
 
+impl From<NativeConversationError<ProfileStoreError>> for ConversationCoordinatorError {
+    fn from(error: NativeConversationError<ProfileStoreError>) -> Self {
+        match error {
+            NativeConversationError::Journal(error) => Self::Profile(error),
+            NativeConversationError::Cryptographic => Self::Cryptographic,
+            NativeConversationError::SecretStorage => Self::SecretStorage,
+            NativeConversationError::StateUnavailable => Self::StateUnavailable,
+            NativeConversationError::MissingMlsState => Self::MissingMlsState,
+            NativeConversationError::MissingMembershipJournal => Self::MissingMembershipJournal,
+            NativeConversationError::StateMismatch => Self::StateMismatch,
+            NativeConversationError::Protocol => Self::Protocol,
+            NativeConversationError::DirectedRequestUnsupported => Self::DirectedRequestUnsupported,
+        }
+    }
+}
+
 fn initial_conversation_state(
     conversation_id: ConversationId,
     device_id: DeviceId,
@@ -2565,62 +1847,36 @@ fn initial_conversation_state(
     .map_err(|_| ConversationCoordinatorError::StateMismatch)
 }
 
+#[cfg(test)]
 fn directed_request_recipients_support(
     state: &ConversationState,
     local_device: DeviceId,
     target: DeviceId,
-    mut supports_directed_requests: impl FnMut(DeviceId) -> bool,
+    supports_directed_requests: impl FnMut(DeviceId) -> bool,
 ) -> bool {
-    target != local_device
-        && state.member(target).is_some()
-        && state
-            .members()
-            .iter()
-            .map(|member| member.device_id())
-            .filter(|device_id| *device_id != local_device)
-            .all(&mut supports_directed_requests)
+    KonclaveClientLibrary::native::directed_request_recipients_support(
+        state,
+        local_device,
+        target,
+        supports_directed_requests,
+    )
 }
 
+#[cfg(test)]
 fn decrypt_application(
     group: &mut MlsConversation,
     envelope: &RelayEnvelope,
 ) -> Result<(DeviceId, ApplicationMessage), ConversationCoordinatorError> {
-    if envelope.delivery_class() != DeliveryClass::GroupApplication {
-        return Err(ConversationCoordinatorError::Protocol);
-    }
-    let ciphertext = MlsApplicationMessage::from_bytes(envelope.payload())
-        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-    let decrypted = group
-        .decrypt_application_message(&ciphertext)
-        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-    let sender = decrypted.authenticated_sender();
-    let message = decode_application_message(decrypted.plaintext())
-        .map_err(|_| ConversationCoordinatorError::Protocol)?;
-    verify_application_content(message.content())?;
-    Ok((sender, message))
+    KonclaveClientLibrary::native::decrypt_application::<ProfileStoreError>(group, envelope)
+        .map_err(Into::into)
 }
 
+#[cfg(test)]
 fn verify_application_content(
     content: &ApplicationContent,
 ) -> Result<(), ConversationCoordinatorError> {
-    if let ApplicationContent::CollaborationPolicyProposal(proposal) = content {
-        verify_collaboration_policy_proposal(proposal)
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
-    }
-    Ok(())
-}
-
-fn application_messages_equal(
-    left: &ApplicationMessage,
-    right: &ApplicationMessage,
-) -> Result<bool, ConversationCoordinatorError> {
-    let left = Zeroizing::new(
-        encode_application_message(left).map_err(|_| ConversationCoordinatorError::Protocol)?,
-    );
-    let right = Zeroizing::new(
-        encode_application_message(right).map_err(|_| ConversationCoordinatorError::Protocol)?,
-    );
-    Ok(left == right)
+    KonclaveClientLibrary::native::verify_application_content::<ProfileStoreError>(content)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

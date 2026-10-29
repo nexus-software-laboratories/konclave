@@ -167,6 +167,18 @@ impl<T> PairingService<T>
 where
     T: RelayTransport + 'static,
 {
+    fn admitted_sweep(&self) -> Result<Self, PairingServiceError> {
+        let admission = Arc::new(
+            self.conversations
+                .activity()
+                .try_begin()
+                .map_err(|_| PairingServiceError::ProfileClosing)?,
+        );
+        let mut scoped = self.clone();
+        scoped.applications = self.applications.with_admission(admission)?;
+        Ok(scoped)
+    }
+
     /// Creates a pairing service sharing the profile's relay transport.
     pub(crate) fn new(
         conversations: ConversationCoordinator,
@@ -540,11 +552,15 @@ where
         &self,
         now_unix_seconds: u64,
     ) -> Result<usize, PairingServiceError> {
-        let _admitted = self
-            .conversations
-            .activity()
-            .try_begin()
-            .map_err(|_| PairingServiceError::ProfileClosing)?;
+        self.admitted_sweep()?
+            .sync_active_repeat_pairings_admitted(now_unix_seconds)
+            .await
+    }
+
+    async fn sync_active_repeat_pairings_admitted(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, PairingServiceError> {
         let store = Arc::clone(&self.store);
         let operation_ids = tokio::task::spawn_blocking(move || {
             store.active_repeat_pairing_ids(None, ACTIVE_REPEAT_PAIRING_PAGE_SIZE)
@@ -798,18 +814,15 @@ where
         &self,
         now_unix_seconds: u64,
     ) -> Result<usize, PairingServiceError> {
-        // A pairing sweep is one of the operations ADR 0008 retains a profile for.
-        // Admission is refused once the profile is closing; every pairing record stays
-        // durable, so the next sweep after reopening is exact rather than repeated.
-        //
-        // This is a top-level operation: the sweep drives pairing replay directly
-        // through the transport and store, so nothing it reaches takes a second
-        // admission while this one is held.
-        let _admitted = self
-            .conversations
-            .activity()
-            .try_begin()
-            .map_err(|_| PairingServiceError::ProfileClosing)?;
+        self.admitted_sweep()?
+            .sync_active_admitted(now_unix_seconds)
+            .await
+    }
+
+    async fn sync_active_admitted(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<usize, PairingServiceError> {
         self.recover(now_unix_seconds).await?;
         let mut processed = 0_usize;
         let store = Arc::clone(&self.store);
