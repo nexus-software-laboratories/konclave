@@ -384,10 +384,10 @@ async fn supervise(
     if let Err(error) = activity.wait_drained(PROFILE_SHUTDOWN_TIMEOUT).await {
         failures.push(anyhow::Error::new(error).context("draining admitted profile operations"));
     }
-    if let Some(applications) = applications {
-        if let Err(error) = applications.shutdown_native_workers().await {
-            failures.push(anyhow::Error::new(error).context("joining native application workers"));
-        }
+    if let Some(applications) = applications
+        && let Err(error) = applications.shutdown_native_workers().await
+    {
+        failures.push(anyhow::Error::new(error).context("joining native application workers"));
     }
 
     match aggregate_failures(failures) {
