@@ -846,7 +846,8 @@ fn same_message(bytes: &[u8], message: &ApplicationMessage) -> Result<bool, Jour
     Ok(bytes == encoded.as_slice())
 }
 
-fn copy_content(content: &ApplicationContent) -> Result<ApplicationContent, JournalError> {
+/// Reconstructs only content admitted by this fixed-membership service authority.
+pub(super) fn copy_content(content: &ApplicationContent) -> Result<ApplicationContent, JournalError> {
     match content {
         ApplicationContent::Text(text) => {
             ApplicationContent::text(text.as_str()).map_err(|_| JournalError::Invalid)
