@@ -636,6 +636,30 @@ impl ServiceJournal {
         })
     }
 
+    /// Reads an existing live claim after the caller drains its previous handler.
+    ///
+    /// This does not create a claim, consume it, or grant a concurrent handling
+    /// lease. New response reservation still revalidates current local authority
+    /// and atomically consumes this exact claim with its immutable response intent.
+    /// # Errors
+    /// Propagates current-owner, authentication and decoding failures.
+    pub fn pending_claim(
+        &self,
+        request: MessageId,
+    ) -> Result<Option<ServiceAuthorization>, JournalError> {
+        self.read(|snapshot| {
+            Ok(snapshot
+                .authority
+                .claims
+                .iter()
+                .find(|claim| claim.request == request && claim.response.is_none())
+                .map(|claim| ServiceAuthorization {
+                    revision: snapshot.authority.revision,
+                    claim: Some(claim.id),
+                }))
+        })
+    }
+
     /// Commits local revocation/enabling under the same reservation mutex.
     /// # Errors
     /// Propagates owner, custody and generation exhaustion failures.

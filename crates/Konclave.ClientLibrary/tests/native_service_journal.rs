@@ -876,7 +876,13 @@ fn committed_expiry_is_terminal_but_never_rewrites_prior_acceptance() {
         Err(JournalError::Conflict)
     );
     assert!(fixture.journal.ready_outbox().unwrap().is_empty());
-    assert!(fixture.journal.outbound_intent(reservation).unwrap().expired);
+    assert!(
+        fixture
+            .journal
+            .outbound_intent(reservation)
+            .unwrap()
+            .expired
+    );
 }
 
 #[test]
@@ -938,4 +944,65 @@ fn actual_retained_inbox_and_claim_capacity_fail_closed() {
             expected_cursor as u64
         );
     }
+}
+
+#[test]
+fn live_claim_reopen_preserves_identity_without_bypassing_reservation_authority() {
+    let fixture = Fixture::new();
+    let request = fixture.complete_request();
+    assert!(fixture.journal.pending_claim(request).unwrap().is_none());
+    let original = fixture.journal.claim(request).unwrap();
+    fixture.owner.release().unwrap();
+    assert!(matches!(
+        fixture.journal.pending_claim(request),
+        Err(JournalError::Storage(StorageError::Released))
+    ));
+    let owner = ServiceStorage::open(fixture.directory.path()).unwrap();
+    let reopened = ServiceJournal::reopen(
+        owner.clone(),
+        sealer(7),
+        NAMESPACE,
+        fixture.id,
+        fixture.local.device_id(),
+    )
+    .unwrap();
+    let before = owner.read_slot(SnapshotKind::Journal).unwrap().unwrap();
+    let recovered = reopened.pending_claim(request).unwrap().unwrap();
+    assert_eq!(recovered.claim, original.claim);
+    assert_eq!(recovered.revision, original.revision);
+    assert_eq!(
+        owner.read_slot(SnapshotKind::Journal).unwrap().unwrap(),
+        before
+    );
+    let mut response = NativeApplicationRequest {
+        conversation_id: fixture.id,
+        message_id: MessageId::from_bytes([1; 16]),
+        content: ApplicationContent::text(MARKER).unwrap(),
+        reply_to: Some(request),
+        authorization: Some(recovered),
+        sent_at_unix_milliseconds: 12,
+        expires_at_unix_seconds: 100,
+        policy_operation: false,
+    };
+    let envelope = EnvelopeId::from_bytes([11; 16]);
+    reopened.set_enabled(false).unwrap();
+    response.authorization = reopened.pending_claim(request).unwrap();
+    assert_eq!(
+        reopened.reserve_application(&response, envelope),
+        Err(JournalError::Authority(AuthorityError::Denied))
+    );
+    reopened.set_enabled(true).unwrap();
+    assert_eq!(
+        reopened.reserve_application(&response, envelope),
+        Err(JournalError::Authority(AuthorityError::Denied))
+    );
+    response.authorization = reopened.pending_claim(request).unwrap();
+    assert_eq!(response.authorization.unwrap().claim, original.claim);
+    reopened.reserve_application(&response, envelope).unwrap();
+    assert!(reopened.pending_claim(request).unwrap().is_none());
+    response.message_id = MessageId::from_bytes([2; 16]);
+    assert_eq!(
+        reopened.reserve_application(&response, EnvelopeId::from_bytes([12; 16])),
+        Err(JournalError::Authority(AuthorityError::Claim))
+    );
 }
