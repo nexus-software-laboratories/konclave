@@ -173,9 +173,10 @@ impl ServiceAuthority {
             return Err(AuthorityError::Scope);
         }
         if claim_id == [0; 16]
-            || self.claims.iter().any(|claim| {
-                claim.id == claim_id || claim.request == message.message.message_id()
-            })
+            || self
+                .claims
+                .iter()
+                .any(|claim| claim.id == claim_id || claim.request == message.message.message_id())
         {
             return Err(AuthorityError::Claim);
         }
@@ -199,7 +200,10 @@ impl ServiceAuthority {
     /// # Errors
     /// Returns capacity exhaustion without mutation if the generation cannot advance.
     pub fn set_enabled(&mut self, enabled: bool) -> Result<(), AuthorityError> {
-        let revision = self.revision.checked_add(1).ok_or(AuthorityError::Capacity)?;
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(AuthorityError::Capacity)?;
         self.revision = revision;
         self.enabled = enabled;
         Ok(())
