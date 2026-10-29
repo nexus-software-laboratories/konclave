@@ -40,6 +40,15 @@ plaintext processing, local authorization, and sealed persistence. Inputs from
 models, extensions, CLI processes, IPC peers, files, and network services remain
 untrusted even when they originate on the same machine.
 
+### Explicit native services
+
+An explicitly composed native service is a separate trusted endpoint for its own
+injected identity, custody, MLS state and journals. It uses the public native client
+contracts, never another endpoint's daemon profile. Web authentication does not
+grant native membership, roles or collaboration-policy authority. As defined by
+[ADR 0013](../adr/adr-0013-a2a-edge-interoperability.md), an ordinary HTTP edge still
+terminates plaintext; native client composition does not extend E2EE to its caller.
+
 ### Agent harnesses and extensions
 
 Harnesses and extensions are adapters, not cryptographic endpoints. They may request
@@ -279,9 +288,10 @@ cursors provide delivery progress but are not accepted as cryptographic freshnes
 
 ### Least privilege
 
-Only the daemon handles raw secret material. Relay and adapter interfaces expose the
-minimum data required for their role. Logs and telemetry contain bounded,
-allowlisted metadata only.
+Only a trusted native endpoint handles its own raw secret material: the daemon for
+local profiles, or an explicitly composed service for its injected endpoint. Relay
+and adapter interfaces expose the minimum data required for their role. Logs and
+telemetry contain bounded, allowlisted metadata only.
 
 ### Harness delivery integrity
 
