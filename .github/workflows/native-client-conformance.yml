@@ -80,6 +80,10 @@ jobs:
           trap 'git diff -- apps/Konclave.LocalDaemon' EXIT
           cargo fmt --package KonclaveLocalDaemon
           cargo test --locked --package KonclaveLocalDaemon --lib native_workers::tests
+      - name: Verify native service authority foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --test native_service_authority
       - name: Verify shared daemon native processing
         if: steps.scope.outputs.run == 'true'
         shell: bash
