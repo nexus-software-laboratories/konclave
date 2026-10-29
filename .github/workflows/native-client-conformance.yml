@@ -60,9 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trap 'git diff -- crates/Konclave.ClientLibrary' EXIT
-          cargo fmt --package KonclaveClientLibrary
-          git diff --exit-code --quiet -- crates/Konclave.ClientLibrary
+          cargo fmt --package KonclaveClientLibrary -- --check
           cargo test --locked --package KonclaveClientLibrary --lib native::
           cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
       - name: Verify native relay session foundation
@@ -86,8 +84,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trap 'git diff -- apps/Konclave.LocalDaemon' EXIT
-          cargo fmt --package KonclaveLocalDaemon
+          cargo fmt --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveLocalDaemon --lib native_workers::tests
       - name: Verify native service authority foundation
         if: steps.scope.outputs.run == 'true'
@@ -98,7 +95,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trap 'git diff -- apps/Konclave.LocalDaemon' EXIT
           cargo test --locked --package KonclaveLocalDaemon --lib conversation::tests
           cargo test --locked --package KonclaveLocalDaemon --lib application::tests
           cargo test --locked --package KonclaveLocalDaemon --lib persistence::tests
@@ -111,8 +107,7 @@ jobs:
           cargo test --locked --package KonclaveLocalDaemon --lib local_failure_diagnostics::tests
           cargo test --locked --package KonclaveLocalDaemon --lib service::tests
           cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
-          git diff --exit-code -- apps/Konclave.LocalDaemon
-      - name: Verify formatting leaves no source delta
+      - name: Verify component checks leave no source delta
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: git diff --exit-code -- crates/Konclave.ClientLibrary apps/Konclave.LocalDaemon
