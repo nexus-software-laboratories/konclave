@@ -15,14 +15,12 @@ use KonclaveCryptographicCore::{
 };
 use KonclaveDomainCore::*;
 use KonclaveProtocolContracts::v1::*;
-use KonclaveSecretStorage::{
-    SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer,
-};
+use KonclaveSecretStorage::{SealedBlob, SecretRecordContext, SecretRecordKind, SecretSealer};
 use zeroize::Zeroizing;
 
 use super::authority::{
-    AuthorityError, CommittedResponse, HandlingClaim, ServiceAuthority, ServiceAuthorization,
-    MAX_CLAIMS,
+    AuthorityError, CommittedResponse, HandlingClaim, MAX_CLAIMS, ServiceAuthority,
+    ServiceAuthorization,
 };
 use super::storage::{ServiceStorage, SnapshotKind, StorageError};
 
@@ -227,14 +225,16 @@ impl ServiceJournal {
             outbox: Vec::new(),
             inbox: Vec::new(),
         };
-        journal.storage.update_slot(SnapshotKind::Journal, |current| {
-            if let Some(current) = current {
-                journal.decode(current)?;
-                return Err(JournalError::Provisioned);
-            }
-            journal.validate(&snapshot)?;
-            Ok((journal.encode(&snapshot)?, ()))
-        })?;
+        journal
+            .storage
+            .update_slot(SnapshotKind::Journal, |current| {
+                if let Some(current) = current {
+                    journal.decode(current)?;
+                    return Err(JournalError::Provisioned);
+                }
+                journal.validate(&snapshot)?;
+                Ok((journal.encode(&snapshot)?, ()))
+            })?;
         Ok(journal)
     }
 
@@ -279,7 +279,9 @@ impl ServiceJournal {
         &self,
         operation: impl FnOnce(&Snapshot) -> Result<R, JournalError>,
     ) -> Result<R, JournalError> {
-        let bytes = self.storage.read_slot(SnapshotKind::Journal)?
+        let bytes = self
+            .storage
+            .read_slot(SnapshotKind::Journal)?
             .ok_or(JournalError::Missing)?;
         let snapshot = self.decode(&bytes)?;
         operation(&snapshot)
@@ -333,8 +335,12 @@ impl ServiceJournal {
         )
         .map_err(|_| JournalError::Protection)?;
         RelayAccessCredential::open(
-            &self.sealer, &self.namespace, &snapshot.endpoint, &snapshot.credential,
-        ).map_err(|_| JournalError::Protection)?;
+            &self.sealer,
+            &self.namespace,
+            &snapshot.endpoint,
+            &snapshot.credential,
+        )
+        .map_err(|_| JournalError::Protection)?;
         if snapshot.state.version() != ProtocolVersion::application_v1() {
             return Err(JournalError::Invalid);
         }
@@ -354,7 +360,8 @@ impl ServiceJournal {
             }
         }
         for (index, row) in snapshot.outbox.iter().enumerate() {
-            let message = decode_application_message(&row.intent).map_err(|_| JournalError::Invalid)?;
+            let message =
+                decode_application_message(&row.intent).map_err(|_| JournalError::Invalid)?;
             if message.version() != ProtocolVersion::application_v1()
                 || !same_message(&row.intent, &message)?
                 || row.reservation.conversation_id != self.conversation
@@ -378,10 +385,11 @@ impl ServiceJournal {
                 ApplicationContent::Text(_)
                     if snapshot.authority.claims.iter().any(|claim| {
                         message.reply_to() == Some(claim.request)
-                            && claim.response == Some(CommittedResponse {
-                                message: row.reservation.message_id,
-                                envelope: row.reservation.envelope_id,
-                            })
+                            && claim.response
+                                == Some(CommittedResponse {
+                                    message: row.reservation.message_id,
+                                    envelope: row.reservation.envelope_id,
+                                })
                     }) => {}
                 _ => return Err(JournalError::Invalid),
             }
@@ -396,7 +404,8 @@ impl ServiceJournal {
                     return Err(JournalError::Invalid);
                 }
             }
-            if row.accepted == Some(0) || (row.accepted.is_some() && row.envelope.is_none())
+            if row.accepted == Some(0)
+                || (row.accepted.is_some() && row.envelope.is_none())
                 || (row.expired && row.accepted.is_some())
                 || (row.abandoned && row.envelope.is_some())
                 || snapshot.outbox[..index].iter().any(|prior| {
@@ -428,7 +437,8 @@ impl ServiceJournal {
             }
             match (&row.message, row.sender) {
                 (Some(bytes), Some(sender)) => {
-                    let message = decode_application_message(bytes).map_err(|_| JournalError::Invalid)?;
+                    let message =
+                        decode_application_message(bytes).map_err(|_| JournalError::Invalid)?;
                     if !same_message(bytes, &message)? {
                         return Err(JournalError::Invalid);
                     }
@@ -440,9 +450,9 @@ impl ServiceJournal {
             if let Some((notification, _)) = row.notification {
                 if row.message.is_none()
                     || complete + 1 != row.stored.cursor()
-                    || snapshot.inbox[..index].iter().any(|prior| {
-                        prior.notification.is_some_and(|(id, _)| id == notification)
-                    })
+                    || snapshot.inbox[..index]
+                        .iter()
+                        .any(|prior| prior.notification.is_some_and(|(id, _)| id == notification))
                 {
                     return Err(JournalError::Invalid);
                 }
@@ -461,16 +471,21 @@ impl ServiceJournal {
             {
                 return Err(JournalError::Invalid);
             }
-            let row = snapshot.inbox.iter().find(|row| {
-                row.notification.is_some()
-                    && row.sender == Some(claim.requester)
-                    && row.message.as_ref().is_some_and(|bytes| {
-                        decode_application_message(bytes)
-                            .is_ok_and(|message| message.message_id() == claim.request)
-                    })
-            }).ok_or(JournalError::Invalid)?;
-            let message = decode_application_message(row.message.as_ref().ok_or(JournalError::Invalid)?)
-                .map_err(|_| JournalError::Invalid)?;
+            let row = snapshot
+                .inbox
+                .iter()
+                .find(|row| {
+                    row.notification.is_some()
+                        && row.sender == Some(claim.requester)
+                        && row.message.as_ref().is_some_and(|bytes| {
+                            decode_application_message(bytes)
+                                .is_ok_and(|message| message.message_id() == claim.request)
+                        })
+                })
+                .ok_or(JournalError::Invalid)?;
+            let message =
+                decode_application_message(row.message.as_ref().ok_or(JournalError::Invalid)?)
+                    .map_err(|_| JournalError::Invalid)?;
             if !matches!(message.content(), ApplicationContent::DirectedRequest(request)
                 if request.target_device_id() == self.device)
             {
@@ -480,9 +495,10 @@ impl ServiceJournal {
                 if !snapshot.outbox.iter().any(|row| {
                     row.reservation.message_id == response.message
                         && row.reservation.envelope_id == response.envelope
-                        && decode_application_message(&row.intent)
-                            .is_ok_and(|message| message.reply_to() == Some(claim.request)
-                                && matches!(message.content(), ApplicationContent::Text(_)))
+                        && decode_application_message(&row.intent).is_ok_and(|message| {
+                            message.reply_to() == Some(claim.request)
+                                && matches!(message.content(), ApplicationContent::Text(_))
+                        })
                 }) {
                     return Err(JournalError::Invalid);
                 }
@@ -513,16 +529,24 @@ impl ServiceJournal {
         }
         let current = &snapshot.inbox[index];
         if sender == self.device {
-            let outbound = snapshot.outbox.iter().find(|row| {
-                row.saved && row.envelope.as_ref() == Some(current.stored.envelope())
-            }).ok_or(JournalError::Conflict)?;
+            let outbound = snapshot
+                .outbox
+                .iter()
+                .find(|row| row.saved && row.envelope.as_ref() == Some(current.stored.envelope()))
+                .ok_or(JournalError::Conflict)?;
             if !same_message(&outbound.intent, message)?
-                || outbound.accepted.is_some_and(|cursor| cursor != current.stored.cursor())
+                || outbound
+                    .accepted
+                    .is_some_and(|cursor| cursor != current.stored.cursor())
             {
                 return Err(JournalError::Conflict);
             }
         } else {
-            if snapshot.outbox.iter().any(|row| row.reservation.message_id == message.message_id()) {
+            if snapshot
+                .outbox
+                .iter()
+                .any(|row| row.reservation.message_id == message.message_id())
+            {
                 return Err(JournalError::Conflict);
             }
             if let Some(reply) = message.reply_to() {
@@ -542,9 +566,11 @@ impl ServiceJournal {
         }
         for prior in &snapshot.inbox[..index] {
             if let Some(bytes) = &prior.message {
-                let earlier = decode_application_message(bytes).map_err(|_| JournalError::Invalid)?;
+                let earlier =
+                    decode_application_message(bytes).map_err(|_| JournalError::Invalid)?;
                 if earlier.message_id() == message.message_id()
-                    || (prior.sender == Some(sender) && earlier.sender_counter() >= message.sender_counter())
+                    || (prior.sender == Some(sender)
+                        && earlier.sender_counter() >= message.sender_counter())
                 {
                     return Err(JournalError::Conflict);
                 }
@@ -552,11 +578,12 @@ impl ServiceJournal {
         }
         if sender != self.device
             && snapshot.inbox[..index].iter().any(|prior| {
-                prior.sender == Some(sender) && prior.message.as_ref().is_some_and(|bytes| {
-                    decode_application_message(bytes).is_ok_and(|earlier| {
-                        message.reply_to().is_some() && earlier.reply_to() == message.reply_to()
+                prior.sender == Some(sender)
+                    && prior.message.as_ref().is_some_and(|bytes| {
+                        decode_application_message(bytes).is_ok_and(|earlier| {
+                            message.reply_to().is_some() && earlier.reply_to() == message.reply_to()
+                        })
                     })
-                })
             })
         {
             return Err(JournalError::Conflict);
@@ -580,8 +607,12 @@ impl ServiceJournal {
     pub fn relay_access(&self) -> Result<(RelayEndpoint, RelayAccessCredential), JournalError> {
         self.read(|snapshot| {
             let credential = RelayAccessCredential::open(
-                &self.sealer, &self.namespace, &snapshot.endpoint, &snapshot.credential,
-            ).map_err(|_| JournalError::Protection)?;
+                &self.sealer,
+                &self.namespace,
+                &snapshot.endpoint,
+                &snapshot.credential,
+            )
+            .map_err(|_| JournalError::Protection)?;
             Ok((snapshot.endpoint.clone(), credential))
         })
     }
@@ -597,10 +628,12 @@ impl ServiceJournal {
     /// # Errors
     /// Propagates authenticated-load and ownership failures.
     pub fn authorization(&self) -> Result<ServiceAuthorization, JournalError> {
-        self.read(|snapshot| Ok(ServiceAuthorization {
-            revision: snapshot.authority.revision,
-            claim: None,
-        }))
+        self.read(|snapshot| {
+            Ok(ServiceAuthorization {
+                revision: snapshot.authority.revision,
+                claim: None,
+            })
+        })
     }
 
     /// Commits local revocation/enabling under the same reservation mutex.
@@ -615,24 +648,38 @@ impl ServiceJournal {
     /// Rejects duplicate claims, wrong recipients, incomplete messages and stale owners.
     pub fn claim(&self, request: MessageId) -> Result<ServiceAuthorization, JournalError> {
         self.update(|snapshot| {
-            let row = snapshot.inbox.iter().find(|row| {
-                row.notification.is_some() && row.message.as_ref().is_some_and(|bytes| {
-                    decode_application_message(bytes).is_ok_and(|message| message.message_id() == request)
+            let row = snapshot
+                .inbox
+                .iter()
+                .find(|row| {
+                    row.notification.is_some()
+                        && row.message.as_ref().is_some_and(|bytes| {
+                            decode_application_message(bytes)
+                                .is_ok_and(|message| message.message_id() == request)
+                        })
                 })
-            }).ok_or(JournalError::Missing)?;
+                .ok_or(JournalError::Missing)?;
             let message = opened_message(row)?;
             let identity = DeviceIdentity::open(&self.sealer, &self.namespace, &snapshot.identity)
                 .map_err(|_| JournalError::Protection)?;
-            let generated = identity.generate_message_id().map_err(|_| JournalError::Protection)?;
+            let generated = identity
+                .generate_message_id()
+                .map_err(|_| JournalError::Protection)?;
             let claim_id = *generated.as_bytes();
-            snapshot.authority.claim(&snapshot.state, &message, claim_id).map_err(Into::into)
+            snapshot
+                .authority
+                .claim(&snapshot.state, &message, claim_id)
+                .map_err(Into::into)
         })
     }
 
     /// Returns exact immutable intent even before ready ciphertext exists.
     /// # Errors
     /// Rejects missing or incorrectly scoped reservations and owner/custody failure.
-    pub fn outbound_intent(&self, reservation: OutboundReservation) -> Result<ReservedIntent, JournalError> {
+    pub fn outbound_intent(
+        &self,
+        reservation: OutboundReservation,
+    ) -> Result<ReservedIntent, JournalError> {
         self.read(|snapshot| intent(find_outbox(snapshot, reservation)?))
     }
 
@@ -651,8 +698,14 @@ impl ServiceJournal {
     /// # Errors
     /// Propagates current-owner authentication and decoding failures.
     pub fn unready_outbox(&self) -> Result<Vec<ReservedIntent>, JournalError> {
-        self.read(|snapshot| snapshot.outbox.iter()
-            .filter(|row| row.envelope.is_none()).map(intent).collect())
+        self.read(|snapshot| {
+            snapshot
+                .outbox
+                .iter()
+                .filter(|row| row.envelope.is_none())
+                .map(intent)
+                .collect()
+        })
     }
 
     /// Opens exact notification identity and time without manufacturing a retry.
@@ -665,8 +718,12 @@ impl ServiceJournal {
     ) -> Result<Option<(NotificationId, u64)>, JournalError> {
         self.read(|snapshot| {
             self.scope(id)?;
-            snapshot.inbox.iter().find(|row| row.stored.cursor() == cursor)
-                .map(|row| row.notification).ok_or(JournalError::Missing)
+            snapshot
+                .inbox
+                .iter()
+                .find(|row| row.stored.cursor() == cursor)
+                .map(|row| row.notification)
+                .ok_or(JournalError::Missing)
         })
     }
 
@@ -674,10 +731,19 @@ impl ServiceJournal {
     /// # Errors
     /// Propagates current-owner authenticated-load failures.
     pub fn ready_outbox(&self) -> Result<Vec<ReservedIntent>, JournalError> {
-        self.read(|snapshot| snapshot.outbox.iter()
-            .filter(|row| row.envelope.is_some() && row.accepted.is_none()
-                && !row.abandoned && !row.expired)
-            .map(intent).collect())
+        self.read(|snapshot| {
+            snapshot
+                .outbox
+                .iter()
+                .filter(|row| {
+                    row.envelope.is_some()
+                        && row.accepted.is_none()
+                        && !row.abandoned
+                        && !row.expired
+                })
+                .map(intent)
+                .collect()
+        })
     }
 
     /// Records exact relay acceptance without replacing original ciphertext.
@@ -688,16 +754,24 @@ impl ServiceJournal {
             if stored.envelope().routing_id() != snapshot.route {
                 return Err(JournalError::Scope);
             }
-            let index = snapshot.outbox.iter().position(|row| {
-                row.envelope.as_ref() == Some(stored.envelope())
-            }).ok_or(JournalError::Conflict)?;
+            let index = snapshot
+                .outbox
+                .iter()
+                .position(|row| row.envelope.as_ref() == Some(stored.envelope()))
+                .ok_or(JournalError::Conflict)?;
             if let Some(cursor) = snapshot.outbox[index].accepted {
-                return if cursor == stored.cursor() { Ok(()) } else { Err(JournalError::Conflict) };
+                return if cursor == stored.cursor() {
+                    Ok(())
+                } else {
+                    Err(JournalError::Conflict)
+                };
             }
-            if snapshot.outbox[index].expired || snapshot.outbox[index].abandoned
+            if snapshot.outbox[index].expired
+                || snapshot.outbox[index].abandoned
                 || snapshot.inbox.iter().any(|row| {
                     (row.stored.envelope().envelope_id() == stored.envelope().envelope_id()
-                        || row.stored.cursor() == stored.cursor()) && &row.stored != stored
+                        || row.stored.cursor() == stored.cursor())
+                        && &row.stored != stored
                 })
             {
                 return Err(JournalError::Conflict);
@@ -705,7 +779,11 @@ impl ServiceJournal {
             if snapshot.outbox[..index].iter().any(|row| {
                 (row.accepted.is_none() && !row.abandoned && !row.expired)
                     || row.accepted.is_some_and(|cursor| cursor >= stored.cursor())
-            }) || snapshot.outbox.iter().any(|row| row.accepted == Some(stored.cursor())) {
+            }) || snapshot
+                .outbox
+                .iter()
+                .any(|row| row.accepted == Some(stored.cursor()))
+            {
                 return Err(JournalError::Conflict);
             }
             snapshot.outbox[index].accepted = Some(stored.cursor());
@@ -716,14 +794,22 @@ impl ServiceJournal {
     /// Retains expired work and its IDs instead of silently pruning it.
     /// # Errors
     /// Rejects premature expiry, wrong reservations and owner/custody failure.
-    pub fn expire_outbound(&self, reservation: OutboundReservation, now: u64) -> Result<NativeExpiryOutcome, JournalError> {
+    pub fn expire_outbound(
+        &self,
+        reservation: OutboundReservation,
+        now: u64,
+    ) -> Result<NativeExpiryOutcome, JournalError> {
         self.update(|snapshot| {
             let row = find_outbox_mut(snapshot, reservation)?;
             if let Some(cursor) = row.accepted {
                 return Ok(NativeExpiryOutcome::Accepted { cursor });
             }
-            if row.envelope.is_none() || row.abandoned { return Err(JournalError::Conflict); }
-            if now < row.expiry { return Err(JournalError::Conflict); }
+            if row.envelope.is_none() || row.abandoned {
+                return Err(JournalError::Conflict);
+            }
+            if now < row.expiry {
+                return Err(JournalError::Conflict);
+            }
             row.expired = true;
             Ok(NativeExpiryOutcome::Expired)
         })
@@ -731,7 +817,8 @@ impl ServiceJournal {
 }
 
 fn same_message(bytes: &[u8], message: &ApplicationMessage) -> Result<bool, JournalError> {
-    let encoded = Zeroizing::new(encode_application_message(message).map_err(|_| JournalError::Invalid)?);
+    let encoded =
+        Zeroizing::new(encode_application_message(message).map_err(|_| JournalError::Invalid)?);
     Ok(bytes == encoded.as_slice())
 }
 
@@ -762,12 +849,26 @@ fn intent(row: &Outbox) -> Result<ReservedIntent, JournalError> {
     })
 }
 
-fn find_outbox(snapshot: &Snapshot, reservation: OutboundReservation) -> Result<&Outbox, JournalError> {
-    snapshot.outbox.iter().find(|row| row.reservation == reservation).ok_or(JournalError::Conflict)
+fn find_outbox(
+    snapshot: &Snapshot,
+    reservation: OutboundReservation,
+) -> Result<&Outbox, JournalError> {
+    snapshot
+        .outbox
+        .iter()
+        .find(|row| row.reservation == reservation)
+        .ok_or(JournalError::Conflict)
 }
 
-fn find_outbox_mut(snapshot: &mut Snapshot, reservation: OutboundReservation) -> Result<&mut Outbox, JournalError> {
-    snapshot.outbox.iter_mut().find(|row| row.reservation == reservation).ok_or(JournalError::Conflict)
+fn find_outbox_mut(
+    snapshot: &mut Snapshot,
+    reservation: OutboundReservation,
+) -> Result<&mut Outbox, JournalError> {
+    snapshot
+        .outbox
+        .iter_mut()
+        .find(|row| row.reservation == reservation)
+        .ok_or(JournalError::Conflict)
 }
 
 fn opened_message(row: &Inbox) -> Result<StoredApplicationMessage, JournalError> {
@@ -791,28 +892,50 @@ impl NativeConversationJournal for ServiceJournal {
             Ok(StoredConversation {
                 routing_id: snapshot.route,
                 signing_material: ConversationSigningMaterial::open(
-                    &self.sealer, &self.namespace, id, &snapshot.signing,
-                ).map_err(|_| JournalError::Protection)?,
+                    &self.sealer,
+                    &self.namespace,
+                    id,
+                    &snapshot.signing,
+                )
+                .map_err(|_| JournalError::Protection)?,
                 state: snapshot.state.clone(),
-                bindings: snapshot.bindings.iter().map(|binding| {
-                    verify_device_credential_binding(binding).map_err(|_| JournalError::Protection)
-                }).collect::<Result<_, _>>()?,
+                bindings: snapshot
+                    .bindings
+                    .iter()
+                    .map(|binding| {
+                        verify_device_credential_binding(binding)
+                            .map_err(|_| JournalError::Protection)
+                    })
+                    .collect::<Result<_, _>>()?,
                 sender_counter: snapshot.counter,
                 replay_cursor: snapshot.cursor,
             })
         })
     }
 
-    fn reserve_application(&self, request: &NativeApplicationRequest<Self::Authorization>, envelope: EnvelopeId) -> Result<OutboundReservation, Self::Error> {
+    fn reserve_application(
+        &self,
+        request: &NativeApplicationRequest<Self::Authorization>,
+        envelope: EnvelopeId,
+    ) -> Result<OutboundReservation, Self::Error> {
         self.update(|snapshot| {
             self.scope(request.conversation_id)?;
-            if let Some(prior) = snapshot.outbox.iter().find(|row| row.reservation.message_id == request.message_id) {
+            if let Some(prior) = snapshot
+                .outbox
+                .iter()
+                .find(|row| row.reservation.message_id == request.message_id)
+            {
                 let candidate = ApplicationMessage::new(
-                    ProtocolVersion::application_v1(), request.message_id,
-                    prior.reservation.sender_counter, request.sent_at_unix_milliseconds,
-                    request.reply_to, copy_content(&request.content)?,
-                ).map_err(|_| JournalError::Invalid)?;
-                if request.policy_operation || prior.reservation.envelope_id != envelope
+                    ProtocolVersion::application_v1(),
+                    request.message_id,
+                    prior.reservation.sender_counter,
+                    request.sent_at_unix_milliseconds,
+                    request.reply_to,
+                    copy_content(&request.content)?,
+                )
+                .map_err(|_| JournalError::Invalid)?;
+                if request.policy_operation
+                    || prior.reservation.envelope_id != envelope
                     || prior.expiry != request.expires_at_unix_seconds
                     || !same_message(&prior.intent, &candidate)?
                 {
@@ -820,58 +943,112 @@ impl NativeConversationJournal for ServiceJournal {
                 }
                 return Ok(prior.reservation);
             }
-            if snapshot.outbox.len() == MAX_ROWS { return Err(JournalError::Capacity); }
+            if snapshot.outbox.len() == MAX_ROWS {
+                return Err(JournalError::Capacity);
+            }
             if request.expires_at_unix_seconds == 0
-                || snapshot.outbox.iter().any(|row| row.reservation.envelope_id == envelope)
+                || snapshot
+                    .outbox
+                    .iter()
+                    .any(|row| row.reservation.envelope_id == envelope)
                 || snapshot.inbox.iter().any(|row| {
                     row.stored.envelope().envelope_id() == envelope
                         || row.message.as_ref().is_some_and(|bytes| {
-                            decode_application_message(bytes).is_ok_and(|message| message.message_id() == request.message_id)
+                            decode_application_message(bytes)
+                                .is_ok_and(|message| message.message_id() == request.message_id)
                         })
                 })
             {
                 return Err(JournalError::Conflict);
             }
-            let counter = snapshot.counter.checked_add(1).ok_or(JournalError::Capacity)?;
+            let counter = snapshot
+                .counter
+                .checked_add(1)
+                .ok_or(JournalError::Capacity)?;
             let message = ApplicationMessage::new(
-                ProtocolVersion::application_v1(), request.message_id, counter,
-                request.sent_at_unix_milliseconds, request.reply_to, copy_content(&request.content)?,
-            ).map_err(|_| JournalError::Invalid)?;
-            let intent = Zeroizing::new(encode_application_message(&message).map_err(|_| JournalError::Invalid)?);
-            if intent.len() > MAX_FIELD { return Err(JournalError::Capacity); }
-            snapshot.authority.reserve(&snapshot.state, request, envelope)?;
+                ProtocolVersion::application_v1(),
+                request.message_id,
+                counter,
+                request.sent_at_unix_milliseconds,
+                request.reply_to,
+                copy_content(&request.content)?,
+            )
+            .map_err(|_| JournalError::Invalid)?;
+            let intent = Zeroizing::new(
+                encode_application_message(&message).map_err(|_| JournalError::Invalid)?,
+            );
+            if intent.len() > MAX_FIELD {
+                return Err(JournalError::Capacity);
+            }
+            snapshot
+                .authority
+                .reserve(&snapshot.state, request, envelope)?;
             let reservation = OutboundReservation {
-                conversation_id: self.conversation, message_id: request.message_id,
-                envelope_id: envelope, sender_counter: counter,
+                conversation_id: self.conversation,
+                message_id: request.message_id,
+                envelope_id: envelope,
+                sender_counter: counter,
             };
             snapshot.counter = counter;
             snapshot.outbox.push(Outbox {
-                reservation, epoch: snapshot.state.epoch(), expiry: request.expires_at_unix_seconds,
-                intent, saved: false, envelope: None, abandoned: false, accepted: None, expired: false,
+                reservation,
+                epoch: snapshot.state.epoch(),
+                expiry: request.expires_at_unix_seconds,
+                intent,
+                saved: false,
+                envelope: None,
+                abandoned: false,
+                accepted: None,
+                expired: false,
             });
             Ok(reservation)
         })
     }
 
-    fn store_outbound_message(&self, reservation: OutboundReservation, route: RoutingId, sender: DeviceId, epoch: u64, message: &ApplicationMessage) -> Result<(), Self::Error> {
+    fn store_outbound_message(
+        &self,
+        reservation: OutboundReservation,
+        route: RoutingId,
+        sender: DeviceId,
+        epoch: u64,
+        message: &ApplicationMessage,
+    ) -> Result<(), Self::Error> {
         self.update(|snapshot| {
-            if route != snapshot.route || sender != self.device { return Err(JournalError::Scope); }
+            if route != snapshot.route || sender != self.device {
+                return Err(JournalError::Scope);
+            }
             let row = find_outbox_mut(snapshot, reservation)?;
-            if epoch != row.epoch || !same_message(&row.intent, message)? { return Err(JournalError::Conflict); }
-            if row.abandoned && !row.saved { return Err(JournalError::Conflict); }
+            if epoch != row.epoch || !same_message(&row.intent, message)? {
+                return Err(JournalError::Conflict);
+            }
+            if row.abandoned && !row.saved {
+                return Err(JournalError::Conflict);
+            }
             row.saved = true;
             Ok(())
         })
     }
 
-    fn store_outbound_envelope(&self, reservation: OutboundReservation, envelope: &RelayEnvelope) -> Result<(), Self::Error> {
+    fn store_outbound_envelope(
+        &self,
+        reservation: OutboundReservation,
+        envelope: &RelayEnvelope,
+    ) -> Result<(), Self::Error> {
         self.update(|snapshot| {
-            if envelope.routing_id() != snapshot.route { return Err(JournalError::Scope); }
+            if envelope.routing_id() != snapshot.route {
+                return Err(JournalError::Scope);
+            }
             let row = find_outbox_mut(snapshot, reservation)?;
             if let Some(prior) = &row.envelope {
-                return if prior == envelope { Ok(()) } else { Err(JournalError::Conflict) };
+                return if prior == envelope {
+                    Ok(())
+                } else {
+                    Err(JournalError::Conflict)
+                };
             }
-            if !row.saved || row.abandoned || envelope.envelope_id() != reservation.envelope_id
+            if !row.saved
+                || row.abandoned
+                || envelope.envelope_id() != reservation.envelope_id
                 || envelope.delivery_class() != DeliveryClass::GroupApplication
                 || envelope.expires_at_unix_seconds() != row.expiry
             {
@@ -882,23 +1059,45 @@ impl NativeConversationJournal for ServiceJournal {
         })
     }
 
-    fn abandon_outbound_application(&self, reservation: OutboundReservation) -> Result<(), Self::Error> {
+    fn abandon_outbound_application(
+        &self,
+        reservation: OutboundReservation,
+    ) -> Result<(), Self::Error> {
         self.update(|snapshot| {
             let row = find_outbox_mut(snapshot, reservation)?;
-            if row.envelope.is_some() { return Err(JournalError::Conflict); }
+            if row.envelope.is_some() {
+                return Err(JournalError::Conflict);
+            }
             row.abandoned = true;
             Ok(())
         })
     }
 
-    fn record_inbox_envelope(&self, stored: &StoredRelayEnvelope) -> Result<ConversationId, Self::Error> {
+    fn record_inbox_envelope(
+        &self,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<ConversationId, Self::Error> {
         self.update(|snapshot| {
-            if stored.envelope().routing_id() != snapshot.route { return Err(JournalError::Scope); }
-            if stored.envelope().delivery_class() != DeliveryClass::GroupApplication { return Err(JournalError::Unsupported); }
-            if let Some(prior) = snapshot.inbox.iter().find(|row| row.stored.cursor() == stored.cursor()) {
-                return if &prior.stored == stored { Ok(self.conversation) } else { Err(JournalError::Conflict) };
+            if stored.envelope().routing_id() != snapshot.route {
+                return Err(JournalError::Scope);
             }
-            if snapshot.inbox.len() == MAX_ROWS { return Err(JournalError::Capacity); }
+            if stored.envelope().delivery_class() != DeliveryClass::GroupApplication {
+                return Err(JournalError::Unsupported);
+            }
+            if let Some(prior) = snapshot
+                .inbox
+                .iter()
+                .find(|row| row.stored.cursor() == stored.cursor())
+            {
+                return if &prior.stored == stored {
+                    Ok(self.conversation)
+                } else {
+                    Err(JournalError::Conflict)
+                };
+            }
+            if snapshot.inbox.len() == MAX_ROWS {
+                return Err(JournalError::Capacity);
+            }
             if stored.cursor() != snapshot.inbox.len() as u64 + 1
                 || snapshot.inbox.iter().any(|row| {
                     row.stored.envelope().envelope_id() == stored.envelope().envelope_id()
@@ -913,57 +1112,110 @@ impl NativeConversationJournal for ServiceJournal {
                 return Err(JournalError::Conflict);
             }
             snapshot.inbox.push(Inbox {
-                stored: stored.clone(), sender: None, epoch: snapshot.state.epoch(),
-                message: None, notification: None,
+                stored: stored.clone(),
+                sender: None,
+                epoch: snapshot.state.epoch(),
+                message: None,
+                notification: None,
             });
             Ok(self.conversation)
         })
     }
 
-    fn inbox_operation(&self, id: ConversationId, cursor: u64) -> Result<InboxOperation, Self::Error> {
+    fn inbox_operation(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+    ) -> Result<InboxOperation, Self::Error> {
         self.read(|snapshot| {
             self.scope(id)?;
-            let row = snapshot.inbox.iter().find(|row| row.stored.cursor() == cursor).ok_or(JournalError::Missing)?;
+            let row = snapshot
+                .inbox
+                .iter()
+                .find(|row| row.stored.cursor() == cursor)
+                .ok_or(JournalError::Missing)?;
             let stored = row.stored.clone();
             if row.notification.is_some() {
-                Ok(InboxOperation::Complete { stored, message: opened_message(row)? })
+                Ok(InboxOperation::Complete {
+                    stored,
+                    message: opened_message(row)?,
+                })
             } else if row.message.is_some() {
-                Ok(InboxOperation::MessageSaved { stored, message: opened_message(row)? })
+                Ok(InboxOperation::MessageSaved {
+                    stored,
+                    message: opened_message(row)?,
+                })
             } else {
                 Ok(InboxOperation::Received { stored })
             }
         })
     }
 
-    fn outbound_history_message(&self, id: ConversationId, stored: &StoredRelayEnvelope) -> Result<Option<StoredApplicationMessage>, Self::Error> {
+    fn outbound_history_message(
+        &self,
+        id: ConversationId,
+        stored: &StoredRelayEnvelope,
+    ) -> Result<Option<StoredApplicationMessage>, Self::Error> {
         self.read(|snapshot| {
             self.scope(id)?;
-            if stored.envelope().routing_id() != snapshot.route { return Err(JournalError::Scope); }
-            let Some(row) = snapshot.outbox.iter().find(|row| row.saved && row.envelope.as_ref() == Some(stored.envelope())) else {
+            if stored.envelope().routing_id() != snapshot.route {
+                return Err(JournalError::Scope);
+            }
+            let Some(row) = snapshot
+                .outbox
+                .iter()
+                .find(|row| row.saved && row.envelope.as_ref() == Some(stored.envelope()))
+            else {
                 return Ok(None);
             };
             Ok(Some(StoredApplicationMessage {
-                cursor: stored.cursor(), envelope_id: stored.envelope().envelope_id(),
-                sender: self.device, epoch: row.epoch,
-                message: decode_application_message(&row.intent).map_err(|_| JournalError::Invalid)?,
+                cursor: stored.cursor(),
+                envelope_id: stored.envelope().envelope_id(),
+                sender: self.device,
+                epoch: row.epoch,
+                message: decode_application_message(&row.intent)
+                    .map_err(|_| JournalError::Invalid)?,
             }))
         })
     }
 
-    fn save_inbox_message(&self, id: ConversationId, cursor: u64, sender: DeviceId, epoch: u64, message: &ApplicationMessage) -> Result<(), Self::Error> {
+    fn save_inbox_message(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+        sender: DeviceId,
+        epoch: u64,
+        message: &ApplicationMessage,
+    ) -> Result<(), Self::Error> {
         self.update(|snapshot| {
             self.scope(id)?;
-            let index = snapshot.inbox.iter().position(|row| row.stored.cursor() == cursor).ok_or(JournalError::Missing)?;
-            if epoch != snapshot.state.epoch() { return Err(JournalError::Scope); }
-            if let Some(prior) = &snapshot.inbox[index].message {
-                return if snapshot.inbox[index].sender == Some(sender) && same_message(prior, message)? {
-                    Ok(())
-                } else { Err(JournalError::Conflict) };
+            let index = snapshot
+                .inbox
+                .iter()
+                .position(|row| row.stored.cursor() == cursor)
+                .ok_or(JournalError::Missing)?;
+            if epoch != snapshot.state.epoch() {
+                return Err(JournalError::Scope);
             }
-            if cursor != snapshot.cursor + 1 { return Err(JournalError::Conflict); }
+            if let Some(prior) = &snapshot.inbox[index].message {
+                return if snapshot.inbox[index].sender == Some(sender)
+                    && same_message(prior, message)?
+                {
+                    Ok(())
+                } else {
+                    Err(JournalError::Conflict)
+                };
+            }
+            if cursor != snapshot.cursor + 1 {
+                return Err(JournalError::Conflict);
+            }
             self.check_received(snapshot, index, sender, message)?;
-            let bytes = Zeroizing::new(encode_application_message(message).map_err(|_| JournalError::Invalid)?);
-            if bytes.len() > MAX_FIELD { return Err(JournalError::Capacity); }
+            let bytes = Zeroizing::new(
+                encode_application_message(message).map_err(|_| JournalError::Invalid)?,
+            );
+            if bytes.len() > MAX_FIELD {
+                return Err(JournalError::Capacity);
+            }
             let row = &mut snapshot.inbox[index];
             row.sender = Some(sender);
             row.message = Some(bytes);
@@ -971,15 +1223,33 @@ impl NativeConversationJournal for ServiceJournal {
         })
     }
 
-    fn complete_inbox_with_notification_at(&self, id: ConversationId, cursor: u64, notification: NotificationId, now: u64) -> Result<u64, Self::Error> {
+    fn complete_inbox_with_notification_at(
+        &self,
+        id: ConversationId,
+        cursor: u64,
+        notification: NotificationId,
+        now: u64,
+    ) -> Result<u64, Self::Error> {
         self.update(|snapshot| {
             self.scope(id)?;
-            let index = snapshot.inbox.iter().position(|row| row.stored.cursor() == cursor).ok_or(JournalError::Missing)?;
+            let index = snapshot
+                .inbox
+                .iter()
+                .position(|row| row.stored.cursor() == cursor)
+                .ok_or(JournalError::Missing)?;
             if let Some(prior) = snapshot.inbox[index].notification {
-                return if prior == (notification, now) { Ok(snapshot.cursor) } else { Err(JournalError::Conflict) };
+                return if prior == (notification, now) {
+                    Ok(snapshot.cursor)
+                } else {
+                    Err(JournalError::Conflict)
+                };
             }
-            if cursor != snapshot.cursor + 1 || snapshot.inbox[index].message.is_none()
-                || snapshot.inbox.iter().any(|row| row.notification.is_some_and(|(id, _)| id == notification))
+            if cursor != snapshot.cursor + 1
+                || snapshot.inbox[index].message.is_none()
+                || snapshot
+                    .inbox
+                    .iter()
+                    .any(|row| row.notification.is_some_and(|(id, _)| id == notification))
             {
                 return Err(JournalError::Conflict);
             }
@@ -989,16 +1259,34 @@ impl NativeConversationJournal for ServiceJournal {
         })
     }
 
-    fn active_membership_outbox(&self, id: ConversationId) -> Result<Option<MembershipOutbox>, Self::Error> {
-        self.read(|_| { self.scope(id)?; Ok(None) })
+    fn active_membership_outbox(
+        &self,
+        id: ConversationId,
+    ) -> Result<Option<MembershipOutbox>, Self::Error> {
+        self.read(|_| {
+            self.scope(id)?;
+            Ok(None)
+        })
     }
-    fn active_membership_inbox(&self, id: ConversationId) -> Result<Option<MembershipInboxOperation>, Self::Error> {
-        self.read(|_| { self.scope(id)?; Ok(None) })
+    fn active_membership_inbox(
+        &self,
+        id: ConversationId,
+    ) -> Result<Option<MembershipInboxOperation>, Self::Error> {
+        self.read(|_| {
+            self.scope(id)?;
+            Ok(None)
+        })
     }
-    fn membership_outbox_for_envelope(&self, _id: EnvelopeId) -> Result<Option<MembershipOutbox>, Self::Error> {
+    fn membership_outbox_for_envelope(
+        &self,
+        _id: EnvelopeId,
+    ) -> Result<Option<MembershipOutbox>, Self::Error> {
         self.read(|_| Ok(None))
     }
-    fn load_membership_outbox(&self, _id: MembershipOperationId) -> Result<MembershipOutbox, Self::Error> {
+    fn load_membership_outbox(
+        &self,
+        _id: MembershipOperationId,
+    ) -> Result<MembershipOutbox, Self::Error> {
         Err(JournalError::Unsupported)
     }
     fn complete_membership_outbox(&self, _id: MembershipOperationId) -> Result<(), Self::Error> {
@@ -1007,25 +1295,64 @@ impl NativeConversationJournal for ServiceJournal {
     fn orphan_membership_outbox(&self, _id: MembershipOperationId) -> Result<(), Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn record_membership_inbox_envelope(&self, _stored: &StoredRelayEnvelope) -> Result<ConversationId, Self::Error> {
+    fn record_membership_inbox_envelope(
+        &self,
+        _stored: &StoredRelayEnvelope,
+    ) -> Result<ConversationId, Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn mark_membership_outbox_accepted(&self, _stored: &StoredRelayEnvelope) -> Result<MembershipOperationId, Self::Error> {
+    fn mark_membership_outbox_accepted(
+        &self,
+        _stored: &StoredRelayEnvelope,
+    ) -> Result<MembershipOperationId, Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn complete_membership_echo(&self, _stored: &StoredRelayEnvelope, _device: DeviceId) -> Result<MembershipOperationId, Self::Error> {
+    fn complete_membership_echo(
+        &self,
+        _stored: &StoredRelayEnvelope,
+        _device: DeviceId,
+    ) -> Result<MembershipOperationId, Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn membership_inbox_operation(&self, _id: ConversationId, _cursor: u64) -> Result<MembershipInboxOperation, Self::Error> {
+    fn membership_inbox_operation(
+        &self,
+        _id: ConversationId,
+        _cursor: u64,
+    ) -> Result<MembershipInboxOperation, Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn save_membership_inbox_transition(&self, _id: ConversationId, _cursor: u64, _sender: DeviceId, _parent: u64, _operation: MembershipOperationId, _control: &[u8], _next: &ConversationState, _bindings: &[DeviceCredentialBinding]) -> Result<(), Self::Error> {
+    fn save_membership_inbox_transition(
+        &self,
+        _id: ConversationId,
+        _cursor: u64,
+        _sender: DeviceId,
+        _parent: u64,
+        _operation: MembershipOperationId,
+        _control: &[u8],
+        _next: &ConversationState,
+        _bindings: &[DeviceCredentialBinding],
+    ) -> Result<(), Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn complete_membership_inbox_with_notification(&self, _id: ConversationId, _cursor: u64, _notification: NotificationId) -> Result<u64, Self::Error> {
+    fn complete_membership_inbox_with_notification(
+        &self,
+        _id: ConversationId,
+        _cursor: u64,
+        _notification: NotificationId,
+    ) -> Result<u64, Self::Error> {
         Err(JournalError::Unsupported)
     }
-    fn store_membership_outbox(&self, _operation: MembershipOperationId, _id: ConversationId, _parent: u64, _envelope: &RelayEnvelope, _control: &[u8], _next: &ConversationState, _bindings: &[DeviceCredentialBinding], _welcome: Option<&[u8]>) -> Result<(), Self::Error> {
+    fn store_membership_outbox(
+        &self,
+        _operation: MembershipOperationId,
+        _id: ConversationId,
+        _parent: u64,
+        _envelope: &RelayEnvelope,
+        _control: &[u8],
+        _next: &ConversationState,
+        _bindings: &[DeviceCredentialBinding],
+        _welcome: Option<&[u8]>,
+    ) -> Result<(), Self::Error> {
         Err(JournalError::Unsupported)
     }
 }
