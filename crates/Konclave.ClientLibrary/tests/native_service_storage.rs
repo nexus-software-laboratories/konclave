@@ -32,7 +32,9 @@ fn fixed_slots_are_independent_and_share_release_and_generation() {
     let directory = directory();
     let owner = ServiceStorage::open(directory.path()).unwrap();
     owner.replace_snapshot(b"journal").unwrap();
-    owner.replace_slot(SnapshotKind::Mls, b"sealed mls").unwrap();
+    owner
+        .replace_slot(SnapshotKind::Mls, b"sealed mls")
+        .unwrap();
     assert_eq!(owner.read_snapshot().unwrap().unwrap(), b"journal");
     assert_eq!(
         owner.read_slot(SnapshotKind::Mls).unwrap().unwrap(),

@@ -1120,7 +1120,6 @@ pub(crate) fn validate_acknowledgment(
         .map_err(|_| ApplicationServiceError::InvalidRelayResponse)
 }
 
-#[cfg(test)]
 pub(crate) fn validate_replay_page(
     after_cursor: u64,
     page: &ReplayPage,

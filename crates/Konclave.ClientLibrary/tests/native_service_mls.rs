@@ -84,7 +84,10 @@ fn sealed_provider_roundtrip_reopen_and_stale_clone_fencing() {
     );
     let actual = backend.get(b"package").unwrap().unwrap();
     assert_eq!(actual.init_key.as_ref(), package().init_key.as_ref());
-    assert_eq!(actual.leaf_node_key.as_ref(), package().leaf_node_key.as_ref());
+    assert_eq!(
+        actual.leaf_node_key.as_ref(),
+        package().leaf_node_key.as_ref()
+    );
     assert_eq!(actual.expiration, u64::MAX);
     assert!(backend.state(b"missing").unwrap().is_none());
     assert!(backend.epoch(b"group", 2).unwrap().is_none());
@@ -98,7 +101,11 @@ fn sealed_provider_roundtrip_reopen_and_stale_clone_fencing() {
         b"synthetic-leaf-private-marker",
         b"updated-epoch-secret-marker",
     ] {
-        assert!(!ordinary.windows(marker.len()).any(|window| window == marker));
+        assert!(
+            !ordinary
+                .windows(marker.len())
+                .any(|window| window == marker)
+        );
     }
     assert!(ServiceMlsStorage::new(owner.clone(), sealer(8), b"endpoint-a").is_err());
     assert!(ServiceMlsStorage::new(owner.clone(), sealer(7), b"endpoint-b").is_err());
@@ -125,7 +132,10 @@ fn sealed_provider_roundtrip_reopen_and_stale_clone_fencing() {
     let restored = resumed.get(b"package").unwrap().unwrap();
     assert_eq!(restored.key_package_bytes, package().key_package_bytes);
     assert_eq!(restored.init_key.as_ref(), package().init_key.as_ref());
-    assert_eq!(restored.leaf_node_key.as_ref(), package().leaf_node_key.as_ref());
+    assert_eq!(
+        restored.leaf_node_key.as_ref(),
+        package().leaf_node_key.as_ref()
+    );
     assert_eq!(restored.expiration, u64::MAX);
     let replacement = KeyPackageData::new(
         b"replacement-public-package".to_vec(),
@@ -225,7 +235,6 @@ fn explicit_custody_failure_has_no_implicit_replacement() {
         fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
             Err(std::io::ErrorKind::PermissionDenied.into())
         }
-
     }
     assert!(matches!(
         ExternalWrappingKeyProvider::from_reader(Unavailable),

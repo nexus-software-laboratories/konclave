@@ -300,9 +300,7 @@ impl GroupStateStorage for CiphertextStorage {
             };
             group.data = state.data.to_vec();
             for epoch in inserts.into_iter().chain(updates) {
-                if let Some((_, data)) =
-                    group.epochs.iter_mut().find(|(id, _)| *id == epoch.id)
-                {
+                if let Some((_, data)) = group.epochs.iter_mut().find(|(id, _)| *id == epoch.id) {
                     *data = epoch.data.to_vec();
                 } else {
                     if group.epochs.len() >= MAX_EPOCHS {
@@ -673,8 +671,7 @@ mod tests {
 
     #[test]
     fn provider_errors_are_finite_and_never_absence() {
-        let outer_identifier_length =
-            b"konclave-native-service-mls-outer-snapshot-v1\0".len() + 32;
+        let outer_identifier_length = b"konclave-native-service-mls-outer-snapshot-v1\0".len() + 32;
         assert!(outer_identifier_length > MAX_ID);
         assert!(outer_identifier_length <= 128);
         for (error, expected) in [
