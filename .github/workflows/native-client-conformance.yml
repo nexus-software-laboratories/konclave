@@ -72,7 +72,7 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: cargo test --locked --package KonclaveClientLibrary --test native_service_storage --test native_service_mls
-      - name: Verify durable native service journal foundation
+      - name: Verify durable native service journal and claim recovery
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: cargo test --locked --package KonclaveClientLibrary --test native_service_journal
