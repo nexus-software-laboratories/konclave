@@ -17,8 +17,12 @@ scope: "Konclave protocol, cryptography, identity, relay, daemon, and adapter bo
   or cryptographic-provider dependencies.
 - `ClientLibrary` composes domain, protocol, and cryptographic operations without
   assuming one relay deployment.
-- The local daemon is the only process boundary that handles plaintext and raw secret
-  state. CLI, UI, extensions, and relays never receive keys or provider state.
+- Native keys and raw MLS state stay inside their owning trusted endpoint process.
+  The local daemon owns local profiles; an explicitly composed service endpoint owns
+  only its injected identity, custody and persistence through public native contracts,
+  consistent with ADR 0013. It never opens another endpoint's profile or infers native
+  authority from web identity. CLI, UI, extensions and relays never receive keys or
+  provider state.
 - The relay stores and logs only allowlisted delivery metadata plus opaque MLS bytes.
   It never parses Konclave application plaintext.
 - Relay data-plane authentication stays outside protobuf. Never treat `RoutingId` as
