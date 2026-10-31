@@ -1205,7 +1205,7 @@ mod tests {
         let binding = material.binding();
         assert!(binding.supports_directed_requests());
         assert!(binding.supports_repeat_pairing());
-        assert!(binding.supports_request_service());
+        assert!(binding.supports_request_services());
         verify_device_credential_binding(binding).unwrap();
 
         let stripped = DeviceCredentialBinding::new(
