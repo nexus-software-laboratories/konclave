@@ -1205,6 +1205,7 @@ mod tests {
         let binding = material.binding();
         assert!(binding.supports_directed_requests());
         assert!(binding.supports_repeat_pairing());
+        assert!(binding.supports_request_service());
         verify_device_credential_binding(binding).unwrap();
 
         let stripped = DeviceCredentialBinding::new(
@@ -1220,22 +1221,27 @@ mod tests {
         assert!(!stripped.supports_repeat_pairing());
         verify_device_credential_binding(&stripped).unwrap();
 
-        let altered = DeviceCredentialBinding::new_with_capabilities(
-            binding.version(),
-            binding.device_id(),
-            binding.conversation_id(),
-            binding.signature_scheme(),
-            binding.device_root_public_key(),
-            binding.conversation_signature_public_key(),
-            binding.device_binding_signature(),
-            binding.application_capabilities() | 4,
-            binding.application_capabilities_signature(),
-        )
-        .unwrap();
-        assert_eq!(
-            verify_device_credential_binding(&altered).err(),
-            Some(KonclaveCryptographicError::InvalidCredentialBinding)
-        );
+        for capabilities in [
+            binding.application_capabilities() ^ APPLICATION_CAPABILITY_REQUEST_SERVICE,
+            binding.application_capabilities() | (1 << 3),
+        ] {
+            let altered = DeviceCredentialBinding::new_with_capabilities(
+                binding.version(),
+                binding.device_id(),
+                binding.conversation_id(),
+                binding.signature_scheme(),
+                binding.device_root_public_key(),
+                binding.conversation_signature_public_key(),
+                binding.device_binding_signature(),
+                capabilities,
+                binding.application_capabilities_signature(),
+            )
+            .unwrap();
+            assert_eq!(
+                verify_device_credential_binding(&altered).err(),
+                Some(KonclaveCryptographicError::InvalidCredentialBinding)
+            );
+        }
     }
 
     #[test]

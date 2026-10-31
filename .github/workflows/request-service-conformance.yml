@@ -69,7 +69,9 @@ jobs:
           cargo fmt --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveDomainCore request_service::
           cargo test --locked --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_service
+          cargo test --locked --package KonclaveCryptographicCore application_capabilities_are_root_signed
           cargo test --locked --package KonclaveLocalDaemon request_service
+          cargo test --locked --package KonclaveLocalDaemon response_continuation_migration_preserves_identity_and_rejects_schema_rollback
           cargo test --locked --package KonclaveLocalDaemon directed_request_response_reservation_is_atomic
           cargo clippy --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --package KonclaveLocalDaemon --all-targets -- -D warnings
       - name: Generate native tool contract

@@ -13140,7 +13140,7 @@ mod tests {
             let device = fixture.device_id;
             let identity = fixture
                 .store
-                .profile_identity_for_schema_transition(22, floor)
+                .profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, floor)
                 .unwrap()
                 .unwrap();
             {
