@@ -242,6 +242,84 @@ mod tests {
     }
 
     #[test]
+    fn request_service_snapshot_preserves_contract_and_rejects_membership_escape() {
+        use crate::{
+            AddMember, ChangeMemberRole, CredentialBindingHash, InvitationId,
+            MembershipAuthorization, MembershipChange, MembershipOperationId, RemoveMember,
+        };
+
+        let channel = channel();
+        let initial = ConversationState::new_with_request_service(
+            ProtocolVersion::application_v1(),
+            channel.conversation_id(),
+            1,
+            active().members().to_vec(),
+            vec![],
+            Some(channel),
+        )
+        .unwrap();
+        let authorization = |change| {
+            MembershipAuthorization::new(
+                initial.version(),
+                initial.conversation_id(),
+                initial.epoch(),
+                MembershipOperationId::from_bytes([5; 16]),
+                change,
+            )
+        };
+        for change in [
+            MembershipChange::Add(AddMember::new(
+                device(9),
+                ConversationRole::Member,
+                InvitationId::from_bytes([6; 16]),
+                CredentialBindingHash::from_bytes([7; 32]),
+            )),
+            MembershipChange::ChangeRole(ChangeMemberRole::new(
+                device(3),
+                ConversationRole::Administrator,
+            )),
+        ] {
+            assert!(
+                initial
+                    .apply_membership_authorization(device(2), &authorization(change), 2)
+                    .is_err()
+            );
+        }
+        let revoked = initial
+            .apply_membership_authorization(
+                device(2),
+                &authorization(MembershipChange::Remove(RemoveMember::new(device(3)))),
+                2,
+            )
+            .unwrap();
+        assert_eq!(revoked.request_service(), Some(channel));
+        assert_eq!(revoked.members().len(), 1);
+        let restored = revoked
+            .apply_membership_authorization(
+                device(2),
+                &MembershipAuthorization::new(
+                    revoked.version(),
+                    revoked.conversation_id(),
+                    revoked.epoch(),
+                    MembershipOperationId::from_bytes([8; 16]),
+                    MembershipChange::Add(AddMember::new(
+                        device(3),
+                        ConversationRole::Member,
+                        InvitationId::from_bytes([9; 16]),
+                        CredentialBindingHash::from_bytes([7; 32]),
+                    )),
+                ),
+                3,
+            )
+            .unwrap();
+        assert_eq!(restored.request_service(), Some(channel));
+        assert_eq!(
+            restored.member(device(3)).unwrap().role(),
+            ConversationRole::Member
+        );
+    }
+
+    #[test]
     fn membership_rejects_role_changes_and_third_members() {
         let operator = Member::new(device(2), ConversationRole::Administrator, 0);
         for (members, expected) in [

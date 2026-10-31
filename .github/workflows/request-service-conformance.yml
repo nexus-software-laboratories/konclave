@@ -66,9 +66,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveDomainCore -- --check
-          cargo test --locked --package KonclaveDomainCore request_service::
-          cargo clippy --locked --package KonclaveDomainCore --all-targets -- -D warnings
+          cargo fmt --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore -- --check
+          cargo test --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_service
+          cargo clippy --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --all-targets -- -D warnings
       - name: Verify component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh

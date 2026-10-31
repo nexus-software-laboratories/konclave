@@ -20,6 +20,13 @@ message ConversationId {
   bytes value = 1;
 }
 
+// Binds one immutable requester/operator channel independently from relay routing.
+message RequestServiceChannel {
+  ConversationId conversation_id = 1;
+  DeviceId operator_device_id = 2;
+  DeviceId requester_device_id = 3;
+}
+
 // Identifies one signed application message.
 message MessageId {
   // Exactly 16 bytes in protocol v1.

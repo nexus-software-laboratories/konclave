@@ -1,11 +1,12 @@
 use std::mem::size_of;
 
 use KonclaveDomainCore::{
-    APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING, ConversationId,
-    ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey,
-    Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId,
-    NotificationId, PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer,
-    PairingStage, ProtocolVersion, RoutingId, SignatureScheme,
+    APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING,
+    APPLICATION_CAPABILITY_REQUEST_SERVICE, ConversationId, ConversationRole,
+    CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Ed25519Signature,
+    EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId, NotificationId,
+    PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer, PairingStage,
+    ProtocolVersion, RequestServiceChannel, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,
@@ -318,8 +319,9 @@ impl DeviceIdentity {
         let signature = cipher_suite
             .sign(&self.secret_key, &canonical)
             .map_err(|_| provider_failure("device credential binding signature"))?;
-        let application_capabilities =
-            APPLICATION_CAPABILITY_DIRECTED_REQUEST | APPLICATION_CAPABILITY_REPEAT_PAIRING;
+        let application_capabilities = APPLICATION_CAPABILITY_DIRECTED_REQUEST
+            | APPLICATION_CAPABILITY_REPEAT_PAIRING
+            | APPLICATION_CAPABILITY_REQUEST_SERVICE;
         let capability_canonical =
             canonical_credential_capabilities(&canonical, application_capabilities);
         let capability_signature = cipher_suite
@@ -359,6 +361,51 @@ impl DeviceIdentity {
         role: ConversationRole,
         expires_at_unix_seconds: u64,
     ) -> Result<Invitation, KonclaveCryptographicError> {
+        self.issue_invitation_with_request_service(
+            conversation_id,
+            routing_id,
+            expected_device_id,
+            role,
+            expires_at_unix_seconds,
+            None,
+        )
+    }
+
+    /// Issues a member invitation authenticated to this operator's private channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns a channel-binding, expiration, randomness, or signature error.
+    pub fn issue_request_service_invitation(
+        &self,
+        channel: RequestServiceChannel,
+        routing_id: RoutingId,
+        expires_at_unix_seconds: u64,
+    ) -> Result<Invitation, KonclaveCryptographicError> {
+        if channel.operator_device_id() != self.device_id {
+            return Err(
+                KonclaveDomainCore::KonclaveDomainError::RequestServiceInvitationMismatch.into(),
+            );
+        }
+        self.issue_invitation_with_request_service(
+            channel.conversation_id(),
+            routing_id,
+            channel.requester_device_id(),
+            ConversationRole::Member,
+            expires_at_unix_seconds,
+            Some(channel),
+        )
+    }
+
+    fn issue_invitation_with_request_service(
+        &self,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        expected_device_id: DeviceId,
+        role: ConversationRole,
+        expires_at_unix_seconds: u64,
+        request_service: Option<RequestServiceChannel>,
+    ) -> Result<Invitation, KonclaveCryptographicError> {
         let cipher_suite = cipher_suite(&self.provider)?;
         let invitation_id =
             InvitationId::from_slice(&random_bytes(&cipher_suite, InvitationId::LENGTH)?)?;
@@ -374,11 +421,12 @@ impl DeviceIdentity {
             expires_at_unix_seconds,
             &nonce,
             self.device_id,
+            request_service,
         );
         let signature = cipher_suite
             .sign(&self.secret_key, &canonical)
             .map_err(|_| provider_failure("invitation signature"))?;
-        Ok(Invitation::new(
+        Ok(Invitation::new_with_request_service(
             ProtocolVersion::application_v1(),
             invitation_id,
             conversation_id,
@@ -389,6 +437,7 @@ impl DeviceIdentity {
             nonce,
             self.device_id,
             Ed25519Signature::from_slice(&signature)?,
+            request_service,
         )?)
     }
 
@@ -778,6 +827,7 @@ pub fn verify_invitation(
         invitation.expires_at_unix_seconds(),
         invitation.nonce(),
         invitation.issuer_device_id(),
+        invitation.request_service(),
     );
     let public_key = SignaturePublicKey::new_slice(issuer_public_key.as_bytes());
     cipher_suite
@@ -974,6 +1024,7 @@ fn canonical_invitation(
     expires_at_unix_seconds: u64,
     nonce: &InvitationNonce,
     issuer_device_id: DeviceId,
+    request_service: Option<RequestServiceChannel>,
 ) -> Vec<u8> {
     let mut output = Vec::with_capacity(192);
     output.extend_from_slice(INVITATION_DOMAIN);
@@ -988,6 +1039,12 @@ fn canonical_invitation(
     output.extend_from_slice(&expires_at_unix_seconds.to_be_bytes());
     output.extend_from_slice(nonce.as_bytes());
     output.extend_from_slice(issuer_device_id.as_bytes());
+    if let Some(channel) = request_service {
+        output.extend_from_slice(b"konclave-request-service-v1\0");
+        output.extend_from_slice(channel.conversation_id().as_bytes());
+        output.extend_from_slice(channel.operator_device_id().as_bytes());
+        output.extend_from_slice(channel.requester_device_id().as_bytes());
+    }
     output
 }
 
@@ -1301,6 +1358,7 @@ mod tests {
             1_800_000_000,
             &nonce,
             device_id,
+            None,
         );
         assert_eq!(
             cipher_suite.sign(&secret_key, &invitation_input).unwrap(),
