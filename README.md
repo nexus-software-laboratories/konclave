@@ -139,6 +139,12 @@ from running in CI.
 
 ## Architecture
 
+[Request-service channels](docs/development/request-services.md) let independently
+enrolled requester profiles contact one operator and receive claim-bound terminal
+answers without sharing a conversation or plaintext with other requesters. Native
+direction checks do not grant work authority; the operator activates local policy
+separately. Enrollment and inspection commands are in the linked guide.
+
 Konclave separates the trusted local agent boundary from relay transport:
 
 - `Konclave.LocalDaemon` builds the shared authenticated local service, profile

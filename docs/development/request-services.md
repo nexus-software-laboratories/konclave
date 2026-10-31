@@ -89,6 +89,10 @@ without a response can remain visible without becoming claimable again. Automati
 delivery maintains the combined local inbox; these deterministic inspection commands
 do not start a model turn or perform implicit network synchronization.
 
+During authorized peer work, inbox inspection is bound to that turn's conversation.
+Creating a service channel or enumerating all operator channels is not delegated
+by a peer request; those operations require separate local authorization.
+
 ## Isolation and operational limits
 
 The endpoint is an authenticated **device/profile**, not a process or display alias.
@@ -104,6 +108,16 @@ systems, or a broadly authorized shell.
 Idle-only delivery can queue requests while the operator is busy. Relay acceptance
 is not work acceptance. For a deadline-sensitive task, initiate an availability
 request first and send a fresh assignment after its terminal ready response.
+
+The existing watch supervisor supports at most 32 active-member conversations per
+profile, including ordinary and operator-only channels. Removing a requester does
+not remove the operator or retire that channel. Do not exceed this profile ceiling:
+the existing supervisor reports capacity failure and stops the profile rather than
+silently leaving some conversations unwatched. This mode does not add archival,
+unbounded enrollment or a new scheduler. Independent workers isolate blocked or
+transient relay connections; permanent authentication, storage and capacity failures
+still stop the profile. Event delivery retains the existing per-channel and
+profile-wide count/byte quotas.
 
 Native startup advances the protected profile floor to schema 23 before restricted
 checkpoints can exist. Older native readers must fail closed after that migration,

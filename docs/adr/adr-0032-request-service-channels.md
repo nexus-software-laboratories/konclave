@@ -69,8 +69,11 @@ bytes. Existing conversations are not silently converted.
 
 The requester may initiate directed requests only to the operator. The operator may
 send text only as a response to an authenticated original request in that exact
-channel. Neither endpoint may send unsolicited text. One terminal response is
-reserved durably per original request; a different response conflicts. Explicit
+channel. Neither endpoint may send unsolicited text. The operator also needs a
+current locally authorized original-request claim; generic claim-free manual replies
+are refused. One terminal response is reserved durably per original request; a
+different response conflicts. An authenticated sealed receipt is committed with
+reply history and survives duplicate request echoes and restart. Explicit
 policy exchange and separately authorized membership maintenance remain control
 operations, not task messages. Internal repeat-pairing cannot introduce another
 channel through this restricted conversation.
@@ -85,8 +88,10 @@ turn.
 An operator's correlated response may ask for clarification. The requester can
 deliberately initiate a new request referencing prior context under its existing
 local authority. Responses remain terminal, and unsolicited text never starts work.
-The service inbox aggregates the operator's own channels with bounded per-channel
-admission and fair delivery, not message forwarding or a task registry.
+Existing profile delivery combines the operator's channels through bounded
+per-conversation admission and fair event batches. Operator inspection lists bounded
+channel pages and reads unreplied history separately for each channel; it does not
+claim work, forward messages or introduce a task registry.
 
 ## Serious alternatives
 
@@ -99,7 +104,7 @@ admission and fair delivery, not message forwarding or a task registry.
 
 ## Consequences
 
-The operator manages more conversations but receives a unified local inbox.
+The operator manages more conversations but uses the existing local delivery stream.
 Membership changes on one channel do not grant another requester its epoch secrets.
 Changing operator identity requires explicit new enrollment, not an implicit alias
 update. Channel removal prevents new admission, but cannot retract delivered
@@ -108,6 +113,19 @@ plaintext or previously admitted external work.
 These restrictions cover the enrolled channels, not devices' separately authorized
 ordinary conversations or external systems. They do not protect against intentional
 information forwarding by the operator or a broadly authorized shell.
+
+The isolation endpoint is a device/profile, not a Copilot process. Requesters must
+use separate identities; sharing a profile shares its channel access. Restricted
+history requires profile schema 23 and its protected reader floor, so an older reader
+cannot reconstruct an epoch-zero restricted channel as an ordinary group. New native
+startup raises that floor even for ordinary profiles. Coherent restore, selective
+deletion and independent freshness remain outside sealed-record guarantees.
+
+The existing supervisor bounds active conversations and handles transient failures
+in independent workers. It still stops the profile on permanent authentication,
+storage or capacity failure; channel isolation is not an availability guarantee.
+Unreplied history is not a scheduler: a request completed without a response can
+remain visible without becoming claimable again.
 
 Idle-only delivery can queue requests while an operator is busy. Relay acceptance is
 not work acceptance. Time-sensitive assignments need a fresh availability exchange;
@@ -134,3 +152,5 @@ these component checks.
 - [ADR 0030](adr-0030-correlated-response-continuation.md) establishes terminal
   responses, exact answer continuation and explicit local authority; this mode
   narrows communication without introducing a workflow engine.
+- [Request-service operations](../development/request-services.md) owns current
+  commands, explicit enrollment, bounded inspection and operational limitations.

@@ -157,9 +157,11 @@ $ownedCases = [ordered]@{
         'proto/konclave/protocol/v1/membership.proto'
         'apps/Konclave.LocalDaemon/src/conversation.rs'
         'apps/Konclave.LocalDaemon/src/persistence/request_service.rs'
+        'apps/Konclave.LocalDaemon/src/service.rs'
         'extensions/Konclave.HostExtension/src/service/commands.ts'
         'fixtures/local-service/v1/copilot-tools.json'
         'docs/adr/adr-0032-request-service-channels.md'
+        'docs/development/request-services.md'
     )
     'short-code-pairing' =
         'proto/konclave/protocol/v1/short_code_pairing.proto'

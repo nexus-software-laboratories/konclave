@@ -2982,6 +2982,147 @@ pub(crate) mod tests {
         if persist_ratchet {
             conversation.group.persist().unwrap();
         }
+
+        pub(crate) fn enroll_request_service_pair(
+            operator: &ConversationCoordinator,
+            requester: &ConversationCoordinator,
+        ) -> ConversationId {
+            let requester_id = requester.device_id().unwrap();
+            let id = operator
+                .create_request_service(requester_id)
+                .unwrap()
+                .conversation_id;
+            let invitation = operator
+                .issue_invitation(id, requester_id, ConversationRole::Member, 1_900_000_000)
+                .unwrap();
+            let proof = requester
+                .create_join_proof(
+                    invitation.invitation,
+                    invitation.routing_id,
+                    invitation.issuer_public_key,
+                    invitation.peer_bindings,
+                    1_700_000_000,
+                )
+                .unwrap();
+            let prepared = operator
+                .prepare_add_member(id, proof, 1_700_000_000, 1_900_000_000)
+                .unwrap();
+            let welcome = MlsWelcome::from_bytes(prepared.welcome.as_ref().unwrap()).unwrap();
+            let stored = StoredRelayEnvelope::new(prepared.envelope, 1).unwrap();
+            operator.mark_membership_outbox_accepted(&stored).unwrap();
+            requester.accept_welcome(id, &welcome, &stored).unwrap();
+            id
+        }
+
+        #[test]
+        fn request_service_multichannel_delivery_is_fair_and_requester_history_is_private() {
+            use KonclaveDomainCore::{AdapterConsumerId, AdapterLeaseId, MessageHistoryOrder};
+            let root = tempfile::tempdir().unwrap();
+            let operator = open_coordinator(root.path(), "operator");
+            let first = open_coordinator(root.path(), "requester-a");
+            let second = open_coordinator(root.path(), "requester-b");
+            let first_id = enroll_request_service_pair(&operator, &first);
+            let second_id = enroll_request_service_pair(&operator, &second);
+            let operator_id = operator.device_id().unwrap();
+            let second_device = second.device_id().unwrap();
+            let store = operator.store();
+            let policy = store
+                .store_collaboration_policy_bundle(include_bytes!(
+                    "../../../fixtures/protocol/v1/collaboration-policy-bundle.bin"
+                ))
+                .unwrap();
+            for id in [first_id, second_id] {
+                store
+                    .activate_collaboration_policy(id, policy, 100)
+                    .unwrap();
+                store.set_adapter_delivery_enabled(id, true).unwrap();
+            }
+            let now = SystemUnixClock.now_unix_milliseconds();
+            for (requester, id, end) in [(&first, first_id, 5), (&second, second_id, 2)] {
+                for cursor in 2..=end {
+                    let prepared = requester
+                        .prepare_application(
+                            id,
+                            ApplicationContent::directed_request(operator_id, "request").unwrap(),
+                            None,
+                            now,
+                            now / 1_000 + 3_600,
+                        )
+                        .unwrap();
+                    let stored = StoredRelayEnvelope::new(prepared.envelope, cursor).unwrap();
+                    requester.mark_outbox_accepted(&stored).unwrap();
+                    operator.process_inbound_application(id, &stored).unwrap();
+                }
+            }
+            let consumer = AdapterConsumerId::from_bytes([81; AdapterConsumerId::LENGTH]);
+            let lease = AdapterLeaseId::from_bytes([82; AdapterLeaseId::LENGTH]);
+            store
+                .acquire_adapter_consumer(consumer, lease, now, now + 60_000)
+                .unwrap();
+            let batch = store
+                .claim_remote_events(consumer, lease, now, now + 60_000, 2)
+                .unwrap();
+            assert_eq!(batch.len(), 2);
+            assert_ne!(batch[0].conversation_id, batch[1].conversation_id);
+            assert!(
+                batch
+                    .iter()
+                    .all(|event| [first_id, second_id].contains(&event.conversation_id))
+            );
+            let query =
+                MessageHistoryQuery::new(MessageHistoryOrder::Ascending, 0, None, None, None, 10)
+                    .unwrap();
+            assert_eq!(
+                operator
+                    .request_service_inbox(first_id, query)
+                    .unwrap()
+                    .messages
+                    .len(),
+                4
+            );
+            assert_eq!(
+                operator
+                    .request_service_inbox(second_id, query)
+                    .unwrap()
+                    .messages
+                    .len(),
+                1
+            );
+            assert!(first.history_query(second_id, query).is_err());
+            assert!(second.history_query(first_id, query).is_err());
+            assert!(
+                first
+                    .prepare_application(
+                        first_id,
+                        ApplicationContent::directed_request(second_device, "cross-requester")
+                            .unwrap(),
+                        None,
+                        now,
+                        now / 1_000 + 3_600,
+                    )
+                    .is_err()
+            );
+            let removal = operator
+                .prepare_remove_member(second_id, second_device, now / 1_000 + 3_600)
+                .unwrap();
+            let removed = StoredRelayEnvelope::new(removal.envelope, 3).unwrap();
+            operator.mark_membership_outbox_accepted(&removed).unwrap();
+            assert!(
+                operator
+                    .request_service_inbox(second_id, query)
+                    .unwrap()
+                    .messages
+                    .is_empty()
+            );
+            assert_eq!(
+                operator
+                    .request_service_inbox(first_id, query)
+                    .unwrap()
+                    .messages
+                    .len(),
+                4
+            );
+        }
     }
 
     #[test]
