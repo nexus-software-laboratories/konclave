@@ -65,7 +65,10 @@ pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
 };
-pub use request_service::{RequestServiceChannel, RequestServiceError, RequestServiceRequest};
+pub use request_service::{
+    RequestServiceChannel, RequestServiceError, RequestServiceReplyDecision, RequestServiceRequest,
+    classify_request_service_reply,
+};
 pub use response_continuation::{
     ResponseContinuationBinding, ResponseContinuationDirection, ResponseContinuationError,
     ResponseContinuationMessage, validate_response_continuation,

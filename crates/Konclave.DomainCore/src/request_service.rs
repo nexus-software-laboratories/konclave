@@ -1,6 +1,6 @@
 use crate::{
     ApplicationContent, ApplicationMessage, ConversationId, ConversationRole, ConversationState,
-    DeviceId,
+    DeviceId, MessageId,
 };
 
 /// Immutable endpoint identities for one private requester/operator channel.
@@ -43,6 +43,33 @@ pub enum RequestServiceError {
     InvalidReply,
     #[error("request-service channel does not permit this internal operation")]
     UnsupportedOperation,
+    #[error("request-service request already has a different terminal reply")]
+    ReplyAlreadyCompleted,
+}
+
+/// Whether an authenticated terminal-reply witness permits insertion or exact retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestServiceReplyDecision {
+    New,
+    Retry,
+}
+
+/// Classifies one reply against the authenticated durable witness for its request.
+///
+/// A retry still requires identical authenticated payload, channel and sender data.
+///
+/// # Errors
+///
+/// Rejects a different response after the request already has a terminal witness.
+pub fn classify_request_service_reply(
+    previous_reply: Option<MessageId>,
+    candidate_reply: MessageId,
+) -> Result<RequestServiceReplyDecision, RequestServiceError> {
+    match previous_reply {
+        None => Ok(RequestServiceReplyDecision::New),
+        Some(previous) if previous == candidate_reply => Ok(RequestServiceReplyDecision::Retry),
+        Some(_) => Err(RequestServiceError::ReplyAlreadyCompleted),
+    }
 }
 
 /// Authenticated original request selected from the same channel's durable history.
@@ -239,6 +266,26 @@ mod tests {
             ApplicationContent::directed_request(target, "fixture request").unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn terminal_reply_classifies_new_exact_retry_and_conflicting_second_response() {
+        let first = MessageId::from_bytes([10; 16]);
+        let second = MessageId::from_bytes([11; 16]);
+        for (previous, candidate, expected) in [
+            (None, first, Ok(RequestServiceReplyDecision::New)),
+            (Some(first), first, Ok(RequestServiceReplyDecision::Retry)),
+            (
+                Some(first),
+                second,
+                Err(RequestServiceError::ReplyAlreadyCompleted),
+            ),
+        ] {
+            assert_eq!(
+                classify_request_service_reply(previous, candidate),
+                expected
+            );
+        }
     }
 
     #[test]
