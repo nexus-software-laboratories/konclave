@@ -34,7 +34,37 @@ impl ProfileStore {
         conversation_id: ConversationId,
         query: MessageHistoryQuery,
     ) -> Result<HistoryPage, ProfileStoreError> {
+        self.load_history_query_filtered(conversation_id, query, None)
+    }
+
+    pub(crate) fn load_request_service_inbox(
+        &self,
+        conversation_id: ConversationId,
+        query: MessageHistoryQuery,
+        operator: DeviceId,
+    ) -> Result<HistoryPage, ProfileStoreError> {
+        self.load_history_query_filtered(conversation_id, query, Some(operator))
+    }
+
+    fn load_history_query_filtered(
+        &self,
+        conversation_id: ConversationId,
+        query: MessageHistoryQuery,
+        operator: Option<DeviceId>,
+    ) -> Result<HistoryPage, ProfileStoreError> {
         let conversation = self.load_conversation(conversation_id)?;
+        let channel = operator
+            .map(|operator| {
+                let channel = conversation
+                    .state
+                    .request_service()
+                    .ok_or(KonclaveDomainCore::RequestServiceError::ConversationMismatch)?;
+                if channel.operator_device_id() != operator {
+                    return Err(KonclaveDomainCore::RequestServiceError::InvalidOperator);
+                }
+                Ok(channel)
+            })
+            .transpose()?;
         let routing_id = conversation.routing_id;
         let upper_cursor = query
             .before_cursor()
@@ -82,8 +112,23 @@ impl ProfileStore {
                 .map_err(|_| ProfileStoreError::CorruptData)?;
             scanned_count += 1;
             last_scanned_cursor = Some(cursor);
+            let matches_service = channel.is_none_or(|channel| {
+                conversation
+                    .state
+                    .member(channel.requester_device_id())
+                    .is_some()
+                    && history.sender == channel.requester_device_id()
+                    && history.request_service_reply == Some(RequestServiceHistoryReply::Pending)
+                    && matches!(
+                        history.message.content(),
+                        ApplicationContent::DirectedRequest(request)
+                            if request.target_device_id() == channel.operator_device_id()
+                    )
+            });
             let message = stored_history_message(history).ok_or(ProfileStoreError::CorruptData)?;
-            if query.matches_timestamp(message.message.sent_at_unix_milliseconds()) {
+            if matches_service
+                && query.matches_timestamp(message.message.sent_at_unix_milliseconds())
+            {
                 messages.push(message);
                 if messages.len() == query.limit() {
                     break;

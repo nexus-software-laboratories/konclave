@@ -373,6 +373,50 @@ pub(crate) mod tests {
 
     struct UnauthorizedWatchRelay;
 
+    struct GatedRequestServiceWatch {
+        blocked: KonclaveDomainCore::RoutingId,
+        release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+        entered: watch::Sender<bool>,
+        healthy: mpsc::Sender<()>,
+    }
+
+    #[async_trait]
+    impl RelayTransport for GatedRequestServiceWatch {
+        async fn submit(
+            &self,
+            _envelope: &RelayEnvelope,
+        ) -> Result<StoredRelayEnvelope, KonclaveClientError> {
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+
+        async fn replay(&self, request: ReplayRequest) -> Result<ReplayPage, KonclaveClientError> {
+            Ok(ReplayPage::new(Vec::new(), request.after_cursor(), false).unwrap())
+        }
+
+        async fn acknowledge(
+            &self,
+            request: AcknowledgeRequest,
+        ) -> Result<AcknowledgeRequest, KonclaveClientError> {
+            Ok(request)
+        }
+
+        async fn connect_watch(
+            &self,
+            request: ReplayRequest,
+        ) -> Result<RelayWatchSession, KonclaveClientError> {
+            if request.routing_id() == self.blocked {
+                let release = self.release.lock().unwrap().take().unwrap();
+                self.entered.send(true).unwrap();
+                release.await.unwrap();
+            } else {
+                let mut entered = self.entered.subscribe();
+                entered.wait_for(|value| *value).await.unwrap();
+                self.healthy.send(()).await.unwrap();
+            }
+            Err(KonclaveClientError::TransportUnavailable)
+        }
+    }
+
     #[async_trait]
     impl RelayTransport for UnauthorizedWatchRelay {
         async fn submit(
@@ -461,6 +505,86 @@ pub(crate) mod tests {
             health: DeliveryHealth::default(),
         };
         service.run_until(async {}).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_service_blocked_watch_does_not_starve_another_enrolled_channel() {
+        use crate::conversation::tests::{enroll_request_service_pair, open_coordinator};
+        use KonclaveDomainCore::ApplicationContent;
+        let root = tempfile::tempdir().unwrap();
+        let operator = open_coordinator(root.path(), "operator");
+        let first = open_coordinator(root.path(), "requester-a");
+        let second = open_coordinator(root.path(), "requester-b");
+        let blocked = enroll_request_service_pair(&operator, &first);
+        let healthy = enroll_request_service_pair(&operator, &second);
+        let (release_tx, release_rx) = oneshot::channel();
+        let (entered_tx, mut entered_rx) = watch::channel(false);
+        let (healthy_tx, mut healthy_rx) = mpsc::channel(1);
+        let applications = ApplicationService::new(
+            operator.clone(),
+            GatedRequestServiceWatch {
+                blocked: operator
+                    .store()
+                    .load_conversation(blocked)
+                    .unwrap()
+                    .routing_id,
+                release: std::sync::Mutex::new(Some(release_rx)),
+                entered: entered_tx,
+                healthy: healthy_tx,
+            },
+        );
+        let service = Service {
+            applications: Some(applications),
+            config: SupervisorConfig {
+                discovery_interval: Duration::from_secs(3_600),
+                retry_initial: Duration::from_secs(3_600),
+                retry_maximum: Duration::from_secs(3_600),
+                shutdown_timeout: Duration::from_secs(5),
+                maximum_conversations: 2,
+            },
+            health: DeliveryHealth::default(),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(service.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        timeout(Duration::from_secs(10), entered_rx.wait_for(|value| *value))
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(10), healthy_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!release_tx.is_closed());
+        let request = second
+            .prepare_application(
+                healthy,
+                ApplicationContent::directed_request(
+                    operator.device_id().unwrap(),
+                    "healthy channel",
+                )
+                .unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let stored = StoredRelayEnvelope::new(request.envelope, 2).unwrap();
+        second.mark_outbox_accepted(&stored).unwrap();
+        let received = operator
+            .process_inbound_application(healthy, &stored)
+            .unwrap();
+        assert_eq!(received.sender, second.device_id().unwrap());
+        assert_eq!(received.message.message_id(), request.message.message_id());
+        assert!(!release_tx.is_closed());
+        release_tx.send(()).unwrap();
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(10), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

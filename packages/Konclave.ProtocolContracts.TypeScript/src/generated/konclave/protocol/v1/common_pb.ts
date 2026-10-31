@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file konclave/protocol/v1/common.proto.
  */
 export const file_konclave_protocol_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("CiFrb25jbGF2ZS9wcm90b2NvbC92MS9jb21tb24ucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIi8KD1Byb3RvY29sVmVyc2lvbhINCgVtYWpvchgBIAEoDRINCgVtaW5vchgCIAEoDSIZCghEZXZpY2VJZBINCgV2YWx1ZRgBIAEoDCIfCg5Db252ZXJzYXRpb25JZBINCgV2YWx1ZRgBIAEoDCIaCglNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiGwoKRW52ZWxvcGVJZBINCgV2YWx1ZRgBIAEoDCIdCgxJbnZpdGF0aW9uSWQSDQoFdmFsdWUYASABKAwiGgoJUGFpcmluZ0lkEg0KBXZhbHVlGAEgASgMIiEKEFBhaXJpbmdNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiKQoYUmVwZWF0UGFpcmluZ09wZXJhdGlvbklkEg0KBXZhbHVlGAEgASgMIiMKElBhaXJpbmdDb250ZXh0SGFzaBINCgV2YWx1ZRgBIAEoDCIaCglSb3V0aW5nSWQSDQoFdmFsdWUYASABKAwqeAoQQ29udmVyc2F0aW9uUm9sZRIhCh1DT05WRVJTQVRJT05fUk9MRV9VTlNQRUNJRklFRBAAEiMKH0NPTlZFUlNBVElPTl9ST0xFX0FETUlOSVNUUkFUT1IQARIcChhDT05WRVJTQVRJT05fUk9MRV9NRU1CRVIQAmIGcHJvdG8z");
+  fileDesc("CiFrb25jbGF2ZS9wcm90b2NvbC92MS9jb21tb24ucHJvdG8SFGtvbmNsYXZlLnByb3RvY29sLnYxIi8KD1Byb3RvY29sVmVyc2lvbhINCgVtYWpvchgBIAEoDRINCgVtaW5vchgCIAEoDSIZCghEZXZpY2VJZBINCgV2YWx1ZRgBIAEoDCIfCg5Db252ZXJzYXRpb25JZBINCgV2YWx1ZRgBIAEoDCLPAQoVUmVxdWVzdFNlcnZpY2VDaGFubmVsEj0KD2NvbnZlcnNhdGlvbl9pZBgBIAEoCzIkLmtvbmNsYXZlLnByb3RvY29sLnYxLkNvbnZlcnNhdGlvbklkEjoKEm9wZXJhdG9yX2RldmljZV9pZBgCIAEoCzIeLmtvbmNsYXZlLnByb3RvY29sLnYxLkRldmljZUlkEjsKE3JlcXVlc3Rlcl9kZXZpY2VfaWQYAyABKAsyHi5rb25jbGF2ZS5wcm90b2NvbC52MS5EZXZpY2VJZCIaCglNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiGwoKRW52ZWxvcGVJZBINCgV2YWx1ZRgBIAEoDCIdCgxJbnZpdGF0aW9uSWQSDQoFdmFsdWUYASABKAwiGgoJUGFpcmluZ0lkEg0KBXZhbHVlGAEgASgMIiEKEFBhaXJpbmdNZXNzYWdlSWQSDQoFdmFsdWUYASABKAwiKQoYUmVwZWF0UGFpcmluZ09wZXJhdGlvbklkEg0KBXZhbHVlGAEgASgMIiMKElBhaXJpbmdDb250ZXh0SGFzaBINCgV2YWx1ZRgBIAEoDCIaCglSb3V0aW5nSWQSDQoFdmFsdWUYASABKAwqeAoQQ29udmVyc2F0aW9uUm9sZRIhCh1DT05WRVJTQVRJT05fUk9MRV9VTlNQRUNJRklFRBAAEiMKH0NPTlZFUlNBVElPTl9ST0xFX0FETUlOSVNUUkFUT1IQARIcChhDT05WRVJTQVRJT05fUk9MRV9NRU1CRVIQAmIGcHJvdG8z");
 
 /**
  * Identifies one version of a Konclave protocol layer.
@@ -79,6 +79,35 @@ export const ConversationIdSchema: GenMessage<ConversationId> = /*@__PURE__*/
   messageDesc(file_konclave_protocol_v1_common, 2);
 
 /**
+ * Binds one immutable requester/operator channel independently from relay routing.
+ *
+ * @generated from message konclave.protocol.v1.RequestServiceChannel
+ */
+export type RequestServiceChannel = Message<"konclave.protocol.v1.RequestServiceChannel"> & {
+  /**
+   * @generated from field: konclave.protocol.v1.ConversationId conversation_id = 1;
+   */
+  conversationId?: ConversationId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.DeviceId operator_device_id = 2;
+   */
+  operatorDeviceId?: DeviceId | undefined;
+
+  /**
+   * @generated from field: konclave.protocol.v1.DeviceId requester_device_id = 3;
+   */
+  requesterDeviceId?: DeviceId | undefined;
+};
+
+/**
+ * Describes the message konclave.protocol.v1.RequestServiceChannel.
+ * Use `create(RequestServiceChannelSchema)` to create a new message.
+ */
+export const RequestServiceChannelSchema: GenMessage<RequestServiceChannel> = /*@__PURE__*/
+  messageDesc(file_konclave_protocol_v1_common, 3);
+
+/**
  * Identifies one signed application message.
  *
  * @generated from message konclave.protocol.v1.MessageId
@@ -97,7 +126,7 @@ export type MessageId = Message<"konclave.protocol.v1.MessageId"> & {
  * Use `create(MessageIdSchema)` to create a new message.
  */
 export const MessageIdSchema: GenMessage<MessageId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 3);
+  messageDesc(file_konclave_protocol_v1_common, 4);
 
 /**
  * Identifies one relay submission for idempotent retry.
@@ -118,7 +147,7 @@ export type EnvelopeId = Message<"konclave.protocol.v1.EnvelopeId"> & {
  * Use `create(EnvelopeIdSchema)` to create a new message.
  */
 export const EnvelopeIdSchema: GenMessage<EnvelopeId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 4);
+  messageDesc(file_konclave_protocol_v1_common, 5);
 
 /**
  * Identifies one invitation authorization.
@@ -139,7 +168,7 @@ export type InvitationId = Message<"konclave.protocol.v1.InvitationId"> & {
  * Use `create(InvitationIdSchema)` to create a new message.
  */
 export const InvitationIdSchema: GenMessage<InvitationId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 5);
+  messageDesc(file_konclave_protocol_v1_common, 6);
 
 /**
  * @generated from message konclave.protocol.v1.PairingId
@@ -158,7 +187,7 @@ export type PairingId = Message<"konclave.protocol.v1.PairingId"> & {
  * Use `create(PairingIdSchema)` to create a new message.
  */
 export const PairingIdSchema: GenMessage<PairingId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 6);
+  messageDesc(file_konclave_protocol_v1_common, 7);
 
 /**
  * @generated from message konclave.protocol.v1.PairingMessageId
@@ -177,7 +206,7 @@ export type PairingMessageId = Message<"konclave.protocol.v1.PairingMessageId"> 
  * Use `create(PairingMessageIdSchema)` to create a new message.
  */
 export const PairingMessageIdSchema: GenMessage<PairingMessageId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 7);
+  messageDesc(file_konclave_protocol_v1_common, 8);
 
 /**
  * @generated from message konclave.protocol.v1.RepeatPairingOperationId
@@ -196,7 +225,7 @@ export type RepeatPairingOperationId = Message<"konclave.protocol.v1.RepeatPairi
  * Use `create(RepeatPairingOperationIdSchema)` to create a new message.
  */
 export const RepeatPairingOperationIdSchema: GenMessage<RepeatPairingOperationId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 8);
+  messageDesc(file_konclave_protocol_v1_common, 9);
 
 /**
  * @generated from message konclave.protocol.v1.PairingContextHash
@@ -215,7 +244,7 @@ export type PairingContextHash = Message<"konclave.protocol.v1.PairingContextHas
  * Use `create(PairingContextHashSchema)` to create a new message.
  */
 export const PairingContextHashSchema: GenMessage<PairingContextHash> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 9);
+  messageDesc(file_konclave_protocol_v1_common, 10);
 
 /**
  * Identifies one opaque relay route.
@@ -236,7 +265,7 @@ export type RoutingId = Message<"konclave.protocol.v1.RoutingId"> & {
  * Use `create(RoutingIdSchema)` to create a new message.
  */
 export const RoutingIdSchema: GenMessage<RoutingId> = /*@__PURE__*/
-  messageDesc(file_konclave_protocol_v1_common, 10);
+  messageDesc(file_konclave_protocol_v1_common, 11);
 
 /**
  * Defines the application authorization assigned to a conversation member.

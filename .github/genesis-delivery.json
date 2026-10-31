@@ -24,6 +24,7 @@
     "Local delivery diagnostics conformance",
     "Profile lifecycle conformance",
     "Response continuation conformance",
+    "Request-service conformance",
     "Installer lifecycle conformance",
     "Marketplace conformance",
     "Pairing rendezvous conformance",
@@ -92,6 +93,7 @@
         "local-delivery-diagnostics-conformance",
         "profile-lifecycle-conformance",
         "response-continuation-conformance",
+        "request-service-conformance",
         "resolve-installer-scope",
         "installer-lifecycle-conformance",
         "marketplace-conformance",
@@ -121,6 +123,13 @@
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/request-service-conformance.yml",
+      "roles": ["merge-gate"],
+      "draftBehavior": "full",
+      "requiredChecks": ["Request-service conformance"]
+    },
     {
       "source": "project",
       "path": ".github/workflows/native-storage-conformance.yml",

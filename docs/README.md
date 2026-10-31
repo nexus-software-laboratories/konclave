@@ -35,6 +35,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0028: External recipe composition](adr/adr-0028-external-recipe-composition.md)
 - [ADR 0029: Locally authorized peer work](adr/adr-0029-locally-authorized-peer-work.md)
 - [ADR 0030: Correlated response continuation](adr/adr-0030-correlated-response-continuation.md)
+- [ADR 0032: Private request-service channels](adr/adr-0032-request-service-channels.md)
 
 ## Protocol
 
@@ -68,6 +69,7 @@ This map lists the documentation contributed by the selected project shape.
 - [Shared local service transport](development/local-service-transport.md)
 - [Copilot delivery safety](development/copilot-delivery-safety.md)
 - [Collaboration policy contracts](development/collaboration-policies.md)
+- [Directional request-service channels](development/request-services.md)
 - [A2A domain mapping](development/a2a-domain-mapping.md)
 - [A2A task store](development/a2a-task-store.md)
 - [A2A agent discovery](development/a2a-discovery.md)

@@ -10,8 +10,9 @@ use crate::v1::common::{
     conversation_id_from_wire, conversation_id_to_wire, credential_hash_from_bytes,
     credential_hash_to_bytes, decode_bounded, device_id_from_wire, device_id_to_wire,
     encode_bounded, invitation_id_from_wire, invitation_id_to_wire, operation_id_from_wire,
-    operation_id_to_wire, require_repeated_field_limits, required, role_from_wire, role_to_wire,
-    version_from_wire, version_to_wire,
+    operation_id_to_wire, request_service_from_wire, request_service_to_wire,
+    require_repeated_field_limits, required, role_from_wire, role_to_wire, version_from_wire,
+    version_to_wire,
 };
 use crate::wire::v1 as wire;
 
@@ -49,6 +50,7 @@ pub fn encode_conversation_state(
     value: &ConversationState,
 ) -> Result<Vec<u8>, KonclaveProtocolError> {
     let wire = wire::ConversationState {
+        request_service: value.request_service().map(request_service_to_wire),
         version: Some(version_to_wire(value.version())),
         conversation_id: Some(conversation_id_to_wire(value.conversation_id())),
         epoch: value.epoch(),
@@ -111,12 +113,13 @@ pub fn decode_conversation_state(bytes: &[u8]) -> Result<ConversationState, Konc
         .into_iter()
         .map(|id| invitation_id_from_wire(Some(id)))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(ConversationState::new(
+    Ok(ConversationState::new_with_request_service(
         version_from_wire(wire.version, STATE_CONTRACT)?,
         conversation_id_from_wire(wire.conversation_id)?,
         wire.epoch,
         members,
         consumed_invitation_ids,
+        request_service_from_wire(wire.request_service)?,
     )?)
 }
 

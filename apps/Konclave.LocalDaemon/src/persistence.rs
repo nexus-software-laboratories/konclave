@@ -49,6 +49,7 @@ mod delivery_diagnostics;
 mod directed_request_handling;
 mod message_history;
 mod relay_migration;
+mod request_service;
 pub(crate) use collaboration_policy_exchange::StoredCollaborationPolicyProposal;
 pub(crate) use collaboration_policy_operation::CollaborationPolicyActivationOperation;
 pub(crate) use directed_request_handling::{
@@ -66,7 +67,7 @@ pub(crate) mod short_code_pairing;
 #[path = "trusted_device_persistence.rs"]
 mod trusted_device;
 
-const PROFILE_SCHEMA_VERSION: u32 = 22;
+const PROFILE_SCHEMA_VERSION: u32 = 23;
 
 #[cfg(test)]
 pub(crate) use tests::response_continuation_fixture_at;
@@ -510,6 +511,10 @@ impl LockedProfile {
         profile_open_step(
             "response_continuation_schema",
             store.initialize_response_continuation_schema(),
+        )?;
+        profile_open_step(
+            "request_service_schema",
+            store.initialize_request_service_schema(),
         )?;
         profile_open_step("short_code_pairings", store.verify_short_code_pairings())?;
         profile_open_step("trusted_devices", store.verify_trusted_device_bindings())?;
@@ -7420,6 +7425,14 @@ impl ProfileStore {
         epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), ProfileStoreError> {
+        let state = self.request_service_state_in(connection, conversation_id, routing_id)?;
+        let request_service_reply = if state.request_service().is_some()
+            && matches!(message.content(), ApplicationContent::DirectedRequest(_))
+        {
+            Some(RequestServiceHistoryReply::Pending)
+        } else {
+            None
+        };
         if direction == MessageDirection::Inbound
             && self.collaboration_policy_operation_reserves_message_id(
                 connection,
@@ -7440,8 +7453,14 @@ impl ProfileStore {
         {
             return Err(ProfileStoreError::DuplicateOperation);
         }
-        let plaintext =
-            encode_history_message_record(direction, envelope_id, sender, epoch, message)?;
+        let plaintext = encode_history_message_record(
+            direction,
+            envelope_id,
+            sender,
+            epoch,
+            message,
+            request_service_reply,
+        )?;
         let blob = self.seal_operation_record(
             SecretRecordKind::LocalApplicationMessage,
             conversation_id,
@@ -7478,6 +7497,9 @@ impl ProfileStore {
         match insert {
             Ok(1) => {
                 self.store_internal_application_marker(connection, conversation_id, message)?;
+                self.commit_request_service_reply_in(
+                    connection, &state, routing_id, sender, message,
+                )?;
                 return Ok(());
             }
             Ok(_) => return Err(ProfileStoreError::Storage),
@@ -7501,6 +7523,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::DuplicateOperation);
         }
         self.store_internal_application_marker(connection, conversation_id, message)?;
+        self.commit_request_service_reply_in(connection, &state, routing_id, sender, message)?;
         match (existing.cursor, cursor) {
             (Some(existing), Some(candidate)) if existing != candidate => {
                 return Err(ProfileStoreError::CursorConflict);
@@ -7602,8 +7625,14 @@ impl ProfileStore {
                 &blob,
             )
             .map_err(|_| ProfileStoreError::CorruptData)?;
-        let (stored_direction, stored_envelope, stored_sender, stored_epoch, message) =
-            decode_history_message_record(&plaintext)?;
+        let DecodedHistoryMessageRecord {
+            direction: stored_direction,
+            envelope_id: stored_envelope,
+            sender: stored_sender,
+            epoch: stored_epoch,
+            message,
+            request_service_reply,
+        } = decode_history_message_record(&plaintext)?;
         let envelope_id =
             EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let sender = DeviceId::from_slice(&sender).map_err(|_| ProfileStoreError::CorruptData)?;
@@ -7654,6 +7683,7 @@ impl ProfileStore {
             epoch,
             message,
             complete,
+            request_service_reply,
         }))
     }
 
@@ -9232,6 +9262,22 @@ struct HistoryRecord {
     epoch: u64,
     message: ApplicationMessage,
     complete: bool,
+    request_service_reply: Option<RequestServiceHistoryReply>,
+}
+
+struct DecodedHistoryMessageRecord {
+    direction: MessageDirection,
+    envelope_id: EnvelopeId,
+    sender: DeviceId,
+    epoch: u64,
+    message: ApplicationMessage,
+    request_service_reply: Option<RequestServiceHistoryReply>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestServiceHistoryReply {
+    Pending,
+    Complete(MessageId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9367,6 +9413,8 @@ pub(crate) enum InboxOperation {
 #[non_exhaustive]
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum ProfileStoreError {
+    #[error(transparent)]
+    RequestService(#[from] KonclaveDomainCore::RequestServiceError),
     #[error("profile identifier is invalid")]
     InvalidProfileId,
     #[error("profile is already locked by another daemon")]
@@ -9488,7 +9536,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION | 21 | 20 | 19 | 18 | 17 | 16 => return Ok(()),
+        PROFILE_SCHEMA_VERSION | 22 | 21 | 20 | 19 | 18 | 17 | 16 => return Ok(()),
         15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
@@ -11200,15 +11248,28 @@ fn encode_history_message_record(
     sender: DeviceId,
     epoch: u64,
     message: &ApplicationMessage,
+    request_service_reply: Option<RequestServiceHistoryReply>,
 ) -> Result<Zeroizing<Vec<u8>>, ProfileStoreError> {
     let message = Zeroizing::new(
         encode_application_message(message).map_err(|_| ProfileStoreError::Protocol)?,
     );
     let mut record = Zeroizing::new(Vec::with_capacity(
-        2 + EnvelopeId::LENGTH + DeviceId::LENGTH + 8 + message.len(),
+        3 + MessageId::LENGTH + EnvelopeId::LENGTH + DeviceId::LENGTH + 8 + message.len(),
     ));
-    record.push(LOCAL_RECORD_VERSION);
+    record.push(if request_service_reply.is_some() {
+        2
+    } else {
+        LOCAL_RECORD_VERSION
+    });
     record.push(direction as u8);
+    match request_service_reply {
+        None => {}
+        Some(RequestServiceHistoryReply::Pending) => record.push(0),
+        Some(RequestServiceHistoryReply::Complete(id)) => {
+            record.push(1);
+            record.extend_from_slice(id.as_bytes());
+        }
+    }
     record.extend_from_slice(envelope_id.as_bytes());
     record.extend_from_slice(sender.as_bytes());
     record.extend_from_slice(&epoch.to_be_bytes());
@@ -11218,21 +11279,29 @@ fn encode_history_message_record(
 
 fn decode_history_message_record(
     record: &[u8],
-) -> Result<
-    (
-        MessageDirection,
-        EnvelopeId,
-        DeviceId,
-        u64,
-        ApplicationMessage,
-    ),
-    ProfileStoreError,
-> {
-    const ENVELOPE_START: usize = 2;
-    const SENDER_START: usize = ENVELOPE_START + EnvelopeId::LENGTH;
-    const EPOCH_START: usize = SENDER_START + DeviceId::LENGTH;
-    const HEADER_LENGTH: usize = EPOCH_START + 8;
-    if record.len() <= HEADER_LENGTH || record[0] != LOCAL_RECORD_VERSION {
+) -> Result<DecodedHistoryMessageRecord, ProfileStoreError> {
+    if record.len() < 3 {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    let (envelope_start, request_service_reply) = match record[0] {
+        LOCAL_RECORD_VERSION => (2, None),
+        2 => match record[2] {
+            0 => (3, Some(RequestServiceHistoryReply::Pending)),
+            1 if record.len() >= 3 + MessageId::LENGTH => (
+                3 + MessageId::LENGTH,
+                Some(RequestServiceHistoryReply::Complete(
+                    MessageId::from_slice(&record[3..3 + MessageId::LENGTH])
+                        .map_err(|_| ProfileStoreError::CorruptData)?,
+                )),
+            ),
+            _ => return Err(ProfileStoreError::CorruptData),
+        },
+        _ => return Err(ProfileStoreError::CorruptData),
+    };
+    let sender_start = envelope_start + EnvelopeId::LENGTH;
+    let epoch_start = sender_start + DeviceId::LENGTH;
+    let header_length = epoch_start + 8;
+    if record.len() <= header_length {
         return Err(ProfileStoreError::CorruptData);
     }
     let direction = match record[1] {
@@ -11240,18 +11309,30 @@ fn decode_history_message_record(
         2 => MessageDirection::Inbound,
         _ => return Err(ProfileStoreError::CorruptData),
     };
-    let envelope_id = EnvelopeId::from_slice(&record[ENVELOPE_START..SENDER_START])
+    let envelope_id = EnvelopeId::from_slice(&record[envelope_start..sender_start])
         .map_err(|_| ProfileStoreError::CorruptData)?;
-    let sender = DeviceId::from_slice(&record[SENDER_START..EPOCH_START])
+    let sender = DeviceId::from_slice(&record[sender_start..epoch_start])
         .map_err(|_| ProfileStoreError::CorruptData)?;
     let epoch = u64::from_be_bytes(
-        record[EPOCH_START..HEADER_LENGTH]
+        record[epoch_start..header_length]
             .try_into()
             .map_err(|_| ProfileStoreError::CorruptData)?,
     );
-    let message = decode_application_message(&record[HEADER_LENGTH..])
+    let message = decode_application_message(&record[header_length..])
         .map_err(|_| ProfileStoreError::Protocol)?;
-    Ok((direction, envelope_id, sender, epoch, message))
+    if request_service_reply.is_some()
+        && !matches!(message.content(), ApplicationContent::DirectedRequest(_))
+    {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    Ok(DecodedHistoryMessageRecord {
+        direction,
+        envelope_id,
+        sender,
+        epoch,
+        message,
+        request_service_reply,
+    })
 }
 
 fn decode_positive_u64(bytes: &[u8]) -> Result<u64, ProfileStoreError> {
@@ -11983,6 +12064,14 @@ mod tests {
         name: &str,
         clock: Arc<dyn UnixClock>,
     ) -> (ConversationFixture, DeviceId) {
+        remote_membership_fixture_with_mode(name, clock, false)
+    }
+
+    fn remote_membership_fixture_with_mode(
+        name: &str,
+        clock: Arc<dyn UnixClock>,
+        request_service: bool,
+    ) -> (ConversationFixture, DeviceId) {
         let root = tempfile::tempdir().unwrap();
         let profile_id = ProfileId::parse(name).unwrap();
         let store = LockedProfile::acquire(root.path(), profile_id.clone())
@@ -11998,7 +12087,7 @@ mod tests {
         let remote_material = remote
             .create_conversation_signing_material(conversation_id)
             .unwrap();
-        let state = ConversationState::new(
+        let state = ConversationState::new_with_request_service(
             ProtocolVersion::application_v1(),
             conversation_id,
             0,
@@ -12007,6 +12096,14 @@ mod tests {
                 Member::new(local.device_id(), ConversationRole::Member, 0),
             ],
             vec![],
+            request_service.then(|| {
+                KonclaveDomainCore::RequestServiceChannel::new(
+                    conversation_id,
+                    remote.device_id(),
+                    local.device_id(),
+                )
+                .unwrap()
+            }),
         )
         .unwrap();
         let routing_id = RoutingId::from_bytes([19; RoutingId::LENGTH]);
@@ -12112,6 +12209,292 @@ mod tests {
             ApplicationContent::text(text).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn request_service_reply_witness_is_atomic_and_survives_reopen_and_request_echo() {
+        use std::sync::Barrier;
+        let (fixture, operator) = remote_membership_fixture_with_mode(
+            "service-reply-restart",
+            Arc::new(SystemUnixClock),
+            true,
+        );
+        let request = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([161; 16]),
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::directed_request(operator, "request").unwrap(),
+        )
+        .unwrap();
+        let envelope = relay_envelope(fixture.routing_id, 161, b"opaque request");
+        let reservation = fixture
+            .store
+            .reserve_outbound_application(
+                fixture.conversation_id,
+                request.message_id(),
+                envelope.envelope_id(),
+            )
+            .unwrap();
+        fixture
+            .store
+            .store_outbound_message(
+                reservation,
+                fixture.routing_id,
+                fixture.device_id,
+                0,
+                &request,
+            )
+            .unwrap();
+        fixture
+            .store
+            .store_outbound_envelope(reservation, &envelope)
+            .unwrap();
+        let echo = StoredRelayEnvelope::new(envelope, 1).unwrap();
+        fixture.store.mark_outbox_accepted(&echo).unwrap();
+        fixture.store.record_inbox_envelope(&echo).unwrap();
+        fixture
+            .store
+            .save_inbox_message(fixture.conversation_id, 1, fixture.device_id, 0, &request)
+            .unwrap();
+        fixture
+            .store
+            .complete_inbox_with_notification(
+                fixture.conversation_id,
+                1,
+                NotificationId::from_bytes([161; 16]),
+            )
+            .unwrap();
+        let query =
+            MessageHistoryQuery::new(MessageHistoryOrder::Ascending, 0, None, None, None, 10)
+                .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .load_request_service_inbox(fixture.conversation_id, query, operator)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        let replies = [162_u8, 163].map(|id| {
+            ApplicationMessage::new(
+                ProtocolVersion::application_v1(),
+                MessageId::from_bytes([id; 16]),
+                u64::from(id - 161),
+                1_700_000_000_000,
+                Some(request.message_id()),
+                ApplicationContent::text("terminal reply").unwrap(),
+            )
+            .unwrap()
+        });
+        for (index, reply) in replies.iter().enumerate() {
+            fixture
+                .store
+                .record_inbox_envelope(
+                    &StoredRelayEnvelope::new(
+                        relay_envelope(
+                            fixture.routing_id,
+                            162 + u8::try_from(index).unwrap(),
+                            reply.message_id().as_bytes(),
+                        ),
+                        2 + u64::try_from(index).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let barrier = Barrier::new(3);
+        let results = std::thread::scope(|scope| {
+            let handles = replies
+                .iter()
+                .enumerate()
+                .map(|(index, reply)| {
+                    let fixture = &fixture;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        fixture.store.save_inbox_message(
+                            fixture.conversation_id,
+                            2 + u64::try_from(index).unwrap(),
+                            operator,
+                            0,
+                            reply,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result
+                    == Err(ProfileStoreError::RequestService(
+                        KonclaveDomainCore::RequestServiceError::ReplyAlreadyCompleted,
+                    )))
+                .count(),
+            1
+        );
+        let winner = results.iter().position(Result::is_ok).unwrap();
+        assert!(
+            fixture
+                .store
+                .load_request_service_inbox(fixture.conversation_id, query, operator)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        let original_id = request.message_id();
+        let conversation_id = fixture.conversation_id;
+        let local_device = fixture.device_id;
+        let closed = fixture.close();
+        let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id)
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        reopened
+            .validate_request_service_application(
+                conversation_id,
+                operator,
+                replies[winner].content(),
+                Some(original_id),
+                replies[winner].message_id(),
+            )
+            .unwrap();
+        assert_eq!(
+            reopened.validate_request_service_application(
+                conversation_id,
+                operator,
+                replies[1 - winner].content(),
+                Some(original_id),
+                replies[1 - winner].message_id(),
+            ),
+            Err(ProfileStoreError::RequestService(
+                KonclaveDomainCore::RequestServiceError::ReplyAlreadyCompleted
+            )),
+        );
+        reopened
+            .save_inbox_message(conversation_id, 1, local_device, 0, &request)
+            .unwrap();
+        assert_eq!(
+            reopened.validate_request_service_application(
+                conversation_id,
+                operator,
+                replies[1 - winner].content(),
+                Some(original_id),
+                replies[1 - winner].message_id(),
+            ),
+            Err(ProfileStoreError::RequestService(
+                KonclaveDomainCore::RequestServiceError::ReplyAlreadyCompleted
+            )),
+        );
+    }
+
+    #[test]
+    fn request_service_schema_upgrade_preserves_ordinary_state_and_blocks_floor_rollback() {
+        let fixture = conversation_fixture("service-schema-upgrade");
+        {
+            let connection = fixture.store.lock().unwrap();
+            set_device_identity_schema_floor(&connection, 22);
+            connection.pragma_update(None, "user_version", 22).unwrap();
+        }
+        let id = fixture.conversation_id;
+        let closed = fixture.close();
+        let store = LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        assert_eq!(
+            store.load_conversation(id).unwrap().state.request_service(),
+            None
+        );
+        {
+            let connection = store.lock().unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                PROFILE_SCHEMA_VERSION
+            );
+            connection.pragma_update(None, "user_version", 22).unwrap();
+        }
+        drop(store);
+        assert_eq!(
+            LockedProfile::acquire(closed.root.path(), closed.profile_id)
+                .unwrap()
+                .open_store(sealer())
+                .err(),
+            Some(ProfileStoreError::CorruptData),
+        );
+    }
+
+    #[test]
+    fn request_service_history_codec_rejects_invalid_receipts_and_preserves_legacy() {
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([165; 16]),
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::directed_request(DeviceId::from_bytes([166; 32]), "request")
+                .unwrap(),
+        )
+        .unwrap();
+        for receipt in [
+            None,
+            Some(RequestServiceHistoryReply::Pending),
+            Some(RequestServiceHistoryReply::Complete(MessageId::from_bytes(
+                [167; 16],
+            ))),
+        ] {
+            let encoded = encode_history_message_record(
+                MessageDirection::Outbound,
+                EnvelopeId::from_bytes([165; 16]),
+                DeviceId::from_bytes([165; 32]),
+                9,
+                &message,
+                receipt,
+            )
+            .unwrap();
+            let decoded = decode_history_message_record(&encoded).unwrap();
+            assert_eq!(decoded.envelope_id, EnvelopeId::from_bytes([165; 16]));
+            assert_eq!(decoded.sender, DeviceId::from_bytes([165; 32]));
+            assert_eq!(decoded.epoch, 9);
+            assert!(application_messages_equal(&message, &decoded.message).unwrap());
+            assert_eq!(decoded.request_service_reply, receipt);
+            for length in 0..encoded.len() {
+                assert!(decode_history_message_record(&encoded[..length]).is_err());
+            }
+        }
+        let mut encoded = encode_history_message_record(
+            MessageDirection::Outbound,
+            EnvelopeId::from_bytes([165; 16]),
+            DeviceId::from_bytes([165; 32]),
+            9,
+            &message,
+            Some(RequestServiceHistoryReply::Pending),
+        )
+        .unwrap();
+        encoded[2] = 255;
+        assert!(decode_history_message_record(&encoded).is_err());
+        let text = application_message(165, 1, "not a request");
+        let encoded = encode_history_message_record(
+            MessageDirection::Outbound,
+            EnvelopeId::from_bytes([165; 16]),
+            DeviceId::from_bytes([165; 32]),
+            9,
+            &text,
+            Some(RequestServiceHistoryReply::Pending),
+        )
+        .unwrap();
+        assert!(decode_history_message_record(&encoded).is_err());
     }
 
     fn relay_envelope(routing_id: RoutingId, id: u8, payload: &[u8]) -> RelayEnvelope {
@@ -12757,7 +13140,7 @@ mod tests {
             let device = fixture.device_id;
             let identity = fixture
                 .store
-                .profile_identity_for_schema_transition(22, floor)
+                .profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, floor)
                 .unwrap()
                 .unwrap();
             {

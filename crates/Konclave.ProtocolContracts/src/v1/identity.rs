@@ -272,6 +272,9 @@ pub(super) fn credential_from_wire(
 
 pub(super) fn invitation_to_wire(value: &Invitation) -> wire::Invitation {
     wire::Invitation {
+        request_service: value
+            .request_service()
+            .map(super::common::request_service_to_wire),
         version: Some(version_to_wire(value.version())),
         invitation_id: Some(invitation_id_to_wire(value.invitation_id())),
         conversation_id: Some(super::common::conversation_id_to_wire(
@@ -290,7 +293,7 @@ pub(super) fn invitation_to_wire(value: &Invitation) -> wire::Invitation {
 pub(super) fn invitation_from_wire(
     wire: wire::Invitation,
 ) -> Result<Invitation, KonclaveProtocolError> {
-    Ok(Invitation::new(
+    Ok(Invitation::new_with_request_service(
         version_from_wire(wire.version, INVITATION_CONTRACT)?,
         invitation_id_from_wire(wire.invitation_id)?,
         super::common::conversation_id_from_wire(wire.conversation_id)?,
@@ -303,6 +306,7 @@ pub(super) fn invitation_from_wire(
         nonce_from_bytes(&wire.nonce)?,
         device_id_from_wire(wire.issuer_device_id)?,
         signature_from_bytes(&wire.issuer_signature)?,
+        super::common::request_service_from_wire(wire.request_service)?,
     )?)
 }
 

@@ -19,6 +19,7 @@ $expectedContracts = @(
     'native-storage'
     'profile-lifecycle'
     'pairing-rendezvous'
+    'request-service'
     'response-continuation'
     'short-code-pairing'
     'trusted-device-alias'
@@ -39,6 +40,7 @@ $workflowByContract = [ordered]@{
     'native-storage' = 'native-storage-conformance.yml'
     'profile-lifecycle' = 'profile-lifecycle-conformance.yml'
     'pairing-rendezvous' = 'pairing-rendezvous-conformance.yml'
+    'request-service' = 'request-service-conformance.yml'
     'short-code-pairing' = 'short-code-pairing-conformance.yml'
     'trusted-device-alias' = 'trusted-device-alias-conformance.yml'
     'user-presence' = 'user-presence-conformance.yml'
@@ -76,7 +78,7 @@ foreach ($contract in $expectedContracts) {
         -Contract $contract `
         -EventName pull_request `
         -ChangedFiles $authorizationHistoryFiles
-    $expected = $contract -cin @('local-delivery-diagnostics', 'response-continuation')
+    $expected = $contract -cin @('local-delivery-diagnostics', 'request-service', 'response-continuation')
     if ($selected -ne $expected) {
         throw "Authorization history changes over-select '$contract'."
     }
@@ -148,6 +150,19 @@ $ownedCases = [ordered]@{
         'apps/Konclave.LocalDaemon/src/profile_lifecycle.rs'
     'pairing-rendezvous' =
         'extensions/Konclave.HostExtension/src/service/pairing-handoff.ts'
+    'request-service' = @(
+        'crates/Konclave.DomainCore/src/request_service.rs'
+        'crates/Konclave.CryptographicCore/src/identity.rs'
+        'crates/Konclave.ProtocolContracts/src/lib.rs'
+        'proto/konclave/protocol/v1/membership.proto'
+        'apps/Konclave.LocalDaemon/src/conversation.rs'
+        'apps/Konclave.LocalDaemon/src/persistence/request_service.rs'
+        'apps/Konclave.LocalDaemon/src/service.rs'
+        'extensions/Konclave.HostExtension/src/service/commands.ts'
+        'fixtures/local-service/v1/copilot-tools.json'
+        'docs/adr/adr-0032-request-service-channels.md'
+        'docs/development/request-services.md'
+    )
     'short-code-pairing' =
         'proto/konclave/protocol/v1/short_code_pairing.proto'
     'trusted-device-alias' =

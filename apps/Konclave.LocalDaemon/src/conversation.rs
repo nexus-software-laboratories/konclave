@@ -12,10 +12,11 @@ use KonclaveDomainCore::{
     DeliveryClass, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, EnvelopeId, Invitation,
     JoinProof, KonclaveDomainError, Member, MembershipOperationId, MessageDeliveryStatus,
     MessageHistoryQuery, MessageId, NotificationId, PairingControl, PairingId, PairingMessageId,
-    PairingStage, ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RoutingId,
-    StoredRelayEnvelope, TrustedDeviceAlias, TrustedDeviceAliasDecision, TrustedDeviceBinding,
-    TrustedDeviceBindingStatus, TrustedDeviceEvidence, TrustedDeviceResolution,
-    resolve_trusted_device, trusted_device_binding_status,
+    PairingStage, ProtocolVersion, RelayEnvelope, RepeatPairingOperationId, RequestServiceChannel,
+    RequestServiceError, RoutingId, StoredRelayEnvelope, TrustedDeviceAlias,
+    TrustedDeviceAliasDecision, TrustedDeviceBinding, TrustedDeviceBindingStatus,
+    TrustedDeviceEvidence, TrustedDeviceResolution, resolve_trusted_device,
+    trusted_device_binding_status,
 };
 use KonclaveProtocolContracts::v1::{
     decode_application_message, decode_membership_commit_bundle, decode_membership_control,
@@ -257,6 +258,20 @@ impl ConversationCoordinator {
     ///
     /// Returns a typed randomness, cryptographic, profile, or state error.
     pub(crate) fn create(&self) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        self.create_with_requester(None)
+    }
+
+    pub(crate) fn create_request_service(
+        &self,
+        requester_device_id: DeviceId,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        self.create_with_requester(Some(requester_device_id))
+    }
+
+    fn create_with_requester(
+        &self,
+        requester_device_id: Option<DeviceId>,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
         let _operation = self
             .operations
             .lock()
@@ -275,7 +290,11 @@ impl ConversationCoordinator {
                     .map_err(|_| ConversationCoordinatorError::Cryptographic)?,
             )
         };
-        self.create_with_identifiers_unlocked(conversation_id, routing_id)
+        self.create_with_identifiers_and_requester_unlocked(
+            conversation_id,
+            routing_id,
+            requester_device_id,
+        )
     }
 
     pub(crate) fn generate_repeat_pairing_identifiers(
@@ -320,9 +339,26 @@ impl ConversationCoordinator {
         conversation_id: ConversationId,
         routing_id: RoutingId,
     ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        self.create_with_identifiers_and_requester_unlocked(conversation_id, routing_id, None)
+    }
+
+    fn create_with_identifiers_and_requester_unlocked(
+        &self,
+        conversation_id: ConversationId,
+        routing_id: RoutingId,
+        requester_device_id: Option<DeviceId>,
+    ) -> Result<ConversationSummary, ConversationCoordinatorError> {
+        let operator_device_id = self.device_id()?;
+        let request_service = requester_device_id
+            .map(|requester| {
+                RequestServiceChannel::new(conversation_id, operator_device_id, requester)
+            })
+            .transpose()?;
         match self.store.load_conversation(conversation_id) {
             Ok(stored) => {
-                if stored.routing_id != routing_id {
+                if stored.routing_id != routing_id
+                    || stored.state.request_service() != request_service
+                {
                     return Err(ConversationCoordinatorError::StateMismatch);
                 }
                 return Ok(self.open_unlocked(conversation_id)?.summary());
@@ -342,7 +378,18 @@ impl ConversationCoordinator {
                 device.device_id(),
             )
         };
-        let state = initial_conversation_state(conversation_id, device_id)?;
+        let state = match request_service {
+            Some(channel) => ConversationState::new_with_request_service(
+                ProtocolVersion::application_v1(),
+                conversation_id,
+                0,
+                vec![Member::new(device_id, ConversationRole::Administrator, 0)],
+                vec![],
+                Some(channel),
+            )
+            .map_err(|_| ConversationCoordinatorError::StateMismatch)?,
+            None => initial_conversation_state(conversation_id, device_id)?,
+        };
         let binding = signing_material.binding().clone();
         self.store.insert_conversation_with_adapter_delivery(
             routing_id,
@@ -438,9 +485,11 @@ impl ConversationCoordinator {
             )
             .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
             let expected_state = stored.state;
-            let group = client
-                .create_group()
-                .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+            let group = match expected_state.request_service() {
+                Some(channel) => client.create_request_service_group(channel.requester_device_id()),
+                None => client.create_group(),
+            }
+            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
             if group.state() != &expected_state {
                 return Err(ConversationCoordinatorError::StateMismatch);
             }
@@ -915,18 +964,33 @@ impl ConversationCoordinator {
         {
             return Err(ConversationCoordinatorError::Unauthorized);
         }
-        let invitation = self
+        let device = self
             .device
             .lock()
-            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?
-            .issue_invitation(
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let invitation = match conversation.group.state().request_service() {
+            Some(channel) => {
+                if expected_device_id != channel.requester_device_id()
+                    || role != ConversationRole::Member
+                {
+                    return Err(RequestServiceError::InvalidRequester.into());
+                }
+                device.issue_request_service_invitation(
+                    channel,
+                    conversation.routing_id,
+                    expires_at_unix_seconds,
+                )
+            }
+            None => device.issue_invitation(
                 conversation_id,
                 conversation.routing_id,
                 expected_device_id,
                 role,
                 expires_at_unix_seconds,
-            )
-            .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+            ),
+        }
+        .map_err(|_| ConversationCoordinatorError::Cryptographic)?;
+        drop(device);
         let stored = self.store.load_conversation(conversation_id)?;
         Ok(InvitationPackage {
             invitation,
@@ -1362,6 +1426,25 @@ impl ConversationCoordinator {
             .operations
             .lock()
             .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        let local_device = self.device_id()?;
+        self.store.validate_request_service_application(
+            request.conversation_id,
+            local_device,
+            &request.content,
+            request.reply_to,
+            request.message_id,
+        )?;
+        if matches!(request.content, ApplicationContent::Text(_))
+            && request.collaboration_action_authorization.is_none()
+            && self
+                .store
+                .load_conversation(request.conversation_id)?
+                .state
+                .request_service()
+                .is_some()
+        {
+            return Err(ConversationCoordinatorError::RequestServiceReplyAuthorityRequired);
+        }
         if let ApplicationContent::DirectedRequest(directed_request) = &request.content {
             let conversation = self.store.load_conversation(request.conversation_id)?;
             let target = directed_request.target_device_id();
@@ -1929,6 +2012,58 @@ impl ConversationCoordinator {
             .map_err(Into::into)
     }
 
+    /// Reads unreplied requests without claiming work or changing local authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects ordinary channels, requester-side access and invalid sealed history.
+    pub(crate) fn request_service_inbox(
+        &self,
+        conversation_id: ConversationId,
+        query: MessageHistoryQuery,
+    ) -> Result<HistoryPage, ConversationCoordinatorError> {
+        self.store
+            .load_request_service_inbox(conversation_id, query, self.device_id()?)
+            .map_err(Into::into)
+    }
+
+    /// Inspects a bounded page of this profile's operator-owned channel descriptors.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid page bounds or an authenticated profile-state failure.
+    pub(crate) fn request_service_channels(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<
+        (Vec<RequestServiceChannelSummary>, Option<ConversationId>),
+        ConversationCoordinatorError,
+    > {
+        if !(1..=50).contains(&limit) {
+            return Err(ConversationCoordinatorError::StateMismatch);
+        }
+        let identifiers = self.conversation_ids(after, limit + 1)?;
+        let operator = self.device_id()?;
+        let mut channels = Vec::with_capacity(identifiers.len().min(limit));
+        for identifier in identifiers.iter().take(limit) {
+            let conversation = self.store.load_conversation(*identifier)?;
+            if let Some(channel) = conversation.state.request_service()
+                && channel.operator_device_id() == operator
+            {
+                channels.push(RequestServiceChannelSummary {
+                    channel,
+                    requester_enrolled: conversation
+                        .state
+                        .member(channel.requester_device_id())
+                        .is_some(),
+                });
+            }
+        }
+        let next = (identifiers.len() > limit).then(|| identifiers[limit - 1]);
+        Ok((channels, next))
+    }
+
     /// Records one exact relay submission response.
     ///
     /// # Errors
@@ -2049,6 +2184,13 @@ impl ConversationCoordinator {
                 let epoch = conversation.group.epoch();
                 let (sender, message) =
                     decrypt_application(&mut conversation.group, stored.envelope())?;
+                self.store.validate_request_service_application(
+                    conversation_id,
+                    sender,
+                    message.content(),
+                    message.reply_to(),
+                    message.message_id(),
+                )?;
                 self.store.save_inbox_message(
                     conversation_id,
                     stored.cursor(),
@@ -2459,6 +2601,11 @@ pub(crate) struct InvitationPackage {
     pub(crate) peer_bindings: Vec<DeviceCredentialBinding>,
 }
 
+pub(crate) struct RequestServiceChannelSummary {
+    pub(crate) channel: RequestServiceChannel,
+    pub(crate) requester_enrolled: bool,
+}
+
 /// One authenticated application message recovered from a relay cursor.
 pub(crate) struct ProcessedApplication {
     pub(crate) conversation_id: ConversationId,
@@ -2517,6 +2664,10 @@ pub(crate) struct TrustedDeviceSummary {
 #[non_exhaustive]
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum ConversationCoordinatorError {
+    #[error(transparent)]
+    RequestService(#[from] RequestServiceError),
+    #[error("request-service replies require a current locally authorized directed-request claim")]
+    RequestServiceReplyAuthorityRequired,
     #[error("daemon profile operation failed")]
     Profile(#[from] ProfileStoreError),
     #[error("cryptographic conversation operation failed")]
@@ -2692,6 +2843,18 @@ pub(crate) mod tests {
         ConversationId,
         DeviceId,
     ) {
+        paired_coordinators_with_mode(false)
+    }
+
+    fn paired_coordinators_with_mode(
+        request_service: bool,
+    ) -> (
+        tempfile::TempDir,
+        ConversationCoordinator,
+        ConversationCoordinator,
+        ConversationId,
+        DeviceId,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let alice_locked =
             LockedProfile::acquire(root.path(), ProfileId::parse("alice").unwrap()).unwrap();
@@ -2750,16 +2913,26 @@ pub(crate) mod tests {
         bob_client
             .register_verified_binding(verify_device_credential_binding(&alice_binding).unwrap())
             .unwrap();
-        let mut alice_group = alice_client.create_group().unwrap();
-        let invitation = alice_identity
-            .issue_invitation(
+        let mut alice_group = if request_service {
+            alice_client
+                .create_request_service_group(bob_identity.device_id())
+                .unwrap()
+        } else {
+            alice_client.create_group().unwrap()
+        };
+        let invitation = match alice_group.state().request_service() {
+            Some(channel) => {
+                alice_identity.issue_request_service_invitation(channel, routing_id, 100)
+            }
+            None => alice_identity.issue_invitation(
                 conversation_id,
                 routing_id,
                 bob_identity.device_id(),
                 ConversationRole::Member,
                 100,
-            )
-            .unwrap();
+            ),
+        }
+        .unwrap();
         let proof = bob_client
             .create_join_proof(&bob_identity, invitation, alice_identity.public_key(), 50)
             .unwrap();
@@ -2809,6 +2982,394 @@ pub(crate) mod tests {
         if persist_ratchet {
             conversation.group.persist().unwrap();
         }
+    }
+
+    pub(crate) fn enroll_request_service_pair(
+        operator: &ConversationCoordinator,
+        requester: &ConversationCoordinator,
+    ) -> ConversationId {
+        let requester_id = requester.device_id().unwrap();
+        let id = operator
+            .create_request_service(requester_id)
+            .unwrap()
+            .conversation_id;
+        let invitation = operator
+            .issue_invitation(id, requester_id, ConversationRole::Member, 1_900_000_000)
+            .unwrap();
+        let proof = requester
+            .create_join_proof(
+                invitation.invitation,
+                invitation.routing_id,
+                invitation.issuer_public_key,
+                invitation.peer_bindings,
+                1_700_000_000,
+            )
+            .unwrap();
+        let prepared = operator
+            .prepare_add_member(id, proof, 1_700_000_000, 1_900_000_000)
+            .unwrap();
+        let welcome = MlsWelcome::from_bytes(prepared.welcome.as_ref().unwrap()).unwrap();
+        let stored = StoredRelayEnvelope::new(prepared.envelope, 1).unwrap();
+        operator.mark_membership_outbox_accepted(&stored).unwrap();
+        operator
+            .process_inbound_membership(id, &stored, 1_700_000_000)
+            .unwrap();
+        requester.accept_welcome(id, &welcome, &stored).unwrap();
+        id
+    }
+
+    #[test]
+    fn request_service_multichannel_delivery_is_fair_and_requester_history_is_private() {
+        use KonclaveDomainCore::{AdapterConsumerId, AdapterLeaseId, MessageHistoryOrder};
+        let root = tempfile::tempdir().unwrap();
+        let operator = open_coordinator(root.path(), "operator");
+        let first = open_coordinator(root.path(), "requester-a");
+        let second = open_coordinator(root.path(), "requester-b");
+        let first_id = enroll_request_service_pair(&operator, &first);
+        let second_id = enroll_request_service_pair(&operator, &second);
+        let operator_id = operator.device_id().unwrap();
+        let second_device = second.device_id().unwrap();
+        let store = operator.store();
+        let policy = store
+            .store_collaboration_policy_bundle(include_bytes!(
+                "../../../fixtures/protocol/v1/collaboration-policy-bundle.bin"
+            ))
+            .unwrap();
+        for id in [first_id, second_id] {
+            store
+                .activate_collaboration_policy(id, policy, 100)
+                .unwrap();
+            store.set_adapter_delivery_enabled(id, true).unwrap();
+        }
+        let now = SystemUnixClock.now_unix_milliseconds();
+        for (requester, id, end) in [(&first, first_id, 5), (&second, second_id, 2)] {
+            for cursor in 2..=end {
+                let prepared = requester
+                    .prepare_application(
+                        id,
+                        ApplicationContent::directed_request(operator_id, "request").unwrap(),
+                        None,
+                        now,
+                        now / 1_000 + 3_600,
+                    )
+                    .unwrap();
+                let stored = StoredRelayEnvelope::new(prepared.envelope, cursor).unwrap();
+                requester.mark_outbox_accepted(&stored).unwrap();
+                operator.process_inbound_application(id, &stored).unwrap();
+            }
+        }
+        let consumer = AdapterConsumerId::from_bytes([81; AdapterConsumerId::LENGTH]);
+        let lease = AdapterLeaseId::from_bytes([82; AdapterLeaseId::LENGTH]);
+        store
+            .acquire_adapter_consumer(consumer, lease, now, now + 60_000)
+            .unwrap();
+        let batch = store
+            .claim_remote_events(consumer, lease, now, now + 60_000, 2)
+            .unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_ne!(
+            batch[0].event.conversation_id,
+            batch[1].event.conversation_id
+        );
+        assert!(
+            batch
+                .iter()
+                .all(|event| [first_id, second_id].contains(&event.event.conversation_id))
+        );
+        let query =
+            MessageHistoryQuery::new(MessageHistoryOrder::Ascending, 0, None, None, None, 10)
+                .unwrap();
+        assert_eq!(
+            operator
+                .request_service_inbox(first_id, query)
+                .unwrap()
+                .messages
+                .len(),
+            4
+        );
+        assert_eq!(
+            operator
+                .request_service_inbox(second_id, query)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert!(first.history_query(second_id, query).is_err());
+        assert!(second.history_query(first_id, query).is_err());
+        assert!(
+            first
+                .prepare_application(
+                    first_id,
+                    ApplicationContent::directed_request(second_device, "cross-requester").unwrap(),
+                    None,
+                    now,
+                    now / 1_000 + 3_600,
+                )
+                .is_err()
+        );
+        let removal = operator
+            .prepare_remove_member(second_id, second_device, now / 1_000 + 3_600)
+            .unwrap();
+        let removed = StoredRelayEnvelope::new(removal.envelope, 3).unwrap();
+        operator.mark_membership_outbox_accepted(&removed).unwrap();
+        assert!(
+            operator
+                .request_service_inbox(second_id, query)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert_eq!(
+            operator
+                .request_service_inbox(first_id, query)
+                .unwrap()
+                .messages
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn request_service_native_direction_and_claimless_reply_are_enforced() {
+        let (_root, operator, requester, id, operator_id) = paired_coordinators_with_mode(true);
+        let requester_id = requester.device_id().unwrap();
+        for (sender, content, reply_to) in [
+            (
+                &operator,
+                ApplicationContent::directed_request(requester_id, "reverse").unwrap(),
+                None,
+            ),
+            (
+                &operator,
+                ApplicationContent::text("unsolicited").unwrap(),
+                None,
+            ),
+            (
+                &requester,
+                ApplicationContent::text("unsolicited").unwrap(),
+                None,
+            ),
+            (
+                &requester,
+                ApplicationContent::directed_request(DeviceId::from_bytes([99; 32]), "foreign")
+                    .unwrap(),
+                None,
+            ),
+            (
+                &requester,
+                ApplicationContent::text("reverse reply").unwrap(),
+                Some(MessageId::from_bytes([98; 16])),
+            ),
+        ] {
+            assert!(
+                sender
+                    .prepare_application(id, content, reply_to, 1_700_000_000_000, 1_900_000_000)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            operator.store.load_conversation(id).unwrap().sender_counter,
+            0
+        );
+        assert_eq!(
+            requester
+                .store
+                .load_conversation(id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
+        let prepared = requester
+            .prepare_application(
+                id,
+                ApplicationContent::directed_request(operator_id, "authorized direction").unwrap(),
+                None,
+                1_700_000_000_000,
+                1_900_000_000,
+            )
+            .unwrap();
+        let request_id = prepared.message.message_id();
+        let stored = StoredRelayEnvelope::new(prepared.envelope, 1).unwrap();
+        requester.mark_outbox_accepted(&stored).unwrap();
+        let received = operator.process_inbound_application(id, &stored).unwrap();
+        assert_eq!(received.sender, requester_id);
+        assert_eq!(received.message.message_id(), request_id);
+        assert_eq!(
+            operator
+                .prepare_application(
+                    id,
+                    ApplicationContent::text("claimless reply").unwrap(),
+                    Some(request_id),
+                    1_700_000_000_000,
+                    1_900_000_000,
+                )
+                .err(),
+            Some(ConversationCoordinatorError::RequestServiceReplyAuthorityRequired),
+        );
+        let query = MessageHistoryQuery::new(
+            KonclaveDomainCore::MessageHistoryOrder::Ascending,
+            0,
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
+        let inbox = operator.request_service_inbox(id, query).unwrap();
+        assert_eq!(inbox.messages.len(), 1);
+        assert_eq!(inbox.messages[0].message.message_id(), request_id);
+        assert!(requester.request_service_inbox(id, query).is_err());
+        assert!(
+            requester
+                .request_service_channels(None, 10)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        let ordinary = operator.create().unwrap();
+        assert!(
+            operator
+                .request_service_inbox(ordinary.conversation_id, query)
+                .is_err()
+        );
+        let (first, next) = operator.request_service_channels(None, 1).unwrap();
+        let next = next.unwrap();
+        let (second, final_next) = operator.request_service_channels(Some(next), 1).unwrap();
+        let channels = first.into_iter().chain(second).collect::<Vec<_>>();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel.conversation_id(), id);
+        assert_eq!(channels[0].channel.operator_device_id(), operator_id);
+        assert_eq!(channels[0].channel.requester_device_id(), requester_id);
+        assert!(channels[0].requester_enrolled);
+        assert!(final_next.is_none());
+    }
+
+    #[test]
+    fn request_service_initial_checkpoint_recovers_without_downgrading() {
+        let root = tempfile::tempdir().unwrap();
+        let locked =
+            LockedProfile::acquire(root.path(), ProfileId::parse("service-recover").unwrap())
+                .unwrap();
+        let mls_path = locked.mls_database_path();
+        let profile_sealer = sealer();
+        let mls = SealedSqliteMlsStorage::open(&mls_path, profile_sealer.share()).unwrap();
+        let store = locked.open_store(profile_sealer).unwrap();
+        let identity = store.load_or_create_device().unwrap();
+        let id = identity.generate_conversation_id().unwrap();
+        let route = identity.generate_routing_id().unwrap();
+        let channel =
+            RequestServiceChannel::new(id, identity.device_id(), DeviceId::from_bytes([97; 32]))
+                .unwrap();
+        let material = identity.create_conversation_signing_material(id).unwrap();
+        let state = ConversationState::new_with_request_service(
+            ProtocolVersion::application_v1(),
+            id,
+            0,
+            vec![Member::new(
+                identity.device_id(),
+                ConversationRole::Administrator,
+                0,
+            )],
+            vec![],
+            Some(channel),
+        )
+        .unwrap();
+        store
+            .insert_conversation(route, &material, &state, &[material.binding().clone()])
+            .unwrap();
+        assert!(!mls.contains_group(id.as_bytes()).unwrap());
+        drop(identity);
+        drop(material);
+        drop(store);
+        drop(mls);
+        let coordinator = open_coordinator(root.path(), "service-recover");
+        coordinator.recover().unwrap();
+        assert_eq!(
+            coordinator
+                .open(id)
+                .unwrap()
+                .group
+                .state()
+                .request_service(),
+            Some(channel)
+        );
+        assert!(
+            coordinator
+                .issue_invitation(
+                    id,
+                    DeviceId::from_bytes([96; 32]),
+                    ConversationRole::Member,
+                    1_900_000_000
+                )
+                .is_err()
+        );
+        assert!(
+            coordinator
+                .issue_invitation(
+                    id,
+                    channel.requester_device_id(),
+                    ConversationRole::Administrator,
+                    1_900_000_000
+                )
+                .is_err()
+        );
+        let invitation = coordinator
+            .issue_invitation(
+                id,
+                channel.requester_device_id(),
+                ConversationRole::Member,
+                1_900_000_000,
+            )
+            .unwrap();
+        assert_eq!(invitation.invitation.request_service(), Some(channel));
+    }
+
+    #[test]
+    fn request_service_rejects_authenticated_wrong_direction_before_receiver_ratchet_commit() {
+        let (_root, operator, requester, id, _) = paired_coordinators_with_mode(true);
+        let unsolicited = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([95; 16]),
+            1,
+            1_700_000_000_000,
+            None,
+            ApplicationContent::text("unsolicited").unwrap(),
+        )
+        .unwrap();
+        let mut conversation = operator.open(id).unwrap();
+        let ciphertext = conversation
+            .group
+            .encrypt_application_message(&encode_application_message(&unsolicited).unwrap())
+            .unwrap();
+        let envelope = RelayEnvelope::new(
+            ProtocolVersion::application_v1(),
+            conversation.routing_id,
+            EnvelopeId::from_bytes([95; 16]),
+            DeliveryClass::GroupApplication,
+            None,
+            1_900_000_000,
+            ciphertext.into_bytes(),
+        )
+        .unwrap();
+        drop(conversation);
+        let stored = StoredRelayEnvelope::new(envelope, 1).unwrap();
+        let refusal = requester
+            .process_inbound_application(id, &stored)
+            .err()
+            .unwrap();
+        assert_eq!(
+            requester.process_inbound_application(id, &stored).err(),
+            Some(refusal)
+        );
+        assert_eq!(
+            requester
+                .store
+                .load_conversation(id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
     }
 
     fn stage_own_echo_saved(

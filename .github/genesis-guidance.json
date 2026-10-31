@@ -222,6 +222,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0032-request-service-channels.md",
+        "title": "ADR 0032: Private request-service channels",
+        "section": "Architecture",
+        "order": 320,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",
@@ -364,6 +371,13 @@
       {
         "path": "docs/development/collaboration-policies.md",
         "title": "Collaboration policy contracts",
+        "section": "Development",
+        "order": 34,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/request-services.md",
+        "title": "Directional request-service channels",
         "section": "Development",
         "order": 34,
         "owner": "project:konclave"

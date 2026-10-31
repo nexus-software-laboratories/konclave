@@ -74,6 +74,11 @@ struct ListConversationsRequest {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreateRequestServiceChannelRequest {
+    requester_device_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct TrustedDeviceAliasRequest {
     device_id: String,
@@ -313,6 +318,21 @@ struct ConversationResult {
 struct ConversationListResult {
     conversation_ids: Vec<String>,
     active_conversation_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct RequestServiceChannelResult {
+    conversation_id: String,
+    operator_device_id: String,
+    requester_device_id: String,
+    requester_enrolled: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct RequestServiceChannelsResult {
+    channels: Vec<RequestServiceChannelResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_after_conversation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -643,8 +663,20 @@ impl StdioServer {
                 Self::require_empty_request(payload)?;
                 Self::encode_json(self.create_conversation().await?)
             }
+            "create_request_service_channel" => Self::encode_json(
+                self.create_request_service_channel(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             "list_conversations" => Self::encode_json(
                 self.list_conversations(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "list_request_service_channels" => Self::encode_json(
+                self.list_request_service_channels(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
+            "read_request_service_inbox" => Self::encode_json(
+                self.read_request_service_inbox(Self::parse_parameters(payload)?)
                     .await?,
             ),
             "list_trusted_devices" => {
@@ -1406,6 +1438,29 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "create_request_service_channel",
+        description = "Create a private operator channel for one expected requester; enrollment grants no work authority."
+    )]
+    async fn create_request_service_channel(
+        &self,
+        Parameters(request): Parameters<CreateRequestServiceChannelRequest>,
+    ) -> Result<Json<ConversationResult>, String> {
+        self.authorize("create_request_service_channel")?;
+        let requester = parse_device_id(&request.requester_device_id)?;
+        let conversations = self.conversations.clone();
+        let summary =
+            tokio::task::spawn_blocking(move || conversations.create_request_service(requester))
+                .await
+                .map_err(|_| "task_failed".to_string())?
+                .map_err(tool_error)?;
+        Ok(Json(ConversationResult {
+            conversation_id: encode_hex(summary.conversation_id.as_bytes()),
+            routing_id: encode_hex(summary.routing_id.as_bytes()),
+            epoch: summary.epoch,
+        }))
+    }
+
+    #[tool(
         name = "list_conversations",
         description = "List a bounded page of local sealed conversation identifiers."
     )]
@@ -1436,6 +1491,47 @@ impl StdioServer {
                 .map(|identifier| encode_hex(identifier.as_bytes()))
                 .collect(),
             active_conversation_id: active.map(|identifier| encode_hex(identifier.as_bytes())),
+        }))
+    }
+
+    #[tool(
+        name = "list_request_service_channels",
+        description = "Inspect a bounded page of this profile's operator-owned private channels and authenticated endpoints."
+    )]
+    async fn list_request_service_channels(
+        &self,
+        Parameters(request): Parameters<ListConversationsRequest>,
+    ) -> Result<Json<RequestServiceChannelsResult>, String> {
+        self.authorize("list_request_service_channels")?;
+        let after = request
+            .after_conversation_id
+            .as_deref()
+            .map(parse_conversation_id)
+            .transpose()?;
+        let limit = page_size(request.limit.or(Some(10)))?;
+        if limit > 50 {
+            return Err("invalid_page_size".to_string());
+        }
+        let conversations = self.conversations.clone();
+        let (channels, next) = tokio::task::spawn_blocking(move || {
+            conversations.request_service_channels(after, limit)
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+        Ok(Json(RequestServiceChannelsResult {
+            channels: channels
+                .into_iter()
+                .map(|summary| RequestServiceChannelResult {
+                    conversation_id: encode_hex(summary.channel.conversation_id().as_bytes()),
+                    operator_device_id: encode_hex(summary.channel.operator_device_id().as_bytes()),
+                    requester_device_id: encode_hex(
+                        summary.channel.requester_device_id().as_bytes(),
+                    ),
+                    requester_enrolled: summary.requester_enrolled,
+                })
+                .collect(),
+            next_after_conversation_id: next.map(|id| encode_hex(id.as_bytes())),
         }))
     }
 
@@ -2037,6 +2133,51 @@ impl StdioServer {
     }
 
     #[tool(
+        name = "read_request_service_inbox",
+        description = "Read bounded unreplied requests in an operator-owned channel; inspection grants no work authority."
+    )]
+    async fn read_request_service_inbox(
+        &self,
+        Parameters(request): Parameters<ReadMessagesRequest>,
+    ) -> Result<Json<ReadMessagesResult>, String> {
+        self.authorize("read_request_service_inbox")?;
+        let conversation_id = parse_conversation_id(&request.conversation_id)?;
+        let order = MessageHistoryOrder::try_from(request.order.as_deref().unwrap_or("asc"))
+            .map_err(|error| error.to_string())?;
+        let limit = page_size(request.limit.or(Some(10)))?;
+        if limit > 10 {
+            return Err("invalid_page_size".to_string());
+        }
+        let query = MessageHistoryQuery::new(
+            order,
+            request.after_cursor.unwrap_or(0),
+            request.before_cursor,
+            request.since_unix_milliseconds,
+            request.until_unix_milliseconds,
+            limit,
+        )
+        .map_err(|error| error.to_string())?;
+        let conversations = self.conversations.clone();
+        let history = tokio::task::spawn_blocking(move || {
+            conversations.request_service_inbox(conversation_id, query)
+        })
+        .await
+        .map_err(|_| "task_failed".to_string())?
+        .map_err(tool_error)?;
+        Ok(Json(ReadMessagesResult {
+            page: MessageListResult {
+                messages: history
+                    .messages
+                    .into_iter()
+                    .map(|message| history_result(conversation_id, message))
+                    .collect::<Result<Vec<_>, _>>()?,
+                has_more: history.has_more,
+            },
+            next_cursor: history.next_cursor,
+        }))
+    }
+
+    #[tool(
         name = "sync_messages",
         description = "Replay, decrypt, persist, and acknowledge one bounded relay page."
     )]
@@ -2245,6 +2386,8 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "get_identity"
         | "list_conversations"
         | "read_messages"
+        | "list_request_service_channels"
+        | "read_request_service_inbox"
         | "delivery_status"
         | "get_message_delivery_status"
         | "get_pairing_status"
@@ -2254,6 +2397,7 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "get_collaboration_policy_status"
         | "inspect_collaboration_policy_proposal" => Ok(()),
         "create_conversation"
+        | "create_request_service_channel"
         | "create_pairing_capability"
         | "create_pairing_rendezvous"
         | "create_short_code_pairing"
@@ -2961,6 +3105,23 @@ mod tests {
                 )
             )
         }));
+    }
+
+    #[test]
+    fn request_service_inspection_is_readonly_but_creation_requires_write_authority() {
+        let read_only = local_stdio_authorization(false);
+        for method in [
+            "list_request_service_channels",
+            "read_request_service_inbox",
+        ] {
+            assert!(read_only(AuthorizationContext { method }).is_ok());
+        }
+        assert!(
+            read_only(AuthorizationContext {
+                method: "create_request_service_channel"
+            })
+            .is_err()
+        );
     }
 
     #[test]

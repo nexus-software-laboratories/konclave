@@ -21,6 +21,8 @@ message ConversationState {
   repeated Member members = 4;
   // Protocol v1 permits at most 1024 retained invitation identifiers.
   repeated InvitationId consumed_invitation_ids = 5;
+  // Absent for ordinary conversations; authenticated in the MLS state digest.
+  RequestServiceChannel request_service = 6;
 }
 
 // Identifies one membership operation independently from relay delivery.

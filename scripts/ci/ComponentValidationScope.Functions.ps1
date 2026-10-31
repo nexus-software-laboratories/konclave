@@ -107,6 +107,19 @@ function Get-ComponentValidationContracts {
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/(?:client|commands|operations|pairing-handoff|validation)\.ts|tests/(?:pairing-handoff|service-client)\.test\.ts)$'
             '^packages/Konclave\.ProtocolContracts\.TypeScript/(?:package(?:-lock)?\.json|buf\.gen\.yaml|src/.*|tests/.*)$'
         )
+        'request-service' = @(
+            '^Cargo\.(lock|toml)$'
+            '^\.github/genesis-delivery\.json$'
+            '^\.github/workflows/request-service-conformance\.yml$'
+            '^crates/Konclave\.(?:DomainCore|CryptographicCore|ProtocolContracts|SecretStorage|RelayAuthentication)/'
+            '^proto/konclave/protocol/'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:conversation|persistence|mcp|local_service|adapter|application|service|pairing_service|pairing|request_service)\.rs|src/persistence/|tests/)'
+            '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/|src/adapter/|tests/)'
+            '^packages/Konclave\.ProtocolContracts\.TypeScript/'
+            '^fixtures/(?:protocol|local-service)/'
+            '^docs/(?:development/request-services|adr/adr-0032-request-service-channels)\.md$'
+            '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
+        )
         'response-continuation' = @(
             '^Cargo\.(lock|toml)$'
             '^\.github/genesis-delivery\.json$'
