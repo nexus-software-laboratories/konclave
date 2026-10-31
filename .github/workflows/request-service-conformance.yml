@@ -92,6 +92,43 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: git diff --exit-code -- fixtures/local-service/v1/copilot-tools.json
+      - name: Resolve protocol Node version
+        id: protocol-toolchain
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw | ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - name: Install protocol Node toolchain
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.protocol-toolchain.outputs.node }}
+          npm-cache-scope: request-service-protocol
+          npm-cache-dependency-hash: ${{ hashFiles('packages/Konclave.ProtocolContracts.TypeScript/package-lock.json') }}
+      - name: Generate and verify TypeScript protocol projection
+        id: protocol-generation
+        if: steps.scope.outputs.run == 'true'
+        working-directory: packages/Konclave.ProtocolContracts.TypeScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run generate
+          npm run build
+          npm test
+      - name: Retain exact TypeScript protocol projection
+        if: steps.scope.outputs.run == 'true' && steps.protocol-generation.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: request-service-protocol-contract
+          path: packages/Konclave.ProtocolContracts.TypeScript/src/generated
+          if-no-files-found: error
+          retention-days: 1
+      - name: Require unchanged submitted TypeScript protocol projection
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: git diff --exit-code -- packages/Konclave.ProtocolContracts.TypeScript/src/generated
       - name: Verify component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
