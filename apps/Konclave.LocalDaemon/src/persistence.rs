@@ -12412,7 +12412,7 @@ mod tests {
                 .unwrap()
                 .open_store(sealer())
                 .err(),
-            Some(ProfileStoreError::UnsupportedSchema),
+            Some(ProfileStoreError::CorruptData),
         );
     }
 
