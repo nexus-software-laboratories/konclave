@@ -910,6 +910,44 @@
     }
   },
   {
+    "name": "create_request_service_channel",
+    "description": "Create a private operator channel for one expected requester; enrollment grants no work authority.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "requester_device_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requester_device_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "routing_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "routing_id",
+        "epoch"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "create_short_code_pairing",
     "description": "Create a six-digit member-pairing code that grants no authority until both devices explicitly confirm the same SAS and peer identity.",
     "inputSchema": {

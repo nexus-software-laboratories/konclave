@@ -238,15 +238,14 @@ impl ProfileStore {
             .lock()?
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ProfileStoreError::Storage)?;
-        if version == super::PROFILE_SCHEMA_VERSION {
+        if matches!(version, 22 | super::PROFILE_SCHEMA_VERSION) {
             self.profile_identity_for_schema_transition(version, version)?;
             return Ok(());
         }
         if version != 21 {
             return Err(ProfileStoreError::UnsupportedSchema);
         }
-        let identity =
-            self.profile_identity_for_schema_transition(version, super::PROFILE_SCHEMA_VERSION)?;
+        let identity = self.profile_identity_for_schema_transition(version, 22)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
@@ -264,7 +263,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         transaction
-            .pragma_update(None, "user_version", super::PROFILE_SCHEMA_VERSION)
+            .pragma_update(None, "user_version", 22)
             .map_err(|_| ProfileStoreError::Storage)?;
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }

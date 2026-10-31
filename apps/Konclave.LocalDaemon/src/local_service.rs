@@ -2920,6 +2920,7 @@ fn is_tool_operation(operation: &str) -> bool {
         operation,
         "get_identity"
             | "create_conversation"
+            | "create_request_service_channel"
             | "list_conversations"
             | "send_message"
             | "send_directed_request"

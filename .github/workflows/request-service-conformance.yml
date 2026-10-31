@@ -66,10 +66,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore -- --check
+          cargo fmt --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --package KonclaveLocalDaemon -- --check
           cargo test --locked --package KonclaveDomainCore request_service::
           cargo test --locked --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_service
-          cargo clippy --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --all-targets -- -D warnings
+          cargo test --locked --package KonclaveLocalDaemon request_service
+          cargo test --locked --package KonclaveLocalDaemon copilot_tool_contract_fixture_matches_the_router
+          cargo test --locked --package KonclaveLocalDaemon directed_request_response_reservation_is_atomic
+          cargo clippy --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --package KonclaveLocalDaemon --all-targets -- -D warnings
       - name: Verify component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh

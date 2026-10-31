@@ -74,6 +74,11 @@ struct ListConversationsRequest {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreateRequestServiceChannelRequest {
+    requester_device_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct TrustedDeviceAliasRequest {
     device_id: String,
@@ -643,6 +648,10 @@ impl StdioServer {
                 Self::require_empty_request(payload)?;
                 Self::encode_json(self.create_conversation().await?)
             }
+            "create_request_service_channel" => Self::encode_json(
+                self.create_request_service_channel(Self::parse_parameters(payload)?)
+                    .await?,
+            ),
             "list_conversations" => Self::encode_json(
                 self.list_conversations(Self::parse_parameters(payload)?)
                     .await?,
@@ -1398,6 +1407,29 @@ impl StdioServer {
             .await
             .map_err(|_| "task_failed".to_string())?
             .map_err(tool_error)?;
+        Ok(Json(ConversationResult {
+            conversation_id: encode_hex(summary.conversation_id.as_bytes()),
+            routing_id: encode_hex(summary.routing_id.as_bytes()),
+            epoch: summary.epoch,
+        }))
+    }
+
+    #[tool(
+        name = "create_request_service_channel",
+        description = "Create a private operator channel for one expected requester; enrollment grants no work authority."
+    )]
+    async fn create_request_service_channel(
+        &self,
+        Parameters(request): Parameters<CreateRequestServiceChannelRequest>,
+    ) -> Result<Json<ConversationResult>, String> {
+        self.authorize("create_request_service_channel")?;
+        let requester = parse_device_id(&request.requester_device_id)?;
+        let conversations = self.conversations.clone();
+        let summary =
+            tokio::task::spawn_blocking(move || conversations.create_request_service(requester))
+                .await
+                .map_err(|_| "task_failed".to_string())?
+                .map_err(tool_error)?;
         Ok(Json(ConversationResult {
             conversation_id: encode_hex(summary.conversation_id.as_bytes()),
             routing_id: encode_hex(summary.routing_id.as_bytes()),
@@ -2254,6 +2286,7 @@ pub(crate) fn local_stdio_authorization(allow_write: bool) -> AuthorizationHook 
         | "get_collaboration_policy_status"
         | "inspect_collaboration_policy_proposal" => Ok(()),
         "create_conversation"
+        | "create_request_service_channel"
         | "create_pairing_capability"
         | "create_pairing_rendezvous"
         | "create_short_code_pairing"
