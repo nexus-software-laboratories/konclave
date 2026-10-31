@@ -61,13 +61,14 @@ jobs:
           key: request-service-conformance
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Verify pure directional authorization
+      - name: Verify channel authorization and terminal reply decisions
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore -- --check
-          cargo test --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_service
+          cargo test --locked --package KonclaveDomainCore request_service::
+          cargo test --locked --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_service
           cargo clippy --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --all-targets -- -D warnings
       - name: Verify component relevance
         if: steps.scope.outputs.run == 'true'
