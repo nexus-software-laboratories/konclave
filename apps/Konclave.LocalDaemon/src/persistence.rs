@@ -7625,14 +7625,14 @@ impl ProfileStore {
                 &blob,
             )
             .map_err(|_| ProfileStoreError::CorruptData)?;
-        let (
-            stored_direction,
-            stored_envelope,
-            stored_sender,
-            stored_epoch,
+        let DecodedHistoryMessageRecord {
+            direction: stored_direction,
+            envelope_id: stored_envelope,
+            sender: stored_sender,
+            epoch: stored_epoch,
             message,
             request_service_reply,
-        ) = decode_history_message_record(&plaintext)?;
+        } = decode_history_message_record(&plaintext)?;
         let envelope_id =
             EnvelopeId::from_slice(&envelope_id).map_err(|_| ProfileStoreError::CorruptData)?;
         let sender = DeviceId::from_slice(&sender).map_err(|_| ProfileStoreError::CorruptData)?;
@@ -9262,6 +9262,15 @@ struct HistoryRecord {
     epoch: u64,
     message: ApplicationMessage,
     complete: bool,
+    request_service_reply: Option<RequestServiceHistoryReply>,
+}
+
+struct DecodedHistoryMessageRecord {
+    direction: MessageDirection,
+    envelope_id: EnvelopeId,
+    sender: DeviceId,
+    epoch: u64,
+    message: ApplicationMessage,
     request_service_reply: Option<RequestServiceHistoryReply>,
 }
 
@@ -11270,17 +11279,7 @@ fn encode_history_message_record(
 
 fn decode_history_message_record(
     record: &[u8],
-) -> Result<
-    (
-        MessageDirection,
-        EnvelopeId,
-        DeviceId,
-        u64,
-        ApplicationMessage,
-        Option<RequestServiceHistoryReply>,
-    ),
-    ProfileStoreError,
-> {
+) -> Result<DecodedHistoryMessageRecord, ProfileStoreError> {
     if record.len() < 3 {
         return Err(ProfileStoreError::CorruptData);
     }
@@ -11326,14 +11325,14 @@ fn decode_history_message_record(
     {
         return Err(ProfileStoreError::CorruptData);
     }
-    Ok((
+    Ok(DecodedHistoryMessageRecord {
         direction,
         envelope_id,
         sender,
         epoch,
         message,
         request_service_reply,
-    ))
+    })
 }
 
 fn decode_positive_u64(bytes: &[u8]) -> Result<u64, ProfileStoreError> {
@@ -12444,13 +12443,12 @@ mod tests {
                 receipt,
             )
             .unwrap();
-            let (_, envelope, sender, epoch, decoded, actual_receipt) =
-                decode_history_message_record(&encoded).unwrap();
-            assert_eq!(envelope, EnvelopeId::from_bytes([165; 16]));
-            assert_eq!(sender, DeviceId::from_bytes([165; 32]));
-            assert_eq!(epoch, 9);
-            assert!(application_messages_equal(&message, &decoded).unwrap());
-            assert_eq!(actual_receipt, receipt);
+            let decoded = decode_history_message_record(&encoded).unwrap();
+            assert_eq!(decoded.envelope_id, EnvelopeId::from_bytes([165; 16]));
+            assert_eq!(decoded.sender, DeviceId::from_bytes([165; 32]));
+            assert_eq!(decoded.epoch, 9);
+            assert!(application_messages_equal(&message, &decoded.message).unwrap());
+            assert_eq!(decoded.request_service_reply, receipt);
             for length in 0..encoded.len() {
                 assert!(decode_history_message_record(&encoded[..length]).is_err());
             }
