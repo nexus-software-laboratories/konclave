@@ -1573,6 +1573,76 @@
     }
   },
   {
+    "name": "list_request_service_channels",
+    "description": "Inspect a bounded page of this profile's operator-owned private channels and authenticated endpoints.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "after_conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "RequestServiceChannelResult": {
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "operator_device_id": {
+              "type": "string"
+            },
+            "requester_device_id": {
+              "type": "string"
+            },
+            "requester_enrolled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "operator_device_id",
+            "requester_device_id",
+            "requester_enrolled"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/RequestServiceChannelResult"
+          },
+          "type": "array"
+        },
+        "next_after_conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channels"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "propose_collaboration_policy",
     "description": "Propose and locally activate one exact canonical collaboration-policy bundle.",
     "inputSchema": {
@@ -1707,6 +1777,260 @@
   {
     "name": "read_messages",
     "description": "Read a bounded cursor-ordered page of sealed local message history.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "after_cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "before_cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "order": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since_unix_milliseconds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until_unix_milliseconds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversation_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "MessageResult": {
+          "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "text",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "directed_request",
+                  "type": "string"
+                },
+                "target_device_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "target_device_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_proposal",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                },
+                "replaces_policy_digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_response",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "proposal_id",
+                "policy_digest",
+                "outcome"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
+                  "const": "collaboration_policy_revocation",
+                  "type": "string"
+                },
+                "policy_digest": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "policy_digest"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "direction": {
+              "type": "string"
+            },
+            "duplicate": {
+              "type": "boolean"
+            },
+            "envelope_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "reply_to_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sender_counter": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sender_device_id": {
+              "type": "string"
+            },
+            "sent_at_unix_milliseconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "message_id",
+            "envelope_id",
+            "sender_device_id",
+            "epoch",
+            "sender_counter",
+            "sent_at_unix_milliseconds",
+            "cursor",
+            "direction",
+            "duplicate"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/MessageResult"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "messages",
+        "has_more"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_request_service_inbox",
+    "description": "Read bounded unreplied requests in an operator-owned channel; inspection grants no work authority.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {

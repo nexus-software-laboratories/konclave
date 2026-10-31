@@ -2434,14 +2434,23 @@ describe('deterministic commands', () => {
     await command?.handler(commandContext('service channels'));
     await command?.handler(commandContext(`service inbox ${conversationId}`));
     expect(request).toHaveBeenCalledWith('read_request_service_inbox', {
-      conversation_id: conversationId, after_cursor: 0, order: 'asc', limit: 10,
+      conversation_id: conversationId,
+      after_cursor: 0,
+      order: 'asc',
+      limit: 10,
     });
     expect(lines.join('\n')).toContain(`/konclave service channels ${conversationId}`);
     expect(lines.join('\n')).toContain(`/konclave service inbox ${conversationId} 17`);
     expect(lines.join('\n')).toContain('Inspection grants no work authority');
-    expect(request.mock.calls.every(([operation]) => [
-      'list_request_service_channels', 'list_conversations', 'read_request_service_inbox',
-    ].includes(operation))).toBe(true);
+    expect(
+      request.mock.calls.every(([operation]) =>
+        [
+          'list_request_service_channels',
+          'list_conversations',
+          'read_request_service_inbox',
+        ].includes(operation),
+      ),
+    ).toBe(true);
   });
 
   it('surfaces native requester-side inbox refusal instead of falling back to ordinary history', async () => {
@@ -2462,7 +2471,10 @@ describe('deterministic commands', () => {
     })[0];
     await command?.handler(commandContext(`service inbox ${conversationId}`));
     expect(request).toHaveBeenCalledWith('read_request_service_inbox', {
-      conversation_id: conversationId, after_cursor: 0, order: 'asc', limit: 10,
+      conversation_id: conversationId,
+      after_cursor: 0,
+      order: 'asc',
+      limit: 10,
     });
     expect(request).not.toHaveBeenCalledWith('read_messages', expect.anything());
     expect(lines.join('\n')).toContain('not_authorized');
@@ -2473,24 +2485,21 @@ describe('deterministic commands', () => {
     'service create not-a-device',
     `service create ${joinerDeviceId} extra`,
     `service unknown ${joinerDeviceId}`,
-  ])(
-    'rejects malformed request-service creation before native dispatch: %s',
-    async (input) => {
-      const request = vi.fn();
-      const lines: string[] = [];
-      const command = createKonclaveCommands({
-        client: stubClient(request),
-        output: {
-          write: (line) => {
-            lines.push(line);
-          },
+  ])('rejects malformed request-service creation before native dispatch: %s', async (input) => {
+    const request = vi.fn();
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
         },
-      })[0];
-      await command?.handler(commandContext(input));
-      expect(request).not.toHaveBeenCalled();
-      expect(lines.join('\n')).toContain('konclave:');
-    },
-  );
+      },
+    })[0];
+    await command?.handler(commandContext(input));
+    expect(request).not.toHaveBeenCalled();
+    expect(lines.join('\n')).toContain('konclave:');
+  });
 
   it('approves a joiner-side pairing and exposes bounded progress controls', async () => {
     const awaitingInviter = pairingStatus({
