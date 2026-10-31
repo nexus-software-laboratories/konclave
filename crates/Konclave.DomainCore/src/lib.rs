@@ -8,6 +8,7 @@ mod identifiers;
 mod message_history;
 mod model;
 mod pairing_rendezvous;
+mod request_service;
 mod response_continuation;
 mod short_code_pairing;
 mod short_code_relay;
@@ -64,6 +65,7 @@ pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
 };
+pub use request_service::{RequestServiceChannel, RequestServiceError, RequestServiceRequest};
 pub use response_continuation::{
     ResponseContinuationBinding, ResponseContinuationDirection, ResponseContinuationError,
     ResponseContinuationMessage, validate_response_continuation,
