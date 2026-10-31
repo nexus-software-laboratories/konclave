@@ -3011,6 +3011,9 @@ pub(crate) mod tests {
         let welcome = MlsWelcome::from_bytes(prepared.welcome.as_ref().unwrap()).unwrap();
         let stored = StoredRelayEnvelope::new(prepared.envelope, 1).unwrap();
         operator.mark_membership_outbox_accepted(&stored).unwrap();
+        operator
+            .process_inbound_membership(id, &stored, 1_700_000_000)
+            .unwrap();
         requester.accept_welcome(id, &welcome, &stored).unwrap();
         id
     }

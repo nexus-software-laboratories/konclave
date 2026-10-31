@@ -2409,6 +2409,85 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain(joinerDeviceId);
   });
 
+  it('renders authenticated service endpoints and pending requests as untrusted inspection', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'list_request_service_channels') {
+        return {
+          channels: [
+            {
+              conversation_id: conversationId,
+              operator_device_id: inviterDeviceId,
+              requester_device_id: joinerDeviceId,
+              requester_enrolled: true,
+            },
+          ],
+        };
+      }
+      if (operation === 'read_request_service_inbox') {
+        return {
+          messages: [
+            {
+              ...historyMessage(1),
+              sender_device_id: joinerDeviceId,
+              content_type: 'directed_request',
+              target_device_id: inviterDeviceId,
+              text: 'inspect this request',
+            },
+          ],
+          has_more: false,
+        };
+      }
+      throw new Error('unexpected operation');
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+    await command?.handler(commandContext('service channels'));
+    await command?.handler(commandContext(`service inbox ${conversationId}`));
+    expect(lines.join('\n')).toContain(`operator: ${inviterDeviceId}`);
+    expect(lines.join('\n')).toContain(`requester: ${joinerDeviceId}; enrolled: yes`);
+    expect(lines.join('\n')).toContain('inspect this request');
+    expect(lines.join('\n')).toContain('untrusted');
+    expect(request.mock.calls.map(([operation]) => operation)).toEqual([
+      'list_request_service_channels',
+      'read_request_service_inbox',
+    ]);
+  });
+
+  it.each(['text', 'outbound', 'over-limit'])(
+    'refuses malformed service inbox pages without ordinary-history fallback: %s',
+    async (kind) => {
+      const message = {
+        ...historyMessage(1),
+        content_type: kind === 'text' ? 'text' : 'directed_request',
+        direction: kind === 'outbound' ? 'outbound' : 'inbound',
+        target_device_id: inviterDeviceId,
+      };
+      const request = vi.fn(async () => ({
+        messages: kind === 'over-limit' ? Array.from({ length: 11 }, () => message) : [message],
+        has_more: false,
+      }));
+      const lines: string[] = [];
+      const command = createKonclaveCommands({
+        client: stubClient(request),
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
+        },
+      })[0];
+      await command?.handler(commandContext(`service inbox ${conversationId}`));
+      expect(lines.join('\n')).toContain('inbox page is malformed');
+      expect(request).not.toHaveBeenCalledWith('read_messages', expect.anything());
+    },
+  );
+
   it('preserves continuation through empty bounded service-channel and inbox scans without granting work', async () => {
     const request = vi.fn(async (operation: string) => {
       if (operation === 'list_request_service_channels') {
