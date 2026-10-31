@@ -2965,8 +2965,18 @@ pub(crate) mod tests {
                     .is_err()
             );
         }
-        assert!(operator.store.pending_outbox().unwrap().is_empty());
-        assert!(requester.store.pending_outbox().unwrap().is_empty());
+        assert_eq!(
+            operator.store.load_conversation(id).unwrap().sender_counter,
+            0
+        );
+        assert_eq!(
+            requester
+                .store
+                .load_conversation(id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
         let prepared = requester
             .prepare_application(
                 id,
@@ -3113,7 +3123,14 @@ pub(crate) mod tests {
             requester.process_inbound_application(id, &stored).err(),
             Some(refusal)
         );
-        assert!(requester.store.pending_outbox().unwrap().is_empty());
+        assert_eq!(
+            requester
+                .store
+                .load_conversation(id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
     }
 
     fn stage_own_echo_saved(

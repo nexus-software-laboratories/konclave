@@ -28,6 +28,7 @@ export const toolOperations = [
   'sync_pairing',
   'cancel_pairing',
   'create_conversation',
+  'create_request_service_channel',
   'list_conversations',
   'create_invitation',
   'create_join_proof',
