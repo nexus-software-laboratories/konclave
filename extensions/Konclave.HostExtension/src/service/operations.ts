@@ -30,6 +30,8 @@ export const toolOperations = [
   'create_conversation',
   'create_request_service_channel',
   'list_conversations',
+  'list_request_service_channels',
+  'read_request_service_inbox',
   'create_invitation',
   'create_join_proof',
   'send_message',

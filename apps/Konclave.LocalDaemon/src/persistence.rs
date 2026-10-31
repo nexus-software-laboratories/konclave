@@ -12266,6 +12266,18 @@ mod tests {
                 NotificationId::from_bytes([161; 16]),
             )
             .unwrap();
+        let query =
+            MessageHistoryQuery::new(MessageHistoryOrder::Ascending, 0, None, None, None, 10)
+                .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .load_request_service_inbox(fixture.conversation_id, query, operator)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
         let replies = [162_u8, 163].map(|id| {
             ApplicationMessage::new(
                 ProtocolVersion::application_v1(),
@@ -12331,6 +12343,14 @@ mod tests {
             1
         );
         let winner = results.iter().position(Result::is_ok).unwrap();
+        assert!(
+            fixture
+                .store
+                .load_request_service_inbox(fixture.conversation_id, query, operator)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
         let original_id = request.message_id();
         let conversation_id = fixture.conversation_id;
         let local_device = fixture.device_id;

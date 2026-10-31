@@ -2012,6 +2012,58 @@ impl ConversationCoordinator {
             .map_err(Into::into)
     }
 
+    /// Reads unreplied requests without claiming work or changing local authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects ordinary channels, requester-side access and invalid sealed history.
+    pub(crate) fn request_service_inbox(
+        &self,
+        conversation_id: ConversationId,
+        query: MessageHistoryQuery,
+    ) -> Result<HistoryPage, ConversationCoordinatorError> {
+        self.store
+            .load_request_service_inbox(conversation_id, query, self.device_id()?)
+            .map_err(Into::into)
+    }
+
+    /// Inspects a bounded page of this profile's operator-owned channel descriptors.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid page bounds or an authenticated profile-state failure.
+    pub(crate) fn request_service_channels(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<
+        (Vec<RequestServiceChannelSummary>, Option<ConversationId>),
+        ConversationCoordinatorError,
+    > {
+        if !(1..=50).contains(&limit) {
+            return Err(ConversationCoordinatorError::StateMismatch);
+        }
+        let identifiers = self.conversation_ids(after, limit + 1)?;
+        let operator = self.device_id()?;
+        let mut channels = Vec::with_capacity(identifiers.len().min(limit));
+        for identifier in identifiers.iter().take(limit) {
+            let conversation = self.store.load_conversation(*identifier)?;
+            if let Some(channel) = conversation.state.request_service()
+                && channel.operator_device_id() == operator
+            {
+                channels.push(RequestServiceChannelSummary {
+                    channel,
+                    requester_enrolled: conversation
+                        .state
+                        .member(channel.requester_device_id())
+                        .is_some(),
+                });
+            }
+        }
+        let next = (identifiers.len() > limit).then(|| identifiers[limit - 1]);
+        Ok((channels, next))
+    }
+
     /// Records one exact relay submission response.
     ///
     /// # Errors
@@ -2549,6 +2601,11 @@ pub(crate) struct InvitationPackage {
     pub(crate) peer_bindings: Vec<DeviceCredentialBinding>,
 }
 
+pub(crate) struct RequestServiceChannelSummary {
+    pub(crate) channel: RequestServiceChannel,
+    pub(crate) requester_enrolled: bool,
+}
+
 /// One authenticated application message recovered from a relay cursor.
 pub(crate) struct ProcessedApplication {
     pub(crate) conversation_id: ConversationId,
@@ -3004,6 +3061,42 @@ pub(crate) mod tests {
                 .err(),
             Some(ConversationCoordinatorError::RequestServiceReplyAuthorityRequired),
         );
+        let query = MessageHistoryQuery::new(
+            KonclaveDomainCore::MessageHistoryOrder::Ascending,
+            0,
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
+        let inbox = operator.request_service_inbox(id, query).unwrap();
+        assert_eq!(inbox.messages.len(), 1);
+        assert_eq!(inbox.messages[0].message.message_id(), request_id);
+        assert!(requester.request_service_inbox(id, query).is_err());
+        assert!(
+            requester
+                .request_service_channels(None, 10)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        let ordinary = operator.create().unwrap();
+        assert!(
+            operator
+                .request_service_inbox(ordinary.conversation_id, query)
+                .is_err()
+        );
+        let (first, next) = operator.request_service_channels(None, 1).unwrap();
+        let next = next.unwrap();
+        let (second, final_next) = operator.request_service_channels(Some(next), 1).unwrap();
+        let channels = first.into_iter().chain(second).collect::<Vec<_>>();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel.conversation_id(), id);
+        assert_eq!(channels[0].channel.operator_device_id(), operator_id);
+        assert_eq!(channels[0].channel.requester_device_id(), requester_id);
+        assert!(channels[0].requester_enrolled);
+        assert!(final_next.is_none());
     }
 
     #[test]

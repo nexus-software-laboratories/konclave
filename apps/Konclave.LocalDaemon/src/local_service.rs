@@ -2883,11 +2883,24 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         | "invalid_routing_id"
         | "invalid_trusted_device_alias"
         | "invalid_repeat_pairing_operation_id"
+        | "request-service endpoints must be distinct"
+        | "request-service conversation does not match"
+        | "request-service request must target its operator"
         | "directed_request_unsupported"
         | "directed_request_target_required" => LocalServiceErrorCode::InvalidRequest,
         "unknown_operation" => LocalServiceErrorCode::UnknownOperation,
         "relay_not_configured" | "profile_unavailable" => LocalServiceErrorCode::ProfileUnavailable,
-        "local_service_not_authorized" | "invalid_collaboration_authorization" => {
+        "local_service_not_authorized"
+        | "invalid_collaboration_authorization"
+        | "request-service operator must remain the sole administrator"
+        | "request-service requester must remain an ordinary member"
+        | "request-service channel cannot contain another member"
+        | "request-service sender is not an active endpoint"
+        | "only the requester may initiate a request-service request"
+        | "request-service channels do not permit unsolicited text"
+        | "only the operator may answer a request-service request"
+        | "request-service channel does not permit this internal operation"
+        | "request-service replies require a current locally authorized directed-request claim" => {
             LocalServiceErrorCode::NotAuthorized
         }
         "profile_suspended" => LocalServiceErrorCode::ProfileSuspended,
@@ -2899,6 +2912,9 @@ fn operation_error_code(code: &str) -> LocalServiceErrorCode {
         "short_code_pairing_expired" => LocalServiceErrorCode::DeadlineExceeded,
         "repeat_pairing_expired" => LocalServiceErrorCode::DeadlineExceeded,
         "collaboration_policy_conflict"
+        | "request-service reply has no authenticated original request"
+        | "request-service reply does not match its original request"
+        | "request-service request already has a different terminal reply"
         | "short_code_pairing_invalid_transition"
         | "short_code_pairing_confirmation_mismatch"
         | "short_code_pairing_rejected"
@@ -2922,6 +2938,8 @@ fn is_tool_operation(operation: &str) -> bool {
             | "create_conversation"
             | "create_request_service_channel"
             | "list_conversations"
+            | "list_request_service_channels"
+            | "read_request_service_inbox"
             | "send_message"
             | "send_directed_request"
             | "propose_collaboration_policy"
@@ -3936,6 +3954,39 @@ mod delivery_contract_tests {
                 "targetDeviceId": "09".repeat(32),
                 "text": "please reply"
             })
+        );
+    }
+
+    #[test]
+    fn request_service_errors_preserve_actionable_rpc_categories() {
+        use KonclaveDomainCore::RequestServiceError;
+        for (error, expected) in [
+            (
+                RequestServiceError::IdenticalEndpoints,
+                LocalServiceErrorCode::InvalidRequest,
+            ),
+            (
+                RequestServiceError::OperatorCannotRequest,
+                LocalServiceErrorCode::NotAuthorized,
+            ),
+            (
+                RequestServiceError::RequesterCannotReply,
+                LocalServiceErrorCode::NotAuthorized,
+            ),
+            (
+                RequestServiceError::MissingRequest,
+                LocalServiceErrorCode::Conflict,
+            ),
+            (
+                RequestServiceError::ReplyAlreadyCompleted,
+                LocalServiceErrorCode::Conflict,
+            ),
+        ] {
+            assert_eq!(super::operation_error_code(&error.to_string()), expected);
+        }
+        assert_eq!(
+            super::operation_error_code(&crate::conversation::ConversationCoordinatorError::RequestServiceReplyAuthorityRequired.to_string()),
+            LocalServiceErrorCode::NotAuthorized,
         );
     }
 

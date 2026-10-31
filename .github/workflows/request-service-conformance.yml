@@ -70,9 +70,28 @@ jobs:
           cargo test --locked --package KonclaveDomainCore request_service::
           cargo test --locked --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_service
           cargo test --locked --package KonclaveLocalDaemon request_service
-          cargo test --locked --package KonclaveLocalDaemon copilot_tool_contract_fixture_matches_the_router
           cargo test --locked --package KonclaveLocalDaemon directed_request_response_reservation_is_atomic
           cargo clippy --locked --package KonclaveDomainCore --package KonclaveProtocolContracts --package KonclaveCryptographicCore --package KonclaveLocalDaemon --all-targets -- -D warnings
+      - name: Generate native tool contract
+        id: tool-contract
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package KonclaveLocalDaemon --lib regenerate_copilot_tool_contract_fixture -- --ignored
+          cargo test --locked --package KonclaveLocalDaemon copilot_tool_contract_fixture_matches_the_router
+      - name: Retain exact native tool contract
+        if: steps.scope.outputs.run == 'true' && steps.tool-contract.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: request-service-tool-contract
+          path: fixtures/local-service/v1/copilot-tools.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Require unchanged submitted tool contract
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: git diff --exit-code -- fixtures/local-service/v1/copilot-tools.json
       - name: Verify component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh

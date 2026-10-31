@@ -2381,6 +2381,117 @@ describe('deterministic commands', () => {
     expect(lines.join('\n')).toContain('phase: inviter_awaiting_join_proof');
   });
 
+  it('creates and selects an explicitly directional request-service channel without activating policy', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'create_request_service_channel') {
+        return { conversation_id: conversationId, routing_id: '55'.repeat(32), epoch: 0 };
+      }
+      if (operation === 'set_active_conversation') {
+        return { active_conversation_id: conversationId };
+      }
+      throw new Error('unexpected operation');
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+    await command?.handler(commandContext(`service create ${joinerDeviceId}`));
+    expect(request.mock.calls).toEqual([
+      ['create_request_service_channel', { requester_device_id: joinerDeviceId }],
+      ['set_active_conversation', { conversation_id: conversationId }],
+    ]);
+    expect(lines.join('\n')).toContain('Enrollment grants no work authority');
+    expect(lines.join('\n')).toContain(joinerDeviceId);
+  });
+
+  it('preserves continuation through empty bounded service-channel and inbox scans without granting work', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'list_request_service_channels') {
+        return { channels: [], next_after_conversation_id: conversationId };
+      }
+      if (operation === 'list_conversations') {
+        return { conversation_ids: [conversationId], active_conversation_id: conversationId };
+      }
+      if (operation === 'read_request_service_inbox') {
+        return { messages: [], has_more: true, next_cursor: 17 };
+      }
+      throw new Error('unexpected operation');
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+    await command?.handler(commandContext('service channels'));
+    await command?.handler(commandContext(`service inbox ${conversationId}`));
+    expect(request).toHaveBeenCalledWith('read_request_service_inbox', {
+      conversation_id: conversationId, after_cursor: 0, order: 'asc', limit: 10,
+    });
+    expect(lines.join('\n')).toContain(`/konclave service channels ${conversationId}`);
+    expect(lines.join('\n')).toContain(`/konclave service inbox ${conversationId} 17`);
+    expect(lines.join('\n')).toContain('Inspection grants no work authority');
+    expect(request.mock.calls.every(([operation]) => [
+      'list_request_service_channels', 'list_conversations', 'read_request_service_inbox',
+    ].includes(operation))).toBe(true);
+  });
+
+  it('surfaces native requester-side inbox refusal instead of falling back to ordinary history', async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === 'list_conversations') {
+        return { conversation_ids: [conversationId], active_conversation_id: conversationId };
+      }
+      throw new LocalServiceError(operation, 'not_authorized');
+    });
+    const lines: string[] = [];
+    const command = createKonclaveCommands({
+      client: stubClient(request),
+      output: {
+        write: (line) => {
+          lines.push(line);
+        },
+      },
+    })[0];
+    await command?.handler(commandContext(`service inbox ${conversationId}`));
+    expect(request).toHaveBeenCalledWith('read_request_service_inbox', {
+      conversation_id: conversationId, after_cursor: 0, order: 'asc', limit: 10,
+    });
+    expect(request).not.toHaveBeenCalledWith('read_messages', expect.anything());
+    expect(lines.join('\n')).toContain('not_authorized');
+  });
+
+  it.each([
+    'service create',
+    'service create not-a-device',
+    `service create ${joinerDeviceId} extra`,
+    `service unknown ${joinerDeviceId}`,
+  ])(
+    'rejects malformed request-service creation before native dispatch: %s',
+    async (input) => {
+      const request = vi.fn();
+      const lines: string[] = [];
+      const command = createKonclaveCommands({
+        client: stubClient(request),
+        output: {
+          write: (line) => {
+            lines.push(line);
+          },
+        },
+      })[0];
+      await command?.handler(commandContext(input));
+      expect(request).not.toHaveBeenCalled();
+      expect(lines.join('\n')).toContain('konclave:');
+    },
+  );
+
   it('approves a joiner-side pairing and exposes bounded progress controls', async () => {
     const awaitingInviter = pairingStatus({
       phase: 'joiner_awaiting_inviter_authorization',
