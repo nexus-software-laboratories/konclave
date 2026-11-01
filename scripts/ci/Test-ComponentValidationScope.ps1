@@ -204,6 +204,7 @@ $ownedCases = [ordered]@{
         'crates/Konclave.ProtocolContracts/src/lib.rs'
         'proto/konclave/protocol/v1/membership.proto'
         'apps/Konclave.LocalDaemon/src/conversation.rs'
+        'apps/Konclave.LocalDaemon/src/native_journal.rs'
         'apps/Konclave.LocalDaemon/src/persistence/request_service.rs'
         'apps/Konclave.LocalDaemon/src/service.rs'
         'extensions/Konclave.HostExtension/src/service/commands.ts'

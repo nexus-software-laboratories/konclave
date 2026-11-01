@@ -12227,6 +12227,73 @@ mod tests {
                 )
                 .unwrap();
         }
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_message_history SET cursor = 99
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    fixture.conversation_id.as_bytes(),
+                    request.message_id().as_bytes()
+                ],
+            )
+            .unwrap();
+        let refusal = fixture
+            .store
+            .validate_request_service_application(
+                fixture.conversation_id,
+                operator,
+                replies[0].content(),
+                replies[0].reply_to(),
+                replies[0].message_id(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            KonclaveClientLibrary::native::NativeConversationJournal::save_inbox_message(
+                &fixture.store,
+                fixture.conversation_id,
+                2,
+                operator,
+                0,
+                &replies[0],
+            )
+            .err(),
+            Some(refusal)
+        );
+        assert!(matches!(
+            fixture
+                .store
+                .inbox_operation(fixture.conversation_id, 2)
+                .unwrap(),
+            InboxOperation::Received { .. }
+        ));
+        assert!(
+            fixture
+                .store
+                .load_history_record(
+                    &fixture.store.lock().unwrap(),
+                    fixture.conversation_id,
+                    fixture.routing_id,
+                    replies[0].message_id(),
+                )
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_message_history SET cursor = 1
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    fixture.conversation_id.as_bytes(),
+                    request.message_id().as_bytes()
+                ],
+            )
+            .unwrap();
         let barrier = Barrier::new(3);
         let results = std::thread::scope(|scope| {
             let handles = replies

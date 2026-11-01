@@ -141,6 +141,13 @@ impl NativeConversationJournal for ProfileStore {
         epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), Self::Error> {
+        self.validate_request_service_application(
+            id,
+            sender,
+            message.content(),
+            message.reply_to(),
+            message.message_id(),
+        )?;
         ProfileStore::save_inbox_message(self, id, cursor, sender, epoch, message)
     }
 

@@ -126,7 +126,7 @@ function Get-ComponentValidationContracts {
             '^crates/Konclave\.ClientLibrary/(?:Cargo\.toml|src/lib\.rs$|src/native/)'
             '^crates/Konclave\.(?:DomainCore|CryptographicCore|ProtocolContracts|SecretStorage|RelayAuthentication)/'
             '^proto/konclave/protocol/'
-            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:conversation|persistence|mcp|local_service|adapter|application|service|pairing_service|pairing|request_service)\.rs|src/persistence/|tests/)'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:conversation|persistence|mcp|local_service|adapter|application|service|pairing_service|pairing|request_service|native_journal)\.rs|src/persistence/|tests/)'
             '^extensions/Konclave\.HostExtension/(?:package(?:-lock)?\.json|src/service/|src/adapter/|tests/)'
             '^packages/Konclave\.ProtocolContracts\.TypeScript/'
             '^fixtures/(?:protocol|local-service)/'
