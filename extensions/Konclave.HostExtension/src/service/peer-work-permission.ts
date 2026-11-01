@@ -8,6 +8,7 @@ export type PeerToolAction =
 const conversationTools = new Set([
   'send_directed_request',
   'read_messages',
+  'read_request_service_inbox',
   'sync_messages',
   'watch_messages',
   'get_collaboration_policy_status',

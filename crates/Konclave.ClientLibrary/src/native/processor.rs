@@ -183,9 +183,11 @@ impl<'a, J: NativeConversationJournal> NativeConversationProcessor<'a, J> {
             )
             .map_err(|_| NativeConversationError::Cryptographic)?;
             let expected_state = stored.state;
-            let group = client
-                .create_group()
-                .map_err(|_| NativeConversationError::Cryptographic)?;
+            let group = match expected_state.request_service() {
+                Some(channel) => client.create_request_service_group(channel.requester_device_id()),
+                None => client.create_group(),
+            }
+            .map_err(|_| NativeConversationError::Cryptographic)?;
             if group.state() != &expected_state {
                 return Err(NativeConversationError::StateMismatch);
             }

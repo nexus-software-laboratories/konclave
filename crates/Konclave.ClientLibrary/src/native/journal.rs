@@ -262,6 +262,8 @@ pub trait NativeConversationJournal {
         stored: &StoredRelayEnvelope,
     ) -> Result<Option<StoredApplicationMessage>, Self::Error>;
     /// Atomically saves protected plaintext and deduplication before MLS persistence.
+    /// Validate authenticated request-service direction and the exact original
+    /// reply witness in the same commit; refusal leaves no inbox or history advance.
     fn save_inbox_message(
         &self,
         id: ConversationId,

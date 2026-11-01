@@ -7,7 +7,7 @@ use crate::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
     MessageId, PairingContextHash, PairingId, PairingMessageId, PairingNonce,
-    RepeatPairingOperationId, RoutingId,
+    RepeatPairingOperationId, RequestServiceChannel, RoutingId,
 };
 
 /// Current Konclave application protocol major version.
@@ -108,6 +108,8 @@ pub enum SignatureScheme {
 pub const APPLICATION_CAPABILITY_DIRECTED_REQUEST: u64 = 1;
 /// Root-signed capability bit for receiving internal repeat-pairing control content.
 pub const APPLICATION_CAPABILITY_REPEAT_PAIRING: u64 = 1 << 1;
+/// Root-signed capability bit for enforcing private requester/operator channels.
+pub const APPLICATION_CAPABILITY_REQUEST_SERVICE: u64 = 1 << 2;
 
 /// Public binding between a device root and a conversation-scoped MLS signature key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +260,13 @@ impl DeviceCredentialBinding {
         self.application_capabilities & APPLICATION_CAPABILITY_REPEAT_PAIRING != 0
     }
 
+    /// Returns whether this device enforces request-service channel semantics.
+    #[must_use]
+    pub const fn supports_request_services(&self) -> bool {
+        self.application_capabilities & APPLICATION_CAPABILITY_REQUEST_SERVICE != 0
+            && self.supports_directed_requests()
+    }
+
     /// Returns the optional device-root signature over the capability assertion.
     #[must_use]
     pub const fn application_capabilities_signature(&self) -> Option<Ed25519Signature> {
@@ -277,6 +286,7 @@ pub struct Invitation {
     nonce: InvitationNonce,
     issuer_device_id: DeviceId,
     issuer_signature: Ed25519Signature,
+    request_service: Option<RequestServiceChannel>,
 }
 
 impl Invitation {
@@ -302,7 +312,54 @@ impl Invitation {
         issuer_device_id: DeviceId,
         issuer_signature: Ed25519Signature,
     ) -> Result<Self, KonclaveDomainError> {
+        Self::new_with_request_service(
+            version,
+            invitation_id,
+            conversation_id,
+            routing_id,
+            expected_device_id,
+            role,
+            expires_at_unix_seconds,
+            nonce,
+            issuer_device_id,
+            issuer_signature,
+            None,
+        )
+    }
+
+    /// Creates an invitation whose signed fields include an optional channel contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an expiration or channel-binding validation error.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the signed invitation fields remain explicit and atomic"
+    )]
+    pub fn new_with_request_service(
+        version: ProtocolVersion,
+        invitation_id: InvitationId,
+        conversation_id: ConversationId,
+        routing_id: Option<RoutingId>,
+        expected_device_id: DeviceId,
+        role: ConversationRole,
+        expires_at_unix_seconds: u64,
+        nonce: InvitationNonce,
+        issuer_device_id: DeviceId,
+        issuer_signature: Ed25519Signature,
+        request_service: Option<RequestServiceChannel>,
+    ) -> Result<Self, KonclaveDomainError> {
         require_positive(expires_at_unix_seconds, "expires_at_unix_seconds")?;
+        if let Some(channel) = request_service {
+            if channel.conversation_id() != conversation_id
+                || channel.operator_device_id() != issuer_device_id
+                || channel.requester_device_id() != expected_device_id
+                || role != ConversationRole::Member
+                || version != ProtocolVersion::application_v1()
+            {
+                return Err(KonclaveDomainError::RequestServiceInvitationMismatch);
+            }
+        }
         Ok(Self {
             version,
             invitation_id,
@@ -314,6 +371,7 @@ impl Invitation {
             nonce,
             issuer_device_id,
             issuer_signature,
+            request_service,
         })
     }
 
@@ -375,6 +433,12 @@ impl Invitation {
     #[must_use]
     pub const fn issuer_signature(&self) -> Ed25519Signature {
         self.issuer_signature
+    }
+
+    /// Returns the immutable request-service contract authenticated by this invitation.
+    #[must_use]
+    pub const fn request_service(&self) -> Option<RequestServiceChannel> {
+        self.request_service
     }
 }
 
@@ -1013,6 +1077,7 @@ pub struct ConversationState {
     epoch: u64,
     members: Vec<Member>,
     consumed_invitation_ids: Vec<InvitationId>,
+    request_service: Option<RequestServiceChannel>,
 }
 
 impl ConversationState {
@@ -1029,6 +1094,29 @@ impl ConversationState {
         epoch: u64,
         members: Vec<Member>,
         consumed_invitation_ids: Vec<InvitationId>,
+    ) -> Result<Self, KonclaveDomainError> {
+        Self::new_with_request_service(
+            version,
+            conversation_id,
+            epoch,
+            members,
+            consumed_invitation_ids,
+            None,
+        )
+    }
+
+    /// Creates a snapshot with an optional immutable requester/operator contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a membership validation error or a channel topology/role mismatch.
+    pub fn new_with_request_service(
+        version: ProtocolVersion,
+        conversation_id: ConversationId,
+        epoch: u64,
+        members: Vec<Member>,
+        consumed_invitation_ids: Vec<InvitationId>,
+        request_service: Option<RequestServiceChannel>,
     ) -> Result<Self, KonclaveDomainError> {
         require_length_range(members.len(), 1, MAX_MEMBERS, "members")?;
         require_length_range(
@@ -1057,13 +1145,21 @@ impl ConversationState {
         {
             return Err(KonclaveDomainError::MissingAdministrator);
         }
-        Ok(Self {
+        let state = Self {
             version,
             conversation_id,
             epoch,
             members,
             consumed_invitation_ids,
-        })
+            request_service,
+        };
+        if let Some(channel) = request_service {
+            if version != ProtocolVersion::application_v1() {
+                return Err(KonclaveDomainError::MembershipVersionMismatch);
+            }
+            channel.validate_membership(&state)?;
+        }
+        Ok(state)
     }
 
     /// Returns the protocol version.
@@ -1076,6 +1172,12 @@ impl ConversationState {
     #[must_use]
     pub const fn conversation_id(&self) -> ConversationId {
         self.conversation_id
+    }
+
+    /// Returns the immutable contract retained through authenticated membership changes.
+    #[must_use]
+    pub const fn request_service(&self) -> Option<RequestServiceChannel> {
+        self.request_service
     }
 
     /// Returns the MLS epoch represented by this state.
@@ -1185,12 +1287,13 @@ impl ConversationState {
             }
         }
 
-        Self::new(
+        Self::new_with_request_service(
             self.version,
             self.conversation_id,
             new_epoch,
             members,
             consumed_invitation_ids,
+            self.request_service,
         )
     }
 }

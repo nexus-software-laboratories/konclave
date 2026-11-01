@@ -57,6 +57,14 @@ pub enum KonclaveDomainError {
     #[error("join credential does not match the conversation authorized by the invitation")]
     MismatchedInvitedConversation,
 
+    /// A restricted invitation contradicts its immutable endpoint or role binding.
+    #[error("request-service invitation does not match its channel contract")]
+    RequestServiceInvitationMismatch,
+
+    /// A restricted membership snapshot contradicts the channel authorization.
+    #[error(transparent)]
+    RequestService(#[from] crate::RequestServiceError),
+
     /// A membership snapshot claims a member joined after the represented epoch.
     #[error("member joined at epoch {joined_epoch} after state epoch {state_epoch}")]
     MemberJoinedAfterStateEpoch { joined_epoch: u64, state_epoch: u64 },
@@ -149,6 +157,8 @@ impl KonclaveDomainError {
             Self::DuplicateIdentifier { .. } => "duplicate_identifier",
             Self::MismatchedInvitedDevice => "mismatched_invited_device",
             Self::MismatchedInvitedConversation => "mismatched_invited_conversation",
+            Self::RequestServiceInvitationMismatch => "request_service_invitation_mismatch",
+            Self::RequestService(_) => "request_service_rejected",
             Self::MemberJoinedAfterStateEpoch { .. } => "member_joined_after_state_epoch",
             Self::MissingAdministrator => "missing_administrator",
             Self::MembershipVersionMismatch => "membership_version_mismatch",

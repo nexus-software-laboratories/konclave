@@ -384,6 +384,10 @@ const helpLines = [
   '  /konclave join <capability>                         Redeem a full recovery capability.',
   '  /konclave new                                       Create an empty conversation.',
   '  /konclave new <alias>                               Create and connect a new conversation.',
+  '  /konclave service create <requester-device>        Create and select a private directional operator channel.',
+  '  /konclave service channels [after-conversation]   Inspect a bounded operator-private channel page.',
+  '  /konclave service inbox [conversation] [after-cursor]',
+  '                                                       Inspect local unreplied requests; no work permission is granted.',
   '  /konclave repeat <operation>                        Resume one alias-based connection.',
   '  /konclave cancel-repeat <operation>                 Cancel one alias-based connection.',
   '  /konclave pairing <pairing>                         Show authenticated pairing state.',
@@ -1275,6 +1279,59 @@ function optionalPositiveSafeInteger(
   return value;
 }
 
+function parseRequestServiceChannels(value: unknown): {
+  readonly channels: readonly {
+    readonly conversationId: string;
+    readonly operatorDeviceId: string;
+    readonly requesterDeviceId: string;
+    readonly requesterEnrolled: boolean;
+  }[];
+  readonly nextAfter: string | undefined;
+} {
+  if (!isRecord(value) || !Array.isArray(value.channels) || value.channels.length > 10) {
+    throw new Error('the local service channel page is malformed');
+  }
+  const channels = value.channels.map((channel) => {
+    if (!isRecord(channel) || typeof channel.requester_enrolled !== 'boolean') {
+      throw new Error('the local service channel descriptor is malformed');
+    }
+    const operator = requireHexIdentifier(
+      channel.operator_device_id,
+      deviceIdCharacters,
+      'operator device',
+    );
+    const requester = requireHexIdentifier(
+      channel.requester_device_id,
+      deviceIdCharacters,
+      'requester device',
+    );
+    if (operator === requester) {
+      throw new Error('the local service channel endpoints are identical');
+    }
+    return {
+      conversationId: requireHexIdentifier(
+        channel.conversation_id,
+        conversationIdCharacters,
+        'conversation',
+      ),
+      operatorDeviceId: operator,
+      requesterDeviceId: requester,
+      requesterEnrolled: channel.requester_enrolled,
+    };
+  });
+  return {
+    channels,
+    nextAfter:
+      value.next_after_conversation_id === undefined || value.next_after_conversation_id === null
+        ? undefined
+        : requireHexIdentifier(
+            value.next_after_conversation_id,
+            conversationIdCharacters,
+            'channel continuation',
+          ),
+  };
+}
+
 function parseMessageList(value: unknown): {
   readonly messages: readonly MessageSummary[];
   readonly hasMore: boolean;
@@ -1288,6 +1345,7 @@ function parseMessageList(value: unknown): {
   ) {
     throw new Error('the local service message-list response is malformed');
   }
+
   const messages = value.messages.map((message): MessageSummary => {
     if (
       !isRecord(message) ||
@@ -3151,6 +3209,120 @@ export function createKonclaveCommands(dependencies: CommandDependencies): Regis
         await renderPairing(presentation, status);
         await presentation.write(
           `next: verify the joiner device, run /konclave use <conversation> or /konclave new, then /konclave approve ${status.pairingId}`,
+        );
+        return;
+      }
+      case 'service': {
+        const parts = parseCommandArguments(argumentsText);
+        if (parts[0] === 'channels') {
+          requireArgumentCount(parts, 1, 2, '/konclave service channels [after-conversation]');
+          const after =
+            parts[1] === undefined
+              ? undefined
+              : requireHexIdentifier(parts[1], conversationIdCharacters, 'after conversation');
+          const page = parseRequestServiceChannels(
+            await client.request('list_request_service_channels', {
+              limit: 10,
+              ...(after === undefined ? {} : { after_conversation_id: after }),
+            }),
+          );
+          if (page.nextAfter !== undefined && after !== undefined && page.nextAfter <= after) {
+            throw new Error('the local service channel continuation did not advance');
+          }
+          for (const channel of page.channels) {
+            await presentation.write(`request-service channel: ${channel.conversationId}`);
+            await presentation.write(`operator: ${channel.operatorDeviceId}`);
+            await presentation.write(
+              `requester: ${channel.requesterDeviceId}; enrolled: ${channel.requesterEnrolled ? 'yes' : 'no'}`,
+            );
+          }
+          if (page.channels.length === 0) {
+            await presentation.write(
+              page.nextAfter === undefined
+                ? 'request-service channels: none in this page'
+                : 'request-service channels: none in this bounded scan; more conversations remain',
+            );
+          }
+          if (page.nextAfter !== undefined) {
+            await presentation.write(`next: /konclave service channels ${page.nextAfter}`);
+          }
+          return;
+        }
+        if (parts[0] === 'inbox') {
+          const { conversationId, remainingIdentifiers } = await resolveConversationArguments(
+            client,
+            parts.slice(1),
+            0,
+            1,
+            '/konclave service inbox [conversation] [after-cursor]',
+          );
+          const after =
+            remainingIdentifiers[0] === undefined ? 0 : parseCursor(remainingIdentifiers[0]);
+          const page = parseMessageList(
+            await client.request('read_request_service_inbox', {
+              conversation_id: conversationId,
+              after_cursor: after,
+              order: 'asc',
+              limit: 10,
+            }),
+          );
+          if (
+            page.messages.length > 10 ||
+            page.messages.some(
+              (message) =>
+                message.content.kind !== 'directed-request' ||
+                message.direction !== 'inbound' ||
+                message.cursor <= after,
+            ) ||
+            (page.hasMore && (page.nextCursor === undefined || page.nextCursor <= after))
+          ) {
+            throw new Error('the local service inbox page is malformed');
+          }
+          for (const message of page.messages) {
+            await presentation.write(
+              `request ${message.messageId}: sender ${message.senderDeviceId}; cursor ${message.cursor}`,
+            );
+            await presentation.write(
+              `${displayMessageTimestamp(message.sentAtUnixMilliseconds)} ${displayMessageContent(message)}`,
+              { ephemeral: true },
+            );
+          }
+          if (page.messages.length === 0) {
+            await presentation.write(
+              page.hasMore
+                ? 'inbox: no unreplied requests in this bounded scan; more history remains'
+                : 'inbox: no unreplied requests',
+            );
+          }
+          if (page.hasMore && page.nextCursor !== undefined) {
+            await presentation.write(
+              `next: /konclave service inbox ${conversationId} ${page.nextCursor}`,
+            );
+          }
+          await presentation.write(
+            'Inspection grants no work authority; replies require a locally authorized request turn.',
+          );
+          return;
+        }
+        const usage = '/konclave service create <requester-device>';
+        requireArgumentCount(parts, 2, 2, usage);
+        if (parts[0] !== 'create') {
+          throw new Error(`usage: ${usage}`);
+        }
+        const requester = requireHexIdentifier(parts[1], deviceIdCharacters, 'requester device');
+        const conversationId = parseConversation(
+          await client.request('create_request_service_channel', {
+            requester_device_id: requester,
+          }),
+        );
+        await selectActiveConversation(client, conversationId);
+        await presentation.write(`request-service channel created: ${conversationId}`);
+        await presentation.write(`expected requester: ${requester}`);
+        await presentation.write(
+          'requester initiates; operator replies only to an authorized original request. Enrollment grants no work authority.',
+        );
+        await presentation.detail(
+          'next: enroll the expected requester as member using the existing explicit pairing approval',
         );
         return;
       }

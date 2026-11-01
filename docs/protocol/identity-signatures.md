@@ -51,6 +51,10 @@ Because a directed request is an MLS group application message, every remote cur
 member must advertise this bit before a sender can emit that content kind, even though
 only the exact target may handle it autonomously.
 
+Bit `2` advertises immutable request-service channel support. Enrollment into this
+mode requires both that bit and directed-request support. Capability proof alone
+does not grant membership or local work authority.
+
 `signature_scheme_u8` is `1` for Ed25519. The resulting signature is the 64-byte
 `device_binding_signature`.
 
@@ -96,6 +100,19 @@ member. An invitation is expired when the current Unix time is greater than or e
 to its expiration value. Cryptographic validity does not establish administrator
 authorization or single-use consumption; authenticated conversation policy enforces
 both.
+
+For a request-service invitation, append this exact authenticated suffix:
+
+```text
+"konclave-request-service-v1\0" ||
+request_service_conversation_id[32] ||
+operator_device_id[32] ||
+requester_device_id[32]
+```
+
+The descriptor must match the invitation conversation, administrator issuer and
+expected member requester. Stripping or substituting it invalidates the issuer
+signature. An ordinary invitation has no suffix and retains its original bytes.
 
 ## MLS credential relationship
 

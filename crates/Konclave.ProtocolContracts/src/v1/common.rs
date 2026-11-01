@@ -2,7 +2,7 @@ use KonclaveDomainCore::{
     ConversationId, ConversationRole, CredentialBindingHash, DeviceId, Ed25519PublicKey,
     Ed25519Signature, EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError,
     MAX_PROTOBUF_TOP_LEVEL_FIELDS, MembershipOperationId, MessageId, PairingContextHash, PairingId,
-    PairingMessageId, ProtocolVersion, RoutingId,
+    PairingMessageId, ProtocolVersion, RequestServiceChannel, RoutingId,
 };
 use prost::Message;
 use prost::bytes::Buf;
@@ -10,6 +10,29 @@ use prost::encoding::{DecodeContext, WireType, decode_key, skip_field};
 
 use crate::KonclaveProtocolError;
 use crate::wire::v1 as wire;
+
+pub(super) fn request_service_to_wire(value: RequestServiceChannel) -> wire::RequestServiceChannel {
+    wire::RequestServiceChannel {
+        conversation_id: Some(conversation_id_to_wire(value.conversation_id())),
+        operator_device_id: Some(device_id_to_wire(value.operator_device_id())),
+        requester_device_id: Some(device_id_to_wire(value.requester_device_id())),
+    }
+}
+
+pub(super) fn request_service_from_wire(
+    value: Option<wire::RequestServiceChannel>,
+) -> Result<Option<RequestServiceChannel>, KonclaveProtocolError> {
+    value
+        .map(|value| {
+            Ok(RequestServiceChannel::new(
+                conversation_id_from_wire(value.conversation_id)?,
+                device_id_from_wire(value.operator_device_id)?,
+                device_id_from_wire(value.requester_device_id)?,
+            )
+            .map_err(KonclaveDomainError::from)?)
+        })
+        .transpose()
+}
 
 pub(super) fn decode_bounded<M>(
     bytes: &[u8],

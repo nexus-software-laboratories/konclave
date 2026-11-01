@@ -34,6 +34,208 @@ fn sealer(value: u8) -> SecretSealer {
 }
 
 #[test]
+fn request_service_invitation_signature_rejects_stripped_or_substituted_contract() {
+    use KonclaveDomainCore::RequestServiceChannel;
+    use KonclaveProtocolContracts::v1::{decode_invitation, encode_invitation};
+
+    let operator = DeviceIdentity::generate().unwrap();
+    let requester = DeviceIdentity::generate().unwrap();
+    let other_requester = DeviceIdentity::generate().unwrap();
+    let channel = RequestServiceChannel::new(
+        conversation_id(101),
+        operator.device_id(),
+        requester.device_id(),
+    )
+    .unwrap();
+    let invitation = operator
+        .issue_request_service_invitation(channel, routing_id(101), 100)
+        .unwrap();
+    verify_invitation(&invitation, operator.public_key(), 50).unwrap();
+    for (expected, descriptor) in [
+        (requester.device_id(), None),
+        (
+            other_requester.device_id(),
+            Some(
+                RequestServiceChannel::new(
+                    channel.conversation_id(),
+                    operator.device_id(),
+                    other_requester.device_id(),
+                )
+                .unwrap(),
+            ),
+        ),
+    ] {
+        let altered = Invitation::new_with_request_service(
+            invitation.version(),
+            invitation.invitation_id(),
+            invitation.conversation_id(),
+            invitation.routing_id(),
+            expected,
+            invitation.role(),
+            invitation.expires_at_unix_seconds(),
+            InvitationNonce::from_slice(invitation.nonce().as_bytes()).unwrap(),
+            invitation.issuer_device_id(),
+            invitation.issuer_signature(),
+            descriptor,
+        )
+        .unwrap();
+        let decoded = decode_invitation(&encode_invitation(&altered).unwrap()).unwrap();
+        assert_eq!(
+            verify_invitation(&decoded, operator.public_key(), 50).unwrap_err(),
+            KonclaveCryptographicError::InvalidInvitationSignature
+        );
+    }
+}
+
+#[test]
+fn request_service_mls_channels_reject_cross_channel_decryption_and_ordinary_invitation() {
+    let operator = DeviceIdentity::generate().unwrap();
+    let requesters = [
+        DeviceIdentity::generate().unwrap(),
+        DeviceIdentity::generate().unwrap(),
+    ];
+    let mut groups = Vec::new();
+    for (index, requester) in requesters.iter().enumerate() {
+        let id = conversation_id(102 + u8::try_from(index).unwrap());
+        let operator_client = operator.create_conversation_client(id).unwrap();
+        let operator_binding = operator_client.binding().clone();
+        let mut operator_group = operator_client
+            .create_request_service_group(requester.device_id())
+            .unwrap();
+        let mut requester_client = requester.create_conversation_client(id).unwrap();
+        requester_client
+            .register_verified_binding(verify_device_credential_binding(&operator_binding).unwrap())
+            .unwrap();
+        let ordinary = operator
+            .issue_invitation(
+                id,
+                routing_id(102),
+                requester.device_id(),
+                ConversationRole::Member,
+                100,
+            )
+            .unwrap();
+        let ordinary_proof = requester_client
+            .create_join_proof(requester, ordinary, operator.public_key(), 50)
+            .unwrap();
+        assert_eq!(
+            operator_group
+                .create_add_commit(ordinary_proof, envelope_id(100), 50)
+                .err(),
+            Some(KonclaveCryptographicError::MembershipAuthorizationMismatch)
+        );
+        let mut requester_client = requester.create_conversation_client(id).unwrap();
+        requester_client
+            .register_verified_binding(verify_device_credential_binding(&operator_binding).unwrap())
+            .unwrap();
+        let channel = operator_group.state().request_service().unwrap();
+        let invitation = operator
+            .issue_request_service_invitation(channel, routing_id(102), 100)
+            .unwrap();
+        let proof = requester_client
+            .create_join_proof(requester, invitation, operator.public_key(), 50)
+            .unwrap();
+        let old = proof.credential();
+        let legacy_binding = DeviceCredentialBinding::new(
+            old.version(),
+            old.device_id(),
+            old.conversation_id(),
+            old.signature_scheme(),
+            old.device_root_public_key(),
+            old.conversation_signature_public_key(),
+            old.device_binding_signature(),
+        );
+        verify_device_credential_binding(&legacy_binding).unwrap();
+        let legacy_proof = KonclaveDomainCore::JoinProof::new(
+            KonclaveProtocolContracts::v1::decode_invitation(
+                &KonclaveProtocolContracts::v1::encode_invitation(proof.invitation()).unwrap(),
+            )
+            .unwrap(),
+            legacy_binding,
+            proof.mls_key_package().to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            operator_group
+                .create_add_commit(legacy_proof, envelope_id(100), 50)
+                .err(),
+            Some(KonclaveCryptographicError::MembershipAuthorizationMismatch)
+        );
+        let add = operator_group
+            .create_add_commit(proof, envelope_id(101), 50)
+            .unwrap();
+        operator_group.accept_pending_commit().unwrap();
+        let requester_group = requester_client.join_group(add.welcome().unwrap()).unwrap();
+        assert_eq!(requester_group.state().request_service(), Some(channel));
+        assert_eq!(requester_group.state(), operator_group.state());
+        groups.push((operator_group, requester_group));
+    }
+    let ciphertext = groups[0]
+        .0
+        .encrypt_application_message(b"operator response")
+        .unwrap();
+    assert!(
+        groups[1]
+            .1
+            .decrypt_application_message(&ciphertext)
+            .is_err()
+    );
+    let plaintext = groups[0]
+        .1
+        .decrypt_application_message(&ciphertext)
+        .unwrap();
+    assert_eq!(plaintext.plaintext(), b"operator response");
+    assert_eq!(plaintext.authenticated_sender(), operator.device_id());
+}
+
+#[test]
+fn request_service_sealed_group_restore_rejects_stripped_snapshot_contract() {
+    let directory = tempfile::tempdir().unwrap();
+    let operator = DeviceIdentity::generate().unwrap();
+    let requester = DeviceIdentity::generate().unwrap();
+    let id = conversation_id(104);
+    let material = operator.create_conversation_signing_material(id).unwrap();
+    let binding = material.binding().clone();
+    let blob = material.seal(&sealer(104), b"operator-profile").unwrap();
+    let path = directory.path().join("operator.sqlite");
+    let storage = SealedSqliteMlsStorage::open(&path, sealer(104)).unwrap();
+    let client = MlsConversationClient::with_storage(material, storage).unwrap();
+    let group = client
+        .create_request_service_group(requester.device_id())
+        .unwrap();
+    let state = group.state().clone();
+    drop(group);
+    let stripped = ConversationState::new(
+        state.version(),
+        state.conversation_id(),
+        state.epoch(),
+        state.members().to_vec(),
+        state.consumed_invitation_ids().to_vec(),
+    )
+    .unwrap();
+    for (snapshot, accepted) in [(stripped, false), (state, true)] {
+        let material =
+            ConversationSigningMaterial::open(&sealer(104), b"operator-profile", id, &blob)
+                .unwrap();
+        let storage = SealedSqliteMlsStorage::open(&path, sealer(104)).unwrap();
+        let client = MlsConversationClient::with_storage(material, storage).unwrap();
+        let restored = client.restore_group(
+            snapshot,
+            vec![verify_device_credential_binding(&binding).unwrap()],
+            None,
+        );
+        if accepted {
+            assert!(restored.is_ok());
+        } else {
+            assert_eq!(
+                restored.err(),
+                Some(KonclaveCryptographicError::MembershipAuthorizationMismatch)
+            );
+        }
+    }
+}
+
+#[test]
 fn sealed_mls_state_recovers_pending_join_commit_ratchets_and_removal() {
     let directory = tempfile::tempdir().unwrap();
     let conversation_id = conversation_id(9);

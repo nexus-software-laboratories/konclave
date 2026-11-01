@@ -44,6 +44,8 @@ message Invitation {
   // Optional for legacy v1 decoding. Newly issued invitations include this opaque
   // relay route in the issuer signature.
   RoutingId routing_id = 10;
+  // Included in the issuer signature; stripping it invalidates that signature.
+  RequestServiceChannel request_service = 11;
 }
 
 // Presents the material required for an administrator-authorized MLS join.

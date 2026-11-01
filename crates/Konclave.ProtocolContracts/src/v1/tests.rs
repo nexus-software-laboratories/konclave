@@ -74,6 +74,92 @@ const ACKNOWLEDGE_FIXTURE: &[u8] =
     include_bytes!("../../../../fixtures/protocol/v1/acknowledge-request.bin");
 
 #[test]
+fn request_service_state_round_trip_rejects_missing_or_inconsistent_endpoints() {
+    let ordinary = decode_conversation_state(CONVERSATION_STATE_FIXTURE).unwrap();
+    let operator = ordinary.members()[0].device_id();
+    let requester = ordinary.members()[1].device_id();
+    let channel = KonclaveDomainCore::RequestServiceChannel::new(
+        ordinary.conversation_id(),
+        operator,
+        requester,
+    )
+    .unwrap();
+    let restricted = KonclaveDomainCore::ConversationState::new_with_request_service(
+        ordinary.version(),
+        ordinary.conversation_id(),
+        ordinary.epoch(),
+        ordinary.members().to_vec(),
+        ordinary.consumed_invitation_ids().to_vec(),
+        Some(channel),
+    )
+    .unwrap();
+    let bytes = encode_conversation_state(&restricted).unwrap();
+    assert_eq!(decode_conversation_state(&bytes).unwrap(), restricted);
+    assert_eq!(
+        encode_conversation_state(&ordinary).unwrap(),
+        CONVERSATION_STATE_FIXTURE
+    );
+    let valid = wire::ConversationState::decode(bytes.as_slice()).unwrap();
+    let descriptor = valid.request_service.as_ref().unwrap().clone();
+    for invalid in [
+        wire::RequestServiceChannel {
+            operator_device_id: None,
+            ..descriptor.clone()
+        },
+        wire::RequestServiceChannel {
+            requester_device_id: descriptor.operator_device_id.clone(),
+            ..descriptor.clone()
+        },
+        wire::RequestServiceChannel {
+            conversation_id: Some(wire::ConversationId {
+                value: vec![99; 32].into(),
+            }),
+            ..descriptor
+        },
+    ] {
+        let mut malformed = valid.clone();
+        malformed.request_service = Some(invalid);
+        assert!(decode_conversation_state(&malformed.encode_to_vec()).is_err());
+    }
+}
+
+#[test]
+fn request_service_invitation_round_trip_requires_matching_signed_endpoint_fields() {
+    let ordinary = decode_invitation(INVITATION_FIXTURE).unwrap();
+    let channel = KonclaveDomainCore::RequestServiceChannel::new(
+        ordinary.conversation_id(),
+        ordinary.issuer_device_id(),
+        ordinary.expected_device_id(),
+    )
+    .unwrap();
+    let restricted = KonclaveDomainCore::Invitation::new_with_request_service(
+        ordinary.version(),
+        ordinary.invitation_id(),
+        ordinary.conversation_id(),
+        ordinary.routing_id(),
+        ordinary.expected_device_id(),
+        ordinary.role(),
+        ordinary.expires_at_unix_seconds(),
+        KonclaveDomainCore::InvitationNonce::from_slice(ordinary.nonce().as_bytes()).unwrap(),
+        ordinary.issuer_device_id(),
+        ordinary.issuer_signature(),
+        Some(channel),
+    )
+    .unwrap();
+    let bytes = encode_invitation(&restricted).unwrap();
+    let decoded = decode_invitation(&bytes).unwrap();
+    assert_eq!(decoded.request_service(), Some(channel));
+    assert_eq!(encode_invitation(&decoded).unwrap(), bytes);
+    assert_eq!(encode_invitation(&ordinary).unwrap(), INVITATION_FIXTURE);
+    let mut malformed = wire::Invitation::decode(bytes.as_slice()).unwrap();
+    malformed.role = wire::ConversationRole::Administrator as i32;
+    assert!(decode_invitation(&malformed.encode_to_vec()).is_err());
+    malformed.role = wire::ConversationRole::Member as i32;
+    malformed.request_service = Some(wire::RequestServiceChannel::default());
+    assert!(decode_invitation(&malformed.encode_to_vec()).is_err());
+}
+
+#[test]
 fn enrollment_request_and_response_round_trip() {
     let request = RelayEnrollmentRequest::new(
         ProtocolVersion::application_v1(),

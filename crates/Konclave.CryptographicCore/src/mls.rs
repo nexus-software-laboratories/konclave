@@ -5,7 +5,7 @@ use KonclaveDomainCore::{
     AddMember, ConversationId, ConversationRole, ConversationState, DeviceCredentialBinding,
     DeviceId, EnvelopeId, Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES,
     MAX_MLS_KEY_PACKAGE_BYTES, MAX_RELAY_PAYLOAD_BYTES, Member, MembershipAuthorization,
-    MembershipChange, MembershipOperationId, ProtocolVersion, RemoveMember,
+    MembershipChange, MembershipOperationId, ProtocolVersion, RemoveMember, RequestServiceChannel,
 };
 use KonclaveProtocolContracts::v1::{
     decode_conversation_state, decode_membership_commit_bundle, decode_membership_control,
@@ -323,11 +323,13 @@ impl MlsConversationClient {
             return Err(KonclaveCryptographicError::MlsConversationMismatch);
         }
         verify_device_credential_binding(proof.credential())?;
+        require_request_service_capability(proof.invitation().request_service(), &self.binding)?;
         validate_key_package(proof.mls_key_package(), proof.credential())?;
         self.join_expectation = Some(JoinExpectation {
             invitation_id: proof.invitation().invitation_id(),
             issuer_device_id: proof.invitation().issuer_device_id(),
             role: proof.invitation().role(),
+            request_service: proof.invitation().request_service(),
         });
         Ok(())
     }
@@ -359,6 +361,7 @@ impl MlsConversationClient {
         if invitation.expected_device_id() != self.binding.device_id() {
             return Err(KonclaveCryptographicError::InvitationDeviceMismatch);
         }
+        require_request_service_capability(invitation.request_service(), &self.binding)?;
         let key_package = self
             .client
             .generate_key_package_message(Default::default(), Default::default(), None)
@@ -369,6 +372,7 @@ impl MlsConversationClient {
             invitation_id: invitation.invitation_id(),
             issuer_device_id: invitation.issuer_device_id(),
             role: invitation.role(),
+            request_service: invitation.request_service(),
         };
         let proof = JoinProof::new(invitation, self.binding.clone(), key_package)?;
         self.join_expectation = Some(expectation);
@@ -381,7 +385,33 @@ impl MlsConversationClient {
     ///
     /// Returns a typed error when MLS group creation or roster validation fails.
     pub fn create_group(self) -> Result<MlsConversation, KonclaveCryptographicError> {
-        let state = ConversationState::new(
+        self.create_group_with_request_service(None)
+    }
+
+    /// Creates an operator-owned group restricted to one expected requester.
+    ///
+    /// # Errors
+    ///
+    /// Returns a channel, capability, MLS, or sealed-storage error.
+    pub fn create_request_service_group(
+        self,
+        requester_device_id: DeviceId,
+    ) -> Result<MlsConversation, KonclaveCryptographicError> {
+        let channel = RequestServiceChannel::new(
+            self.binding.conversation_id(),
+            self.binding.device_id(),
+            requester_device_id,
+        )
+        .map_err(KonclaveDomainCore::KonclaveDomainError::from)?;
+        self.create_group_with_request_service(Some(channel))
+    }
+
+    fn create_group_with_request_service(
+        self,
+        request_service: Option<RequestServiceChannel>,
+    ) -> Result<MlsConversation, KonclaveCryptographicError> {
+        require_request_service_capability(request_service, &self.binding)?;
+        let state = ConversationState::new_with_request_service(
             ProtocolVersion::application_v1(),
             self.binding.conversation_id(),
             0,
@@ -391,6 +421,7 @@ impl MlsConversationClient {
                 0,
             )],
             vec![],
+            request_service,
         )?;
         self.policy.set_state(state.clone())?;
         let group_context_extensions = authenticated_state_digest_extensions(&state)?;
@@ -520,6 +551,7 @@ impl MlsConversationClient {
             .ok_or(KonclaveCryptographicError::MembershipAuthorizationRequired)?;
         let joining_member = state.member(self.binding.device_id());
         if state.conversation_id() != self.binding.conversation_id()
+            || state.request_service() != expectation.request_service
             || joining_member.map(Member::role) != Some(expectation.role)
             || joining_member.map(Member::joined_epoch) != Some(state.epoch())
             || state.member(expectation.issuer_device_id).map(Member::role)
@@ -1294,6 +1326,7 @@ impl MlsConversation {
             now_unix_seconds,
         )?;
         if proof.invitation().conversation_id() != self.state.conversation_id()
+            || proof.invitation().request_service() != self.state.request_service()
             || self
                 .state
                 .consumed_invitation_ids()
@@ -1302,6 +1335,7 @@ impl MlsConversation {
             return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
         }
         let verified = verify_device_credential_binding(proof.credential())?;
+        require_request_service_capability(self.state.request_service(), proof.credential())?;
         validate_key_package(proof.mls_key_package(), proof.credential())?;
         Ok(verified)
     }
@@ -1692,6 +1726,7 @@ struct JoinExpectation {
     invitation_id: KonclaveDomainCore::InvitationId,
     issuer_device_id: DeviceId,
     role: ConversationRole,
+    request_service: Option<RequestServiceChannel>,
 }
 
 struct ValidatedTransition {
@@ -2037,6 +2072,7 @@ fn verify_group_state(
         let registered = policy
             .binding(device_id)?
             .ok_or(KonclaveCryptographicError::CredentialNotRegistered)?;
+        require_request_service_capability(state.request_service(), &registered.binding)?;
         if member.signing_identity().signature_key.as_bytes()
             != registered
                 .binding
@@ -2045,6 +2081,16 @@ fn verify_group_state(
         {
             return Err(KonclaveCryptographicError::CredentialSigningKeyMismatch);
         }
+    }
+    Ok(())
+}
+
+fn require_request_service_capability(
+    channel: Option<RequestServiceChannel>,
+    binding: &DeviceCredentialBinding,
+) -> Result<(), KonclaveCryptographicError> {
+    if channel.is_some() && !binding.supports_request_services() {
+        return Err(KonclaveCryptographicError::MembershipAuthorizationMismatch);
     }
     Ok(())
 }
