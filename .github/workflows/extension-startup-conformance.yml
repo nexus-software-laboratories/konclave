@@ -48,7 +48,7 @@ jobs:
               $files | Where-Object {
                 $_ -match '^\.github/genesis-delivery\.json$' -or
                 $_ -match '^\.github/workflows/extension-startup-conformance\.yml$' -or
-                $_ -match '^extensions/Konclave\.HostExtension/(?:package-lock\.json|package\.json|src/(?:extension|runtime|startup|service/client)\.ts|tests/(?:extension-runtime|startup|service-client)\.test\.ts)$'
+                $_ -match '^extensions/Konclave\.HostExtension/(?:package-lock\.json|package\.json|src/(?:extension|runtime|startup|service/(?:client|policy-enforcement|prompt-observation))\.ts|tests/(?:extension-runtime|startup|service-client|policy-enforcement|prompt-observation)\.test\.ts)$'
               }
             ).Count -ne 0
           }
@@ -83,19 +83,29 @@ jobs:
             src/runtime.ts \
             src/startup.ts \
             src/service/client.ts \
+            src/service/policy-enforcement.ts \
+            src/service/prompt-observation.ts \
             tests/extension-runtime.test.ts \
             tests/startup.test.ts \
-            tests/service-client.test.ts
+            tests/service-client.test.ts \
+            tests/policy-enforcement.test.ts \
+            tests/prompt-observation.test.ts
           npx eslint \
             src/extension.ts \
             src/runtime.ts \
             src/startup.ts \
             src/service/client.ts \
+            src/service/policy-enforcement.ts \
+            src/service/prompt-observation.ts \
             tests/extension-runtime.test.ts \
             tests/startup.test.ts \
-            tests/service-client.test.ts
+            tests/service-client.test.ts \
+            tests/policy-enforcement.test.ts \
+            tests/prompt-observation.test.ts
           npx tsc --noEmit
           npx vitest run \
             tests/extension-runtime.test.ts \
             tests/startup.test.ts \
-            tests/service-client.test.ts
+            tests/service-client.test.ts \
+            tests/policy-enforcement.test.ts \
+            tests/prompt-observation.test.ts
