@@ -43,7 +43,7 @@ impl RequestAdmissionExpiry {
 pub enum RequestDeliveryOutcome {
     /// The receiver admitted the request under current local authorization.
     Admitted,
-    /// The receiver durably reserved the request's one terminal response.
+    /// An actual authenticated correlated answer was observed.
     Responded,
     /// The cutoff passed before admission.
     ExpiredBeforeAdmission,
@@ -82,6 +82,9 @@ impl RequestDeliveryOutcome {
 /// Finite delivery-contract errors without peer bodies or local secrets.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum RequestDeliveryError {
+    /// A receipt does not name an opted-in request and its exact authenticated target.
+    #[error("request delivery receipt correlation is invalid")]
+    InvalidReceipt,
     /// The supplied cutoff cannot be represented by every supported client.
     #[error("request admission expiry is invalid")]
     InvalidExpiry,
@@ -91,6 +94,42 @@ pub enum RequestDeliveryError {
     /// Two authenticated observations contradict an already observed terminal result.
     #[error("request delivery outcome conflicts with existing delivery state")]
     ConflictingOutcome,
+}
+
+/// Binds a history-only receipt to the authenticated request in the same conversation.
+///
+/// # Errors
+///
+/// Returns [`RequestDeliveryError::InvalidReceipt`] for mismatched identity,
+/// correlation, missing opt-in, or a claimed response without an actual answer.
+pub fn validate_request_delivery_receipt(
+    original: &crate::ApplicationMessage,
+    authenticated_receipt_sender: crate::DeviceId,
+    receipt: &crate::ApplicationMessage,
+) -> Result<(), RequestDeliveryError> {
+    let crate::ApplicationContent::DirectedRequest(request) = original.content() else {
+        return Err(RequestDeliveryError::InvalidReceipt);
+    };
+    let crate::ApplicationContent::RequestDeliveryOutcome(outcome) = receipt.content() else {
+        return Err(RequestDeliveryError::InvalidReceipt);
+    };
+    let options = request.delivery().ok_or(RequestDeliveryError::InvalidReceipt)?;
+    if request.target_device_id() != authenticated_receipt_sender
+        || receipt.reply_to() != Some(original.message_id())
+        || receipt.message_id() == original.message_id()
+        || *outcome == RequestDeliveryOutcome::Responded
+        || *outcome == RequestDeliveryOutcome::ExpiredBeforeAdmission && options.expiry().is_none()
+    {
+        return Err(RequestDeliveryError::InvalidReceipt);
+    }
+    if let Some(expiry) = options.expiry()
+        && matches!(outcome, RequestDeliveryOutcome::Admitted | RequestDeliveryOutcome::ExpiredBeforeAdmission)
+        && expiry.is_expired(receipt.sent_at_unix_milliseconds())
+            != (*outcome == RequestDeliveryOutcome::ExpiredBeforeAdmission)
+    {
+        return Err(RequestDeliveryError::InvalidReceipt);
+    }
+    Ok(())
 }
 
 /// Folds authenticated observations without a task registry or arrival-order trust.
@@ -123,6 +162,44 @@ pub fn observe_request_delivery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_delivery_receipts_bind_target_opt_in_and_exact_request() {
+        use crate::{ApplicationContent, ApplicationMessage, DeviceId, DirectedRequest, MessageId, ProtocolVersion, RequestDeliveryOptions};
+        let target = DeviceId::from_bytes([1; 32]);
+        let original_id = MessageId::from_bytes([2; 16]);
+        let content = DirectedRequest::new(target, "body").unwrap()
+            .with_delivery(RequestDeliveryOptions::new(Some(RequestAdmissionExpiry::new(1_000).unwrap())));
+        let original = ApplicationMessage::new(
+            ProtocolVersion::application_v1(), original_id, 1, 1, None,
+            ApplicationContent::DirectedRequest(content),
+        ).unwrap();
+        let receipt = |outcome, reply_to, sent_at| ApplicationMessage::new(
+            ProtocolVersion::application_v1(), MessageId::from_bytes([3; 16]),
+            1, sent_at, reply_to, ApplicationContent::RequestDeliveryOutcome(outcome),
+        );
+        for (outcome, at, valid) in [
+            (RequestDeliveryOutcome::Admitted, 999, true),
+            (RequestDeliveryOutcome::Admitted, 1_000, false),
+            (RequestDeliveryOutcome::ExpiredBeforeAdmission, 999, false),
+            (RequestDeliveryOutcome::ExpiredBeforeAdmission, 1_000, true),
+            (RequestDeliveryOutcome::EndedWithoutResponse, 2_000, true),
+        ] {
+            let receipt = receipt(outcome, Some(original_id), at).unwrap();
+            assert_eq!(validate_request_delivery_receipt(&original, target, &receipt).is_ok(), valid);
+            assert!(validate_request_delivery_receipt(&original, DeviceId::from_bytes([4; 32]), &receipt).is_err());
+        }
+        assert!(receipt(RequestDeliveryOutcome::Admitted, None, 1).is_err());
+        assert!(receipt(RequestDeliveryOutcome::Responded, Some(original_id), 1).is_err());
+        let wrong_reference = receipt(RequestDeliveryOutcome::Admitted, Some(MessageId::from_bytes([9; 16])), 1).unwrap();
+        assert!(validate_request_delivery_receipt(&original, target, &wrong_reference).is_err());
+        let legacy = ApplicationMessage::new(
+            ProtocolVersion::application_v1(), original_id, 1, 1, None,
+            ApplicationContent::directed_request(target, "body").unwrap(),
+        ).unwrap();
+        assert!(validate_request_delivery_receipt(&legacy, target,
+            &receipt(RequestDeliveryOutcome::Admitted, Some(original_id), 1).unwrap()).is_err());
+    }
 
     #[test]
     fn admission_cutoff_is_exclusive_and_never_uses_a_relative_budget() {

@@ -1,7 +1,8 @@
 use KonclaveDomainCore::{
     ApplicationContent, ApplicationMessage, MAX_APPLICATION_MESSAGE_BYTES,
     MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
-    RepeatPairingOperationId, RepeatPairingRequest, RepeatPairingResponse,
+    DirectedRequest, RepeatPairingOperationId, RepeatPairingRequest, RepeatPairingResponse,
+    RequestAdmissionExpiry, RequestDeliveryOptions, RequestDeliveryOutcome,
 };
 
 use crate::KonclaveProtocolError;
@@ -34,7 +35,15 @@ pub fn encode_application_message(
             wire::application_message::Content::DirectedRequest(wire::DirectedRequestContent {
                 target_device_id: Some(device_id_to_wire(request.target_device_id())),
                 body: request.body().to_owned(),
+                delivery: request.delivery().map(|options| wire::RequestDeliveryOptions {
+                    expires_at_unix_milliseconds: options.expiry().map(RequestAdmissionExpiry::unix_milliseconds),
+                }),
             })
+        }
+        ApplicationContent::RequestDeliveryOutcome(outcome) => {
+            wire::application_message::Content::RequestDeliveryOutcome(
+                wire::RequestDeliveryOutcomeContent { outcome: outcome.wire_value() },
+            )
         }
         ApplicationContent::RepeatPairingRequest(request) => {
             wire::application_message::Content::RepeatPairingRequest(
@@ -123,10 +132,24 @@ pub fn decode_application_message(
             ApplicationContent::text(text.body)?
         }
         Some(wire::application_message::Content::DirectedRequest(request)) => {
-            ApplicationContent::directed_request(
+            let mut directed = DirectedRequest::new(
                 device_id_from_wire(request.target_device_id)?,
                 request.body,
-            )?
+            )?;
+            if let Some(delivery) = request.delivery {
+                let expiry = delivery.expires_at_unix_milliseconds
+                    .map(RequestAdmissionExpiry::new)
+                    .transpose()
+                    .map_err(KonclaveDomainCore::KonclaveDomainError::from)?;
+                directed = directed.with_delivery(RequestDeliveryOptions::new(expiry));
+            }
+            ApplicationContent::DirectedRequest(directed)
+        }
+        Some(wire::application_message::Content::RequestDeliveryOutcome(receipt)) => {
+            ApplicationContent::RequestDeliveryOutcome(
+                RequestDeliveryOutcome::from_wire(receipt.outcome)
+                    .map_err(KonclaveDomainCore::KonclaveDomainError::from)?,
+            )
         }
         Some(wire::application_message::Content::RepeatPairingRequest(request)) => {
             ApplicationContent::repeat_pairing_request(RepeatPairingRequest::new(

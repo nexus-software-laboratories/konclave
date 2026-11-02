@@ -67,7 +67,7 @@ pub(crate) mod short_code_pairing;
 #[path = "trusted_device_persistence.rs"]
 mod trusted_device;
 
-const PROFILE_SCHEMA_VERSION: u32 = 23;
+const PROFILE_SCHEMA_VERSION: u32 = 24;
 
 #[cfg(test)]
 pub(crate) use tests::response_continuation_fixture_at;
@@ -515,6 +515,10 @@ impl LockedProfile {
         profile_open_step(
             "request_service_schema",
             store.initialize_request_service_schema(),
+        )?;
+        profile_open_step(
+            "request_delivery_schema",
+            store.initialize_request_delivery_schema(),
         )?;
         profile_open_step("short_code_pairings", store.verify_short_code_pairings())?;
         profile_open_step("trusted_devices", store.verify_trusted_device_bindings())?;
@@ -4532,6 +4536,41 @@ impl ProfileStore {
             }
             return Ok(reservation);
         }
+        let reservation = self.reserve_new_outbound_application_in(
+            &transaction, conversation_id, message_id, envelope_id,
+        )?;
+        if let Some((
+            authorization,
+            content,
+            reply_to,
+            sent_at_unix_milliseconds,
+            expires_at_unix_seconds,
+            now_unix_milliseconds,
+        )) = collaboration_action
+        {
+            self.reserve_directed_request_response_in(
+                &transaction,
+                authorization.directed_request_claim,
+                reservation,
+                true,
+                content,
+                reply_to,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+                now_unix_milliseconds,
+            )?;
+        }
+        transaction.commit().map_err(|_| ProfileStoreError::Storage)?;
+        Ok(reservation)
+    }
+
+    fn reserve_new_outbound_application_in(
+        &self,
+        transaction: &Connection,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        envelope_id: EnvelopeId,
+    ) -> Result<OutboundReservation, ProfileStoreError> {
         let pending: i64 = transaction
             .query_row(
                 "SELECT count(*) FROM daemon_outbox
@@ -4589,30 +4628,6 @@ impl ProfileStore {
             envelope_id,
             sender_counter,
         };
-        if let Some((
-            authorization,
-            content,
-            reply_to,
-            sent_at_unix_milliseconds,
-            expires_at_unix_seconds,
-            now_unix_milliseconds,
-        )) = collaboration_action
-        {
-            self.reserve_directed_request_response_in(
-                &transaction,
-                authorization.directed_request_claim,
-                reservation,
-                true,
-                content,
-                reply_to,
-                sent_at_unix_milliseconds,
-                expires_at_unix_seconds,
-                now_unix_milliseconds,
-            )?;
-        }
-        transaction
-            .commit()
-            .map_err(|_| ProfileStoreError::Storage)?;
         Ok(reservation)
     }
 
@@ -6872,7 +6887,7 @@ impl ProfileStore {
         } else {
             false
         };
-        if !internal {
+        if !internal && !matches!(message.message.content(), ApplicationContent::RequestDeliveryOutcome(_)) {
             self.insert_remote_event_in(
                 &transaction,
                 conversation_id,
@@ -7425,6 +7440,17 @@ impl ProfileStore {
         epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), ProfileStoreError> {
+        if matches!(message.content(), ApplicationContent::RequestDeliveryOutcome(_)) {
+            let original = self.load_history_record(
+                connection, conversation_id, routing_id,
+                message.reply_to().ok_or(ProfileStoreError::InvalidTransition)?,
+            )?.ok_or(ProfileStoreError::OperationNotFound)?;
+            if !original.complete {
+                return Err(ProfileStoreError::InvalidTransition);
+            }
+            KonclaveDomainCore::validate_request_delivery_receipt(&original.message, sender, message)
+                .map_err(|_| ProfileStoreError::InvalidTransition)?;
+        }
         let state = self.request_service_state_in(connection, conversation_id, routing_id)?;
         let request_service_reply = if state.request_service().is_some()
             && matches!(message.content(), ApplicationContent::DirectedRequest(_))
@@ -9536,7 +9562,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), ProfileStoreError> {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| ProfileStoreError::Storage)?;
     match version {
-        PROFILE_SCHEMA_VERSION | 22 | 21 | 20 | 19 | 18 | 17 | 16 => return Ok(()),
+        PROFILE_SCHEMA_VERSION | 23 | 22 | 21 | 20 | 19 | 18 | 17 | 16 => return Ok(()),
         15 => return initialize_collaboration_policy_exchange_schema(connection),
         14 => return initialize_collaboration_policy_schema(connection),
         13 => return initialize_active_conversation_schema(connection),
@@ -12689,6 +12715,19 @@ mod tests {
         lease_id: AdapterLeaseId,
         target_device_id: DeviceId,
     ) -> ClaimDirectedRequest {
+        directed_request_claim_input_with_content(
+            fixture, policy_digest, consumer_id, lease_id,
+            ApplicationContent::directed_request(target_device_id, "review the contract").unwrap(),
+        )
+    }
+
+    fn directed_request_claim_input_with_content(
+        fixture: &ConversationFixture,
+        policy_digest: CollaborationPolicyDigest,
+        consumer_id: AdapterConsumerId,
+        lease_id: AdapterLeaseId,
+        content: ApplicationContent,
+    ) -> ClaimDirectedRequest {
         fixture
             .store
             .set_adapter_delivery_enabled(fixture.conversation_id, true)
@@ -12699,7 +12738,7 @@ mod tests {
             1,
             DeviceId::from_bytes([44; DeviceId::LENGTH]),
             1,
-            ApplicationContent::directed_request(target_device_id, "review the contract").unwrap(),
+            content,
         );
         let notification_id = NotificationId::from_bytes([45; NotificationId::LENGTH]);
         fixture
@@ -12747,6 +12786,52 @@ mod tests {
         {
             DirectedRequestClaimOutcome::Claimed(claim) => claim,
             _ => panic!("directed request should be claimable"),
+        }
+
+        #[test]
+        fn request_delivery_cutoff_is_checked_only_before_first_durable_admission() {
+            use KonclaveDomainCore::{DirectedRequest, RequestAdmissionExpiry, RequestDeliveryOptions, RequestDeliveryOutcome};
+            for cutoff in [999, 1_000, 1_001] {
+                let fixture = conversation_fixture(&format!("delivery-cutoff-{cutoff}"));
+                let digest = activate_request_reply_policy(&fixture);
+                let content = DirectedRequest::new(fixture.device_id, "request").unwrap()
+                    .with_delivery(RequestDeliveryOptions::new(Some(RequestAdmissionExpiry::new(cutoff).unwrap())));
+                let input = directed_request_claim_input_with_content(
+                    &fixture, digest, AdapterConsumerId::from_bytes([61; 16]),
+                    AdapterLeaseId::from_bytes([62; 16]), ApplicationContent::DirectedRequest(content),
+                );
+                let outcome = fixture.store.claim_directed_request(input).unwrap();
+                let receipts = fixture.store.request_delivery_receipts(Some((fixture.conversation_id, input.request_message_id))).unwrap();
+                assert_eq!(receipts.len(), 1);
+                assert!(fixture.store.request_delivery_receipt_needs_sealing(receipts[0]).unwrap());
+                if cutoff <= input.now_unix_milliseconds {
+                    assert_eq!(outcome, DirectedRequestClaimOutcome::ExpiredBeforeAdmission);
+                    assert_eq!(receipts[0].outcome, RequestDeliveryOutcome::ExpiredBeforeAdmission);
+                    assert!(fixture.store.active_directed_request_claim(ActiveDirectedRequestClaim {
+                        conversation_id: input.conversation_id,
+                        request_message_id: input.request_message_id,
+                        responder_device_id: input.responder_device_id,
+                        consumer_id: input.consumer_id, attempt: 1, policy_digest: input.policy_digest,
+                        now_unix_milliseconds: input.now_unix_milliseconds,
+                    }).unwrap().is_none());
+                } else {
+                    let DirectedRequestClaimOutcome::Claimed(claim) = outcome else { panic!("claim"); };
+                    assert_eq!(receipts[0].outcome, RequestDeliveryOutcome::Admitted);
+                    let retry = fixture.store.claim_directed_request(ClaimDirectedRequest { now_unix_milliseconds: 2_000, ..input }).unwrap();
+                    assert_eq!(retry, DirectedRequestClaimOutcome::Claimed(claim));
+                    fixture.store.complete_directed_request_without_response(CompleteDirectedRequest {
+                        conversation_id: input.conversation_id,
+                        request_message_id: input.request_message_id,
+                        responder_device_id: input.responder_device_id,
+                        consumer_id: input.consumer_id, attempt: claim.attempt, policy_digest: input.policy_digest,
+                    }).unwrap();
+                    let completed = fixture.store.request_delivery_receipts(Some((fixture.conversation_id, input.request_message_id))).unwrap();
+                    assert_eq!(completed.len(), 2);
+                    assert_eq!(completed[1].outcome, RequestDeliveryOutcome::EndedWithoutResponse);
+                    assert!(completed[1].reservation.sender_counter > receipts[0].reservation.sender_counter);
+                }
+                fixture.store.verify_directed_request_handlings().unwrap();
+            }
         }
     }
 

@@ -2,7 +2,8 @@ use std::mem::size_of;
 
 use KonclaveDomainCore::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING,
-    APPLICATION_CAPABILITY_REQUEST_SERVICE, ConversationId, ConversationRole,
+    APPLICATION_CAPABILITY_REQUEST_SERVICE, APPLICATION_CAPABILITY_REQUEST_DELIVERY,
+    ConversationId, ConversationRole,
     CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId, NotificationId,
     PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer, PairingStage,
@@ -321,7 +322,8 @@ impl DeviceIdentity {
             .map_err(|_| provider_failure("device credential binding signature"))?;
         let application_capabilities = APPLICATION_CAPABILITY_DIRECTED_REQUEST
             | APPLICATION_CAPABILITY_REPEAT_PAIRING
-            | APPLICATION_CAPABILITY_REQUEST_SERVICE;
+            | APPLICATION_CAPABILITY_REQUEST_SERVICE
+            | APPLICATION_CAPABILITY_REQUEST_DELIVERY;
         let capability_canonical =
             canonical_credential_capabilities(&canonical, application_capabilities);
         let capability_signature = cipher_suite
@@ -1206,6 +1208,7 @@ mod tests {
         assert!(binding.supports_directed_requests());
         assert!(binding.supports_repeat_pairing());
         assert!(binding.supports_request_services());
+        assert!(binding.supports_request_delivery());
         verify_device_credential_binding(binding).unwrap();
 
         let stripped = DeviceCredentialBinding::new(
@@ -1223,7 +1226,8 @@ mod tests {
 
         for capabilities in [
             binding.application_capabilities() ^ APPLICATION_CAPABILITY_REQUEST_SERVICE,
-            binding.application_capabilities() | (1 << 3),
+            binding.application_capabilities() ^ APPLICATION_CAPABILITY_REQUEST_DELIVERY,
+            binding.application_capabilities() | (1 << 4),
         ] {
             let altered = DeviceCredentialBinding::new_with_capabilities(
                 binding.version(),

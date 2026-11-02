@@ -7,7 +7,8 @@ use crate::{
     ConversationId, CredentialBindingHash, DeviceId, Ed25519PublicKey, Ed25519Signature,
     EnvelopeId, InvitationId, InvitationNonce, KonclaveDomainError, MembershipOperationId,
     MessageId, PairingContextHash, PairingId, PairingMessageId, PairingNonce,
-    RepeatPairingOperationId, RequestServiceChannel, RoutingId,
+    RepeatPairingOperationId, RequestAdmissionExpiry, RequestDeliveryOutcome,
+    RequestServiceChannel, RoutingId,
 };
 
 /// Current Konclave application protocol major version.
@@ -110,6 +111,8 @@ pub const APPLICATION_CAPABILITY_DIRECTED_REQUEST: u64 = 1;
 pub const APPLICATION_CAPABILITY_REPEAT_PAIRING: u64 = 1 << 1;
 /// Root-signed capability bit for enforcing private requester/operator channels.
 pub const APPLICATION_CAPABILITY_REQUEST_SERVICE: u64 = 1 << 2;
+/// Root-signed support for admission expiry and history-only delivery receipts.
+pub const APPLICATION_CAPABILITY_REQUEST_DELIVERY: u64 = 1 << 3;
 
 /// Public binding between a device root and a conversation-scoped MLS signature key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +267,13 @@ impl DeviceCredentialBinding {
     #[must_use]
     pub const fn supports_request_services(&self) -> bool {
         self.application_capabilities & APPLICATION_CAPABILITY_REQUEST_SERVICE != 0
+            && self.supports_directed_requests()
+    }
+
+    /// Returns whether this device enforces admission expiry and delivery receipts.
+    #[must_use]
+    pub const fn supports_request_delivery(&self) -> bool {
+        self.application_capabilities & APPLICATION_CAPABILITY_REQUEST_DELIVERY != 0
             && self.supports_directed_requests()
     }
 
@@ -1470,6 +1480,28 @@ pub struct DirectedRequest {
     #[zeroize(skip)]
     target_device_id: DeviceId,
     body: String,
+    #[zeroize(skip)]
+    delivery: Option<RequestDeliveryOptions>,
+}
+
+/// Presence requests encrypted delivery receipts; the admission cutoff is optional.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestDeliveryOptions {
+    expiry: Option<RequestAdmissionExpiry>,
+}
+
+impl RequestDeliveryOptions {
+    /// Requests receipts, optionally refusing new admission at the given cutoff.
+    #[must_use]
+    pub const fn new(expiry: Option<RequestAdmissionExpiry>) -> Self {
+        Self { expiry }
+    }
+
+    /// Returns the cutoff, which never cancels already admitted work.
+    #[must_use]
+    pub const fn expiry(self) -> Option<RequestAdmissionExpiry> {
+        self.expiry
+    }
 }
 
 impl DirectedRequest {
@@ -1486,7 +1518,21 @@ impl DirectedRequest {
         Ok(Self {
             target_device_id,
             body: validate_application_text(body.into(), "directed_request_body")?,
+            delivery: None,
         })
+    }
+
+    /// Attaches immutable delivery semantics to an already validated request.
+    #[must_use]
+    pub fn with_delivery(mut self, options: RequestDeliveryOptions) -> Self {
+        self.delivery = Some(options);
+        self
+    }
+
+    /// Returns negotiated delivery options, absent for legacy requests.
+    #[must_use]
+    pub const fn delivery(&self) -> Option<RequestDeliveryOptions> {
+        self.delivery
     }
 
     /// Returns the exact member expected to answer.
@@ -1625,6 +1671,7 @@ impl RepeatPairingResponse {
 pub enum ApplicationContent {
     Text(String),
     DirectedRequest(DirectedRequest),
+    RequestDeliveryOutcome(#[zeroize(skip)] RequestDeliveryOutcome),
     RepeatPairingRequest(Box<RepeatPairingRequest>),
     RepeatPairingResponse(Box<RepeatPairingResponse>),
     CollaborationPolicyProposal(Box<CollaborationPolicyProposal>),
@@ -1729,6 +1776,13 @@ impl ApplicationMessage {
         reply_to: Option<MessageId>,
         content: ApplicationContent,
     ) -> Result<Self, KonclaveDomainError> {
+        if matches!(content, ApplicationContent::RequestDeliveryOutcome(_))
+            && (reply_to.is_none()
+                || reply_to == Some(message_id)
+                || matches!(content, ApplicationContent::RequestDeliveryOutcome(RequestDeliveryOutcome::Responded)))
+        {
+            return Err(crate::RequestDeliveryError::InvalidReceipt.into());
+        }
         require_positive(sender_counter, "sender_counter")?;
         Ok(Self {
             version,

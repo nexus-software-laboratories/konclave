@@ -1883,6 +1883,7 @@ async fn dispatch_authorized_request(
             .await
         }
         "collaboration.turn.authorize" => {
+            let services = state.services.clone();
             let store = Arc::clone(&state.store);
             let grant = state.grant.clone();
             let consumer = state.consumer;
@@ -1898,18 +1899,26 @@ async fn dispatch_authorized_request(
             };
             let payload = request.payload().to_vec();
             run_collaboration_policy_request(move || {
-                authorize_collaboration_turn(
+                let result = authorize_collaboration_turn(
                     &store,
                     &grant,
                     consumer,
                     delivery.as_ref(),
                     local_device,
                     &payload,
-                )
+                )?;
+                let request: AuthorizeCollaborationTurnRequest = serde_json::from_slice(&payload)
+                    .map_err(|_| "invalid_request".to_string())?;
+                services.conversations().seal_request_delivery_receipts(
+                    parse_collaboration_conversation_id(&request.conversation_id)?,
+                    parse_collaboration_message_id(&request.request_message_id)?,
+                ).map_err(|_| "internal".to_string())?;
+                Ok(result)
             })
             .await
         }
         "collaboration.turn.complete" => {
+            let services = state.services.clone();
             let store = Arc::clone(&state.store);
             let grant = state.grant.clone();
             let consumer = state.consumer;
@@ -1924,7 +1933,14 @@ async fn dispatch_authorized_request(
             };
             let payload = request.payload().to_vec();
             run_collaboration_policy_request(move || {
-                complete_collaboration_turn(&store, &grant, consumer, local_device, &payload)
+                let result = complete_collaboration_turn(&store, &grant, consumer, local_device, &payload)?;
+                let request: CompleteCollaborationTurnRequest = serde_json::from_slice(&payload)
+                    .map_err(|_| "invalid_request".to_string())?;
+                services.conversations().seal_request_delivery_receipts(
+                    parse_collaboration_conversation_id(&request.conversation_id)?,
+                    parse_collaboration_message_id(&request.request_message_id)?,
+                ).map_err(|_| "internal".to_string())?;
+                Ok(result)
             })
             .await
         }
@@ -2366,6 +2382,9 @@ fn authorize_collaboration_turn_with_lease(
                 Err(_) => return Err("internal".to_string()),
             };
             match claim {
+                DirectedRequestClaimOutcome::ExpiredBeforeAdmission => encode_collaboration_turn_authorization(
+                    "denied", Some("request_expired_before_admission"), Some(&active), None,
+                ),
                 DirectedRequestClaimOutcome::Claimed(claim) => {
                     encode_collaboration_turn_authorization(
                         "authorized",
@@ -3389,7 +3408,8 @@ fn delivery_event_result(claimed: ClaimedRemoteEvent) -> DeliveryEventResult {
                         ),
                     }
                 }
-                ApplicationContent::RepeatPairingRequest(_)
+                ApplicationContent::RequestDeliveryOutcome(_)
+                | ApplicationContent::RepeatPairingRequest(_)
                 | ApplicationContent::RepeatPairingResponse(_) => {
                     unreachable!("internal application content cannot enter client delivery")
                 }

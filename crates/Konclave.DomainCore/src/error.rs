@@ -65,6 +65,10 @@ pub enum KonclaveDomainError {
     #[error(transparent)]
     RequestService(#[from] crate::RequestServiceError),
 
+    /// A request delivery option or outcome violates the negotiated contract.
+    #[error(transparent)]
+    RequestDelivery(#[from] crate::RequestDeliveryError),
+
     /// A membership snapshot claims a member joined after the represented epoch.
     #[error("member joined at epoch {joined_epoch} after state epoch {state_epoch}")]
     MemberJoinedAfterStateEpoch { joined_epoch: u64, state_epoch: u64 },

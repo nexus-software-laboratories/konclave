@@ -693,6 +693,7 @@ fn directed_request_rejects_malformed_wire_values() {
             wire::DirectedRequestContent {
                 target_device_id,
                 body,
+                delivery: None,
             },
         ));
         decode_application_message(&application.encode_to_vec())
@@ -726,6 +727,51 @@ fn directed_request_rejects_malformed_wire_values() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn request_delivery_round_trips_options_and_rejects_unrepresentable_expiry() {
+    use KonclaveDomainCore::{DirectedRequest, RequestAdmissionExpiry, RequestDeliveryOptions};
+    let legacy = ApplicationMessage::new(
+        ProtocolVersion::application_v1(), MessageId::from_bytes([31; 16]), 1, 10, None,
+        ApplicationContent::directed_request(DeviceId::from_bytes([32; 32]), "request").unwrap(),
+    ).unwrap();
+    let legacy_bytes = encode_application_message(&legacy).unwrap();
+    let decoded = decode_application_message(&legacy_bytes).unwrap();
+    assert_eq!(encode_application_message(&decoded).unwrap(), legacy_bytes);
+    let ApplicationContent::DirectedRequest(request) = decoded.content() else { panic!("request"); };
+    assert!(request.delivery().is_none());
+    for expiry in [None, Some(RequestAdmissionExpiry::new(1_000).unwrap())] {
+        let request = DirectedRequest::new(DeviceId::from_bytes([32; 32]), "request").unwrap()
+            .with_delivery(RequestDeliveryOptions::new(expiry));
+        let message = ApplicationMessage::new(
+            ProtocolVersion::application_v1(), legacy.message_id(), 1, 10, None,
+            ApplicationContent::DirectedRequest(request),
+        ).unwrap();
+        let bytes = encode_application_message(&message).unwrap();
+        assert_ne!(bytes, legacy_bytes);
+        assert_eq!(decode_application_message(&bytes).unwrap(), message);
+    }
+    for expiry in [0, 9_007_199_254_740_992, u64::MAX] {
+        let mut wire = wire::ApplicationMessage::decode(legacy_bytes.as_slice()).unwrap();
+        let Some(wire::application_message::Content::DirectedRequest(request)) = wire.content.as_mut() else { panic!("request"); };
+        request.delivery = Some(wire::RequestDeliveryOptions { expires_at_unix_milliseconds: Some(expiry) });
+        assert!(decode_application_message(&wire.encode_to_vec()).is_err());
+    }
+}
+
+#[test]
+fn request_delivery_rejects_unknown_outcomes_and_missing_reply_reference() {
+    let mut application = wire::ApplicationMessage::decode(APPLICATION_FIXTURE).unwrap();
+    for outcome in [0, 1, 2, 3, 4, u32::MAX] {
+        application.content = Some(wire::application_message::Content::RequestDeliveryOutcome(
+            wire::RequestDeliveryOutcomeContent { outcome },
+        ));
+        application.reply_to = Some(wire::MessageId { value: vec![93; MessageId::LENGTH].into() });
+        assert_eq!(decode_application_message(&application.encode_to_vec()).is_ok(), matches!(outcome, 1 | 3 | 4));
+        application.reply_to = None;
+        assert!(decode_application_message(&application.encode_to_vec()).is_err());
+    }
 }
 
 #[test]

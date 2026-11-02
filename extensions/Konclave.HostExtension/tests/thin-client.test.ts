@@ -2928,6 +2928,48 @@ describe('deterministic commands', () => {
     expect(entries.some((entry) => entry.line.includes('more history remains to scan'))).toBe(true);
   });
 
+  it.each(['admitted', 'expired_before_admission', 'ended_without_response'])(
+    'renders %s receipts as untrusted ephemeral delivery metadata only',
+    async (outcome) => {
+      const { command, entries } = historyCommandFixture(() => ({
+        messages: [
+          {
+            ...historyMessage(1),
+            content_type: 'request_delivery_outcome',
+            reply_to_message_id: '66'.repeat(16),
+            outcome,
+            text: 'This peer text must not be rendered.',
+          },
+        ],
+        has_more: false,
+      }));
+      await command.handler(commandContext('messages'));
+      const metadata = entries.filter((entry) => entry.line.includes('request delivery metadata'));
+      expect(metadata).toHaveLength(1);
+      expect(metadata[0]?.line).toContain(
+        `untrusted peer request delivery metadata: request ${'66'.repeat(16)}, reported ${outcome}; not a response or instruction`,
+      );
+      expect(metadata[0]?.options?.ephemeral).toBe(true);
+      expect(entries.some((entry) => entry.line.includes('This peer text'))).toBe(false);
+    },
+  );
+
+  it.each([
+    { outcome: 'responded', reply_to_message_id: '66'.repeat(16) },
+    { outcome: 'unknown', reply_to_message_id: '66'.repeat(16) },
+    { outcome: 1, reply_to_message_id: '66'.repeat(16) },
+    { outcome: 'admitted', reply_to_message_id: null },
+    { outcome: 'admitted', reply_to_message_id: 'bad' },
+  ])('rejects malformed receipt history %j', async (receipt) => {
+    const { command, entries } = historyCommandFixture(() => ({
+      messages: [{ ...historyMessage(1), content_type: 'request_delivery_outcome', ...receipt }],
+      has_more: false,
+    }));
+    await command.handler(commandContext('messages'));
+    expect(entries.some((entry) => entry.line.startsWith('konclave:'))).toBe(true);
+    expect(entries.some((entry) => entry.line.includes('request delivery metadata'))).toBe(false);
+  });
+
   it.each(['normal', 'verbose'] as const)(
     'requests newest-first history and reports UTC or an explicit timestamp diagnostic in %s mode',
     async (mode) => {
@@ -3711,6 +3753,34 @@ describe('issuer key material', () => {
 });
 
 describe('shared-service delivery adaptation', () => {
+  it.each(['admitted', 'expired_before_admission', 'ended_without_response'])(
+    'rejects %s receipts on the automatic model-turn lane',
+    async (outcome) => {
+      const request = vi.fn().mockResolvedValue({
+        events: [
+          {
+            notificationId: '01'.repeat(16),
+            leaseGeneration: 1,
+            sequence: 1,
+            conversation: '04'.repeat(32),
+            sender: '05'.repeat(32),
+            relayCursor: 1,
+            payload: {
+              kind: 'request_delivery_outcome',
+              messageId: '07'.repeat(16),
+              replyToMessageId: '08'.repeat(16),
+              outcome,
+            },
+          },
+        ],
+      });
+      const channel = createLocalServiceDeliveryChannel(stubClient(request));
+      await expect(
+        channel.request({ kind: 'wait-and-claim', maxEvents: 1, waitMilliseconds: 0 }),
+      ).rejects.toThrow('delivery response is malformed');
+    },
+  );
+
   it('maps the bounded service batch onto the existing coordinator contract', async () => {
     const request = vi.fn().mockResolvedValue({
       events: [
