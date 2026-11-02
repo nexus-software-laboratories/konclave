@@ -78,7 +78,9 @@ The handling journal records the delivery fact and hence the intent to emit its
 receipt. Materialization reuses ordinary encrypted outbound journaling and retry;
 restart reconstructs an interrupted receipt from that fact. Stable, domain-separated
 receipt identifiers make duplicate materialization idempotent. No receipt claims
-exactly-once execution. Removal can prevent a pending receipt from being sent.
+exactly-once execution. Removal or incompatible membership can abandon a pending
+receipt with a local diagnostic, but cannot block profile recovery or reopen
+handling. Existing ciphertext remains bound to its original epoch and reservation.
 
 Receipts remain inspectable authenticated history but never start model turns,
 trigger answer continuation or request another reply. Absence of a receipt is

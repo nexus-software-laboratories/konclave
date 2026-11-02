@@ -1840,6 +1840,22 @@
             {
               "properties": {
                 "content_type": {
+                  "const": "request_delivery_outcome",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "outcome"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content_type": {
                   "const": "text",
                   "type": "string"
                 },
@@ -2091,6 +2107,22 @@
       "$defs": {
         "MessageResult": {
           "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "request_delivery_outcome",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "outcome"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "content_type": {
@@ -2667,6 +2699,22 @@
         "conversation_id": {
           "type": "string"
         },
+        "delivery_receipts": {
+          "description": "Request encrypted, history-only delivery receipts.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expires_at_unix_milliseconds": {
+          "description": "Optional absolute admission cutoff, not an execution or relay deadline.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "message_id": {
           "type": "string"
         },
@@ -2889,6 +2937,22 @@
       "$defs": {
         "MessageResult": {
           "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "request_delivery_outcome",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "outcome"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "content_type": {
@@ -3277,6 +3341,22 @@
       "$defs": {
         "MessageResult": {
           "oneOf": [
+            {
+              "properties": {
+                "content_type": {
+                  "const": "request_delivery_outcome",
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content_type",
+                "outcome"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "content_type": {

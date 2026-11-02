@@ -383,9 +383,13 @@ impl ProfileStore {
         if status == 1 {
             return Ok(true);
         }
-        let outbound = self
+        let outbound = match self
             .outbound_application(reservation.conversation_id, reservation.message_id)?
-            .ok_or(ProfileStoreError::CorruptData)?;
+        {
+            Some(outbound) => outbound,
+            None if status == 4 => return Ok(false),
+            None => return Err(ProfileStoreError::CorruptData),
+        };
         if outbound.message.content()
             != &ApplicationContent::RequestDeliveryOutcome(receipt.outcome)
             || outbound.message.reply_to() != Some(receipt.request_message_id)

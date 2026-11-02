@@ -7470,9 +7470,15 @@ impl ProfileStore {
                 message,
             )
             .map_err(|_| ProfileStoreError::InvalidTransition)?;
-            let identifiers = |outcome| KonclaveCryptographicCore::derive_request_delivery_identifiers(
-                conversation_id, original.message.message_id(), sender, outcome,
-            ).0;
+            let identifiers = |outcome| {
+                KonclaveCryptographicCore::derive_request_delivery_identifiers(
+                    conversation_id,
+                    original.message.message_id(),
+                    sender,
+                    outcome,
+                )
+                .0
+            };
             if identifiers(*outcome) != message.message_id() {
                 return Err(ProfileStoreError::InvalidTransition);
             }
@@ -7481,15 +7487,24 @@ impl ProfileStore {
                 identifiers(KonclaveDomainCore::RequestDeliveryOutcome::Admitted),
                 identifiers(KonclaveDomainCore::RequestDeliveryOutcome::EndedWithoutResponse),
             ] {
-                if let Some(previous) = self.load_history_record(connection, conversation_id, routing_id, id)? {
-                    let ApplicationContent::RequestDeliveryOutcome(previous_outcome) = previous.message.content() else {
+                if let Some(previous) =
+                    self.load_history_record(connection, conversation_id, routing_id, id)?
+                {
+                    let ApplicationContent::RequestDeliveryOutcome(previous_outcome) =
+                        previous.message.content()
+                    else {
                         return Err(ProfileStoreError::InvalidTransition);
                     };
                     KonclaveDomainCore::validate_request_delivery_receipt(
-                        &original.message, previous.sender, &previous.message,
-                    ).map_err(|_| ProfileStoreError::CorruptData)?;
-                    observed = Some(KonclaveDomainCore::observe_request_delivery(observed, *previous_outcome)
-                        .map_err(|_| ProfileStoreError::InvalidTransition)?);
+                        &original.message,
+                        previous.sender,
+                        &previous.message,
+                    )
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+                    observed = Some(
+                        KonclaveDomainCore::observe_request_delivery(observed, *previous_outcome)
+                            .map_err(|_| ProfileStoreError::InvalidTransition)?,
+                    );
                 }
             }
             KonclaveDomainCore::observe_request_delivery(observed, *outcome)
@@ -12836,107 +12851,138 @@ mod tests {
         }
     }
 
-        #[test]
-        fn request_delivery_cutoff_is_checked_only_before_first_durable_admission() {
-            use KonclaveDomainCore::{
-                DirectedRequest, RequestAdmissionExpiry, RequestDeliveryOptions,
-                RequestDeliveryOutcome,
-            };
-            for cutoff in [999, 1_000, 1_001] {
-                let fixture = conversation_fixture(&format!("delivery-cutoff-{cutoff}"));
-                let digest = activate_request_reply_policy(&fixture);
-                let content = DirectedRequest::new(fixture.device_id, "request")
+    #[test]
+    fn request_delivery_cutoff_is_checked_only_before_first_durable_admission() {
+        use KonclaveDomainCore::{
+            DirectedRequest, RequestAdmissionExpiry, RequestDeliveryOptions, RequestDeliveryOutcome,
+        };
+        for cutoff in [999, 1_000, 1_001] {
+            let fixture = conversation_fixture(&format!("delivery-cutoff-{cutoff}"));
+            let digest = activate_request_reply_policy(&fixture);
+            let content = DirectedRequest::new(fixture.device_id, "request")
+                .unwrap()
+                .with_delivery(RequestDeliveryOptions::new(Some(
+                    RequestAdmissionExpiry::new(cutoff).unwrap(),
+                )));
+            let input = directed_request_claim_input_with_content(
+                &fixture,
+                digest,
+                AdapterConsumerId::from_bytes([61; 16]),
+                AdapterLeaseId::from_bytes([62; 16]),
+                ApplicationContent::DirectedRequest(content),
+            );
+            let outcome = fixture.store.claim_directed_request(input).unwrap();
+            let receipts = fixture
+                .store
+                .request_delivery_receipts(Some((
+                    fixture.conversation_id,
+                    input.request_message_id,
+                )))
+                .unwrap();
+            assert_eq!(receipts.len(), 1);
+            assert!(
+                fixture
+                    .store
+                    .request_delivery_receipt_needs_sealing(receipts[0])
                     .unwrap()
-                    .with_delivery(RequestDeliveryOptions::new(Some(
-                        RequestAdmissionExpiry::new(cutoff).unwrap(),
-                    )));
-                let input = directed_request_claim_input_with_content(
-                    &fixture,
-                    digest,
-                    AdapterConsumerId::from_bytes([61; 16]),
-                    AdapterLeaseId::from_bytes([62; 16]),
-                    ApplicationContent::DirectedRequest(content),
+            );
+            if cutoff <= input.now_unix_milliseconds {
+                assert_eq!(outcome, DirectedRequestClaimOutcome::ExpiredBeforeAdmission);
+                assert_eq!(
+                    receipts[0].outcome,
+                    RequestDeliveryOutcome::ExpiredBeforeAdmission
                 );
-                let outcome = fixture.store.claim_directed_request(input).unwrap();
-                let receipts = fixture
+                assert!(
+                    fixture
+                        .store
+                        .active_directed_request_claim(ActiveDirectedRequestClaim {
+                            conversation_id: input.conversation_id,
+                            request_message_id: input.request_message_id,
+                            responder_device_id: input.responder_device_id,
+                            consumer_id: input.consumer_id,
+                            attempt: 1,
+                            policy_digest: input.policy_digest,
+                            now_unix_milliseconds: input.now_unix_milliseconds,
+                        })
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                let DirectedRequestClaimOutcome::Claimed(claim) = outcome else {
+                    panic!("claim");
+                };
+                assert_eq!(receipts[0].outcome, RequestDeliveryOutcome::Admitted);
+                let retry = fixture
+                    .store
+                    .claim_directed_request(ClaimDirectedRequest {
+                        now_unix_milliseconds: 2_000,
+                        ..input
+                    })
+                    .unwrap();
+                assert_eq!(retry, DirectedRequestClaimOutcome::Claimed(claim));
+                fixture
+                    .store
+                    .complete_directed_request_without_response(CompleteDirectedRequest {
+                        conversation_id: input.conversation_id,
+                        request_message_id: input.request_message_id,
+                        responder_device_id: input.responder_device_id,
+                        consumer_id: input.consumer_id,
+                        attempt: claim.attempt,
+                        policy_digest: input.policy_digest,
+                    })
+                    .unwrap();
+                let completed = fixture
                     .store
                     .request_delivery_receipts(Some((
                         fixture.conversation_id,
                         input.request_message_id,
                     )))
                     .unwrap();
-                assert_eq!(receipts.len(), 1);
-                assert!(
-                    fixture
-                        .store
-                        .request_delivery_receipt_needs_sealing(receipts[0])
-                        .unwrap()
+                assert_eq!(completed.len(), 2);
+                assert_eq!(
+                    completed[1].outcome,
+                    RequestDeliveryOutcome::EndedWithoutResponse
                 );
-                if cutoff <= input.now_unix_milliseconds {
-                    assert_eq!(outcome, DirectedRequestClaimOutcome::ExpiredBeforeAdmission);
-                    assert_eq!(
-                        receipts[0].outcome,
-                        RequestDeliveryOutcome::ExpiredBeforeAdmission
-                    );
-                    assert!(
-                        fixture
-                            .store
-                            .active_directed_request_claim(ActiveDirectedRequestClaim {
-                                conversation_id: input.conversation_id,
-                                request_message_id: input.request_message_id,
-                                responder_device_id: input.responder_device_id,
-                                consumer_id: input.consumer_id,
-                                attempt: 1,
-                                policy_digest: input.policy_digest,
-                                now_unix_milliseconds: input.now_unix_milliseconds,
-                            })
-                            .unwrap()
-                            .is_none()
-                    );
-                } else {
-                    let DirectedRequestClaimOutcome::Claimed(claim) = outcome else {
-                        panic!("claim");
-                    };
-                    assert_eq!(receipts[0].outcome, RequestDeliveryOutcome::Admitted);
-                    let retry = fixture
-                        .store
-                        .claim_directed_request(ClaimDirectedRequest {
-                            now_unix_milliseconds: 2_000,
-                            ..input
-                        })
-                        .unwrap();
-                    assert_eq!(retry, DirectedRequestClaimOutcome::Claimed(claim));
-                    fixture
-                        .store
-                        .complete_directed_request_without_response(CompleteDirectedRequest {
-                            conversation_id: input.conversation_id,
-                            request_message_id: input.request_message_id,
-                            responder_device_id: input.responder_device_id,
-                            consumer_id: input.consumer_id,
-                            attempt: claim.attempt,
-                            policy_digest: input.policy_digest,
-                        })
-                        .unwrap();
-                    let completed = fixture
-                        .store
-                        .request_delivery_receipts(Some((
-                            fixture.conversation_id,
-                            input.request_message_id,
-                        )))
-                        .unwrap();
-                    assert_eq!(completed.len(), 2);
-                    assert_eq!(
-                        completed[1].outcome,
-                        RequestDeliveryOutcome::EndedWithoutResponse
-                    );
-                    assert!(
-                        completed[1].reservation.sender_counter
-                            > receipts[0].reservation.sender_counter
-                    );
-                }
-                fixture.store.verify_directed_request_handlings().unwrap();
+                assert!(
+                    completed[1].reservation.sender_counter
+                        > receipts[0].reservation.sender_counter
+                );
             }
+            fixture.store.verify_directed_request_handlings().unwrap();
         }
+    }
+
+    pub(crate) fn retain_legacy_peer_binding(
+        store: &ProfileStore,
+        conversation_id: ConversationId,
+        peer: DeviceId,
+    ) {
+        let conversation = store.load_conversation(conversation_id).unwrap();
+        let binding = conversation.bindings.iter()
+            .find(|binding| binding.binding().device_id() == peer).unwrap().binding();
+        let legacy = DeviceCredentialBinding::new(
+            binding.version(),
+            binding.device_id(),
+            binding.conversation_id(),
+            binding.signature_scheme(),
+            binding.device_root_public_key(),
+            binding.conversation_signature_public_key(),
+            binding.device_binding_signature(),
+        );
+        let encoded = encode_device_credential_binding(&legacy).unwrap();
+        let blob = store.seal_conversation_record(
+            SecretRecordKind::ConversationCredentialBinding,
+            conversation_id,
+            None,
+            Some(peer),
+            &encoded,
+        ).unwrap();
+        assert_eq!(store.lock().unwrap().execute(
+            "UPDATE daemon_conversation_binding SET sealed_binding = ?1
+             WHERE conversation_id = ?2 AND device_id = ?3",
+            params![blob.as_bytes(), conversation_id.as_bytes().as_slice(), peer.as_bytes().as_slice()],
+        ).unwrap(), 1);
+    }
 
     fn activate_request_reply_policy(fixture: &ConversationFixture) -> CollaborationPolicyDigest {
         let canonical_bundle = collaboration_policy_bytes("request-reply", "legacy annotation");
@@ -13342,33 +13388,6 @@ mod tests {
                 connection.pragma_update(None, "user_version", 21).unwrap();
             }
 
-            #[test]
-            fn request_delivery_migration_preserves_identity_and_authenticates_reader_floor() {
-                let fixture = conversation_fixture("delivery-schema");
-                let device = fixture.device_id;
-                let identity = fixture.store.profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, 23)
-                    .unwrap().unwrap();
-                {
-                    let connection = fixture.store.lock().unwrap();
-                    connection.execute(
-                        "UPDATE daemon_profile SET sealed_device_identity = ?1",
-                        params![identity.as_bytes()],
-                    ).unwrap();
-                    connection.pragma_update(None, "user_version", 23).unwrap();
-                }
-                let closed = fixture.close();
-                let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
-                    .unwrap().open_store(sealer()).unwrap();
-                assert_eq!(reopened.load_or_create_device().unwrap().device_id(), device);
-                assert!(reopened.profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION).is_ok());
-                reopened.lock().unwrap().pragma_update(None, "user_version", 23).unwrap();
-                drop(reopened);
-                assert_eq!(
-                    LockedProfile::acquire(closed.root.path(), closed.profile_id)
-                        .unwrap().open_store(sealer()).err(),
-                    Some(ProfileStoreError::CorruptData),
-                );
-            }
             let closed = fixture.close();
             let result = LockedProfile::acquire(closed.root.path(), closed.profile_id)
                 .unwrap()
@@ -13382,6 +13401,39 @@ mod tests {
                 assert_eq!(result.err(), Some(ProfileStoreError::CorruptData));
             }
         }
+    }
+
+    #[test]
+    fn request_delivery_migration_preserves_identity_and_authenticates_reader_floor() {
+        let fixture = conversation_fixture("delivery-schema");
+        let device = fixture.device_id;
+        let identity = fixture
+            .store
+            .profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, 23)
+            .unwrap()
+            .unwrap();
+        {
+            let connection = fixture.store.lock().unwrap();
+            connection.execute(
+                "UPDATE daemon_profile SET sealed_device_identity = ?1",
+                params![identity.as_bytes()],
+            ).unwrap();
+            connection.pragma_update(None, "user_version", 23).unwrap();
+        }
+        let closed = fixture.close();
+        let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
+            .unwrap().open_store(sealer()).unwrap();
+        assert_eq!(reopened.load_or_create_device().unwrap().device_id(), device);
+        assert!(reopened.profile_identity_for_schema_transition(
+            PROFILE_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION
+        ).is_ok());
+        reopened.lock().unwrap().pragma_update(None, "user_version", 23).unwrap();
+        drop(reopened);
+        assert_eq!(
+            LockedProfile::acquire(closed.root.path(), closed.profile_id)
+                .unwrap().open_store(sealer()).err(),
+            Some(ProfileStoreError::CorruptData),
+        );
     }
 
     fn reserve_directed_response_fixture(

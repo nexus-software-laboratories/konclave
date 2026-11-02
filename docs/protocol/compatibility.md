@@ -228,6 +228,9 @@ behavior. Presence requests encrypted delivery receipts and may supply
 every current member before allocating the request; it MUST NOT silently
 drop options. Receipt materialization also checks current recipient capabilities.
 New membership or removal can therefore prevent an observation from being sent.
+An incompatible membership abandons an unsealed receipt reservation with a local
+diagnostic; it MUST NOT block profile recovery or reopen the handling. Already
+sealed receipts are not reinterpreted under later capability changes.
 
 The receiver compares the cutoff with its local clock immediately before creating
 the first durable authorized handling claim. Equality is expired. This is native
