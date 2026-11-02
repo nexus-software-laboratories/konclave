@@ -4526,12 +4526,12 @@ pub(crate) mod tests {
             let reopened = open_coordinator(root.path(), "bob");
             reopened.recover().unwrap();
             if legacy_binding == Some(false) {
-                assert!(
-                    reopened
-                        .outbound_application(conversation_id, receipt_id)
-                        .unwrap()
-                        .is_none()
-                );
+                assert!(matches!(
+                    reopened.outbound_application(conversation_id, receipt_id),
+                    Err(ConversationCoordinatorError::Profile(
+                        ProfileStoreError::InvalidTransition
+                    ))
+                ));
                 assert!(
                     !reopened
                         .store
@@ -4541,12 +4541,12 @@ pub(crate) mod tests {
                 drop(reopened);
                 let recovered = open_coordinator(root.path(), "bob");
                 recovered.recover().unwrap();
-                assert!(
-                    recovered
-                        .outbound_application(conversation_id, receipt_id)
-                        .unwrap()
-                        .is_none()
-                );
+                assert!(matches!(
+                    recovered.outbound_application(conversation_id, receipt_id),
+                    Err(ConversationCoordinatorError::Profile(
+                        ProfileStoreError::InvalidTransition
+                    ))
+                ));
                 continue;
             }
             let receipt = reopened
