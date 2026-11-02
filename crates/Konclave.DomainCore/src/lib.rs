@@ -8,6 +8,7 @@ mod identifiers;
 mod message_history;
 mod model;
 mod pairing_rendezvous;
+mod request_delivery;
 mod request_service;
 mod response_continuation;
 mod short_code_pairing;
@@ -64,6 +65,10 @@ pub use model::{
 pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
+};
+pub use request_delivery::{
+    MAX_REQUEST_ADMISSION_UNIX_MILLISECONDS, RequestAdmissionExpiry, RequestDeliveryError,
+    RequestDeliveryOutcome, observe_request_delivery,
 };
 pub use request_service::{
     RequestServiceChannel, RequestServiceError, RequestServiceReplyDecision, RequestServiceRequest,
