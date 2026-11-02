@@ -55,7 +55,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-      - name: Verify pure response continuation foundation
+      - name: Verify pure response continuation and request delivery foundations
         if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
@@ -63,6 +63,7 @@ jobs:
           cargo fmt --package KonclaveDomainCore
           git diff
           cargo test --locked --package KonclaveDomainCore response_continuation::tests
+          cargo test --locked --package KonclaveDomainCore request_delivery::tests
           cargo clippy --locked --package KonclaveDomainCore --all-targets -- -D warnings
           git diff --exit-code
       - name: Verify deterministic component relevance
