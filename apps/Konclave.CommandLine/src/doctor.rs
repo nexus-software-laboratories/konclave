@@ -18,7 +18,6 @@ use KonclaveUserPresence::native_user_presence_supported;
 use crate::cli::DoctorArgs;
 use crate::installation;
 
-const MAX_PROFILES: usize = 128;
 const MAX_PROFILE_ROOT_ENTRIES: usize = 1024;
 const MAX_PLUGIN_MANIFEST_BYTES: u64 = 64 * 1024;
 
@@ -379,10 +378,6 @@ fn check_profiles(root: &Path, report: &mut DoctorReport) {
         if !database.is_file() {
             continue;
         }
-        if profiles == MAX_PROFILES {
-            report.fail("profiles", "profile count exceeds diagnostic bound");
-            return;
-        }
         profiles += 1;
         databases_readable &= check_profile_database(&database, report);
         match NativeWrappingKeyProvider::verify_existing(&profile_id) {
@@ -597,5 +592,93 @@ mod tests {
             .checks
             .iter()
             .any(|check| { check.status == "PASS" && check.code == "profiles" }));
+    }
+
+    #[test]
+    fn profile_scan_checks_more_than_128_databases() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..129 {
+            create_profile_database(root.path(), index);
+        }
+        let mut report = DoctorReport::default();
+
+        check_profiles(root.path(), &mut report);
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .filter(|check| check.code == "profile_relay")
+                .count(),
+            129
+        );
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.status == "PASS" && check.code == "profiles"));
+    }
+
+    #[test]
+    fn profile_scan_detects_corruption_among_more_than_128_databases() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..129 {
+            let database = create_profile_database(root.path(), index);
+            if index == 128 {
+                std::fs::write(database, b"not a database").unwrap();
+            }
+        }
+        let mut report = DoctorReport::default();
+
+        check_profiles(root.path(), &mut report);
+
+        assert_eq!(report.failures, 1);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.status == "FAIL" && check.code == "profile_database"));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.status == "PASS" && check.code == "profiles"));
+    }
+
+    #[test]
+    fn profile_scan_preserves_root_entry_bound() {
+        for entry_count in [MAX_PROFILE_ROOT_ENTRIES, MAX_PROFILE_ROOT_ENTRIES + 1] {
+            let root = tempfile::tempdir().unwrap();
+            for index in 0..entry_count {
+                std::fs::File::create(root.path().join(format!("entry-{index}"))).unwrap();
+            }
+            let mut report = DoctorReport::default();
+
+            check_profiles(root.path(), &mut report);
+
+            assert_eq!(
+                report.failures,
+                usize::from(entry_count > MAX_PROFILE_ROOT_ENTRIES)
+            );
+            assert!(!report
+                .checks
+                .iter()
+                .any(|check| check.status == "PASS" && check.code == "profiles"));
+        }
+    }
+
+    fn create_profile_database(root: &Path, index: usize) -> PathBuf {
+        let profile = root.join(format!("profile-{index}"));
+        std::fs::create_dir(&profile).unwrap();
+        let database = profile.join("profile.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE daemon_profile (
+                    singleton_id INTEGER PRIMARY KEY,
+                    relay_endpoint TEXT
+                 );
+                 INSERT INTO daemon_profile (singleton_id, relay_endpoint) VALUES (1, NULL);",
+            )
+            .unwrap();
+        database
     }
 }
