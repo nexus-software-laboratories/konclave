@@ -4516,20 +4516,37 @@ pub(crate) mod tests {
             assert_eq!(receipts.len(), 1);
             let receipt_id = receipts[0].reservation.message_id;
             if legacy_binding == Some(false) {
-                crate::persistence::tests::retain_legacy_peer_binding(
-                    &bob.store, conversation_id, alice.device_id().unwrap(),
+                crate::persistence::retain_legacy_peer_binding(
+                    &bob.store,
+                    conversation_id,
+                    alice.device_id().unwrap(),
                 );
             }
             drop(bob);
             let reopened = open_coordinator(root.path(), "bob");
             reopened.recover().unwrap();
             if legacy_binding == Some(false) {
-                assert!(reopened.outbound_application(conversation_id, receipt_id).unwrap().is_none());
-                assert!(!reopened.store.request_delivery_receipt_needs_sealing(receipts[0]).unwrap());
+                assert!(
+                    reopened
+                        .outbound_application(conversation_id, receipt_id)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    !reopened
+                        .store
+                        .request_delivery_receipt_needs_sealing(receipts[0])
+                        .unwrap()
+                );
                 drop(reopened);
                 let recovered = open_coordinator(root.path(), "bob");
                 recovered.recover().unwrap();
-                assert!(recovered.outbound_application(conversation_id, receipt_id).unwrap().is_none());
+                assert!(
+                    recovered
+                        .outbound_application(conversation_id, receipt_id)
+                        .unwrap()
+                        .is_none()
+                );
                 continue;
             }
             let receipt = reopened
@@ -4538,8 +4555,10 @@ pub(crate) mod tests {
                 .unwrap();
             let bytes = receipt.envelope.payload().to_vec();
             if legacy_binding == Some(true) {
-                crate::persistence::tests::retain_legacy_peer_binding(
-                    &reopened.store, conversation_id, alice.device_id().unwrap(),
+                crate::persistence::retain_legacy_peer_binding(
+                    &reopened.store,
+                    conversation_id,
+                    alice.device_id().unwrap(),
                 );
             }
             reopened.recover().unwrap();
@@ -4588,13 +4607,16 @@ pub(crate) mod tests {
                 RemoteEventPayload::ApplicationMessage(message) if message.message_id() == receipt_id)));
             if matches!(outcome, DirectedRequestClaimOutcome::Claimed(_)) {
                 let resumed_at = now + 60_001;
-                reopened.store.acquire_adapter_consumer(
-                    consumer, lease, resumed_at, resumed_at + 60_000
-                ).unwrap();
-                let resumed_events = reopened.store.claim_remote_events(
-                    consumer, lease, resumed_at, resumed_at + 60_000, 1
-                ).unwrap();
-                let DirectedRequestClaimOutcome::Claimed(claim) = reopened.store
+                reopened
+                    .store
+                    .acquire_adapter_consumer(consumer, lease, resumed_at, resumed_at + 60_000)
+                    .unwrap();
+                let resumed_events = reopened
+                    .store
+                    .claim_remote_events(consumer, lease, resumed_at, resumed_at + 60_000, 1)
+                    .unwrap();
+                let DirectedRequestClaimOutcome::Claimed(claim) = reopened
+                    .store
                     .claim_directed_request(ClaimDirectedRequest {
                         conversation_id,
                         request_message_id: request_id,
@@ -4605,7 +4627,11 @@ pub(crate) mod tests {
                         lease_generation: resumed_events[0].lease_generation,
                         policy_digest: digest,
                         now_unix_milliseconds: resumed_at,
-                    }).unwrap() else { panic!("admitted request remains claimable after its cutoff"); };
+                    })
+                    .unwrap()
+                else {
+                    panic!("admitted request remains claimable after its cutoff");
+                };
                 if !answer {
                     reopened
                         .store

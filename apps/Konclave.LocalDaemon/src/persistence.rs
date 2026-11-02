@@ -70,7 +70,7 @@ mod trusted_device;
 const PROFILE_SCHEMA_VERSION: u32 = 24;
 
 #[cfg(test)]
-pub(crate) use tests::response_continuation_fixture_at;
+pub(crate) use tests::{response_continuation_fixture_at, retain_legacy_peer_binding};
 const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_SEALED_RECORD_BYTES: usize = MAX_SECRET_PLAINTEXT_BYTES + 64;
 const MAX_LOCAL_BINDINGS: usize = MAX_MEMBERS + 1;
@@ -12958,8 +12958,12 @@ mod tests {
         peer: DeviceId,
     ) {
         let conversation = store.load_conversation(conversation_id).unwrap();
-        let binding = conversation.bindings.iter()
-            .find(|binding| binding.binding().device_id() == peer).unwrap().binding();
+        let binding = conversation
+            .bindings
+            .iter()
+            .find(|binding| binding.binding().device_id() == peer)
+            .unwrap()
+            .binding();
         let legacy = DeviceCredentialBinding::new(
             binding.version(),
             binding.device_id(),
@@ -12970,18 +12974,31 @@ mod tests {
             binding.device_binding_signature(),
         );
         let encoded = encode_device_credential_binding(&legacy).unwrap();
-        let blob = store.seal_conversation_record(
-            SecretRecordKind::ConversationCredentialBinding,
-            conversation_id,
-            None,
-            Some(peer),
-            &encoded,
-        ).unwrap();
-        assert_eq!(store.lock().unwrap().execute(
-            "UPDATE daemon_conversation_binding SET sealed_binding = ?1
+        let blob = store
+            .seal_conversation_record(
+                SecretRecordKind::ConversationCredentialBinding,
+                conversation_id,
+                None,
+                Some(peer),
+                &encoded,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE daemon_conversation_binding SET sealed_binding = ?1
              WHERE conversation_id = ?2 AND device_id = ?3",
-            params![blob.as_bytes(), conversation_id.as_bytes().as_slice(), peer.as_bytes().as_slice()],
-        ).unwrap(), 1);
+                    params![
+                        blob.as_bytes(),
+                        conversation_id.as_bytes().as_slice(),
+                        peer.as_bytes().as_slice()
+                    ],
+                )
+                .unwrap(),
+            1
+        );
     }
 
     fn activate_request_reply_policy(fixture: &ConversationFixture) -> CollaborationPolicyDigest {
@@ -13414,24 +13431,42 @@ mod tests {
             .unwrap();
         {
             let connection = fixture.store.lock().unwrap();
-            connection.execute(
-                "UPDATE daemon_profile SET sealed_device_identity = ?1",
-                params![identity.as_bytes()],
-            ).unwrap();
+            connection
+                .execute(
+                    "UPDATE daemon_profile SET sealed_device_identity = ?1",
+                    params![identity.as_bytes()],
+                )
+                .unwrap();
             connection.pragma_update(None, "user_version", 23).unwrap();
         }
         let closed = fixture.close();
         let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
-            .unwrap().open_store(sealer()).unwrap();
-        assert_eq!(reopened.load_or_create_device().unwrap().device_id(), device);
-        assert!(reopened.profile_identity_for_schema_transition(
-            PROFILE_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION
-        ).is_ok());
-        reopened.lock().unwrap().pragma_update(None, "user_version", 23).unwrap();
+            .unwrap()
+            .open_store(sealer())
+            .unwrap();
+        assert_eq!(
+            reopened.load_or_create_device().unwrap().device_id(),
+            device
+        );
+        assert!(
+            reopened
+                .profile_identity_for_schema_transition(
+                    PROFILE_SCHEMA_VERSION,
+                    PROFILE_SCHEMA_VERSION
+                )
+                .is_ok()
+        );
+        reopened
+            .lock()
+            .unwrap()
+            .pragma_update(None, "user_version", 23)
+            .unwrap();
         drop(reopened);
         assert_eq!(
             LockedProfile::acquire(closed.root.path(), closed.profile_id)
-                .unwrap().open_store(sealer()).err(),
+                .unwrap()
+                .open_store(sealer())
+                .err(),
             Some(ProfileStoreError::CorruptData),
         );
     }
