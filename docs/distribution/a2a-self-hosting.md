@@ -180,7 +180,7 @@ margin.
 Load the exact Docker archive:
 
 ```shell
-docker image load --input konclave-a2a-gateway-container-0.1.29-linux-amd64.docker.tar
+docker image load --input konclave-a2a-gateway-container-0.1.30-linux-amd64.docker.tar
 ```
 
 Prepare all five host roots before starting Compose. The example disables automatic
