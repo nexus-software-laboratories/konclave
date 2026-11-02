@@ -171,8 +171,10 @@ signature scheme, carries the device-root and conversation-scoped public keys, a
 carries the device-root signature over that canonical binding. New bindings may also
 carry application capability bits plus a separate device-root signature over the
 base credential and those bits. Bit `0` advertises
-`DirectedRequest`; legacy bindings decode with no capabilities and cannot receive
-that content kind. A join proof combines the exact credential binding with an
+`DirectedRequest`; bit `3` additionally advertises admission expiry and history-only
+request-delivery receipts. Legacy bindings decode with no capabilities and cannot
+receive those content kinds. Upgrading an executable does not rewrite existing
+root-signed assertions. A join proof combines the exact credential binding with an
 invitation for the same device and conversation and one bounded MLS KeyPackage. Newly
 issued join-capable invitations also bind the
 opaque relay routing identifier in the issuer signature, so handoff cannot redirect
@@ -214,8 +216,47 @@ Automatic request handling is local durable state, not peer-authored application
 content. It is keyed by conversation, directed-request message, and local responder.
 Only a live exact delivery claim may create a bounded handling attempt. A response
 must reference that request and is reserved atomically with the terminal handling
-transition; a no-response outcome is terminal without creating an application
-message.
+transition. Without delivery options, a no-response outcome remains local and does
+not create an application message.
+
+### Request admission and delivery receipts
+
+`DirectedRequest.delivery` is optional. Its absence preserves legacy bytes and
+behavior. Presence requests encrypted delivery receipts and may supply
+`expires_at_unix_milliseconds`, an absolute admission cutoff in the range
+`1..=9007199254740991`. A sender MUST require the new root-signed capability from
+every current member before allocating the request; it MUST NOT silently
+drop options. Receipt materialization also checks current recipient capabilities.
+New membership or removal can therefore prevent an observation from being sent.
+
+The receiver compares the cutoff with its local clock immediately before creating
+the first durable authorized handling claim. Equality is expired. This is native
+admission before model enqueue, not model start, execution success or an external
+effect. The cutoff MUST NOT cancel an admitted attempt or invalidate a later answer.
+Policy, membership, consumer leases and one-use response rules remain independent.
+No deadline is parsed from the body, and no retry is scheduled automatically.
+
+`RequestDeliveryOutcomeContent` has no task body or free-form reason. Its finite
+wire outcomes are `1 admitted`, `3 expired_before_admission`, and
+`4 ended_without_response`. Value `2` is reserved for the locally derived responded
+observation: an actual correlated ordinary-text answer, never a standalone receipt.
+Absent, unknown, unsolicited, self-referencing and incorrectly attributed receipts
+MUST fail closed. The reply reference names the exact opted-in request in the same
+conversation, and the authenticated receipt sender MUST be its exact target.
+
+Admission and terminal receipts have separate domain-separated message and envelope
+identifiers. Contradictory terminal receipts share identifiers and conflict rather
+than creating independent terminal operations. The sealed handling record and its
+outbox reservation commit atomically; restart reconstructs missing ciphertext using
+that exact reservation. Receipts reuse bounded transport retry, not a task queue.
+Profile schema `24` authenticates a reader floor that rejects older runtimes.
+
+Receipts remain inspectable authenticated history. They MUST NOT create adapter
+events, start or resume model turns, grant authority, qualify as answers, or consume
+a restricted channel's terminal-answer reservation. Duplicate observations are
+idempotent; a late admission observation cannot reopen a terminal result. Absence of
+a receipt means unknown. Clock accuracy and honest peer reporting are assumptions;
+no observation promises exactly-once execution.
 
 ### Collaboration-policy bundle
 

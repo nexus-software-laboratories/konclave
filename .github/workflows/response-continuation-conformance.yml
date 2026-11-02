@@ -80,6 +80,21 @@ jobs:
           cargo test --locked --package KonclaveDomainCore request_delivery::tests
           cargo test --locked --package KonclaveProtocolContracts --package KonclaveCryptographicCore request_delivery
           cargo clippy --locked --package KonclaveDomainCore --all-targets -- -D warnings
+      - name: Generate native request delivery tool contract
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package KonclaveLocalDaemon --lib regenerate_copilot_tool_contract_fixture -- --ignored
+          cargo test --locked --package KonclaveLocalDaemon --lib copilot_tool_contract_fixture_matches_the_router
+      - name: Retain exact native tool contract
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: request-delivery-tool-contract
+          path: fixtures/local-service/v1/copilot-tools.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Verify deterministic component relevance
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
@@ -160,17 +175,7 @@ jobs:
           cargo test --locked --package KonclaveLocalDaemon --lib directed_request
           cargo test --locked --package KonclaveLocalDaemon --lib request_delivery
           cargo test --locked --package KonclaveLocalDaemon --lib local_service::tests
-          cargo test --locked --package KonclaveLocalDaemon --lib regenerate_copilot_tool_contract_fixture -- --ignored
-          cargo test --locked --package KonclaveLocalDaemon --lib copilot_tool_contract_fixture_matches_the_router
           cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
-      - name: Retain exact native tool contract
-        if: steps.scope.outputs.run == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: request-delivery-tool-contract
-          path: fixtures/local-service/v1/copilot-tools.json
-          if-no-files-found: error
-          retention-days: 1
       - name: Require unchanged submitted source
         if: steps.scope.outputs.run == 'true'
         shell: bash

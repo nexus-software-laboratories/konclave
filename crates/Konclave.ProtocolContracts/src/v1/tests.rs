@@ -763,7 +763,9 @@ fn request_delivery_round_trips_options_and_rejects_unrepresentable_expiry() {
         .unwrap();
         let bytes = encode_application_message(&message).unwrap();
         assert_ne!(bytes, legacy_bytes);
-        assert_eq!(decode_application_message(&bytes).unwrap(), message);
+        let decoded = decode_application_message(&bytes).unwrap();
+        assert_eq!(encode_application_message(&decoded).unwrap(), bytes);
+        assert!(decoded.content() == message.content());
     }
     for expiry in [0, 9_007_199_254_740_992, u64::MAX] {
         let mut wire = wire::ApplicationMessage::decode(legacy_bytes.as_slice()).unwrap();

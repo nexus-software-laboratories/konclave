@@ -7450,10 +7450,7 @@ impl ProfileStore {
         epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), ProfileStoreError> {
-        if matches!(
-            message.content(),
-            ApplicationContent::RequestDeliveryOutcome(_)
-        ) {
+        if let ApplicationContent::RequestDeliveryOutcome(outcome) = message.content() {
             let original = self
                 .load_history_record(
                     connection,
@@ -7473,6 +7470,30 @@ impl ProfileStore {
                 message,
             )
             .map_err(|_| ProfileStoreError::InvalidTransition)?;
+            let identifiers = |outcome| KonclaveCryptographicCore::derive_request_delivery_identifiers(
+                conversation_id, original.message.message_id(), sender, outcome,
+            ).0;
+            if identifiers(*outcome) != message.message_id() {
+                return Err(ProfileStoreError::InvalidTransition);
+            }
+            let mut observed = None;
+            for id in [
+                identifiers(KonclaveDomainCore::RequestDeliveryOutcome::Admitted),
+                identifiers(KonclaveDomainCore::RequestDeliveryOutcome::EndedWithoutResponse),
+            ] {
+                if let Some(previous) = self.load_history_record(connection, conversation_id, routing_id, id)? {
+                    let ApplicationContent::RequestDeliveryOutcome(previous_outcome) = previous.message.content() else {
+                        return Err(ProfileStoreError::InvalidTransition);
+                    };
+                    KonclaveDomainCore::validate_request_delivery_receipt(
+                        &original.message, previous.sender, &previous.message,
+                    ).map_err(|_| ProfileStoreError::CorruptData)?;
+                    observed = Some(KonclaveDomainCore::observe_request_delivery(observed, *previous_outcome)
+                        .map_err(|_| ProfileStoreError::InvalidTransition)?);
+                }
+            }
+            KonclaveDomainCore::observe_request_delivery(observed, *outcome)
+                .map_err(|_| ProfileStoreError::InvalidTransition)?;
         }
         let state = self.request_service_state_in(connection, conversation_id, routing_id)?;
         let request_service_reply = if state.request_service().is_some()
