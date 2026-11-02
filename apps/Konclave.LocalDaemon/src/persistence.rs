@@ -12834,6 +12834,7 @@ mod tests {
             DirectedRequestClaimOutcome::Claimed(claim) => claim,
             _ => panic!("directed request should be claimable"),
         }
+    }
 
         #[test]
         fn request_delivery_cutoff_is_checked_only_before_first_durable_admission() {
@@ -12936,7 +12937,6 @@ mod tests {
                 fixture.store.verify_directed_request_handlings().unwrap();
             }
         }
-    }
 
     fn activate_request_reply_policy(fixture: &ConversationFixture) -> CollaborationPolicyDigest {
         let canonical_bundle = collaboration_policy_bytes("request-reply", "legacy annotation");
@@ -13340,6 +13340,34 @@ mod tests {
                     )
                     .unwrap();
                 connection.pragma_update(None, "user_version", 21).unwrap();
+            }
+
+            #[test]
+            fn request_delivery_migration_preserves_identity_and_authenticates_reader_floor() {
+                let fixture = conversation_fixture("delivery-schema");
+                let device = fixture.device_id;
+                let identity = fixture.store.profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, 23)
+                    .unwrap().unwrap();
+                {
+                    let connection = fixture.store.lock().unwrap();
+                    connection.execute(
+                        "UPDATE daemon_profile SET sealed_device_identity = ?1",
+                        params![identity.as_bytes()],
+                    ).unwrap();
+                    connection.pragma_update(None, "user_version", 23).unwrap();
+                }
+                let closed = fixture.close();
+                let reopened = LockedProfile::acquire(closed.root.path(), closed.profile_id.clone())
+                    .unwrap().open_store(sealer()).unwrap();
+                assert_eq!(reopened.load_or_create_device().unwrap().device_id(), device);
+                assert!(reopened.profile_identity_for_schema_transition(PROFILE_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION).is_ok());
+                reopened.lock().unwrap().pragma_update(None, "user_version", 23).unwrap();
+                drop(reopened);
+                assert_eq!(
+                    LockedProfile::acquire(closed.root.path(), closed.profile_id)
+                        .unwrap().open_store(sealer()).err(),
+                    Some(ProfileStoreError::CorruptData),
+                );
             }
             let closed = fixture.close();
             let result = LockedProfile::acquire(closed.root.path(), closed.profile_id)
