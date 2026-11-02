@@ -23,6 +23,43 @@ function client(request: LocalServiceClient['request']): LocalServiceClient {
 }
 
 describe('generic harness command', () => {
+  it.each([
+    {},
+    { delivery_receipts: true },
+    { expires_at_unix_milliseconds: Number.MAX_SAFE_INTEGER },
+    { delivery_receipts: true, expires_at_unix_milliseconds: 1 },
+  ])('forwards opt-in delivery metadata without changing legacy payloads: %j', async (delivery) => {
+    const request = vi.fn().mockResolvedValue({ message_id: '03'.repeat(16) });
+    const connected = client(request);
+    const controller = new AbortController();
+    const payload = {
+      conversation_id: '01'.repeat(32),
+      message_id: '03'.repeat(16),
+      target_device_id: '02'.repeat(32),
+      text: 'Untrusted request data.',
+      ...delivery,
+    };
+    await invokeGenericCommand(
+      {
+        profile: 'generic-test',
+        profileMode: 'durable',
+        integrationLabel: 'future-harness.v1',
+        operation: 'send_directed_request',
+      },
+      payload,
+      {
+        environment: {},
+        moduleDir: 'module',
+        signal: controller.signal,
+        reportCleanupFailure: vi.fn(),
+        connect: vi.fn().mockResolvedValue(connected),
+      },
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[0]).toBe('send_directed_request');
+    expect(request.mock.calls[0]?.[1]).toBe(payload);
+  });
+
   it('accepts bounded labels and explicit durable or ephemeral profile modes', () => {
     const durable = [
       '--profile',

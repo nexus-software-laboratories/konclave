@@ -59,6 +59,8 @@ import { RelayEnrollmentOutcome } from '../src/generated/konclave/protocol/v1/en
 import {
   ApplicationMessageSchema,
   DirectedRequestContentSchema,
+  RequestDeliveryOptionsSchema,
+  RequestDeliveryOutcomeContentSchema,
   TextContentSchema,
 } from '../src/generated/konclave/protocol/v1/application_pb.js';
 import { DeviceCredentialBindingSchema } from '../src/generated/konclave/protocol/v1/identity_pb.js';
@@ -96,6 +98,101 @@ function expectCode(action: () => unknown, code: ProtocolErrorCode): void {
 }
 
 describe('application contracts', () => {
+  it('preserves legacy directed-request bytes when delivery options are omitted', () => {
+    const legacy = directedRequestMessage();
+    if (legacy.content.case !== 'directedRequest') {
+      throw new Error('expected directed request');
+    }
+    const omitted = create(ApplicationMessageSchema, {
+      ...legacy,
+      content: {
+        case: 'directedRequest',
+        value: { ...legacy.content.value, delivery: undefined },
+      },
+    });
+    expect(encodeApplicationMessage(omitted)).toEqual(encodeApplicationMessage(legacy));
+    const decoded = decodeApplicationMessage(encodeApplicationMessage(legacy));
+    expect(decoded.content.case).toBe('directedRequest');
+    if (decoded.content.case === 'directedRequest') {
+      expect(decoded.content.value.delivery).toBeUndefined();
+    }
+  });
+
+  it('round trips opt-in delivery with an optional bounded expiry', () => {
+    for (const expiry of [undefined, 1n, 9_007_199_254_740_991n]) {
+      const request = directedRequestMessage();
+      if (request.content.case !== 'directedRequest') {
+        throw new Error('expected directed request');
+      }
+      request.content.value.delivery = create(RequestDeliveryOptionsSchema, {
+        expiresAtUnixMilliseconds: expiry,
+      });
+      const encoded = encodeApplicationMessage(request);
+      expect(encodeApplicationMessage(decodeApplicationMessage(encoded))).toEqual(encoded);
+      expect(encoded).not.toEqual(encodeApplicationMessage(directedRequestMessage()));
+    }
+  });
+
+  it('rejects invalid delivery expiry during encoding and decoding', () => {
+    for (const expiry of [0n, 9_007_199_254_740_992n]) {
+      const request = directedRequestMessage();
+      if (request.content.case !== 'directedRequest') {
+        throw new Error('expected directed request');
+      }
+      request.content.value.delivery = create(RequestDeliveryOptionsSchema, {
+        expiresAtUnixMilliseconds: expiry,
+      });
+      expectCode(() => encodeApplicationMessage(request), protocolErrorCodes.outOfRange);
+      const raw = encodeBounded(
+        ApplicationMessageSchema,
+        request,
+        MAX_APPLICATION_MESSAGE_BYTES,
+        'ApplicationMessage',
+      );
+      expectCode(() => decodeApplicationMessage(raw), protocolErrorCodes.outOfRange);
+    }
+  });
+
+  it('accepts only correlated admitted, expired, or ended delivery receipts', () => {
+    for (const outcome of [1, 3, 4]) {
+      const receipt = create(ApplicationMessageSchema, {
+        ...applicationMessage({ replyToLength: 16 }),
+        content: {
+          case: 'requestDeliveryOutcome',
+          value: create(RequestDeliveryOutcomeContentSchema, { outcome }),
+        },
+      });
+      const encoded = encodeApplicationMessage(receipt);
+      expect(encodeApplicationMessage(decodeApplicationMessage(encoded))).toEqual(encoded);
+      receipt.replyTo = undefined;
+      expectCode(() => encodeApplicationMessage(receipt), protocolErrorCodes.missingField);
+      const raw = encodeBounded(
+        ApplicationMessageSchema,
+        receipt,
+        MAX_APPLICATION_MESSAGE_BYTES,
+        'ApplicationMessage',
+      );
+      expectCode(() => decodeApplicationMessage(raw), protocolErrorCodes.missingField);
+    }
+    for (const outcome of [0, 2, 5, 0xffff_ffff]) {
+      const receipt = create(ApplicationMessageSchema, {
+        ...applicationMessage({ replyToLength: 16 }),
+        content: {
+          case: 'requestDeliveryOutcome',
+          value: create(RequestDeliveryOutcomeContentSchema, { outcome }),
+        },
+      });
+      expectCode(() => encodeApplicationMessage(receipt), protocolErrorCodes.unsupportedEnum);
+      const raw = encodeBounded(
+        ApplicationMessageSchema,
+        receipt,
+        MAX_APPLICATION_MESSAGE_BYTES,
+        'ApplicationMessage',
+      );
+      expectCode(() => decodeApplicationMessage(raw), protocolErrorCodes.unsupportedEnum);
+    }
+  });
+
   it('round trips a valid application message', () => {
     const value = applicationMessage({ replyToLength: 16 });
     expect(

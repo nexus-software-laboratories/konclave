@@ -607,6 +607,7 @@ impl ConversationCoordinator {
                 response.expires_at_unix_seconds,
             )?;
         }
+        self.seal_request_delivery_receipts_unlocked(None)?;
         self.store.abandon_unsealed_outbox()?;
         let mut pending_after = None;
         loop {
@@ -1457,9 +1458,16 @@ impl ConversationCoordinator {
                     conversation.bindings.iter().any(|binding| {
                         binding.binding().device_id() == device_id
                             && binding.binding().supports_directed_requests()
+                            && (directed_request.delivery().is_none()
+                                || binding.binding().supports_request_delivery())
                     })
                 },
-            ) {
+            ) || directed_request.delivery().is_some()
+                && !conversation.bindings.iter().any(|binding| {
+                    binding.binding().device_id() == local_device
+                        && binding.binding().supports_request_delivery()
+                })
+            {
                 return Err(ConversationCoordinatorError::DirectedRequestUnsupported);
             }
         }
@@ -1578,6 +1586,68 @@ impl ConversationCoordinator {
             message,
             envelope,
         })
+    }
+
+    pub(crate) fn seal_request_delivery_receipts(
+        &self,
+        conversation_id: ConversationId,
+        request_message_id: MessageId,
+    ) -> Result<(), ConversationCoordinatorError> {
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| ConversationCoordinatorError::StateUnavailable)?;
+        self.seal_request_delivery_receipts_unlocked(Some((conversation_id, request_message_id)))
+    }
+
+    fn seal_request_delivery_receipts_unlocked(
+        &self,
+        request: Option<(ConversationId, MessageId)>,
+    ) -> Result<(), ConversationCoordinatorError> {
+        let now = SystemUnixClock.now_unix_milliseconds() / 1_000;
+        let local = self.device_id()?;
+        for receipt in self.store.request_delivery_receipts(request)? {
+            if receipt.expires_at_unix_seconds <= now
+                || !self.store.request_delivery_receipt_needs_sealing(receipt)?
+            {
+                continue;
+            }
+            let conversation = self
+                .store
+                .load_conversation(receipt.reservation.conversation_id)?;
+            if conversation.state.member(local).is_none() {
+                self.store
+                    .abandon_outbound_application(receipt.reservation)?;
+                continue;
+            }
+            if conversation.state.members().iter().any(|member| {
+                !conversation.bindings.iter().any(|binding| {
+                    binding.binding().device_id() == member.device_id()
+                        && binding.binding().supports_request_delivery()
+                })
+            }) {
+                self.store
+                    .abandon_outbound_application(receipt.reservation)?;
+                #[cfg(feature = "rust-service-observability")]
+                tracing::warn!(
+                    target: crate::local_failure_log::LOCAL_FAILURE_TARGET,
+                    stage = "request_delivery",
+                    code = "receipt_abandoned_incompatible_membership",
+                    "request delivery receipt abandoned"
+                );
+                #[cfg(not(feature = "rust-service-observability"))]
+                eprintln!("konclave: request delivery receipt abandoned: incompatible membership");
+                continue;
+            }
+            self.prepare_reserved_application(
+                receipt.reservation,
+                ApplicationContent::RequestDeliveryOutcome(receipt.outcome),
+                Some(receipt.request_message_id),
+                receipt.sent_at_unix_milliseconds,
+                receipt.expires_at_unix_seconds,
+            )?;
+        }
+        Ok(())
     }
 
     /// Creates and journals one add-member commit before relay transmission.
@@ -4245,8 +4315,14 @@ pub(crate) mod tests {
         let request = alice
             .prepare_application(
                 conversation_id,
-                ApplicationContent::directed_request(bob_device_id, "return the agreed contract")
-                    .unwrap(),
+                ApplicationContent::DirectedRequest(
+                    KonclaveDomainCore::DirectedRequest::new(
+                        bob_device_id,
+                        "return the agreed contract",
+                    )
+                    .unwrap()
+                    .with_delivery(KonclaveDomainCore::RequestDeliveryOptions::new(None)),
+                ),
                 None,
                 now,
                 expires_at,
@@ -4323,6 +4399,311 @@ pub(crate) mod tests {
             recovered.message.content(),
             ApplicationContent::Text(body) if body == "recovered response"
         ));
+        let receipts = reopened
+            .store
+            .request_delivery_receipts(Some((conversation_id, request_message_id)))
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert!(
+            !reopened
+                .store
+                .request_delivery_receipt_needs_sealing(receipts[0])
+                .unwrap()
+        );
+        assert!(receipts[0].reservation.sender_counter < recovered.message.sender_counter());
+    }
+
+    #[test]
+    fn request_delivery_recovers_receipts_without_enqueuing_a_model_event() {
+        use crate::persistence::{
+            ClaimDirectedRequest, CompleteDirectedRequest, DirectedRequestClaimOutcome,
+            RemoteEventPayload,
+        };
+        use KonclaveDomainCore::{
+            AdapterConsumerId, AdapterLeaseId, DirectedRequest, RequestAdmissionExpiry,
+            RequestDeliveryOptions, RequestDeliveryOutcome,
+        };
+        for (restricted, expired, answer, legacy_binding) in [
+            (false, false, true, None),
+            (false, false, false, None),
+            (false, true, false, None),
+            (true, false, true, None),
+            (true, false, false, None),
+            (true, true, false, None),
+            (false, false, false, Some(false)),
+            (false, false, false, Some(true)),
+        ] {
+            let (root, alice, bob, conversation_id, request_cursor) = if restricted {
+                let root = tempfile::tempdir().unwrap();
+                let alice = open_coordinator(root.path(), "alice");
+                let bob = open_coordinator(root.path(), "bob");
+                let id = enroll_request_service_pair(&bob, &alice);
+                (root, alice, bob, id, 2)
+            } else {
+                let (root, alice, bob, id, _) = paired_coordinators();
+                (root, alice, bob, id, 1)
+            };
+            let target = bob.device_id().unwrap();
+            let bundle =
+                include_bytes!("../../../fixtures/protocol/v1/collaboration-policy-bundle.bin");
+            let digest = bob.store.store_collaboration_policy_bundle(bundle).unwrap();
+            bob.store
+                .activate_collaboration_policy(conversation_id, digest, 100)
+                .unwrap();
+            bob.store
+                .set_adapter_delivery_enabled(conversation_id, true)
+                .unwrap();
+            alice
+                .store
+                .set_adapter_delivery_enabled(conversation_id, true)
+                .unwrap();
+            let now = SystemUnixClock.now_unix_milliseconds();
+            let cutoff = if expired { now } else { now + 1 };
+            let content = DirectedRequest::new(target, "request")
+                .unwrap()
+                .with_delivery(RequestDeliveryOptions::new(Some(
+                    RequestAdmissionExpiry::new(cutoff).unwrap(),
+                )));
+            let prepared = alice
+                .prepare_application(
+                    conversation_id,
+                    ApplicationContent::DirectedRequest(content),
+                    None,
+                    now,
+                    now / 1_000 + 3_600,
+                )
+                .unwrap();
+            let request_id = prepared.message.message_id();
+            let stored = StoredRelayEnvelope::new(prepared.envelope, request_cursor).unwrap();
+            alice.mark_outbox_accepted(&stored).unwrap();
+            alice
+                .process_inbound_application(conversation_id, &stored)
+                .unwrap();
+            bob.process_inbound_application(conversation_id, &stored)
+                .unwrap();
+            let consumer = AdapterConsumerId::from_bytes([91; 16]);
+            let lease = AdapterLeaseId::from_bytes([92; 16]);
+            bob.store
+                .acquire_adapter_consumer(consumer, lease, now, now + 60_000)
+                .unwrap();
+            let events = bob
+                .store
+                .claim_remote_events(consumer, lease, now, now + 60_000, 1)
+                .unwrap();
+            let outcome = bob
+                .store
+                .claim_directed_request(ClaimDirectedRequest {
+                    conversation_id,
+                    request_message_id: request_id,
+                    responder_device_id: target,
+                    notification_id: events[0].event.notification_id,
+                    consumer_id: consumer,
+                    lease_id: lease,
+                    lease_generation: events[0].lease_generation,
+                    policy_digest: digest,
+                    now_unix_milliseconds: now,
+                })
+                .unwrap();
+            if expired {
+                assert_eq!(outcome, DirectedRequestClaimOutcome::ExpiredBeforeAdmission);
+            } else {
+                assert!(matches!(outcome, DirectedRequestClaimOutcome::Claimed(_)));
+            }
+            let receipts = bob
+                .store
+                .request_delivery_receipts(Some((conversation_id, request_id)))
+                .unwrap();
+            assert_eq!(receipts.len(), 1);
+            let receipt_id = receipts[0].reservation.message_id;
+            if legacy_binding == Some(false) {
+                crate::persistence::retain_legacy_peer_binding(
+                    &bob.store,
+                    conversation_id,
+                    alice.device_id().unwrap(),
+                );
+            }
+            drop(bob);
+            let reopened = open_coordinator(root.path(), "bob");
+            reopened.recover().unwrap();
+            if legacy_binding == Some(false) {
+                assert!(matches!(
+                    reopened.outbound_application(conversation_id, receipt_id),
+                    Err(ConversationCoordinatorError::Profile(
+                        ProfileStoreError::InvalidTransition
+                    ))
+                ));
+                assert!(
+                    !reopened
+                        .store
+                        .request_delivery_receipt_needs_sealing(receipts[0])
+                        .unwrap()
+                );
+                drop(reopened);
+                let recovered = open_coordinator(root.path(), "bob");
+                recovered.recover().unwrap();
+                assert!(matches!(
+                    recovered.outbound_application(conversation_id, receipt_id),
+                    Err(ConversationCoordinatorError::Profile(
+                        ProfileStoreError::InvalidTransition
+                    ))
+                ));
+                continue;
+            }
+            let receipt = reopened
+                .outbound_application(conversation_id, receipt_id)
+                .unwrap()
+                .unwrap();
+            let bytes = receipt.envelope.payload().to_vec();
+            if legacy_binding == Some(true) {
+                crate::persistence::retain_legacy_peer_binding(
+                    &reopened.store,
+                    conversation_id,
+                    alice.device_id().unwrap(),
+                );
+            }
+            reopened.recover().unwrap();
+            assert_eq!(
+                reopened
+                    .outbound_application(conversation_id, receipt_id)
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .payload(),
+                bytes.as_slice()
+            );
+            if legacy_binding == Some(true) {
+                continue;
+            }
+            assert_eq!(receipt.message.reply_to(), Some(request_id));
+            assert!(
+                receipt.message.content()
+                    == &ApplicationContent::RequestDeliveryOutcome(if expired {
+                        RequestDeliveryOutcome::ExpiredBeforeAdmission
+                    } else {
+                        RequestDeliveryOutcome::Admitted
+                    },)
+            );
+            let stored_receipt =
+                StoredRelayEnvelope::new(receipt.envelope, request_cursor + 1).unwrap();
+            alice
+                .process_inbound_application(conversation_id, &stored_receipt)
+                .unwrap();
+            let history = alice.history(conversation_id, 0, 10).unwrap();
+            assert!(
+                history
+                    .messages
+                    .iter()
+                    .any(|entry| entry.message.message_id() == receipt_id)
+            );
+            alice
+                .store
+                .acquire_adapter_consumer(consumer, lease, now, now + 60_000)
+                .unwrap();
+            let events = alice
+                .store
+                .claim_remote_events(consumer, lease, now, now + 60_000, 10)
+                .unwrap();
+            assert!(!events.iter().any(|entry| matches!(&entry.event.payload,
+                RemoteEventPayload::ApplicationMessage(message) if message.message_id() == receipt_id)));
+            if matches!(outcome, DirectedRequestClaimOutcome::Claimed(_)) {
+                let resumed_at = now + 60_001;
+                reopened
+                    .store
+                    .acquire_adapter_consumer(consumer, lease, resumed_at, resumed_at + 60_000)
+                    .unwrap();
+                let resumed_events = reopened
+                    .store
+                    .claim_remote_events(consumer, lease, resumed_at, resumed_at + 60_000, 1)
+                    .unwrap();
+                let DirectedRequestClaimOutcome::Claimed(claim) = reopened
+                    .store
+                    .claim_directed_request(ClaimDirectedRequest {
+                        conversation_id,
+                        request_message_id: request_id,
+                        responder_device_id: target,
+                        notification_id: resumed_events[0].event.notification_id,
+                        consumer_id: consumer,
+                        lease_id: lease,
+                        lease_generation: resumed_events[0].lease_generation,
+                        policy_digest: digest,
+                        now_unix_milliseconds: resumed_at,
+                    })
+                    .unwrap()
+                else {
+                    panic!("admitted request remains claimable after its cutoff");
+                };
+                if !answer {
+                    reopened
+                        .store
+                        .complete_directed_request_without_response(CompleteDirectedRequest {
+                            conversation_id,
+                            request_message_id: request_id,
+                            responder_device_id: target,
+                            consumer_id: consumer,
+                            attempt: claim.attempt,
+                            policy_digest: digest,
+                        })
+                        .unwrap();
+                    let intents = reopened
+                        .store
+                        .request_delivery_receipts(Some((conversation_id, request_id)))
+                        .unwrap();
+                    assert_eq!(intents.len(), 2);
+                    let terminal_id = intents[1].reservation.message_id;
+                    drop(reopened);
+                    let terminal_owner = open_coordinator(root.path(), "bob");
+                    terminal_owner.recover().unwrap();
+                    let terminal = terminal_owner
+                        .outbound_application(conversation_id, terminal_id)
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        terminal.message.content()
+                            == &ApplicationContent::RequestDeliveryOutcome(
+                                RequestDeliveryOutcome::EndedWithoutResponse
+                            )
+                    );
+                    alice
+                        .process_inbound_application(
+                            conversation_id,
+                            &StoredRelayEnvelope::new(terminal.envelope, request_cursor + 2)
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    let events = alice
+                        .store
+                        .claim_remote_events(consumer, lease, now, now + 60_000, 10)
+                        .unwrap();
+                    assert!(!events.iter().any(|entry| matches!(&entry.event.payload,
+                        RemoteEventPayload::ApplicationMessage(message) if message.message_id() == terminal_id)));
+                    continue;
+                }
+                let response = reopened
+                    .prepare_application_with_id(
+                        conversation_id,
+                        MessageId::from_bytes([93; 16]),
+                        ApplicationContent::text("answer after the admission cutoff").unwrap(),
+                        Some(request_id),
+                        Some(CollaborationActionAuthorization {
+                            policy_digest: digest,
+                            consumer_id: consumer,
+                            not_after_unix_milliseconds: resumed_at + 60_000,
+                            directed_request_claim: claim,
+                        }),
+                        resumed_at + 1,
+                        now / 1_000 + 3_600,
+                    )
+                    .unwrap();
+                alice
+                    .process_inbound_application(
+                        conversation_id,
+                        &StoredRelayEnvelope::new(response.envelope, request_cursor + 2).unwrap(),
+                    )
+                    .unwrap();
+                assert!(alice.history(conversation_id, 0, 10).unwrap().messages.iter()
+                    .any(|entry| matches!(entry.message.content(), ApplicationContent::Text(body) if body == "answer after the admission cutoff")));
+            }
+        }
     }
 
     #[test]

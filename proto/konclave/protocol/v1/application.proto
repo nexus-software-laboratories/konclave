@@ -18,6 +18,19 @@ message DirectedRequestContent {
 
   // Bounded to 255 KiB of UTF-8 in protocol v1.
   string body = 2;
+
+  // Presence requires negotiated request-delivery capability.
+  RequestDeliveryOptions delivery = 3;
+}
+
+// Requests encrypted delivery observations without task or execution semantics.
+message RequestDeliveryOptions {
+  optional uint64 expires_at_unix_milliseconds = 1;
+}
+
+// History-only authenticated observation; reply_to names the original request.
+message RequestDeliveryOutcomeContent {
+  uint32 outcome = 1;
 }
 
 // Requests a fresh member capability over an existing authenticated conversation.
@@ -53,5 +66,6 @@ message ApplicationMessage {
     DirectedRequestContent directed_request = 14;
     RepeatPairingRequestContent repeat_pairing_request = 15;
     RepeatPairingResponseContent repeat_pairing_response = 16;
+    RequestDeliveryOutcomeContent request_delivery_outcome = 17;
   }
 }

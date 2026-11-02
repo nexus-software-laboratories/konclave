@@ -29,6 +29,7 @@ must understand without reconstructing issue, pull-request, or conversation hist
 - [ADR 0026: Explain message delivery through authenticated local metadata](../adr/adr-0026-local-delivery-diagnostics.md)
 - [ADR 0027: Retain explicit service trust and defer automatic LAN discovery](../adr/adr-0027-lan-service-discovery.md)
 - [ADR 0030: Continue locally authorized work on exact correlated answers](../adr/adr-0030-correlated-response-continuation.md)
+- [ADR 0033: Distinguish request delivery from task execution](../adr/adr-0033-request-delivery-semantics.md)
 
 ## Superseded records
 

@@ -10,15 +10,37 @@ impl ProfileStore {
             .lock()?
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ProfileStoreError::Storage)?;
-        if version == PROFILE_SCHEMA_VERSION {
+        if version >= 23 {
             self.profile_identity_for_schema_transition(version, version)?;
             return Ok(());
         }
         if version != 22 {
             return Err(ProfileStoreError::UnsupportedSchema);
         }
-        let identity =
-            self.profile_identity_for_schema_transition(version, PROFILE_SCHEMA_VERSION)?;
+        self.advance_profile_schema_floor(version, 23)
+    }
+
+    pub(super) fn initialize_request_delivery_schema(&self) -> Result<(), ProfileStoreError> {
+        let version: u32 = self
+            .lock()?
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if version == PROFILE_SCHEMA_VERSION {
+            self.profile_identity_for_schema_transition(version, version)?;
+            return Ok(());
+        }
+        if version != 23 {
+            return Err(ProfileStoreError::UnsupportedSchema);
+        }
+        self.advance_profile_schema_floor(version, PROFILE_SCHEMA_VERSION)
+    }
+
+    fn advance_profile_schema_floor(
+        &self,
+        version: u32,
+        next: u32,
+    ) -> Result<(), ProfileStoreError> {
+        let identity = self.profile_identity_for_schema_transition(version, next)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
@@ -36,7 +58,7 @@ impl ProfileStore {
             return Err(ProfileStoreError::CorruptData);
         }
         transaction
-            .pragma_update(None, "user_version", PROFILE_SCHEMA_VERSION)
+            .pragma_update(None, "user_version", next)
             .map_err(|_| ProfileStoreError::Storage)?;
         transaction.commit().map_err(|_| ProfileStoreError::Storage)
     }
@@ -53,7 +75,10 @@ impl ProfileStore {
         let Some(channel) = conversation.state.request_service() else {
             return Ok(());
         };
-        let original = if matches!(content, ApplicationContent::Text(_)) {
+        let original = if matches!(
+            content,
+            ApplicationContent::Text(_) | ApplicationContent::RequestDeliveryOutcome(_)
+        ) {
             match reply_to {
                 Some(id) => {
                     let connection = self.lock()?;
@@ -79,7 +104,9 @@ impl ProfileStore {
                 original,
                 original.cursor.ok_or(ProfileStoreError::CorruptData)?,
             )?;
-            validate_reply_witness(original, candidate_id)?;
+            if matches!(content, ApplicationContent::Text(_)) {
+                validate_reply_witness(original, candidate_id)?;
+            }
         }
         channel.validate_application(
             &conversation.state,
@@ -155,7 +182,10 @@ impl ProfileStore {
         let Some(channel) = state.request_service() else {
             return Ok(());
         };
-        if !matches!(message.content(), ApplicationContent::Text(_)) {
+        if !matches!(
+            message.content(),
+            ApplicationContent::Text(_) | ApplicationContent::RequestDeliveryOutcome(_)
+        ) {
             channel.validate_application(
                 state,
                 sender,
@@ -185,6 +215,12 @@ impl ProfileStore {
                 message: &original.message,
             }),
         )?;
+        if matches!(
+            message.content(),
+            ApplicationContent::RequestDeliveryOutcome(_)
+        ) {
+            return Ok(());
+        }
         if validate_reply_witness(&original, message.message_id())?
             == RequestServiceReplyDecision::Retry
         {

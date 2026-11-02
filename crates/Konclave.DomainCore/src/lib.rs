@@ -8,6 +8,7 @@ mod identifiers;
 mod message_history;
 mod model;
 mod pairing_rendezvous;
+mod request_delivery;
 mod request_service;
 mod response_continuation;
 mod short_code_pairing;
@@ -48,10 +49,11 @@ pub use message_history::{
 };
 pub use model::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING,
-    APPLICATION_CAPABILITY_REQUEST_SERVICE, APPLICATION_PROTOCOL_MAJOR, APPLICATION_PROTOCOL_MINOR,
-    AcknowledgeRequest, AddMember, ApplicationContent, ApplicationMessage, ChangeMemberRole,
-    ConversationRole, ConversationState, DeliveryClass, DeviceCredentialBinding, DirectedRequest,
-    Invitation, JoinProof, MAX_APPLICATION_MESSAGE_BYTES, MAX_CONSUMED_INVITATIONS, MAX_MEMBERS,
+    APPLICATION_CAPABILITY_REQUEST_DELIVERY, APPLICATION_CAPABILITY_REQUEST_SERVICE,
+    APPLICATION_PROTOCOL_MAJOR, APPLICATION_PROTOCOL_MINOR, AcknowledgeRequest, AddMember,
+    ApplicationContent, ApplicationMessage, ChangeMemberRole, ConversationRole, ConversationState,
+    DeliveryClass, DeviceCredentialBinding, DirectedRequest, Invitation, JoinProof,
+    MAX_APPLICATION_MESSAGE_BYTES, MAX_CONSUMED_INVITATIONS, MAX_MEMBERS,
     MAX_MLS_KEY_PACKAGE_BYTES, MAX_PAIRING_CIPHERTEXT_BYTES, MAX_PAIRING_RELAY_ENDPOINT_BYTES,
     MAX_PAIRING_WELCOME_BYTES, MAX_PROTOBUF_TOP_LEVEL_FIELDS, MAX_RELAY_CONTROL_MESSAGE_BYTES,
     MAX_RELAY_ENVELOPE_BYTES, MAX_RELAY_PAYLOAD_BYTES, MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
@@ -59,11 +61,15 @@ pub use model::{
     MembershipAuthorization, MembershipChange, PairingControl, PairingEnvelope,
     PairingInvitationPayload, PairingOffer, PairingSenderRole, PairingStage, PairingWelcomePayload,
     ProtocolVersion, RelayEnvelope, RemoveMember, RepeatPairingRequest, RepeatPairingResponse,
-    ReplayPage, ReplayRequest, SignatureScheme, StoredRelayEnvelope,
+    ReplayPage, ReplayRequest, RequestDeliveryOptions, SignatureScheme, StoredRelayEnvelope,
 };
 pub use pairing_rendezvous::{
     MAX_PAIRING_RENDEZVOUS_CIPHERTEXT_BYTES, MAX_PAIRING_RENDEZVOUS_RECORD_BYTES,
     PairingRendezvousRecord, PairingRendezvousTakeRequest,
+};
+pub use request_delivery::{
+    MAX_REQUEST_ADMISSION_UNIX_MILLISECONDS, RequestAdmissionExpiry, RequestDeliveryError,
+    RequestDeliveryOutcome, observe_request_delivery, validate_request_delivery_receipt,
 };
 pub use request_service::{
     RequestServiceChannel, RequestServiceError, RequestServiceReplyDecision, RequestServiceRequest,

@@ -1,6 +1,7 @@
 use KonclaveDomainCore::{
     CollaborationPolicyBundle, CollaborationPolicyDigest, CollaborationPolicyProposal,
-    CollaborationPolicyProposalId, ConversationId, DeviceId, MessageId,
+    CollaborationPolicyProposalId, ConversationId, DeviceId, EnvelopeId, MessageId,
+    RequestDeliveryOutcome,
 };
 use KonclaveProtocolContracts::v1::{
     decode_collaboration_policy_bundle, encode_collaboration_policy_bundle,
@@ -124,6 +125,33 @@ fn derive_exchange_message_id(domain: &[u8], components: &[&[u8]]) -> MessageId 
     MessageId::from_bytes(message_id)
 }
 
+/// Derives separate application and envelope identifiers for one delivery phase.
+///
+/// Terminal outcomes intentionally share identifiers so contradictory terminal
+/// facts cannot silently create distinct outbound operations.
+#[must_use]
+pub fn derive_request_delivery_identifiers(
+    conversation_id: ConversationId,
+    request_message_id: MessageId,
+    responder: DeviceId,
+    outcome: RequestDeliveryOutcome,
+) -> (MessageId, EnvelopeId) {
+    let phase = [u8::from(outcome != RequestDeliveryOutcome::Admitted)];
+    let components: &[&[u8]] = &[
+        conversation_id.as_bytes(),
+        request_message_id.as_bytes(),
+        responder.as_bytes(),
+        &phase,
+    ];
+    (
+        derive_exchange_message_id(b"konclave-request-delivery-message-v1\0", components),
+        EnvelopeId::from_bytes(
+            derive_exchange_message_id(b"konclave-request-delivery-envelope-v1\0", components)
+                .into_bytes(),
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use KonclaveDomainCore::{
@@ -132,6 +160,66 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn request_delivery_identifiers_bind_request_device_conversation_and_phase() {
+        let conversation = ConversationId::from_bytes([1; 32]);
+        let request = MessageId::from_bytes([2; 16]);
+        let responder = DeviceId::from_bytes([3; 32]);
+        let identifiers = |conversation, request, responder, outcome| {
+            derive_request_delivery_identifiers(conversation, request, responder, outcome)
+        };
+        let admitted = identifiers(
+            conversation,
+            request,
+            responder,
+            RequestDeliveryOutcome::Admitted,
+        );
+        let expired = identifiers(
+            conversation,
+            request,
+            responder,
+            RequestDeliveryOutcome::ExpiredBeforeAdmission,
+        );
+        assert_ne!(admitted, expired);
+        assert_eq!(
+            expired,
+            identifiers(
+                conversation,
+                request,
+                responder,
+                RequestDeliveryOutcome::EndedWithoutResponse
+            )
+        );
+        assert_ne!(admitted.0.as_bytes(), admitted.1.as_bytes());
+        assert_ne!(
+            admitted,
+            identifiers(
+                ConversationId::from_bytes([4; 32]),
+                request,
+                responder,
+                RequestDeliveryOutcome::Admitted
+            )
+        );
+        assert_ne!(
+            admitted,
+            identifiers(
+                conversation,
+                MessageId::from_bytes([5; 16]),
+                responder,
+                RequestDeliveryOutcome::Admitted
+            )
+        );
+        assert_ne!(
+            admitted,
+            identifiers(
+                conversation,
+                request,
+                DeviceId::from_bytes([6; 32]),
+                RequestDeliveryOutcome::Admitted
+            )
+        );
+    }
 
     fn bundle(name: &str, guidance: &str) -> CollaborationPolicyBundle {
         CollaborationPolicyBundle::new(

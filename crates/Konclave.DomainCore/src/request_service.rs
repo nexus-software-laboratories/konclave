@@ -185,7 +185,7 @@ impl RequestServiceChannel {
                     return Err(RequestServiceError::InvalidTarget);
                 }
             }
-            ApplicationContent::Text(_) => {
+            ApplicationContent::Text(_) | ApplicationContent::RequestDeliveryOutcome(_) => {
                 if reply_to.is_none() {
                     return Err(RequestServiceError::UnsolicitedText);
                 }
@@ -207,6 +207,11 @@ impl RequestServiceChannel {
                     return Err(RequestServiceError::InvalidReply);
                 };
                 if request.target_device_id() != self.operator_device_id {
+                    return Err(RequestServiceError::InvalidReply);
+                }
+                if matches!(content, ApplicationContent::RequestDeliveryOutcome(_))
+                    && request.delivery().is_none()
+                {
                     return Err(RequestServiceError::InvalidReply);
                 }
             }
