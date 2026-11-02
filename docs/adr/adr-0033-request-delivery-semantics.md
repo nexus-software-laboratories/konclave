@@ -1,6 +1,6 @@
 ---
 title: Distinguish request delivery from task execution
-status: Proposed
+status: Accepted
 date: 2026-11-02
 authors:
   - Konclave maintainers
