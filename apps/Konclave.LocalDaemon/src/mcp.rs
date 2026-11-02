@@ -1678,14 +1678,17 @@ impl StdioServer {
             .transpose()?;
         let mut directed = KonclaveDomainCore::DirectedRequest::new(target_device_id, request.text)
             .map_err(|_| "invalid_text".to_string())?;
-        let expiry = request.expires_at_unix_milliseconds
-            .map(KonclaveDomainCore::RequestAdmissionExpiry::new).transpose()
+        let expiry = request
+            .expires_at_unix_milliseconds
+            .map(KonclaveDomainCore::RequestAdmissionExpiry::new)
+            .transpose()
             .map_err(|_| "invalid_request_admission_expiry".to_string())?;
         if request.delivery_receipts == Some(false) && expiry.is_some() {
             return Err("request_admission_expiry_requires_receipts".to_string());
         }
         if request.delivery_receipts == Some(true) || expiry.is_some() {
-            directed = directed.with_delivery(KonclaveDomainCore::RequestDeliveryOptions::new(expiry));
+            directed =
+                directed.with_delivery(KonclaveDomainCore::RequestDeliveryOptions::new(expiry));
         }
         let content = ApplicationContent::DirectedRequest(directed);
         self.send_application_content(conversation_id, message_id, content, reply_to, None)
@@ -2821,14 +2824,20 @@ fn message_result(
     duplicate: bool,
 ) -> Result<MessageResult, String> {
     let content = match message.content() {
-        ApplicationContent::RequestDeliveryOutcome(outcome) => MessageContentResult::RequestDeliveryOutcome {
-            outcome: match outcome {
-                KonclaveDomainCore::RequestDeliveryOutcome::Admitted => "admitted",
-                KonclaveDomainCore::RequestDeliveryOutcome::Responded => "responded",
-                KonclaveDomainCore::RequestDeliveryOutcome::ExpiredBeforeAdmission => "expired_before_admission",
-                KonclaveDomainCore::RequestDeliveryOutcome::EndedWithoutResponse => "ended_without_response",
-            },
-        },
+        ApplicationContent::RequestDeliveryOutcome(outcome) => {
+            MessageContentResult::RequestDeliveryOutcome {
+                outcome: match outcome {
+                    KonclaveDomainCore::RequestDeliveryOutcome::Admitted => "admitted",
+                    KonclaveDomainCore::RequestDeliveryOutcome::Responded => "responded",
+                    KonclaveDomainCore::RequestDeliveryOutcome::ExpiredBeforeAdmission => {
+                        "expired_before_admission"
+                    }
+                    KonclaveDomainCore::RequestDeliveryOutcome::EndedWithoutResponse => {
+                        "ended_without_response"
+                    }
+                },
+            }
+        }
         ApplicationContent::Text(text) => MessageContentResult::Text { text: text.clone() },
         ApplicationContent::DirectedRequest(request) => MessageContentResult::DirectedRequest {
             target_device_id: encode_hex(request.target_device_id().as_bytes()),

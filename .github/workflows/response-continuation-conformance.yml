@@ -109,6 +109,31 @@ jobs:
           npm run format --prefix extensions/Konclave.HostExtension
           cargo fmt --package KonclaveLocalDaemon
           git diff --binary --output="$RUNNER_TEMP/response-continuation-format.patch"
+      - name: Generate TypeScript request delivery contract
+        id: protocol-generation
+        if: steps.scope.outputs.run == 'true'
+        working-directory: packages/Konclave.ProtocolContracts.TypeScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run generate
+      - name: Retain exact TypeScript request delivery contract
+        if: ${{ !cancelled() && steps.protocol-generation.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: request-delivery-protocol-contract
+          path: packages/Konclave.ProtocolContracts.TypeScript/src/generated
+          if-no-files-found: error
+          retention-days: 1
+      - name: Verify TypeScript request delivery contract
+        if: steps.scope.outputs.run == 'true'
+        working-directory: packages/Konclave.ProtocolContracts.TypeScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          npm test
       - name: Retain submitted formatting evidence
         if: ${{ !cancelled() && steps.format.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

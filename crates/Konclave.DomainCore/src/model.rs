@@ -1779,7 +1779,10 @@ impl ApplicationMessage {
         if matches!(content, ApplicationContent::RequestDeliveryOutcome(_))
             && (reply_to.is_none()
                 || reply_to == Some(message_id)
-                || matches!(content, ApplicationContent::RequestDeliveryOutcome(RequestDeliveryOutcome::Responded)))
+                || matches!(
+                    content,
+                    ApplicationContent::RequestDeliveryOutcome(RequestDeliveryOutcome::Responded)
+                ))
         {
             return Err(crate::RequestDeliveryError::InvalidReceipt.into());
         }

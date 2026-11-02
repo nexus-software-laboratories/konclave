@@ -146,7 +146,8 @@ pub fn derive_request_delivery_identifiers(
     (
         derive_exchange_message_id(b"konclave-request-delivery-message-v1\0", components),
         EnvelopeId::from_bytes(
-            derive_exchange_message_id(b"konclave-request-delivery-envelope-v1\0", components).into_bytes(),
+            derive_exchange_message_id(b"konclave-request-delivery-envelope-v1\0", components)
+                .into_bytes(),
         ),
     )
 }
@@ -168,14 +169,56 @@ mod tests {
         let identifiers = |conversation, request, responder, outcome| {
             derive_request_delivery_identifiers(conversation, request, responder, outcome)
         };
-        let admitted = identifiers(conversation, request, responder, RequestDeliveryOutcome::Admitted);
-        let expired = identifiers(conversation, request, responder, RequestDeliveryOutcome::ExpiredBeforeAdmission);
+        let admitted = identifiers(
+            conversation,
+            request,
+            responder,
+            RequestDeliveryOutcome::Admitted,
+        );
+        let expired = identifiers(
+            conversation,
+            request,
+            responder,
+            RequestDeliveryOutcome::ExpiredBeforeAdmission,
+        );
         assert_ne!(admitted, expired);
-        assert_eq!(expired, identifiers(conversation, request, responder, RequestDeliveryOutcome::EndedWithoutResponse));
+        assert_eq!(
+            expired,
+            identifiers(
+                conversation,
+                request,
+                responder,
+                RequestDeliveryOutcome::EndedWithoutResponse
+            )
+        );
         assert_ne!(admitted.0.as_bytes(), admitted.1.as_bytes());
-        assert_ne!(admitted, identifiers(ConversationId::from_bytes([4; 32]), request, responder, RequestDeliveryOutcome::Admitted));
-        assert_ne!(admitted, identifiers(conversation, MessageId::from_bytes([5; 16]), responder, RequestDeliveryOutcome::Admitted));
-        assert_ne!(admitted, identifiers(conversation, request, DeviceId::from_bytes([6; 32]), RequestDeliveryOutcome::Admitted));
+        assert_ne!(
+            admitted,
+            identifiers(
+                ConversationId::from_bytes([4; 32]),
+                request,
+                responder,
+                RequestDeliveryOutcome::Admitted
+            )
+        );
+        assert_ne!(
+            admitted,
+            identifiers(
+                conversation,
+                MessageId::from_bytes([5; 16]),
+                responder,
+                RequestDeliveryOutcome::Admitted
+            )
+        );
+        assert_ne!(
+            admitted,
+            identifiers(
+                conversation,
+                request,
+                DeviceId::from_bytes([6; 32]),
+                RequestDeliveryOutcome::Admitted
+            )
+        );
     }
 
     fn bundle(name: &str, guidance: &str) -> CollaborationPolicyBundle {

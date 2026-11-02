@@ -4537,7 +4537,10 @@ impl ProfileStore {
             return Ok(reservation);
         }
         let reservation = self.reserve_new_outbound_application_in(
-            &transaction, conversation_id, message_id, envelope_id,
+            &transaction,
+            conversation_id,
+            message_id,
+            envelope_id,
         )?;
         if let Some((
             authorization,
@@ -4560,7 +4563,9 @@ impl ProfileStore {
                 now_unix_milliseconds,
             )?;
         }
-        transaction.commit().map_err(|_| ProfileStoreError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
         Ok(reservation)
     }
 
@@ -6887,7 +6892,12 @@ impl ProfileStore {
         } else {
             false
         };
-        if !internal && !matches!(message.message.content(), ApplicationContent::RequestDeliveryOutcome(_)) {
+        if !internal
+            && !matches!(
+                message.message.content(),
+                ApplicationContent::RequestDeliveryOutcome(_)
+            )
+        {
             self.insert_remote_event_in(
                 &transaction,
                 conversation_id,
@@ -7440,16 +7450,29 @@ impl ProfileStore {
         epoch: u64,
         message: &ApplicationMessage,
     ) -> Result<(), ProfileStoreError> {
-        if matches!(message.content(), ApplicationContent::RequestDeliveryOutcome(_)) {
-            let original = self.load_history_record(
-                connection, conversation_id, routing_id,
-                message.reply_to().ok_or(ProfileStoreError::InvalidTransition)?,
-            )?.ok_or(ProfileStoreError::OperationNotFound)?;
+        if matches!(
+            message.content(),
+            ApplicationContent::RequestDeliveryOutcome(_)
+        ) {
+            let original = self
+                .load_history_record(
+                    connection,
+                    conversation_id,
+                    routing_id,
+                    message
+                        .reply_to()
+                        .ok_or(ProfileStoreError::InvalidTransition)?,
+                )?
+                .ok_or(ProfileStoreError::OperationNotFound)?;
             if !original.complete {
                 return Err(ProfileStoreError::InvalidTransition);
             }
-            KonclaveDomainCore::validate_request_delivery_receipt(&original.message, sender, message)
-                .map_err(|_| ProfileStoreError::InvalidTransition)?;
+            KonclaveDomainCore::validate_request_delivery_receipt(
+                &original.message,
+                sender,
+                message,
+            )
+            .map_err(|_| ProfileStoreError::InvalidTransition)?;
         }
         let state = self.request_service_state_in(connection, conversation_id, routing_id)?;
         let request_service_reply = if state.request_service().is_some()
@@ -12716,7 +12739,10 @@ mod tests {
         target_device_id: DeviceId,
     ) -> ClaimDirectedRequest {
         directed_request_claim_input_with_content(
-            fixture, policy_digest, consumer_id, lease_id,
+            fixture,
+            policy_digest,
+            consumer_id,
+            lease_id,
             ApplicationContent::directed_request(target_device_id, "review the contract").unwrap(),
         )
     }
@@ -12790,45 +12816,101 @@ mod tests {
 
         #[test]
         fn request_delivery_cutoff_is_checked_only_before_first_durable_admission() {
-            use KonclaveDomainCore::{DirectedRequest, RequestAdmissionExpiry, RequestDeliveryOptions, RequestDeliveryOutcome};
+            use KonclaveDomainCore::{
+                DirectedRequest, RequestAdmissionExpiry, RequestDeliveryOptions,
+                RequestDeliveryOutcome,
+            };
             for cutoff in [999, 1_000, 1_001] {
                 let fixture = conversation_fixture(&format!("delivery-cutoff-{cutoff}"));
                 let digest = activate_request_reply_policy(&fixture);
-                let content = DirectedRequest::new(fixture.device_id, "request").unwrap()
-                    .with_delivery(RequestDeliveryOptions::new(Some(RequestAdmissionExpiry::new(cutoff).unwrap())));
+                let content = DirectedRequest::new(fixture.device_id, "request")
+                    .unwrap()
+                    .with_delivery(RequestDeliveryOptions::new(Some(
+                        RequestAdmissionExpiry::new(cutoff).unwrap(),
+                    )));
                 let input = directed_request_claim_input_with_content(
-                    &fixture, digest, AdapterConsumerId::from_bytes([61; 16]),
-                    AdapterLeaseId::from_bytes([62; 16]), ApplicationContent::DirectedRequest(content),
+                    &fixture,
+                    digest,
+                    AdapterConsumerId::from_bytes([61; 16]),
+                    AdapterLeaseId::from_bytes([62; 16]),
+                    ApplicationContent::DirectedRequest(content),
                 );
                 let outcome = fixture.store.claim_directed_request(input).unwrap();
-                let receipts = fixture.store.request_delivery_receipts(Some((fixture.conversation_id, input.request_message_id))).unwrap();
+                let receipts = fixture
+                    .store
+                    .request_delivery_receipts(Some((
+                        fixture.conversation_id,
+                        input.request_message_id,
+                    )))
+                    .unwrap();
                 assert_eq!(receipts.len(), 1);
-                assert!(fixture.store.request_delivery_receipt_needs_sealing(receipts[0]).unwrap());
+                assert!(
+                    fixture
+                        .store
+                        .request_delivery_receipt_needs_sealing(receipts[0])
+                        .unwrap()
+                );
                 if cutoff <= input.now_unix_milliseconds {
                     assert_eq!(outcome, DirectedRequestClaimOutcome::ExpiredBeforeAdmission);
-                    assert_eq!(receipts[0].outcome, RequestDeliveryOutcome::ExpiredBeforeAdmission);
-                    assert!(fixture.store.active_directed_request_claim(ActiveDirectedRequestClaim {
-                        conversation_id: input.conversation_id,
-                        request_message_id: input.request_message_id,
-                        responder_device_id: input.responder_device_id,
-                        consumer_id: input.consumer_id, attempt: 1, policy_digest: input.policy_digest,
-                        now_unix_milliseconds: input.now_unix_milliseconds,
-                    }).unwrap().is_none());
+                    assert_eq!(
+                        receipts[0].outcome,
+                        RequestDeliveryOutcome::ExpiredBeforeAdmission
+                    );
+                    assert!(
+                        fixture
+                            .store
+                            .active_directed_request_claim(ActiveDirectedRequestClaim {
+                                conversation_id: input.conversation_id,
+                                request_message_id: input.request_message_id,
+                                responder_device_id: input.responder_device_id,
+                                consumer_id: input.consumer_id,
+                                attempt: 1,
+                                policy_digest: input.policy_digest,
+                                now_unix_milliseconds: input.now_unix_milliseconds,
+                            })
+                            .unwrap()
+                            .is_none()
+                    );
                 } else {
-                    let DirectedRequestClaimOutcome::Claimed(claim) = outcome else { panic!("claim"); };
+                    let DirectedRequestClaimOutcome::Claimed(claim) = outcome else {
+                        panic!("claim");
+                    };
                     assert_eq!(receipts[0].outcome, RequestDeliveryOutcome::Admitted);
-                    let retry = fixture.store.claim_directed_request(ClaimDirectedRequest { now_unix_milliseconds: 2_000, ..input }).unwrap();
+                    let retry = fixture
+                        .store
+                        .claim_directed_request(ClaimDirectedRequest {
+                            now_unix_milliseconds: 2_000,
+                            ..input
+                        })
+                        .unwrap();
                     assert_eq!(retry, DirectedRequestClaimOutcome::Claimed(claim));
-                    fixture.store.complete_directed_request_without_response(CompleteDirectedRequest {
-                        conversation_id: input.conversation_id,
-                        request_message_id: input.request_message_id,
-                        responder_device_id: input.responder_device_id,
-                        consumer_id: input.consumer_id, attempt: claim.attempt, policy_digest: input.policy_digest,
-                    }).unwrap();
-                    let completed = fixture.store.request_delivery_receipts(Some((fixture.conversation_id, input.request_message_id))).unwrap();
+                    fixture
+                        .store
+                        .complete_directed_request_without_response(CompleteDirectedRequest {
+                            conversation_id: input.conversation_id,
+                            request_message_id: input.request_message_id,
+                            responder_device_id: input.responder_device_id,
+                            consumer_id: input.consumer_id,
+                            attempt: claim.attempt,
+                            policy_digest: input.policy_digest,
+                        })
+                        .unwrap();
+                    let completed = fixture
+                        .store
+                        .request_delivery_receipts(Some((
+                            fixture.conversation_id,
+                            input.request_message_id,
+                        )))
+                        .unwrap();
                     assert_eq!(completed.len(), 2);
-                    assert_eq!(completed[1].outcome, RequestDeliveryOutcome::EndedWithoutResponse);
-                    assert!(completed[1].reservation.sender_counter > receipts[0].reservation.sender_counter);
+                    assert_eq!(
+                        completed[1].outcome,
+                        RequestDeliveryOutcome::EndedWithoutResponse
+                    );
+                    assert!(
+                        completed[1].reservation.sender_counter
+                            > receipts[0].reservation.sender_counter
+                    );
                 }
                 fixture.store.verify_directed_request_handlings().unwrap();
             }

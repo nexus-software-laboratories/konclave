@@ -1,8 +1,8 @@
 use KonclaveDomainCore::{
-    ApplicationContent, ApplicationMessage, MAX_APPLICATION_MESSAGE_BYTES,
+    ApplicationContent, ApplicationMessage, DirectedRequest, MAX_APPLICATION_MESSAGE_BYTES,
     MAX_COLLABORATION_POLICY_BUNDLE_BYTES, MAX_REPEAT_PAIRING_CAPABILITY_BYTES,
-    DirectedRequest, RepeatPairingOperationId, RepeatPairingRequest, RepeatPairingResponse,
-    RequestAdmissionExpiry, RequestDeliveryOptions, RequestDeliveryOutcome,
+    RepeatPairingOperationId, RepeatPairingRequest, RepeatPairingResponse, RequestAdmissionExpiry,
+    RequestDeliveryOptions, RequestDeliveryOutcome,
 };
 
 use crate::KonclaveProtocolError;
@@ -35,14 +35,20 @@ pub fn encode_application_message(
             wire::application_message::Content::DirectedRequest(wire::DirectedRequestContent {
                 target_device_id: Some(device_id_to_wire(request.target_device_id())),
                 body: request.body().to_owned(),
-                delivery: request.delivery().map(|options| wire::RequestDeliveryOptions {
-                    expires_at_unix_milliseconds: options.expiry().map(RequestAdmissionExpiry::unix_milliseconds),
-                }),
+                delivery: request
+                    .delivery()
+                    .map(|options| wire::RequestDeliveryOptions {
+                        expires_at_unix_milliseconds: options
+                            .expiry()
+                            .map(RequestAdmissionExpiry::unix_milliseconds),
+                    }),
             })
         }
         ApplicationContent::RequestDeliveryOutcome(outcome) => {
             wire::application_message::Content::RequestDeliveryOutcome(
-                wire::RequestDeliveryOutcomeContent { outcome: outcome.wire_value() },
+                wire::RequestDeliveryOutcomeContent {
+                    outcome: outcome.wire_value(),
+                },
             )
         }
         ApplicationContent::RepeatPairingRequest(request) => {
@@ -132,12 +138,11 @@ pub fn decode_application_message(
             ApplicationContent::text(text.body)?
         }
         Some(wire::application_message::Content::DirectedRequest(request)) => {
-            let mut directed = DirectedRequest::new(
-                device_id_from_wire(request.target_device_id)?,
-                request.body,
-            )?;
+            let mut directed =
+                DirectedRequest::new(device_id_from_wire(request.target_device_id)?, request.body)?;
             if let Some(delivery) = request.delivery {
-                let expiry = delivery.expires_at_unix_milliseconds
+                let expiry = delivery
+                    .expires_at_unix_milliseconds
                     .map(RequestAdmissionExpiry::new)
                     .transpose()
                     .map_err(KonclaveDomainCore::KonclaveDomainError::from)?;

@@ -163,6 +163,7 @@ impl KonclaveDomainError {
             Self::MismatchedInvitedConversation => "mismatched_invited_conversation",
             Self::RequestServiceInvitationMismatch => "request_service_invitation_mismatch",
             Self::RequestService(_) => "request_service_rejected",
+            Self::RequestDelivery(_) => "request_delivery_rejected",
             Self::MemberJoinedAfterStateEpoch { .. } => "member_joined_after_state_epoch",
             Self::MissingAdministrator => "missing_administrator",
             Self::MembershipVersionMismatch => "membership_version_mismatch",

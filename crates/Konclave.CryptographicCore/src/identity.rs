@@ -2,12 +2,11 @@ use std::mem::size_of;
 
 use KonclaveDomainCore::{
     APPLICATION_CAPABILITY_DIRECTED_REQUEST, APPLICATION_CAPABILITY_REPEAT_PAIRING,
-    APPLICATION_CAPABILITY_REQUEST_SERVICE, APPLICATION_CAPABILITY_REQUEST_DELIVERY,
-    ConversationId, ConversationRole,
-    CredentialBindingHash, DeviceCredentialBinding, DeviceId, Ed25519PublicKey, Ed25519Signature,
-    EnvelopeId, Invitation, InvitationId, InvitationNonce, MessageId, NotificationId,
-    PairingContextHash, PairingControl, PairingId, PairingMessageId, PairingOffer, PairingStage,
-    ProtocolVersion, RequestServiceChannel, RoutingId, SignatureScheme,
+    APPLICATION_CAPABILITY_REQUEST_DELIVERY, APPLICATION_CAPABILITY_REQUEST_SERVICE,
+    ConversationId, ConversationRole, CredentialBindingHash, DeviceCredentialBinding, DeviceId,
+    Ed25519PublicKey, Ed25519Signature, EnvelopeId, Invitation, InvitationId, InvitationNonce,
+    MessageId, NotificationId, PairingContextHash, PairingControl, PairingId, PairingMessageId,
+    PairingOffer, PairingStage, ProtocolVersion, RequestServiceChannel, RoutingId, SignatureScheme,
 };
 use KonclaveProtocolContracts::v1::{
     decode_device_credential_binding, encode_device_credential_binding,

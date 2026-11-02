@@ -113,7 +113,9 @@ pub fn validate_request_delivery_receipt(
     let crate::ApplicationContent::RequestDeliveryOutcome(outcome) = receipt.content() else {
         return Err(RequestDeliveryError::InvalidReceipt);
     };
-    let options = request.delivery().ok_or(RequestDeliveryError::InvalidReceipt)?;
+    let options = request
+        .delivery()
+        .ok_or(RequestDeliveryError::InvalidReceipt)?;
     if request.target_device_id() != authenticated_receipt_sender
         || receipt.reply_to() != Some(original.message_id())
         || receipt.message_id() == original.message_id()
@@ -123,7 +125,10 @@ pub fn validate_request_delivery_receipt(
         return Err(RequestDeliveryError::InvalidReceipt);
     }
     if let Some(expiry) = options.expiry()
-        && matches!(outcome, RequestDeliveryOutcome::Admitted | RequestDeliveryOutcome::ExpiredBeforeAdmission)
+        && matches!(
+            outcome,
+            RequestDeliveryOutcome::Admitted | RequestDeliveryOutcome::ExpiredBeforeAdmission
+        )
         && expiry.is_expired(receipt.sent_at_unix_milliseconds())
             != (*outcome == RequestDeliveryOutcome::ExpiredBeforeAdmission)
     {
@@ -165,19 +170,34 @@ mod tests {
 
     #[test]
     fn request_delivery_receipts_bind_target_opt_in_and_exact_request() {
-        use crate::{ApplicationContent, ApplicationMessage, DeviceId, DirectedRequest, MessageId, ProtocolVersion, RequestDeliveryOptions};
+        use crate::{
+            ApplicationContent, ApplicationMessage, DeviceId, DirectedRequest, MessageId,
+            ProtocolVersion, RequestDeliveryOptions,
+        };
         let target = DeviceId::from_bytes([1; 32]);
         let original_id = MessageId::from_bytes([2; 16]);
-        let content = DirectedRequest::new(target, "body").unwrap()
-            .with_delivery(RequestDeliveryOptions::new(Some(RequestAdmissionExpiry::new(1_000).unwrap())));
-        let original = ApplicationMessage::new(
-            ProtocolVersion::application_v1(), original_id, 1, 1, None,
-            ApplicationContent::DirectedRequest(content),
-        ).unwrap();
-        let receipt = |outcome, reply_to, sent_at| ApplicationMessage::new(
-            ProtocolVersion::application_v1(), MessageId::from_bytes([3; 16]),
-            1, sent_at, reply_to, ApplicationContent::RequestDeliveryOutcome(outcome),
+        let content = DirectedRequest::new(target, "body").unwrap().with_delivery(
+            RequestDeliveryOptions::new(Some(RequestAdmissionExpiry::new(1_000).unwrap())),
         );
+        let original = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            original_id,
+            1,
+            1,
+            None,
+            ApplicationContent::DirectedRequest(content),
+        )
+        .unwrap();
+        let receipt = |outcome, reply_to, sent_at| {
+            ApplicationMessage::new(
+                ProtocolVersion::application_v1(),
+                MessageId::from_bytes([3; 16]),
+                1,
+                sent_at,
+                reply_to,
+                ApplicationContent::RequestDeliveryOutcome(outcome),
+            )
+        };
         for (outcome, at, valid) in [
             (RequestDeliveryOutcome::Admitted, 999, true),
             (RequestDeliveryOutcome::Admitted, 1_000, false),
@@ -186,19 +206,45 @@ mod tests {
             (RequestDeliveryOutcome::EndedWithoutResponse, 2_000, true),
         ] {
             let receipt = receipt(outcome, Some(original_id), at).unwrap();
-            assert_eq!(validate_request_delivery_receipt(&original, target, &receipt).is_ok(), valid);
-            assert!(validate_request_delivery_receipt(&original, DeviceId::from_bytes([4; 32]), &receipt).is_err());
+            assert_eq!(
+                validate_request_delivery_receipt(&original, target, &receipt).is_ok(),
+                valid
+            );
+            assert!(
+                validate_request_delivery_receipt(
+                    &original,
+                    DeviceId::from_bytes([4; 32]),
+                    &receipt
+                )
+                .is_err()
+            );
         }
         assert!(receipt(RequestDeliveryOutcome::Admitted, None, 1).is_err());
         assert!(receipt(RequestDeliveryOutcome::Responded, Some(original_id), 1).is_err());
-        let wrong_reference = receipt(RequestDeliveryOutcome::Admitted, Some(MessageId::from_bytes([9; 16])), 1).unwrap();
+        let wrong_reference = receipt(
+            RequestDeliveryOutcome::Admitted,
+            Some(MessageId::from_bytes([9; 16])),
+            1,
+        )
+        .unwrap();
         assert!(validate_request_delivery_receipt(&original, target, &wrong_reference).is_err());
         let legacy = ApplicationMessage::new(
-            ProtocolVersion::application_v1(), original_id, 1, 1, None,
+            ProtocolVersion::application_v1(),
+            original_id,
+            1,
+            1,
+            None,
             ApplicationContent::directed_request(target, "body").unwrap(),
-        ).unwrap();
-        assert!(validate_request_delivery_receipt(&legacy, target,
-            &receipt(RequestDeliveryOutcome::Admitted, Some(original_id), 1).unwrap()).is_err());
+        )
+        .unwrap();
+        assert!(
+            validate_request_delivery_receipt(
+                &legacy,
+                target,
+                &receipt(RequestDeliveryOutcome::Admitted, Some(original_id), 1).unwrap()
+            )
+            .is_err()
+        );
     }
 
     #[test]
