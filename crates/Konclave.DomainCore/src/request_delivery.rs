@@ -139,7 +139,9 @@ mod tests {
         }
         for value in [1, MAX_REQUEST_ADMISSION_UNIX_MILLISECONDS] {
             assert_eq!(
-                RequestAdmissionExpiry::new(value).unwrap().unix_milliseconds(),
+                RequestAdmissionExpiry::new(value)
+                    .unwrap()
+                    .unix_milliseconds(),
                 value
             );
         }
