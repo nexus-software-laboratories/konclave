@@ -1204,6 +1204,74 @@ fn send_journals_plaintext_before_exact_envelope_and_recovers_saved_echo() {
 }
 
 #[test]
+fn delivery_options_require_the_local_signed_capability_before_reserving() {
+    let fixture = Fixture::new();
+    fixture.incoming();
+    let local = fixture.device.lock().unwrap().device_id();
+    let stored = fixture
+        .journal
+        .load_conversation(fixture.journal.id)
+        .unwrap();
+    let target = stored
+        .state
+        .members()
+        .iter()
+        .find(|member| member.device_id() != local)
+        .unwrap()
+        .device_id();
+    let binding = stored
+        .bindings
+        .iter()
+        .find(|binding| binding.binding().device_id() == local)
+        .unwrap()
+        .binding();
+    let legacy = DeviceCredentialBinding::new(
+        binding.version(),
+        binding.device_id(),
+        binding.conversation_id(),
+        binding.signature_scheme(),
+        binding.device_root_public_key(),
+        binding.conversation_signature_public_key(),
+        binding.device_binding_signature(),
+    );
+    *fixture.journal.bindings.lock().unwrap() = stored
+        .bindings
+        .iter()
+        .map(|binding| {
+            let binding = if binding.binding().device_id() == local {
+                &legacy
+            } else {
+                binding.binding()
+            };
+            fixture
+                .journal
+                .sealer
+                .seal(
+                    &Journal::context(
+                        SecretRecordKind::ConversationCredentialBinding,
+                        fixture.journal.id.as_bytes(),
+                    ),
+                    &encode_device_credential_binding(binding).unwrap(),
+                )
+                .unwrap()
+        })
+        .collect();
+    let mut request = fixture.request(3);
+    request.content = ApplicationContent::DirectedRequest(
+        DirectedRequest::new(target, "request")
+            .unwrap()
+            .with_delivery(RequestDeliveryOptions::new(None)),
+    );
+    assert!(matches!(
+        fixture.processor().prepare_application(request),
+        Err(NativeConversationError::DirectedRequestUnsupported)
+    ));
+    let rows = fixture.journal.rows.lock().unwrap();
+    assert_eq!(rows.counter, 0);
+    assert!(rows.reservations.is_empty());
+}
+
+#[test]
 fn failed_send_never_reuses_reserved_counter() {
     for boundary in ["outbound-message", "outbound-envelope"] {
         let fixture = Fixture::new();

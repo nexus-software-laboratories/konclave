@@ -3479,22 +3479,17 @@ pub(crate) mod tests {
     fn native_delivery_options_require_signed_support_before_reservation() {
         use KonclaveDomainCore::{DirectedRequest, RequestDeliveryOptions};
 
-        for (delivery, legacy_local, legacy_remote, supported) in [
-            (true, false, false, true),
-            (true, true, false, false),
-            (true, false, true, false),
-            (false, true, false, true),
+        for (delivery, legacy_remote, supported) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, true),
         ] {
             let (_root, alice, bob, conversation_id, _) = paired_coordinators();
-            if legacy_local || legacy_remote {
+            if legacy_remote {
                 crate::persistence::retain_legacy_peer_binding(
                     &alice.store,
                     conversation_id,
-                    if legacy_local {
-                        alice.device_id().unwrap()
-                    } else {
-                        bob.device_id().unwrap()
-                    },
+                    bob.device_id().unwrap(),
                 );
             }
             let mut directed = DirectedRequest::new(bob.device_id().unwrap(), "request").unwrap();
