@@ -1,0 +1,117 @@
+name: Native client conformance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: native-client-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-client-conformance:
+    name: Native client conformance
+    if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout component validation scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: .ci-scope
+          sparse-checkout: |
+            scripts/ci/ComponentValidationScope.Functions.ps1
+            scripts/ci/Resolve-ComponentValidationScope.ps1
+          sparse-checkout-cone-mode: false
+      - name: Resolve native client scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          ./.ci-scope/scripts/ci/Resolve-ComponentValidationScope.ps1 `
+            -Contract 'native-client' `
+            -EventName $env:EVENT_NAME `
+            -PullRequestNumber ([int]$env:PULL_REQUEST_NUMBER)
+      - name: Checkout source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Install Rust
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+      - name: Verify native conversation foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --package KonclaveClientLibrary -- --check
+          cargo test --locked --package KonclaveClientLibrary --lib native::
+          cargo clippy --locked --package KonclaveClientLibrary --all-targets -- -D warnings
+      - name: Verify native relay session foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --lib native::session_tests
+      - name: Verify durable native example storage and MLS foundations
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --test native_service_storage --test native_service_mls
+      - name: Verify durable native service journal and claim recovery
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --test native_service_journal
+      - name: Verify actual service-owned native session composition
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --test native_service_session
+      - name: Verify owned native worker foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo test --locked --package KonclaveLocalDaemon --lib native_workers::tests
+      - name: Verify native service authority foundation
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: cargo test --locked --package KonclaveClientLibrary --test native_service_authority
+      - name: Verify shared daemon native processing
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package KonclaveLocalDaemon --lib conversation::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib application::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib persistence::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib native_session::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib activity::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib profile_runtime::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib profile_supervisor::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib pairing_service::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib pairing_supervisor::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib local_failure_diagnostics::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib service::tests
+          cargo clippy --locked --package KonclaveLocalDaemon --all-targets -- -D warnings
+      - name: Verify component checks leave no source delta
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: git diff --exit-code -- crates/Konclave.ClientLibrary apps/Konclave.LocalDaemon
+      - name: Verify conservative component relevance
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: ./scripts/ci/Test-ComponentValidationScope.ps1

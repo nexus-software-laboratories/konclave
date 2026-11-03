@@ -1,3 +1,8 @@
+pub(crate) use KonclaveClientLibrary::native::{
+    InboxOperation, MembershipInboxOperation, MembershipOutbox, MembershipOutboxStatus,
+    MessageDirection, OutboundReservation, StoredApplicationMessage, StoredConversation,
+    StoredMembershipTransition,
+};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -9162,16 +9167,6 @@ fn require_collaboration_action_lease(
     }
 }
 
-/// Reopened conversation inputs for the cryptographic client and relay transport.
-pub(crate) struct StoredConversation {
-    pub routing_id: RoutingId,
-    pub signing_material: ConversationSigningMaterial,
-    pub state: ConversationState,
-    pub bindings: Vec<VerifiedDeviceCredentialBinding>,
-    pub sender_counter: u64,
-    pub replay_cursor: u64,
-}
-
 /// Optional state committed with a new conversation record.
 pub(crate) struct ConversationInsertOptions<'a> {
     replay_cursor: u64,
@@ -9201,14 +9196,6 @@ impl<'a> ConversationInsertOptions<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct OutboundReservation {
-    pub conversation_id: ConversationId,
-    pub message_id: MessageId,
-    pub envelope_id: EnvelopeId,
-    pub sender_counter: u64,
-}
-
 pub(crate) struct PendingOutbox {
     pub conversation_id: ConversationId,
     pub envelope: RelayEnvelope,
@@ -9233,43 +9220,6 @@ pub(crate) enum OutboundApplicationStatus {
 pub(crate) enum ExpireOutboundResult {
     Expired,
     Accepted { cursor: u64 },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MembershipOutboxStatus {
-    Ready = 1,
-    Accepted = 2,
-    Applied = 3,
-    Orphaned = 4,
-}
-
-pub(crate) struct MembershipOutbox {
-    pub operation_id: MembershipOperationId,
-    pub conversation_id: ConversationId,
-    pub parent_epoch: u64,
-    pub envelope: RelayEnvelope,
-    pub control: Zeroizing<Vec<u8>>,
-    pub next_state: ConversationState,
-    pub bindings: Vec<VerifiedDeviceCredentialBinding>,
-    pub welcome: Option<Vec<u8>>,
-    pub status: MembershipOutboxStatus,
-    pub accepted_cursor: Option<u64>,
-}
-
-pub(crate) struct StoredMembershipTransition {
-    pub stored: StoredRelayEnvelope,
-    pub sender: DeviceId,
-    pub parent_epoch: u64,
-    pub operation_id: MembershipOperationId,
-    pub control: Zeroizing<Vec<u8>>,
-    pub next_state: ConversationState,
-    pub bindings: Vec<VerifiedDeviceCredentialBinding>,
-}
-
-pub(crate) enum MembershipInboxOperation {
-    Received { stored: StoredRelayEnvelope },
-    TransitionSaved(StoredMembershipTransition),
-    Complete(StoredMembershipTransition),
 }
 
 pub(crate) struct PendingJoin {
@@ -9398,20 +9348,6 @@ struct RemoteEventHead {
     notification_id: NotificationId,
 }
 
-pub(crate) struct StoredApplicationMessage {
-    pub cursor: u64,
-    pub envelope_id: EnvelopeId,
-    pub sender: DeviceId,
-    pub epoch: u64,
-    pub message: ApplicationMessage,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MessageDirection {
-    Outbound = 1,
-    Inbound = 2,
-}
-
 pub(crate) struct StoredHistoryMessage {
     pub(crate) cursor: u64,
     pub(crate) direction: MessageDirection,
@@ -9475,20 +9411,6 @@ pub(crate) enum PendingInbox {
     },
     MessageSaved {
         conversation_id: ConversationId,
-        stored: StoredRelayEnvelope,
-        message: StoredApplicationMessage,
-    },
-}
-
-pub(crate) enum InboxOperation {
-    Received {
-        stored: StoredRelayEnvelope,
-    },
-    MessageSaved {
-        stored: StoredRelayEnvelope,
-        message: StoredApplicationMessage,
-    },
-    Complete {
         stored: StoredRelayEnvelope,
         message: StoredApplicationMessage,
     },
@@ -12390,6 +12312,73 @@ mod tests {
                 )
                 .unwrap();
         }
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_message_history SET cursor = 99
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    fixture.conversation_id.as_bytes(),
+                    request.message_id().as_bytes()
+                ],
+            )
+            .unwrap();
+        let refusal = fixture
+            .store
+            .validate_request_service_application(
+                fixture.conversation_id,
+                operator,
+                replies[0].content(),
+                replies[0].reply_to(),
+                replies[0].message_id(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            KonclaveClientLibrary::native::NativeConversationJournal::save_inbox_message(
+                &fixture.store,
+                fixture.conversation_id,
+                2,
+                operator,
+                0,
+                &replies[0],
+            )
+            .err(),
+            Some(refusal)
+        );
+        assert!(matches!(
+            fixture
+                .store
+                .inbox_operation(fixture.conversation_id, 2)
+                .unwrap(),
+            InboxOperation::Received { .. }
+        ));
+        assert!(
+            fixture
+                .store
+                .load_history_record(
+                    &fixture.store.lock().unwrap(),
+                    fixture.conversation_id,
+                    fixture.routing_id,
+                    replies[0].message_id(),
+                )
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE daemon_message_history SET cursor = 1
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    fixture.conversation_id.as_bytes(),
+                    request.message_id().as_bytes()
+                ],
+            )
+            .unwrap();
         let barrier = Barrier::new(3);
         let results = std::thread::scope(|scope| {
             let handles = replies

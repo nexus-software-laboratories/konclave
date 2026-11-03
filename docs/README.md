@@ -35,6 +35,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0028: External recipe composition](adr/adr-0028-external-recipe-composition.md)
 - [ADR 0029: Locally authorized peer work](adr/adr-0029-locally-authorized-peer-work.md)
 - [ADR 0030: Correlated response continuation](adr/adr-0030-correlated-response-continuation.md)
+- [ADR 0031: Embeddable durable native client](adr/adr-0031-embeddable-durable-native-client.md)
 - [ADR 0032: Private request-service channels](adr/adr-0032-request-service-channels.md)
 - [ADR 0033: Request delivery semantics](adr/adr-0033-request-delivery-semantics.md)
 
@@ -62,6 +63,7 @@ This map lists the documentation contributed by the selected project shape.
 - [A2A conformance profile](development/a2a-conformance.md)
 - [Sealed secret storage](development/secret-storage.md)
 - [Opaque relay storage](development/relay-storage.md)
+- [Explicit native client composition](development/native-client.md)
 - [Outbound relay client](development/relay-client.md)
 - [Daemon profiles and recovery](development/daemon-profiles.md)
 - [Local message delivery diagnostics](development/local-delivery-diagnostics.md)

@@ -214,7 +214,9 @@ fn application_failure_code(error: &ApplicationServiceError) -> &'static str {
         ApplicationServiceError::Relay(error) => client_failure_code(error),
         ApplicationServiceError::Conversation(error) => conversation_failure_code(error),
         ApplicationServiceError::PolicyStorage(error) => profile_store_failure_code(error),
-        ApplicationServiceError::Task => "application_worker_failed",
+        ApplicationServiceError::Task | ApplicationServiceError::Worker(_) => {
+            "application_worker_failed"
+        }
         ApplicationServiceError::Protocol => "application_protocol_failure",
         ApplicationServiceError::LocalPolicyProposal => "application_local_policy_proposal",
         ApplicationServiceError::PolicyProposalMismatch => "application_policy_proposal_mismatch",
@@ -376,6 +378,18 @@ mod tests {
     fn application_and_pairing_failures_have_finite_retained_codes() {
         for (error, expected) in [
             (ApplicationServiceError::Task, "application_worker_failed"),
+            (
+                ApplicationServiceError::Worker(crate::native_workers::NativeWorkerError::Task),
+                "application_worker_failed",
+            ),
+            (
+                ApplicationServiceError::Worker(
+                    crate::native_workers::NativeWorkerError::UnobservedOperation(Box::new(
+                        ConversationCoordinatorError::StateUnavailable,
+                    )),
+                ),
+                "application_worker_failed",
+            ),
             (
                 ApplicationServiceError::Protocol,
                 "application_protocol_failure",
