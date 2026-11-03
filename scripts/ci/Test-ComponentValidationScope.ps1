@@ -121,6 +121,13 @@ foreach ($path in @(
     }
 }
 
+if (-not (Get-ComponentValidationDecision `
+    -Contract 'response-continuation' `
+    -EventName pull_request `
+    -ChangedFiles @('crates/Konclave.DomainCore/src/request_delivery.rs'))) {
+    throw 'Request delivery foundation is not selected.'
+}
+
 $ownedCases = [ordered]@{
     'a2a-discovery' =
         'crates/Konclave.A2ADiscovery/src/catalog.rs'

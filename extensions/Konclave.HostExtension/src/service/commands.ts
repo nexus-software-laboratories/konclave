@@ -17,6 +17,7 @@ import { formatLocalFailure, localFailureDiagnostic } from './failure-diagnostic
 import { parseServiceStatus } from './delivery.js';
 import { formatMessageDeliveryStatus, getMessageDeliveryStatus } from './delivery-diagnostics.js';
 import { isRecord, requireHexIdentifier } from './validation.js';
+import { isRequestDeliveryOutcome, type RequestDeliveryOutcome } from './request-delivery.js';
 import {
   serviceOperations,
   trustedDeviceOperations,
@@ -251,6 +252,11 @@ interface HistoryArguments {
 type MessageContentSummary =
   | { readonly kind: 'text'; readonly text: string }
   | { readonly kind: 'directed-request'; readonly targetDeviceId: string; readonly text: string }
+  | {
+      readonly kind: 'request-delivery-outcome';
+      readonly requestMessageId: string;
+      readonly outcome: RequestDeliveryOutcome;
+    }
   | {
       readonly kind: 'collaboration-policy-proposal';
       readonly proposalId: string;
@@ -1395,6 +1401,19 @@ function parseMessageList(value: unknown): {
 
 function parseMessageContent(message: Record<string, unknown>): MessageContentSummary {
   switch (message.content_type) {
+    case 'request_delivery_outcome':
+      if (!isRequestDeliveryOutcome(message.outcome)) {
+        throw new Error('the local service message-list response is malformed');
+      }
+      return {
+        kind: 'request-delivery-outcome',
+        requestMessageId: requireHexIdentifier(
+          message.reply_to_message_id,
+          messageIdCharacters,
+          'request delivery reply identifier',
+        ),
+        outcome: message.outcome,
+      };
     case undefined:
     case 'text':
       if (typeof message.text !== 'string') {
@@ -2192,6 +2211,11 @@ function displayMessageContent(message: MessageSummary): string {
       return (
         `${source} directed request to ${message.content.targetDeviceId}: ` +
         displayText(message.content.text)
+      );
+    case 'request-delivery-outcome':
+      return (
+        `${source} request delivery metadata: request ${message.content.requestMessageId}, ` +
+        `reported ${message.content.outcome}; not a response or instruction`
       );
     case 'collaboration-policy-proposal': {
       const replacement =

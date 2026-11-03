@@ -380,6 +380,7 @@ impl ServiceJournal {
             match message.content() {
                 ApplicationContent::DirectedRequest(request)
                     if message.reply_to().is_none()
+                        && request.delivery().is_none()
                         && request.target_device_id() != self.device
                         && snapshot.state.member(request.target_device_id()).is_some() => {}
                 ApplicationContent::Text(_)
@@ -523,6 +524,7 @@ impl ServiceJournal {
             ApplicationContent::Text(_) if message.reply_to().is_some() => {}
             ApplicationContent::DirectedRequest(request)
                 if message.reply_to().is_none()
+                    && request.delivery().is_none()
                     && request.target_device_id() != sender
                     && snapshot.state.member(request.target_device_id()).is_some() => {}
             _ => return Err(JournalError::Unsupported),
@@ -854,7 +856,7 @@ pub(super) fn copy_content(
         ApplicationContent::Text(text) => {
             ApplicationContent::text(text.as_str()).map_err(|_| JournalError::Invalid)
         }
-        ApplicationContent::DirectedRequest(request) => {
+        ApplicationContent::DirectedRequest(request) if request.delivery().is_none() => {
             ApplicationContent::directed_request(request.target_device_id(), request.body())
                 .map_err(|_| JournalError::Invalid)
         }

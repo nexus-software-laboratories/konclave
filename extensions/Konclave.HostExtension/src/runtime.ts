@@ -10,6 +10,7 @@ import { formatLocalServiceFailure, type LocalServiceClient } from './service/cl
 import { createLocalServiceDeliveryChannel } from './service/delivery.js';
 import { connectInstalledService } from './service/installed.js';
 import { createCopilotPolicyGate, type CopilotPolicyGate } from './service/policy-enforcement.js';
+import { isMemoryContextMessage } from './service/prompt-observation.js';
 import {
   createKonclaveCommands,
   type CommandOutput,
@@ -567,9 +568,11 @@ function attachExtension(
   unsubscriptions.push(
     session.on('user.message', (event) => {
       const userEvent = event as UserMessageEvent;
-      policyGate?.observePrompt(
-        typeof userEvent.data?.content === 'string' ? userEvent.data.content : '',
-      );
+      if (!isMemoryContextMessage(userEvent.data)) {
+        policyGate?.observePrompt(
+          typeof userEvent.data?.content === 'string' ? userEvent.data.content : '',
+        );
+      }
       markActive();
     }),
   );

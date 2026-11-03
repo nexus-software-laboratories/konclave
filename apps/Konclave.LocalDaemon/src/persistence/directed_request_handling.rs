@@ -1,9 +1,9 @@
-use KonclaveCryptographicCore::DeviceIdentity;
+use KonclaveCryptographicCore::{DeviceIdentity, derive_request_delivery_identifiers};
 use KonclaveDomainCore::{
     AdapterConsumerId, AdapterLeaseId, ApplicationContent, CollaborationPolicyDigest,
     ConversationId, DeviceId, EnvelopeId, MAX_TEXT_BODY_BYTES, MessageId, NotificationId,
-    RequestHandlingObservation, ResponseContinuationDirection, ResponseContinuationMessage,
-    validate_response_continuation,
+    RequestDeliveryOutcome, RequestHandlingObservation, ResponseContinuationDirection,
+    ResponseContinuationMessage, validate_response_continuation,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use zeroize::Zeroizing;
@@ -22,9 +22,15 @@ const HANDLING_STATE_COMPLETED_RESPONSE: i64 = 2;
 const HANDLING_STATE_COMPLETED_NO_RESPONSE: i64 = 3;
 const HANDLING_RECORD_VERSION: u8 = 1;
 const CONTINUATION_RECORD_VERSION: u8 = 2;
+const DELIVERY_RECORD_VERSION: u8 = 3;
+const DELIVERY_RECEIPT_BYTES: usize = 1 + 8 + 8 + 8;
+const DELIVERY_RECEIPT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 const HANDLING_RECORD_FIXED_BYTES: usize = 243;
-const MAX_HANDLING_RECORD_BYTES: usize =
-    HANDLING_RECORD_FIXED_BYTES + MessageId::LENGTH + MAX_TEXT_BODY_BYTES;
+const MAX_HANDLING_RECORD_BYTES: usize = HANDLING_RECORD_FIXED_BYTES
+    + MessageId::LENGTH
+    + MAX_TEXT_BODY_BYTES
+    + 1
+    + 2 * DELIVERY_RECEIPT_BYTES;
 const MAX_SEALED_HANDLING_RECORD_BYTES: usize = MAX_HANDLING_RECORD_BYTES + 64;
 const HANDLING_STATE_RECORD_VERSION: u8 = 1;
 const HANDLING_STATE_RECORD_BYTES: usize = 9;
@@ -91,6 +97,7 @@ pub(crate) enum DirectedRequestClaimOutcome {
     AttemptsExhausted,
     CompletedResponse,
     CompletedNoResponse,
+    ExpiredBeforeAdmission,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +110,15 @@ pub(crate) struct RecoverableDirectedRequestResponse {
     pub(crate) reservation: super::OutboundReservation,
     pub(crate) request_message_id: MessageId,
     pub(crate) response_text: Zeroizing<String>,
+    pub(crate) sent_at_unix_milliseconds: u64,
+    pub(crate) expires_at_unix_seconds: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RequestDeliveryReceipt {
+    pub(crate) reservation: super::OutboundReservation,
+    pub(crate) outcome: RequestDeliveryOutcome,
+    pub(crate) request_message_id: MessageId,
     pub(crate) sent_at_unix_milliseconds: u64,
     pub(crate) expires_at_unix_seconds: u64,
 }
@@ -123,6 +139,7 @@ struct DirectedRequestHandling {
     response_text: Option<Zeroizing<String>>,
     response_sent_at_unix_milliseconds: Option<u64>,
     response_expires_at_unix_seconds: Option<u64>,
+    delivery_receipts: Vec<RequestDeliveryReceipt>,
 }
 
 struct HandlingMetadata {
@@ -233,12 +250,162 @@ fn initialize_schema(
 }
 
 impl ProfileStore {
+    fn request_routing_id(
+        &self,
+        connection: &Connection,
+        conversation_id: ConversationId,
+    ) -> Result<KonclaveDomainCore::RoutingId, ProfileStoreError> {
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT routing_id FROM daemon_conversation WHERE conversation_id = ?1",
+                params![conversation_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?
+            .ok_or(ProfileStoreError::ConversationNotFound)?;
+        KonclaveDomainCore::RoutingId::from_slice(&bytes)
+            .map_err(|_| ProfileStoreError::CorruptData)
+    }
+
+    fn reserve_request_delivery_receipt_in(
+        &self,
+        connection: &Connection,
+        claim: DirectedRequestClaim,
+        outcome: RequestDeliveryOutcome,
+        now_unix_milliseconds: u64,
+    ) -> Result<RequestDeliveryReceipt, ProfileStoreError> {
+        let (message_id, envelope_id) = derive_request_delivery_identifiers(
+            claim.conversation_id,
+            claim.request_message_id,
+            claim.responder_device_id,
+            outcome,
+        );
+        let reservation = self.reserve_new_outbound_application_in(
+            connection,
+            claim.conversation_id,
+            message_id,
+            envelope_id,
+        )?;
+        let expires_at_unix_seconds = (now_unix_milliseconds / 1_000)
+            .checked_add(DELIVERY_RECEIPT_RETENTION_SECONDS)
+            .ok_or(ProfileStoreError::SequenceExhausted)?;
+        Ok(RequestDeliveryReceipt {
+            reservation,
+            outcome,
+            request_message_id: claim.request_message_id,
+            sent_at_unix_milliseconds: now_unix_milliseconds,
+            expires_at_unix_seconds,
+        })
+    }
+
+    pub(crate) fn request_delivery_receipts(
+        &self,
+        request: Option<(ConversationId, MessageId)>,
+    ) -> Result<Vec<RequestDeliveryReceipt>, ProfileStoreError> {
+        let connection = self.lock()?;
+        let keys = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT
+                    CASE WHEN length(conversation_id) = 32 THEN conversation_id END,
+                    CASE WHEN length(request_message_id) = 16 THEN request_message_id END,
+                    CASE WHEN length(responder_device_id) = 32 THEN responder_device_id END
+                 FROM daemon_directed_request_handling
+                 WHERE (?1 IS NULL OR conversation_id = ?1)
+                   AND (?2 IS NULL OR request_message_id = ?2)
+                 ORDER BY conversation_id, request_message_id, responder_device_id
+                 LIMIT ?3",
+                )
+                .map_err(|_| ProfileStoreError::Storage)?;
+            statement
+                .query_map(
+                    params![
+                        request.map(|(conversation, _)| conversation.into_bytes()),
+                        request.map(|(_, message)| message.into_bytes()),
+                        i64::try_from(MAX_DIRECTED_REQUEST_HANDLINGS + 1)
+                            .map_err(|_| ProfileStoreError::CorruptData)?,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(|_| ProfileStoreError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ProfileStoreError::Storage)?
+        };
+        if keys.len() > MAX_DIRECTED_REQUEST_HANDLINGS {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        let mut receipts = Vec::new();
+        for (conversation, request, responder) in keys {
+            let conversation = ConversationId::from_slice(&conversation)
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            let request =
+                MessageId::from_slice(&request).map_err(|_| ProfileStoreError::CorruptData)?;
+            let responder =
+                DeviceId::from_slice(&responder).map_err(|_| ProfileStoreError::CorruptData)?;
+            let metadata = load_handling_metadata(&connection, conversation, request, responder)?
+                .ok_or(ProfileStoreError::CorruptData)?;
+            let handling = self.open_directed_request_handling(&connection, metadata)?;
+            receipts.extend(handling.delivery_receipts);
+        }
+        Ok(receipts)
+    }
+
+    pub(crate) fn request_delivery_receipt_needs_sealing(
+        &self,
+        receipt: RequestDeliveryReceipt,
+    ) -> Result<bool, ProfileStoreError> {
+        let reservation = receipt.reservation;
+        let (envelope, counter, status): (Vec<u8>, i64, i64) = self
+            .lock()?
+            .query_row(
+                "SELECT CASE WHEN length(envelope_id) = 16 THEN envelope_id END,
+                sender_counter, status FROM daemon_outbox
+             WHERE conversation_id = ?1 AND message_id = ?2",
+                params![
+                    reservation.conversation_id.as_bytes().as_slice(),
+                    reservation.message_id.as_bytes().as_slice()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if EnvelopeId::from_slice(&envelope).ok() != Some(reservation.envelope_id)
+            || from_sql_integer(counter)? != reservation.sender_counter
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        if status == 1 {
+            return Ok(true);
+        }
+        if status == 4 {
+            return Ok(false);
+        }
+        let outbound = self
+            .outbound_application(reservation.conversation_id, reservation.message_id)?
+            .ok_or(ProfileStoreError::CorruptData)?;
+        if outbound.message.content()
+            != &ApplicationContent::RequestDeliveryOutcome(receipt.outcome)
+            || outbound.message.reply_to() != Some(receipt.request_message_id)
+            || outbound.message.sent_at_unix_milliseconds() != receipt.sent_at_unix_milliseconds
+            || outbound.envelope.expires_at_unix_seconds() != receipt.expires_at_unix_seconds
+        {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        Ok(false)
+    }
+
     pub(super) fn initialize_response_continuation_schema(&self) -> Result<(), ProfileStoreError> {
         let version: u32 = self
             .lock()?
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| ProfileStoreError::Storage)?;
-        if matches!(version, 22 | super::PROFILE_SCHEMA_VERSION) {
+        if matches!(version, 22 | 23 | super::PROFILE_SCHEMA_VERSION) {
             self.profile_identity_for_schema_transition(version, version)?;
             return Ok(());
         }
@@ -568,6 +735,27 @@ impl ProfileStore {
             None => None,
         };
         let is_new = existing.is_none();
+        let delivery_options = if continuation_message_id.is_none() {
+            let routing_id = self.request_routing_id(&transaction, request.conversation_id)?;
+            let original = self
+                .load_history_record(
+                    &transaction,
+                    request.conversation_id,
+                    routing_id,
+                    request.request_message_id,
+                )?
+                .ok_or(ProfileStoreError::OperationNotFound)?;
+            match original.message.content() {
+                ApplicationContent::DirectedRequest(directed) => directed.delivery(),
+                _ => return Err(ProfileStoreError::InvalidTransition),
+            }
+        } else {
+            None
+        };
+        let expired_before_admission = is_new
+            && delivery_options
+                .and_then(KonclaveDomainCore::RequestDeliveryOptions::expiry)
+                .is_some_and(|expiry| expiry.is_expired(request.now_unix_milliseconds));
         if existing.as_ref().is_some_and(|handling| {
             handling.claim.continuation_message_id != continuation_message_id
         }) {
@@ -579,6 +767,11 @@ impl ProfileStore {
                     return Ok(DirectedRequestClaimOutcome::CompletedResponse);
                 }
                 HandlingState::CompletedNoResponse => {
+                    if existing.delivery_receipts.iter().any(|receipt| {
+                        receipt.outcome == RequestDeliveryOutcome::ExpiredBeforeAdmission
+                    }) {
+                        return Ok(DirectedRequestClaimOutcome::ExpiredBeforeAdmission);
+                    }
                     return Ok(DirectedRequestClaimOutcome::CompletedNoResponse);
                 }
                 HandlingState::Claimed if claim_matches(&existing.claim, &request) => {
@@ -596,11 +789,12 @@ impl ProfileStore {
                     return Ok(DirectedRequestClaimOutcome::AttemptsExhausted);
                 }
                 HandlingState::Claimed => {
-                    if active_directed_request_claim_count(
-                        &transaction,
-                        request.consumer_id,
-                        request.now_unix_milliseconds,
-                    )? > 0
+                    if !expired_before_admission
+                        && active_directed_request_claim_count(
+                            &transaction,
+                            request.consumer_id,
+                            request.now_unix_milliseconds,
+                        )? > 0
                     {
                         return Ok(DirectedRequestClaimOutcome::Busy);
                     }
@@ -608,11 +802,12 @@ impl ProfileStore {
                 }
             },
             None => {
-                if active_directed_request_claim_count(
-                    &transaction,
-                    request.consumer_id,
-                    request.now_unix_milliseconds,
-                )? > 0
+                if !expired_before_admission
+                    && active_directed_request_claim_count(
+                        &transaction,
+                        request.consumer_id,
+                        request.now_unix_milliseconds,
+                    )? > 0
                 {
                     return Ok(DirectedRequestClaimOutcome::Busy);
                 }
@@ -632,16 +827,38 @@ impl ProfileStore {
             attempt,
             policy_digest: request.policy_digest,
         };
-        let handling = DirectedRequestHandling {
+        let mut handling = DirectedRequestHandling {
             claim,
-            state: HandlingState::Claimed,
+            state: if expired_before_admission {
+                HandlingState::CompletedNoResponse
+            } else {
+                HandlingState::Claimed
+            },
             response_message_id: None,
             response_envelope_id: None,
             response_sender_counter: None,
             response_text: None,
             response_sent_at_unix_milliseconds: None,
             response_expires_at_unix_seconds: None,
+            delivery_receipts: existing
+                .as_ref()
+                .map_or_else(Vec::new, |existing| existing.delivery_receipts.clone()),
         };
+        if is_new && delivery_options.is_some() {
+            let outcome = if expired_before_admission {
+                RequestDeliveryOutcome::ExpiredBeforeAdmission
+            } else {
+                RequestDeliveryOutcome::Admitted
+            };
+            handling
+                .delivery_receipts
+                .push(self.reserve_request_delivery_receipt_in(
+                    &transaction,
+                    claim,
+                    outcome,
+                    request.now_unix_milliseconds,
+                )?);
+        }
         if is_new {
             self.require_directed_request_handling_capacity(&transaction)?;
             let sealed_state = self.advance_directed_request_handling_state(&transaction)?;
@@ -653,7 +870,11 @@ impl ProfileStore {
         transaction
             .commit()
             .map_err(|_| ProfileStoreError::Storage)?;
-        Ok(DirectedRequestClaimOutcome::Claimed(claim))
+        Ok(if expired_before_admission {
+            DirectedRequestClaimOutcome::ExpiredBeforeAdmission
+        } else {
+            DirectedRequestClaimOutcome::Claimed(claim)
+        })
     }
 
     pub(crate) fn active_directed_request_claim(
@@ -787,7 +1008,7 @@ impl ProfileStore {
         if existing.state == HandlingState::CompletedResponse {
             return Ok(DirectedRequestCompletionOutcome::CompletedResponse);
         }
-        let completed = DirectedRequestHandling {
+        let mut completed = DirectedRequestHandling {
             claim: existing.claim,
             state: HandlingState::CompletedNoResponse,
             response_message_id: None,
@@ -796,7 +1017,19 @@ impl ProfileStore {
             response_text: None,
             response_sent_at_unix_milliseconds: None,
             response_expires_at_unix_seconds: None,
+            delivery_receipts: existing.delivery_receipts,
         };
+        if !completed.delivery_receipts.is_empty() {
+            use crate::clock::{SystemUnixClock, UnixClock};
+            completed
+                .delivery_receipts
+                .push(self.reserve_request_delivery_receipt_in(
+                    &transaction,
+                    completed.claim,
+                    RequestDeliveryOutcome::EndedWithoutResponse,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )?);
+        }
         self.update_directed_request_handling(&transaction, &completed)?;
         transaction
             .commit()
@@ -868,6 +1101,7 @@ impl ProfileStore {
             response_text: Some(Zeroizing::new(response_text.clone())),
             response_sent_at_unix_milliseconds: Some(sent_at_unix_milliseconds),
             response_expires_at_unix_seconds: Some(expires_at_unix_seconds),
+            delivery_receipts: existing.delivery_receipts,
         };
         self.update_directed_request_handling(connection, &completed)
     }
@@ -1296,6 +1530,37 @@ impl ProfileStore {
             )
             .map_err(|_| ProfileStoreError::CorruptData)?;
         let opened = decode_directed_request_handling(&plaintext)?;
+        if !opened.delivery_receipts.is_empty() {
+            let routing = self.request_routing_id(connection, opened.claim.conversation_id)?;
+            let original = self
+                .load_history_record(
+                    connection,
+                    opened.claim.conversation_id,
+                    routing,
+                    opened.claim.request_message_id,
+                )?
+                .ok_or(ProfileStoreError::CorruptData)?;
+            if !original.complete || original.direction != MessageDirection::Inbound {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            for receipt in &opened.delivery_receipts {
+                let message = KonclaveDomainCore::ApplicationMessage::new(
+                    KonclaveDomainCore::ProtocolVersion::application_v1(),
+                    receipt.reservation.message_id,
+                    receipt.reservation.sender_counter,
+                    receipt.sent_at_unix_milliseconds,
+                    Some(receipt.request_message_id),
+                    ApplicationContent::RequestDeliveryOutcome(receipt.outcome),
+                )
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+                KonclaveDomainCore::validate_request_delivery_receipt(
+                    &original.message,
+                    opened.claim.responder_device_id,
+                    &message,
+                )
+                .map_err(|_| ProfileStoreError::CorruptData)?;
+            }
+        }
         if handling_metadata_equal(&expected, &opened) {
             Ok(opened)
         } else {
@@ -1558,6 +1823,7 @@ fn decode_handling_metadata(
         response_text: None,
         response_sent_at_unix_milliseconds: None,
         response_expires_at_unix_seconds: None,
+        delivery_receipts: Vec::new(),
     })
 }
 
@@ -1653,7 +1919,12 @@ fn encode_directed_request_handling(
         return Err(ProfileStoreError::CorruptData);
     }
     let mut encoded = Vec::with_capacity(HANDLING_RECORD_FIXED_BYTES + response_length);
-    encoded.push(if handling.claim.continuation_message_id.is_some() {
+    if !handling.delivery_receipts.is_empty() && handling.claim.continuation_message_id.is_some() {
+        return Err(ProfileStoreError::CorruptData);
+    }
+    encoded.push(if !handling.delivery_receipts.is_empty() {
+        DELIVERY_RECORD_VERSION
+    } else if handling.claim.continuation_message_id.is_some() {
         CONTINUATION_RECORD_VERSION
     } else {
         HANDLING_RECORD_VERSION
@@ -1719,6 +1990,24 @@ fn encode_directed_request_handling(
     if let Some(response_text) = response_text {
         encoded.extend_from_slice(response_text);
     }
+    if !handling.delivery_receipts.is_empty() {
+        if handling.delivery_receipts.len() > 2 {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        encoded.push(
+            u8::try_from(handling.delivery_receipts.len())
+                .map_err(|_| ProfileStoreError::CorruptData)?,
+        );
+        for receipt in &handling.delivery_receipts {
+            encoded.push(
+                u8::try_from(receipt.outcome.wire_value())
+                    .map_err(|_| ProfileStoreError::CorruptData)?,
+            );
+            encoded.extend_from_slice(&receipt.reservation.sender_counter.to_be_bytes());
+            encoded.extend_from_slice(&receipt.sent_at_unix_milliseconds.to_be_bytes());
+            encoded.extend_from_slice(&receipt.expires_at_unix_seconds.to_be_bytes());
+        }
+    }
     Ok(encoded)
 }
 
@@ -1728,7 +2017,7 @@ fn decode_directed_request_handling(
     if bytes.len() < HANDLING_RECORD_FIXED_BYTES
         || !matches!(
             bytes[0],
-            HANDLING_RECORD_VERSION | CONTINUATION_RECORD_VERSION
+            HANDLING_RECORD_VERSION | CONTINUATION_RECORD_VERSION | DELIVERY_RECORD_VERSION
         )
     {
         return Err(ProfileStoreError::CorruptData);
@@ -1774,14 +2063,16 @@ fn decode_directed_request_handling(
     if continuation_message_id.is_some() && state == HandlingState::CompletedResponse {
         return Err(ProfileStoreError::CorruptData);
     }
-    if response_length > MAX_TEXT_BODY_BYTES || rest.len() != response_length {
+    if response_length > MAX_TEXT_BODY_BYTES || rest.len() < response_length {
         return Err(ProfileStoreError::CorruptData);
     }
+    let (response_bytes, delivery_bytes) = rest.split_at(response_length);
     let response_text = if response_length == 0 {
         None
     } else {
         Some(Zeroizing::new(
-            String::from_utf8(rest.to_vec()).map_err(|_| ProfileStoreError::CorruptData)?,
+            String::from_utf8(response_bytes.to_vec())
+                .map_err(|_| ProfileStoreError::CorruptData)?,
         ))
     };
     if (state == HandlingState::CompletedResponse)
@@ -1823,6 +2114,65 @@ fn decode_directed_request_handling(
     {
         return Err(ProfileStoreError::CorruptData);
     }
+    let mut delivery_receipts = Vec::new();
+    let mut rest = delivery_bytes;
+    if bytes[0] == DELIVERY_RECORD_VERSION {
+        let count = usize::from(take_array::<1>(&mut rest)?[0]);
+        if !(1..=2).contains(&count) || rest.len() != count * DELIVERY_RECEIPT_BYTES {
+            return Err(ProfileStoreError::CorruptData);
+        }
+        for _ in 0..count {
+            let outcome =
+                RequestDeliveryOutcome::from_wire(u32::from(take_array::<1>(&mut rest)?[0]))
+                    .map_err(|_| ProfileStoreError::CorruptData)?;
+            let sender_counter = u64::from_be_bytes(take_array(&mut rest)?);
+            let sent_at_unix_milliseconds = u64::from_be_bytes(take_array(&mut rest)?);
+            let expires_at_unix_seconds = u64::from_be_bytes(take_array(&mut rest)?);
+            let (message_id, envelope_id) = derive_request_delivery_identifiers(
+                conversation_id,
+                request_message_id,
+                responder_device_id,
+                outcome,
+            );
+            if sender_counter == 0
+                || (sent_at_unix_milliseconds / 1_000)
+                    .checked_add(DELIVERY_RECEIPT_RETENTION_SECONDS)
+                    != Some(expires_at_unix_seconds)
+            {
+                return Err(ProfileStoreError::CorruptData);
+            }
+            delivery_receipts.push(RequestDeliveryReceipt {
+                reservation: super::OutboundReservation {
+                    conversation_id,
+                    message_id,
+                    envelope_id,
+                    sender_counter,
+                },
+                outcome,
+                request_message_id,
+                sent_at_unix_milliseconds,
+                expires_at_unix_seconds,
+            });
+        }
+        match delivery_receipts.as_slice() {
+            [receipt]
+                if receipt.outcome == RequestDeliveryOutcome::Admitted
+                    && state != HandlingState::CompletedNoResponse => {}
+            [receipt]
+                if receipt.outcome == RequestDeliveryOutcome::ExpiredBeforeAdmission
+                    && state == HandlingState::CompletedNoResponse => {}
+            [admission, terminal]
+                if admission.outcome == RequestDeliveryOutcome::Admitted
+                    && terminal.outcome == RequestDeliveryOutcome::EndedWithoutResponse
+                    && terminal.reservation.sender_counter
+                        > admission.reservation.sender_counter
+                    && state == HandlingState::CompletedNoResponse => {}
+            _ => return Err(ProfileStoreError::CorruptData),
+        }
+    }
+    if !rest.is_empty() {
+        return Err(ProfileStoreError::CorruptData);
+    }
     Ok(DirectedRequestHandling {
         claim,
         state,
@@ -1834,6 +2184,7 @@ fn decode_directed_request_handling(
             .then_some(response_sent_at_unix_milliseconds),
         response_expires_at_unix_seconds: response_present
             .then_some(response_expires_at_unix_seconds),
+        delivery_receipts,
     })
 }
 

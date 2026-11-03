@@ -37,6 +37,7 @@ This map lists the documentation contributed by the selected project shape.
 - [ADR 0030: Correlated response continuation](adr/adr-0030-correlated-response-continuation.md)
 - [ADR 0031: Embeddable durable native client](adr/adr-0031-embeddable-durable-native-client.md)
 - [ADR 0032: Private request-service channels](adr/adr-0032-request-service-channels.md)
+- [ADR 0033: Request delivery semantics](adr/adr-0033-request-delivery-semantics.md)
 
 ## Protocol
 

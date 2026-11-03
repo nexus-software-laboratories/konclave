@@ -166,6 +166,71 @@ impl Fixture {
 }
 
 #[test]
+fn unsupported_delivery_options_never_become_legacy_intent_or_native_admission() {
+    for cutoff in [None, Some(RequestAdmissionExpiry::new(20).unwrap())] {
+        let fixture = Fixture::new();
+        let mut request = fixture.request(1);
+        request.content = ApplicationContent::DirectedRequest(
+            DirectedRequest::new(fixture.peer.device_id(), MARKER)
+                .unwrap()
+                .with_delivery(RequestDeliveryOptions::new(cutoff)),
+        );
+        assert_eq!(
+            fixture
+                .journal
+                .reserve_application(&request, EnvelopeId::from_bytes([11; 16])),
+            Err(JournalError::Unsupported)
+        );
+        assert_eq!(
+            fixture
+                .journal
+                .load_conversation(fixture.id)
+                .unwrap()
+                .sender_counter,
+            0
+        );
+
+        let stored = fixture.envelope(61, 71, 1);
+        fixture.journal.record_inbox_envelope(&stored).unwrap();
+        let received = ApplicationMessage::new(
+            ProtocolVersion::application_v1(),
+            MessageId::from_bytes([81; 16]),
+            1,
+            12,
+            None,
+            ApplicationContent::DirectedRequest(
+                DirectedRequest::new(fixture.local.device_id(), MARKER)
+                    .unwrap()
+                    .with_delivery(RequestDeliveryOptions::new(cutoff)),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.journal.save_inbox_message(
+                fixture.id,
+                1,
+                fixture.peer.device_id(),
+                0,
+                &received
+            ),
+            Err(JournalError::Unsupported)
+        );
+        assert!(matches!(
+            fixture.journal.inbox_operation(fixture.id, 1).unwrap(),
+            InboxOperation::Received { .. }
+        ));
+        assert_eq!(
+            fixture
+                .journal
+                .load_conversation(fixture.id)
+                .unwrap()
+                .replay_cursor,
+            0
+        );
+    }
+}
+
+#[test]
 fn provision_reopen_retains_keys_and_sealed_intent_and_rejects_wrong_scope() {
     let fixture = Fixture::new();
     let request = fixture.request(1);

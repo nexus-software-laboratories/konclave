@@ -14,7 +14,8 @@ mod short_code_pairing;
 pub use collaboration_policy::{
     VerifiedCollaborationPolicyProposal, derive_collaboration_policy_digest,
     derive_collaboration_policy_proposal_message_id,
-    derive_collaboration_policy_response_message_id, verify_collaboration_policy_proposal,
+    derive_collaboration_policy_response_message_id, derive_request_delivery_identifiers,
+    verify_collaboration_policy_proposal,
 };
 pub use error::KonclaveCryptographicError;
 pub use hmac::{HMAC_SHA256_TAG_LENGTH, HmacSha256Key, fill_random};

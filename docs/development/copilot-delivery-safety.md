@@ -69,6 +69,13 @@ effects. No task tracking, workflow engine, or automatic policy replacement is a
 
 ## Injection timing
 
+Prompt binding observes original prompt content, not transformed context. Copilot's
+memory-context `user.message` envelope has `source: "memory"`, empty `content`,
+nonempty string `transformedContent`, and no `messageId`. Only that non-prompt shape
+is excluded from policy observation; it cannot activate or replace authorization.
+Identified prompts, nonempty input, unknown sources and malformed context remain
+observable, preserving foreground-interruption and replay rejection.
+
 Events are queued while the session is active and settled only once it is idle.
 Uncorrelated terminal events never enter the model. Request and continuation delivery preserve the
 one-outstanding-turn gate and uses the SDK's explicit `enqueue` mode so a peer turn

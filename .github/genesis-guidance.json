@@ -236,6 +236,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0033-request-delivery-semantics.md",
+        "title": "ADR 0033: Request delivery semantics",
+        "section": "Architecture",
+        "order": 330,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

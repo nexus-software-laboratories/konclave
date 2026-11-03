@@ -1,5 +1,6 @@
 import { types } from 'node:util';
 
+import { isRequestDeliveryOutcome } from '../service/request-delivery.js';
 import {
   isRecipeHex,
   measureRecipeText,
@@ -49,6 +50,7 @@ const baseFields = [
 const contentFields = {
   text: ['text'],
   directed_request: ['target_device_id', 'text'],
+  request_delivery_outcome: ['outcome'],
   collaboration_policy_proposal: ['proposal_id', 'policy_digest', 'replaces_policy_digest'],
   collaboration_policy_response: ['proposal_id', 'policy_digest', 'outcome'],
   collaboration_policy_revocation: ['policy_digest'],
@@ -169,6 +171,12 @@ export function selectRecipeReply(
       }
       identifiers.add(identifier);
       cursor = currentCursor;
+      if (
+        kind === 'request_delivery_outcome' &&
+        (replyTo === null || !isRequestDeliveryOutcome(recipeDataProperty(message, 'outcome')))
+      ) {
+        throw new RecipeRunError('invalid_response');
+      }
       let text: string | undefined;
       if (kind === 'text' || kind === 'directed_request') {
         text = validateRecipeMessageText(recipeDataProperty(message, 'text'));

@@ -331,6 +331,16 @@ after a terminal response or no-response result. Finite turn and token policies 
 the autonomous path until durable accounting exists. Unsupported and generic
 harnesses retain explicit-send behavior.
 
+Negotiated request-delivery options add an authenticated admission cutoff and
+encrypted, authority-free delivery observations. The first native handling claim
+checks the receiver clock; expiry never cancels admitted work. Receipt reservations
+are sealed atomically with the handling fact and recovered through the normal
+outbox. Receipts remain history only: they cannot create adapter events, continue
+work, authorize tools or consume a restricted channel's one terminal answer.
+Unknown or missing receipts prove nothing. The
+[delivery contract](../protocol/compatibility.md#request-admission-and-delivery-receipts)
+defines exact correlation, signed capability, reader-floor and clock boundaries.
+
 An explicitly activated `session.work` policy may additionally admit ordinary tools
 under the receiving Copilot session's existing permissions and repository
 instructions. The daemon rechecks the live policy digest and exact request claim

@@ -88,9 +88,16 @@ impl<'a, J: NativeConversationJournal> NativeConversationProcessor<'a, J> {
                     stored.bindings.iter().any(|binding| {
                         binding.binding().device_id() == device
                             && binding.binding().supports_directed_requests()
+                            && (directed.delivery().is_none()
+                                || binding.binding().supports_request_delivery())
                     })
                 },
-            ) {
+            ) || directed.delivery().is_some()
+                && !stored.bindings.iter().any(|binding| {
+                    binding.binding().device_id() == local
+                        && binding.binding().supports_request_delivery()
+                })
+            {
                 return Err(NativeConversationError::DirectedRequestUnsupported);
             }
         }

@@ -141,6 +141,10 @@ struct SendDirectedRequestRequest {
     target_device_id: Option<String>,
     text: String,
     reply_to_message_id: Option<String>,
+    /// Request encrypted, history-only delivery receipts.
+    delivery_receipts: Option<bool>,
+    /// Optional absolute admission cutoff, not an execution or relay deadline.
+    expires_at_unix_milliseconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -462,6 +466,9 @@ struct MessageResult {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 #[serde(tag = "content_type", rename_all = "snake_case")]
 enum MessageContentResult {
+    RequestDeliveryOutcome {
+        outcome: &'static str,
+    },
     Text {
         text: String,
     },
@@ -1669,8 +1676,21 @@ impl StdioServer {
             .as_deref()
             .map(parse_message_id)
             .transpose()?;
-        let content = ApplicationContent::directed_request(target_device_id, request.text)
+        let mut directed = KonclaveDomainCore::DirectedRequest::new(target_device_id, request.text)
             .map_err(|_| "invalid_text".to_string())?;
+        let expiry = request
+            .expires_at_unix_milliseconds
+            .map(KonclaveDomainCore::RequestAdmissionExpiry::new)
+            .transpose()
+            .map_err(|_| "invalid_request_admission_expiry".to_string())?;
+        if request.delivery_receipts == Some(false) && expiry.is_some() {
+            return Err("request_admission_expiry_requires_receipts".to_string());
+        }
+        if request.delivery_receipts == Some(true) || expiry.is_some() {
+            directed =
+                directed.with_delivery(KonclaveDomainCore::RequestDeliveryOptions::new(expiry));
+        }
+        let content = ApplicationContent::DirectedRequest(directed);
         self.send_application_content(conversation_id, message_id, content, reply_to, None)
             .await
     }
@@ -2804,6 +2824,20 @@ fn message_result(
     duplicate: bool,
 ) -> Result<MessageResult, String> {
     let content = match message.content() {
+        ApplicationContent::RequestDeliveryOutcome(outcome) => {
+            MessageContentResult::RequestDeliveryOutcome {
+                outcome: match outcome {
+                    KonclaveDomainCore::RequestDeliveryOutcome::Admitted => "admitted",
+                    KonclaveDomainCore::RequestDeliveryOutcome::Responded => "responded",
+                    KonclaveDomainCore::RequestDeliveryOutcome::ExpiredBeforeAdmission => {
+                        "expired_before_admission"
+                    }
+                    KonclaveDomainCore::RequestDeliveryOutcome::EndedWithoutResponse => {
+                        "ended_without_response"
+                    }
+                },
+            }
+        }
         ApplicationContent::Text(text) => MessageContentResult::Text { text: text.clone() },
         ApplicationContent::DirectedRequest(request) => MessageContentResult::DirectedRequest {
             target_device_id: encode_hex(request.target_device_id().as_bytes()),

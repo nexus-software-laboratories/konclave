@@ -203,6 +203,27 @@ command completes. If the pairing is abandoned or times out, that empty conversa
 remains visible in `/konclave conversations`; the command does not hide this
 non-atomic boundary.
 
+## Admission-limited requests
+
+The `send_directed_request` tool accepts optional structured delivery fields.
+Set `delivery_receipts: true` to request encrypted delivery observations without a
+cutoff, or supply `expires_at_unix_milliseconds` as a positive, safe-integer absolute
+Unix millisecond cutoff. A cutoff implicitly requests receipts; combining it with
+`delivery_receipts: false` is rejected. Omitting both fields preserves plain requests.
+These are tool arguments, not slash-command flags or instructions in the body.
+
+The target must advertise the new root-signed capability. Existing credential
+bindings are not rewritten by an executable upgrade; an unsupported conversation
+fails visibly instead of silently ignoring the cutoff.
+
+Inspect `read_messages` or `/konclave messages` for `admitted`,
+`expired_before_admission`, and `ended_without_response` delivery metadata. An actual
+correlated answer establishes a response. Receipts never wake either model or ask
+for an acknowledgement; they do not prove task success or external execution.
+Callers own any retry and execution budget. See the
+[delivery contract](../protocol/compatibility.md#request-admission-and-delivery-receipts)
+for clock, compatibility and recovery limits.
+
 ## Browse message history
 
 History uses the conversation selected with `/konclave use`, unless an explicit

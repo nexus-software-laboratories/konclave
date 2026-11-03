@@ -79,7 +79,7 @@ function queuedDeliveryClient(): LocalServiceClient {
   };
 }
 
-function queuedDirectedRequestClient(): LocalServiceClient {
+function queuedDirectedRequestClient(workAllowed = false): LocalServiceClient {
   let rejectClaim: ((error: Error) => void) | undefined;
   let claims = 0;
   const close = vi.fn(() => rejectClaim?.(new Error('closed')));
@@ -123,7 +123,11 @@ function queuedDirectedRequestClient(): LocalServiceClient {
           policyName: 'request-reply',
           requestMessageId: '04'.repeat(16),
           attempt: 1,
+          workAllowed,
         };
+      }
+      if (operation === 'collaboration.action.evaluate') {
+        return { decision: 'allow', authorization: '07'.repeat(16) };
       }
       if (operation === 'collaboration.turn.complete') {
         return { outcome: 'completed_no_response', changed: true };
@@ -625,6 +629,96 @@ describe('bootExtension', () => {
       requestMessageId: '04'.repeat(16),
       attempt: 1,
     });
+    controller?.dispose();
+  });
+
+  it.each([
+    [false, 'memory'],
+    [true, 'memory'],
+    [true, 'foreground-before'],
+    [true, 'foreground-after'],
+    [true, 'replay'],
+  ] as const)('binds a reply with work=%s and %s events', async (workAllowed, scenario) => {
+    const diagnostics = createDiagnosticsRecorder();
+    const processController = new FakeProcessController();
+    const sessionMock = createSessionMock({ deferToolInitialization: true });
+    const client = queuedDirectedRequestClient(workAllowed);
+    const joinSession = vi.fn(async (_config: JoinSessionConfig) => sessionMock.session);
+    const controller = await bootExtension({
+      diagnostics: diagnostics.diagnostics,
+      joinSession,
+      processController,
+      connect: vi.fn().mockResolvedValue(client),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sessionMock.emit('session.idle', { data: {}, timestamp: '2026-08-16T00:00:00.000Z' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sessionMock.initializeTools).toHaveBeenCalledTimes(1);
+    sessionMock.releaseToolInitialization();
+    await sessionMock.toolInitialization;
+
+    const submitted = sessionMock.rpcSend.mock.calls[0]?.[0];
+    const config = joinSession.mock.calls[0]?.[0];
+    if (!submitted || !config) {
+      throw new Error('directed request admission was not observed');
+    }
+    const memory = {
+      data: {
+        source: 'memory',
+        content: '',
+        transformedContent: '<memories>Untrusted recalled context.</memories>',
+      },
+    };
+    const foreground = { data: { content: 'new foreground work', messageId: 'foreground' } };
+    const synthetic = { data: { content: submitted.prompt, messageId: 'synthetic' } };
+    sessionMock.emit('user.message', scenario === 'foreground-before' ? foreground : memory);
+    sessionMock.emit('user.message', synthetic);
+    sessionMock.emit(
+      'user.message',
+      scenario === 'replay' ? synthetic : scenario === 'foreground-after' ? foreground : memory,
+    );
+
+    const args = {
+      conversation_id: '02'.repeat(32),
+      message_id: '08'.repeat(16),
+      reply_to_message_id: '04'.repeat(16),
+      text: 'available',
+    };
+    const decision = await config.hooks.onPreToolUse?.(
+      {
+        sessionId: 'foreground-session-123',
+        timestamp: new Date(0),
+        workingDirectory: 'workspace',
+        toolName: 'send_message',
+        toolArgs: args,
+      },
+      { sessionId: 'foreground-session-123' },
+    );
+    if (scenario === 'memory') {
+      expect(decision).toMatchObject({
+        modifiedArgs: args,
+        additionalContext: expect.stringContaining('normal Copilot permissions'),
+      });
+      expect(decision).not.toHaveProperty('permissionDecision');
+      expect(requestCount(client, 'collaboration.action.evaluate')).toBe(1);
+      expect(client.request).toHaveBeenCalledWith('collaboration.action.evaluate', {
+        conversationId: '02'.repeat(32),
+        policyDigest: '06'.repeat(32),
+        action: 'conversation.reply',
+        resource: null,
+        messageId: args.message_id,
+        replyToMessageId: args.reply_to_message_id,
+        text: args.text,
+        requestMessageId: '04'.repeat(16),
+        attempt: 1,
+      });
+    } else {
+      expect(decision).toMatchObject({ permissionDecision: 'deny' });
+      expect(requestCount(client, 'collaboration.action.evaluate')).toBe(0);
+    }
     controller?.dispose();
   });
 

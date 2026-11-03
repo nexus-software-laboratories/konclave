@@ -417,6 +417,7 @@ impl ProfileStore {
     ) -> Result<(), ProfileStoreError> {
         let (kind, proposal_id, policy_digest, response_outcome) = match message.content() {
             ApplicationContent::Text(_)
+            | ApplicationContent::RequestDeliveryOutcome(_)
             | ApplicationContent::DirectedRequest(_)
             | ApplicationContent::RepeatPairingRequest(_)
             | ApplicationContent::RepeatPairingResponse(_) => return Ok(()),
@@ -883,6 +884,7 @@ impl ProfileStore {
         let (expected_kind, expected_proposal_id, expected_digest, expected_outcome) =
             match history.message.content() {
                 ApplicationContent::Text(_)
+                | ApplicationContent::RequestDeliveryOutcome(_)
                 | ApplicationContent::DirectedRequest(_)
                 | ApplicationContent::RepeatPairingRequest(_)
                 | ApplicationContent::RepeatPairingResponse(_) => {

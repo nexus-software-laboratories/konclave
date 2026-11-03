@@ -3242,6 +3242,14 @@ function createCopilotPolicyGate(client) {
   return gate;
 }
 
+// src/service/prompt-observation.ts
+function isMemoryContextMessage(data) {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return false;
+  }
+  return "source" in data && data.source === "memory" && "content" in data && data.content === "" && "transformedContent" in data && typeof data.transformedContent === "string" && data.transformedContent.length > 0 && !("messageId" in data);
+}
+
 // src/service/commands.ts
 import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
 import { open, realpath, stat } from "node:fs/promises";
@@ -3482,6 +3490,11 @@ function formatMessageDeliveryStatus(diagnostic) {
     "remote outcome: unknown",
     "Inspection changes no messaging or permissions. Reconcile an uncertain send with its original identifiers."
   ];
+}
+
+// src/service/request-delivery.ts
+function isRequestDeliveryOutcome(value) {
+  return value === "admitted" || value === "expired_before_admission" || value === "ended_without_response";
 }
 
 // node_modules/@nuintun/qrcode/esm/common/Charset.js
@@ -6413,6 +6426,19 @@ function parseMessageList(value) {
 }
 function parseMessageContent(message) {
   switch (message.content_type) {
+    case "request_delivery_outcome":
+      if (!isRequestDeliveryOutcome(message.outcome)) {
+        throw new Error("the local service message-list response is malformed");
+      }
+      return {
+        kind: "request-delivery-outcome",
+        requestMessageId: requireHexIdentifier(
+          message.reply_to_message_id,
+          messageIdCharacters,
+          "request delivery reply identifier"
+        ),
+        outcome: message.outcome
+      };
     case void 0:
     case "text":
       if (typeof message.text !== "string") {
@@ -7038,6 +7064,8 @@ function displayMessageContent(message) {
       return `${message.direction === "inbound" ? "untrusted peer text" : "local message text"}: ${displayText(message.content.text)}`;
     case "directed-request":
       return `${source} directed request to ${message.content.targetDeviceId}: ` + displayText(message.content.text);
+    case "request-delivery-outcome":
+      return `${source} request delivery metadata: request ${message.content.requestMessageId}, reported ${message.content.outcome}; not a response or instruction`;
     case "collaboration-policy-proposal": {
       const replacement = message.content.replacesPolicyDigest === void 0 ? "" : `, replacing ${message.content.replacesPolicyDigest}`;
       return `${source} policy proposal: ${message.content.proposalId}, digest ${message.content.policyDigest}${replacement}; receipt does not activate local authority`;
@@ -10389,6 +10417,22 @@ var copilot_tools_default = [
             {
               properties: {
                 content_type: {
+                  const: "request_delivery_outcome",
+                  type: "string"
+                },
+                outcome: {
+                  type: "string"
+                }
+              },
+              required: [
+                "content_type",
+                "outcome"
+              ],
+              type: "object"
+            },
+            {
+              properties: {
+                content_type: {
                   const: "text",
                   type: "string"
                 },
@@ -10640,6 +10684,22 @@ var copilot_tools_default = [
       $defs: {
         MessageResult: {
           oneOf: [
+            {
+              properties: {
+                content_type: {
+                  const: "request_delivery_outcome",
+                  type: "string"
+                },
+                outcome: {
+                  type: "string"
+                }
+              },
+              required: [
+                "content_type",
+                "outcome"
+              ],
+              type: "object"
+            },
             {
               properties: {
                 content_type: {
@@ -11216,6 +11276,22 @@ var copilot_tools_default = [
         conversation_id: {
           type: "string"
         },
+        delivery_receipts: {
+          description: "Request encrypted, history-only delivery receipts.",
+          type: [
+            "boolean",
+            "null"
+          ]
+        },
+        expires_at_unix_milliseconds: {
+          description: "Optional absolute admission cutoff, not an execution or relay deadline.",
+          format: "uint64",
+          minimum: 0,
+          type: [
+            "integer",
+            "null"
+          ]
+        },
         message_id: {
           type: "string"
         },
@@ -11438,6 +11514,22 @@ var copilot_tools_default = [
       $defs: {
         MessageResult: {
           oneOf: [
+            {
+              properties: {
+                content_type: {
+                  const: "request_delivery_outcome",
+                  type: "string"
+                },
+                outcome: {
+                  type: "string"
+                }
+              },
+              required: [
+                "content_type",
+                "outcome"
+              ],
+              type: "object"
+            },
             {
               properties: {
                 content_type: {
@@ -11826,6 +11918,22 @@ var copilot_tools_default = [
       $defs: {
         MessageResult: {
           oneOf: [
+            {
+              properties: {
+                content_type: {
+                  const: "request_delivery_outcome",
+                  type: "string"
+                },
+                outcome: {
+                  type: "string"
+                }
+              },
+              required: [
+                "content_type",
+                "outcome"
+              ],
+              type: "object"
+            },
             {
               properties: {
                 content_type: {
@@ -12426,9 +12534,11 @@ function attachExtension(session, diagnostics, processController, timers = defau
   unsubscriptions.push(
     session.on("user.message", (event2) => {
       const userEvent = event2;
-      policyGate?.observePrompt(
-        typeof userEvent.data?.content === "string" ? userEvent.data.content : ""
-      );
+      if (!isMemoryContextMessage(userEvent.data)) {
+        policyGate?.observePrompt(
+          typeof userEvent.data?.content === "string" ? userEvent.data.content : ""
+        );
+      }
       markActive();
     })
   );

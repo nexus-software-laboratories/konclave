@@ -79,8 +79,31 @@ function validateApplicationMessage(value: ApplicationMessage): void {
         'directed_request_target_device_id',
       );
       validateApplicationBody(value.content.value.body, 'directed_request_body');
+      const expiry = value.content.value.delivery?.expiresAtUnixMilliseconds;
+      if (expiry !== undefined) {
+        validateUint64(expiry, 'request_delivery_expiry', true);
+        if (expiry > 9_007_199_254_740_991n) {
+          throw new ProtocolValidationError(
+            protocolErrorCodes.outOfRange,
+            'request_delivery_expiry is outside the safe integer range',
+          );
+        }
+      }
       break;
     }
+    case 'requestDeliveryOutcome':
+      required(value.replyTo, 'reply_to');
+      if (
+        value.content.value.outcome !== 1 &&
+        value.content.value.outcome !== 3 &&
+        value.content.value.outcome !== 4
+      ) {
+        throw new ProtocolValidationError(
+          protocolErrorCodes.unsupportedEnum,
+          'request_delivery_outcome is unsupported',
+        );
+      }
+      break;
     case 'collaborationPolicyProposal':
       validateCollaborationPolicyProposal(value.content.value);
       break;

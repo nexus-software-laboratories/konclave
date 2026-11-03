@@ -160,6 +160,11 @@ counter reservation and immutable response intent commit together.
 The example's membership is explicitly preprovisioned and immutable. Membership
 mutation fails as unsupported. Retained counters, intents, inbox evidence and
 claims are never pruned or recycled; capacity exhaustion denies new work.
+Optional request delivery cutoffs and receipts are unsupported by this bounded
+example and fail explicitly before admission; they are never stripped into a
+legacy request. Adapters implementing these options must preserve the native
+admission and history-only outcome contract in
+[ADR 0033](../adr/adr-0033-request-delivery-semantics.md).
 `pending_claim` reads an existing live claim only after the caller has drained its
 previous handler. It does not issue a concurrent handling lease. New response
 reservation still checks current authority and consumes that claim once.
