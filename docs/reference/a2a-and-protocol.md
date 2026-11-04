@@ -178,12 +178,13 @@ roles, and local authority at their owning boundaries.
 | Application identity | Message ID 16 bytes; directed target 32 bytes; nonzero uint64 sender counter |
 | TypeScript integers | `bigint` for uint64; directed expiry additionally constrained to the safe-integer range by its validator |
 
-The latest checked-in profile is
+The protocol snapshot for this guide's [documented source baseline](../README.md) is
 [`protocol-v1.0.0-alpha.4`](../../protocol/releases/protocol-v1.0.0-alpha.4.json):
 prerelease, transport endpoint major 1, relay/application 1.0, daemon profile schema
 24, RFC 9420 suite `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`, and MLS extensions
 `0xff00`–`0xff02`. Package, wire, service, and storage versions are independent axes;
-this is not a stable-platform or npm-publication promise.
+this is not a stable-platform or npm-publication promise, nor a claim that this is
+the newest checked-in protocol snapshot.
 
 Relay transport is protobuf: WebSocket binary ReplayRequest/ReplayPage, with HTTP
 submit/ack. Application plaintext is inside MLS ciphertext, not relay JSON.

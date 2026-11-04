@@ -199,20 +199,36 @@ export interface LocalServiceClientOptions {
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
+/**
+ * Connection to one independently selected profile; the caller owns its lifecycle.
+ * Retire before close, even after an operation fails. Retirement failure does not
+ * undo an application result and is not a reason to repeat successful work.
+ *
+ * @see [Checked result validation and cleanup](../../tests/examples/installed-client.ts)
+ * @see [Request and lifecycle contract](../../../../docs/integrations/typescript-client.md#request-cancellation-and-ownership)
+ * @see [Exact-operation recovery](../../../../docs/reference/recovery.md#recover-the-original-operation)
+ */
 export interface LocalServiceClient {
   /** The immutable profile this connection is bound to. */
   readonly profile: string;
-  /** Invokes one bounded operation and reconciles its actual terminal result. */
+  /**
+   * Invokes one bounded operation and reconciles its actual terminal result.
+   * Validate the unknown result against that operation's contract before using it.
+   * Cancellation requests are not rollback; preserve exact identity for recovery.
+   */
   request(
     operation: string,
     payload: unknown,
     options?: number | LocalServiceRequestOptions,
   ): Promise<unknown>;
-  /** Retires this exact grant and closes both lanes. */
+  /**
+   * Retires this exact grant and closes both lanes. Call before close; retirement
+   * failures reject and finite grant expiry remains the backstop.
+   */
   retire(): Promise<void>;
-  /** Closes the connection. */
+  /** Closes without retiring the grant; a subsequent retire call is a no-op. */
   close(): void;
-  /** Whether the connection is still usable. */
+  /** Whether the client remains open, not a continuous service or relay health probe. */
   readonly connected: boolean;
 }
 

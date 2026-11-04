@@ -62,6 +62,11 @@ const bufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffe
  * Names use lowercase ASCII alphanumeric segments separated by hyphens. Provider identifiers
  * also allow underscores or dots between segments, but have no path, URL, or loading semantics.
  * No spelling or Unicode normalization is performed, and empty configuration is valid.
+ * A definition grants neither execution permission nor data-disclosure authority.
+ *
+ * @see [Select a pinned run](run.ts)
+ * @see [Checked fanOut and handoff compositions](../../examples/recipes/compositions.ts)
+ * @see [Definition versus authority](../../../../docs/integrations/recipes.md#definition-versus-authority)
  * @param input Untrusted structured data, never an executable provider object.
  * @returns A frozen snapshot with canonical JSON and its domain-separated digest.
  * @throws {RecipeDefinitionError} For invalid shape, text, identifiers, or hard bounds.

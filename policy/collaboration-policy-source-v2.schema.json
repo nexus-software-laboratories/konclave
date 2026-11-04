@@ -2,32 +2,39 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:konclave:schema:collaboration-policy-source:v2",
   "title": "Konclave collaboration policy source v2",
+  "description": "Editable deterministic policy source, not active authority. Compilation creates canonical bytes; a separate explicit local decision activates a conversation binding. Authoring and activation workflow: https://github.com/nexus-software-laboratories/konclave/blob/main/policy/README.md",
   "type": "object",
   "additionalProperties": false,
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "properties": {
     "apiVersion": {
+      "description": "Selects source format v2, which rejects model guidance and task instructions. This is not a wire, package or storage version.",
       "const": "konclave.dev/v2"
     },
     "kind": {
+      "description": "Selects a collaboration-policy document, not a catalog or executable workflow.",
       "const": "CollaborationPolicy"
     },
     "metadata": {
+      "description": "Policy naming metadata; neither its presence nor its name grants authority.",
       "type": "object",
       "additionalProperties": false,
       "required": ["name"],
       "properties": {
         "name": {
+          "description": "Canonical lowercase policy name, at most 128 characters. The name is not the compiled bundle's content digest.",
           "$ref": "#/$defs/canonicalIdentifier",
           "maxLength": 128
         }
       }
     },
     "spec": {
+      "description": "Deterministic statements, required evidence and usage limits. No model guidance or task instructions are accepted.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "statements": {
+          "description": "Up to 256 statements, sorted by unique identifier during compilation. Omission means no statements; an action without a matching statement is denied.",
           "type": "array",
           "maxItems": 256,
           "items": {
@@ -35,6 +42,7 @@
           }
         },
         "requiredHarnessClaims": {
+          "description": "Up to 64 namespaced claims that must all be independently proven by the local harness. Declaring a claim is not evidence; missing proof denies. Exact-target harness control is also required.",
           "type": "array",
           "maxItems": 64,
           "items": {
@@ -42,6 +50,7 @@
           }
         },
         "limits": {
+          "description": "Usage limits resolved against caller-supplied defaults. Omitting this object inherits all defaults; an empty object also inherits them.",
           "$ref": "#/$defs/limits"
         }
       }
@@ -49,11 +58,13 @@
   },
   "$defs": {
     "canonicalIdentifier": {
+      "description": "Lowercase ASCII alphanumeric segments with interior hyphens or underscores, separated by dots or slashes. Spelling is canonical, not normalized.",
       "type": "string",
       "minLength": 1,
       "pattern": "^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:[./][a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*$"
     },
     "namespacedIdentifier": {
+      "description": "Canonical identifier containing a dot or slash, at most 256 characters. Matching is exact, with no glob, hierarchy or filesystem interpretation.",
       "allOf": [
         {
           "$ref": "#/$defs/canonicalIdentifier"
@@ -65,21 +76,26 @@
       "maxLength": 256
     },
     "statement": {
+      "description": "One exact action/resource rule. Among matching rules, deny precedes require_local_approval, which precedes allow; local restrictions can only narrow authority.",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "effect", "action"],
       "properties": {
         "id": {
+          "description": "Canonical statement identifier, at most 128 characters and unique within the compiled bundle. It identifies the statement, not an action permission.",
           "$ref": "#/$defs/canonicalIdentifier",
           "maxLength": 128
         },
         "effect": {
+          "description": "allow permits only after local authority, proven claims/controls and limits pass. deny refuses even with approval. require_local_approval requires fresh local approval after those checks; approval cannot override denial, missing evidence or exhausted limits.",
           "enum": ["allow", "deny", "require_local_approval"]
         },
         "action": {
+          "description": "Exact namespaced action selector. A matching rule alone does not grant local authority or prove harness enforcement.",
           "$ref": "#/$defs/namespacedIdentifier"
         },
         "resource": {
+          "description": "Exact namespaced resource selector. Omission or null matches only an unscoped action, never every resource.",
           "anyOf": [
             {
               "$ref": "#/$defs/namespacedIdentifier"
@@ -92,24 +108,30 @@
       }
     },
     "optionalPositiveInteger": {
+      "description": "Positive u64 integer from 1 through 18446744073709551615, or null for unlimited. Omission inherits the caller's default; zero is invalid. Unlimited never removes independent parser, frame, queue, journal or storage hard bounds.",
       "type": ["integer", "null"],
       "minimum": 1,
       "maximum": 18446744073709551615
     },
     "limits": {
+      "description": "Each omitted field inherits its caller default independently. Explicit null removes that policy limit, not ordinary authorization checks or independent hard bounds.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "durationMilliseconds": {
+          "description": "Elapsed duration in milliseconds, not seconds. A finite policy duration expires when elapsed time reaches this limit.",
           "$ref": "#/$defs/optionalPositiveInteger"
         },
         "turns": {
+          "description": "Maximum turn usage; existing usage plus the prospective reservation must fit the finite limit.",
           "$ref": "#/$defs/optionalPositiveInteger"
         },
         "tokens": {
+          "description": "Maximum token usage; existing usage plus the prospective reservation must fit the finite limit.",
           "$ref": "#/$defs/optionalPositiveInteger"
         },
         "concurrentRequests": {
+          "description": "Maximum concurrent-request usage including the prospective reservation: positive u32 from 1 through 4294967295. Omission inherits the caller default; null is unlimited within independent hard bounds; zero is invalid.",
           "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 4294967295
