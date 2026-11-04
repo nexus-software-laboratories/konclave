@@ -1874,7 +1874,7 @@ async fn dispatch_authorized_request(
                 }
             };
             delivery_heartbeat(
-                &state.delivery,
+                &mut state.delivery,
                 &state.store,
                 state.consumer,
                 local_device,
@@ -3333,7 +3333,7 @@ async fn delivery_finish(
 }
 
 async fn delivery_heartbeat(
-    delivery: &Option<DeliveryAttachment>,
+    delivery: &mut Option<DeliveryAttachment>,
     store: &Arc<crate::persistence::ProfileStore>,
     consumer: AdapterConsumerId,
     local_device: DeviceId,
@@ -3358,6 +3358,19 @@ async fn delivery_heartbeat(
             })
         })
         .transpose()?;
+    if delivery.is_none() {
+        let turn = turn.ok_or_else(|| "delivery_turn_required".to_string())?;
+        let store = Arc::clone(store);
+        *delivery = Some(
+            tokio::task::spawn_blocking(move || DeliveryAttachment::resume(turn, &store))
+                .await
+                .map_err(|_| "profile_unavailable".to_string())?
+                .map_err(|error| {
+                    record_failure(&error);
+                    "delivery_resume_rejected".to_string()
+                })?,
+        );
+    }
     let attachment = delivery
         .as_ref()
         .ok_or_else(|| "profile_unavailable".to_string())?
@@ -4513,6 +4526,162 @@ mod collaboration_policy_tests {
                     CollaborationActionEvaluation::Deny("policy_inactive")
                 ));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn directed_request_delivery_resume_restores_work_and_reply_without_readmission() {
+        for disconnected in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let coordinator = open_coordinator(root.path(), "delivery-reconnect");
+            let conversation = coordinator.create().unwrap();
+            let store = coordinator.store();
+            let digest = store
+                .store_collaboration_policy_bundle(&bundle_with_work_permission(
+                    CollaborationPolicyLimits::new(Some(3_600_000), None, None, Some(1)).unwrap(),
+                    Some(CollaborationPolicyEffect::Allow),
+                ))
+                .unwrap();
+            store
+                .activate_collaboration_policy(
+                    conversation.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap();
+            let local_device = coordinator.device_id().unwrap();
+            let (old, request_id, notification_id, generation) = directed_request_delivery(
+                &store,
+                conversation.conversation_id,
+                conversation.routing_id,
+                local_device,
+            );
+            let authorize = serde_json::to_vec(&json!({
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "requestMessageId": crate::mcp::encode_hex(request_id.as_bytes()),
+                "notificationId": crate::mcp::encode_hex(notification_id.as_bytes()),
+                "leaseGeneration": generation,
+            }))
+            .unwrap();
+            let authorized: serde_json::Value = serde_json::from_slice(
+                &authorize_collaboration_turn(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    Some(&old),
+                    local_device,
+                    &authorize,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(authorized["outcome"], "authorized");
+            let turn = json!({
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "requestMessageId": crate::mcp::encode_hex(request_id.as_bytes()),
+                "policyDigest": crate::mcp::encode_hex(digest.as_bytes()),
+                "attempt": 1,
+            });
+            let mut connection_delivery = None;
+            assert_eq!(
+                super::delivery_heartbeat(
+                    &mut connection_delivery,
+                    &store,
+                    consumer(),
+                    local_device,
+                    b"{}",
+                )
+                .await,
+                Err("delivery_turn_required".to_string()),
+            );
+            assert!(connection_delivery.is_none());
+            if disconnected {
+                old.release(&store).unwrap();
+            }
+            let payload = serde_json::to_vec(&json!({"turn": turn})).unwrap();
+            super::delivery_heartbeat(
+                &mut connection_delivery,
+                &store,
+                consumer(),
+                local_device,
+                &payload,
+            )
+            .await
+            .unwrap();
+            let resumed = connection_delivery.as_ref().unwrap();
+            assert_ne!(resumed.lease_id(), old.lease_id());
+            assert_eq!(
+                old.release(&store),
+                Err(crate::persistence::ProfileStoreError::InvalidAdapterLease),
+            );
+            let mut work = turn.clone();
+            work["action"] = json!("session.work");
+            assert!(matches!(
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    local_device,
+                    &serde_json::to_vec(&work).unwrap(),
+                )
+                .unwrap(),
+                CollaborationActionEvaluation::AllowWork,
+            ));
+            let mut reply = turn.clone();
+            reply["action"] = json!("conversation.reply");
+            reply["messageId"] = json!("11".repeat(16));
+            reply["replyToMessageId"] = json!(crate::mcp::encode_hex(request_id.as_bytes()));
+            reply["text"] = json!("correlated result");
+            assert!(matches!(
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    local_device,
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .unwrap(),
+                CollaborationActionEvaluation::Allow(_),
+            ));
+            let mut other_connection = None;
+            let other_consumer = AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]);
+            assert!(
+                super::delivery_heartbeat(
+                    &mut other_connection,
+                    &store,
+                    other_consumer,
+                    local_device,
+                    &payload,
+                )
+                .await
+                .is_err(),
+            );
+            assert!(other_connection.is_none());
+            super::delivery_heartbeat(
+                &mut connection_delivery,
+                &store,
+                consumer(),
+                local_device,
+                &payload,
+            )
+            .await
+            .unwrap();
+            store
+                .deactivate_collaboration_policy(conversation.conversation_id)
+                .unwrap();
+            let mut revoked_connection = None;
+            assert!(
+                super::delivery_heartbeat(
+                    &mut revoked_connection,
+                    &store,
+                    consumer(),
+                    local_device,
+                    &payload,
+                )
+                .await
+                .is_err(),
+            );
+            assert!(revoked_connection.is_none());
         }
     }
 
