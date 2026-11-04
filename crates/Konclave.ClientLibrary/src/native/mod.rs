@@ -5,6 +5,8 @@
 //! Journal and MLS adapters must fence every mutation against that same owner.
 //! A process mutex alone does not provide ownership across service replicas.
 
+#![doc = include_str!("../../../../docs/integrations/native-client.md")]
+
 mod journal;
 mod processor;
 mod session;

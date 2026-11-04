@@ -7,6 +7,8 @@
 //! system. This crate supplies typed claim, settlement, heartbeat, and status
 //! operations without importing harness-specific prompt, model, command, or UI types.
 
+#![doc = include_str!("../../../docs/integrations/adapter-sdk.md")]
+
 mod error;
 mod model;
 

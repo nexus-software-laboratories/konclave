@@ -1,5 +1,9 @@
 # Generic harness client
 
+This page describes the v0.1.31 packaged executable. For an in-process caller,
+see the [TypeScript client reference](typescript-client.md), including request
+options, cancellation reconciliation and retire-before-close ownership.
+
 Harness-specific integrations improve lifecycle mapping and automatic delivery, but
 they are not an eligibility gate. The packaged `generic.mjs` client lets any local
 harness invoke the shared service through the installed AccountTrusted or Windows
@@ -48,6 +52,13 @@ The caller supplies a bounded lowercase integration label using letters, digits,
 metadata but never sends it to the service, stores it as evidence, or uses it to select
 a profile. Unknown labels are accepted because they are self-declared, not an
 allowlist.
+
+Labels are 1–64 ASCII characters and must begin and end with a letter or digit.
+All profile, mode, label and operation arguments are required; duplicate or unknown
+flags fail as `invalid_arguments`. The executable accepts stdin up to 1,048,576
+bytes; an empty stream or interactive stdin supplies `{}`, not an implicit request.
+The operation deadline is 90,000 milliseconds, separate from connection startup.
+SIGINT/SIGTERM request cancellation; they do not retract committed effects.
 
 The packaged reference executable proves AccountTrusted through the installed issuer
 and can obtain UserPresence only through the Konclave-owned native Windows WebAuthn
@@ -113,6 +124,12 @@ identifier and pass `--request-id <32-hex-characters>`. Reuse that exact identif
 operation, and payload after a transport failure to retrieve the sealed terminal
 outcome rather than creating a new operation.
 
+This local RPC identity is separate from an operation's durable `message_id`.
+Retain the latter too for message retries. Each new executable process obtains a
+new session key: cross-process application recovery must follow that operation's
+durable identity contract, not assume all prior session-ledger scope is retained.
+The executable has no caller-configurable deadline flag.
+
 PowerShell:
 
 ```powershell
@@ -130,6 +147,10 @@ Success is one JSON object on stdout:
 ```
 
 Read the service response from `result`. Failure is one finite JSON object on stderr.
+Failure exits with code 1. Service failures include `{ "error": "<finite-code>",
+"operation": "<operation>" }`; configuration and identity errors omit `operation`,
+and otherwise unclassified failures become `generic_client_failed`. Branch on these
+finite labels rather than parsing exception text.
 Credentials, paths, request payloads, and peer plaintext are never copied into an
 error. If the operation succeeded but clean grant retirement failed, the successful
 envelope is preserved and stderr receives the finite

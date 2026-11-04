@@ -1,7 +1,71 @@
 #Requires -Version 7.4
+
 <#
 .SYNOPSIS
     Installs, updates, migrates relay state, or removes the per-user runtime.
+.DESCRIPTION
+    Uses an explicitly selected, verified release directory for native runtime
+    installation. Keep checksums, provenance and assets from the same release.
+    Native runtime health and plugin activation are separate lifecycle decisions.
+
+    Update failures restore and recheck the previous runtime. Ordinary uninstall
+    retains identity, profiles and durable authority; permanent state deletion
+    requires both destructive switches. Errors stop the operation rather than
+    creating replacement custody or silently changing authorization policy.
+.PARAMETER Action
+    Defaults to Install. Update changes the native version; Rollback selects a
+    retained version; Status inspects installation state. PrepareMarketplace is
+    the normal marketplace setup path. ActivatePlugin is direct-install
+    compatibility. MigrateRelay uses journaled apply/abort recovery.
+.PARAMETER ReleaseDirectory
+    Directory containing the matching verified release assets. Required by
+    actions that consume a candidate release; not a download URL or plugin cache.
+.PARAMETER DataRoot
+    Explicit installation data-root override. Omit for the platform convention.
+    Select the existing installation deliberately; do not discover another profile.
+.PARAMETER RollbackVersion
+    Exact retained version for Rollback. Omit to use the recorded previous version.
+.PARAMETER RelayEndpoint
+    Explicit relay URL for initialization or migration. TLS is required outside
+    loopback. A route or URL alone is not enrollment authority.
+.PARAMETER AuthorizationPolicy
+    Initial account-trusted or user-presence evidence policy; noninteractive
+    initialization requires an explicit choice. UserPresence needs supported
+    Windows native evidence. This is not an in-place policy migration shortcut.
+.PARAMETER ExternalSource
+    Absolute Unix headless enrollment-source path, not a plaintext environment
+    credential. Retain the protected source independently of versioned binaries.
+.PARAMETER ServiceIdentityFile
+    Explicit owner-protected headless service identity input. Do not replace it
+    to repair an existing installation or expose its contents.
+.PARAMETER ProfileKeyDirectory
+    Explicit headless per-profile wrapping-key directory. Preserve its custody,
+    ownership and contents across runtime updates.
+.PARAMETER AllowNoRecovery
+    Explicitly acknowledges that loss of all UserPresence credentials can strand
+    administration. It does not bypass authentication or authorize fallback.
+.PARAMETER RemoveState
+    Requests permanent installation-state deletion during Uninstall. Requires
+    the separate ConfirmStateRemoval acknowledgment; incomplete requests fail.
+.PARAMETER ConfirmStateRemoval
+    Confirms the destructive RemoveState request. Ordinary Uninstall omits both.
+.EXAMPLE
+    .\Install-Konclave.ps1 -Action Status
+
+    Inspects the platform-default installation without changing plugin activation.
+.EXAMPLE
+    .\Install-Konclave.ps1 -Action Update -ReleaseDirectory '.\verified-release'
+
+    Updates an existing installation from an independently verified matching
+    release set. Replace the example directory with that explicit input.
+.EXAMPLE
+    .\Install-Konclave.ps1 -Action Uninstall
+
+    Removes the owned runtime and supervision while preserving durable state.
+.NOTES
+    Requires PowerShell 7.4 or newer. Follow docs/distribution/installation.md for
+    release verification, platform prerequisites, initialization and recovery.
+    Plugin hooks/restart and native runtime supervision have separate owners.
 #>
 [CmdletBinding()]
 param(

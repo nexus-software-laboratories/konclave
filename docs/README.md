@@ -1,6 +1,34 @@
 # Konclave documentation
 
-This map lists the documentation contributed by the selected project shape.
+Start with the guide for your role. Installation, a tool schema, conversation
+membership and permission to execute work are separate boundaries.
+
+| Reader | Start here | Next |
+| --- | --- | --- |
+| Copilot operator | [Install](distribution/installation.md), [connect two sessions](distribution/local-demo.md) | [Commands and pairing](../extensions/Konclave.HostExtension/docs/copilot-cli-extension.md), [private request services](development/request-services.md), [recovery](reference/recovery.md) |
+| Agent/harness author | [Agent tools and workflows](reference/agent-tools.md) | [Generated field reference](reference/agent-tool-contracts.md), [policy authoring](../policy/README.md), [delivery safety](development/copilot-delivery-safety.md) |
+| TypeScript integrator | [Integration entry points](integrations/typescript-client.md) | [Generic client](integrations/generic-client.md), [recipes](integrations/recipes.md) |
+| Rust integrator | [Local-service and native clients](integrations/native-client.md) | [Adapter SDK](integrations/adapter-sdk.md), [native composition](development/native-client.md) |
+| A2A/protocol implementer | [A2A and protocol reference](reference/a2a-and-protocol.md) | [Task-store contracts](development/a2a-task-store.md), [compatibility](protocol/compatibility.md) |
+| Self-hosted operator | [Operator configuration](reference/operator-configuration.md) | [Relay authentication](protocol/relay-authentication.md), [A2A deployment](distribution/a2a-self-hosting.md) |
+| Custody/backend implementer | [Security extension boundaries](reference/security-boundaries.md) | [Threat model](security/threat-model.md), [secret storage](development/secret-storage.md) |
+| Contributor or documentation agent | [Writing documentation](development/documentation.md) | [Architecture decisions](architecture/decisions.md), [conformance](development/conformance.md) |
+
+The reader journeys were reconciled against
+[v0.1.31 source](https://github.com/nexus-software-laboratories/konclave/tree/e2a24e3a8d7e039850a58fd17617d35ed42d66f2).
+The live source and generated contracts in this checkout remain authoritative.
+Protocol tags, native releases and private workspace integration artifacts have
+separate availability contracts; an exported symbol is not a registry publication.
+This is the repository's Markdown reference, not a separately deployed website.
+
+## Reference
+
+- [Agent tools and workflows](reference/agent-tools.md)
+- [Generated agent-tool fields](reference/agent-tool-contracts.md)
+- [Diagnostics and safe recovery](reference/recovery.md)
+- [A2A and protocol callers](reference/a2a-and-protocol.md)
+- [Installer, CLI and operator configuration](reference/operator-configuration.md)
+- [Security and backend extension boundaries](reference/security-boundaries.md)
 
 ## Architecture
 
@@ -54,6 +82,7 @@ This map lists the documentation contributed by the selected project shape.
 
 ## Development
 
+- [Writing documentation](development/documentation.md)
 - [Rust engineering conventions](development/rust-engineering.md)
 - [Node dependency installation](development/node-dependencies.md)
 - [Rust service composition](development/rust-services.md)
@@ -84,6 +113,9 @@ This map lists the documentation contributed by the selected project shape.
 
 ## Guides
 
+- [Copilot commands and runtime](../extensions/Konclave.HostExtension/docs/copilot-cli-extension.md)
+- [TypeScript integration entry points](integrations/typescript-client.md)
+- [Rust local-service and native clients](integrations/native-client.md)
 - [Author collaboration policies](../policy/README.md)
 - [Operate the self-hosted A2A gateway](distribution/a2a-self-hosting.md)
 - [Install an unsigned prerelease](distribution/installation.md)
