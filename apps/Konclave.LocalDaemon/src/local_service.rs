@@ -2518,15 +2518,16 @@ fn evaluate_collaboration_action_request(
     let conversation_id = parse_collaboration_conversation_id(&request.conversation_id)?;
     let request_message_id = parse_collaboration_message_id(&request.request_message_id)?;
     let now_unix_milliseconds = SystemUnixClock.now_unix_milliseconds();
-    let lease_expires_at = store
-        .active_adapter_consumer_expiry(consumer)
+    let delivery_owner = store
+        .adapter_consumer_lease()
         .map_err(|_| "internal".to_string())?;
-    if grant.harness() != HarnessKind::Copilot
-        || !lease_expires_at.is_some_and(|expires_at| expires_at > now_unix_milliseconds)
-    {
-        return Ok(CollaborationActionEvaluation::Deny(
-            "copilot_delivery_not_proven",
-        ));
+    if let Some(reason) = copilot_delivery_denial(
+        grant.harness(),
+        consumer,
+        delivery_owner,
+        now_unix_milliseconds,
+    ) {
+        return Ok(CollaborationActionEvaluation::Deny(reason));
     }
     let expected_digest = crate::mcp::decode_hex::<32>(&request.policy_digest)
         .map(KonclaveDomainCore::CollaborationPolicyDigest::from_bytes)
@@ -2671,6 +2672,23 @@ fn parse_collaboration_message_id(value: &str) -> Result<KonclaveDomainCore::Mes
     crate::mcp::decode_hex::<16>(value)
         .map(KonclaveDomainCore::MessageId::from_bytes)
         .map_err(|_| "invalid_request".to_string())
+}
+
+fn copilot_delivery_denial(
+    harness: HarnessKind,
+    consumer: AdapterConsumerId,
+    owner: Option<(AdapterConsumerId, u64)>,
+    now: u64,
+) -> Option<&'static str> {
+    if harness != HarnessKind::Copilot {
+        return Some("copilot_harness_required");
+    }
+    match owner {
+        None => Some("delivery_consumer_missing"),
+        Some((active, _)) if active != consumer => Some("delivery_consumer_replaced"),
+        Some((_, expiry)) if expiry <= now => Some("delivery_lease_expired"),
+        Some(_) => None,
+    }
 }
 
 fn directed_request_handling_error(error: &crate::persistence::ProfileStoreError) -> String {
@@ -4529,6 +4547,50 @@ mod collaboration_policy_tests {
         }
     }
 
+    #[test]
+    fn delivery_lease_denials_distinguish_harness_missing_replaced_and_expired() {
+        let current = consumer();
+        let other = AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]);
+        for (harness, owner, expected) in [
+            (
+                HarnessKind::Generic,
+                Some((current, 101)),
+                Some("copilot_harness_required"),
+            ),
+            (
+                HarnessKind::A2AGateway,
+                Some((current, 101)),
+                Some("copilot_harness_required"),
+            ),
+            (
+                HarnessKind::Copilot,
+                None,
+                Some("delivery_consumer_missing"),
+            ),
+            (
+                HarnessKind::Copilot,
+                Some((other, 101)),
+                Some("delivery_consumer_replaced"),
+            ),
+            (
+                HarnessKind::Copilot,
+                Some((current, 99)),
+                Some("delivery_lease_expired"),
+            ),
+            (
+                HarnessKind::Copilot,
+                Some((current, 100)),
+                Some("delivery_lease_expired"),
+            ),
+            (HarnessKind::Copilot, Some((current, 101)), None),
+        ] {
+            assert_eq!(
+                super::copilot_delivery_denial(harness, current, owner, 100),
+                expected
+            );
+        }
+    }
+
     #[tokio::test]
     async fn directed_request_delivery_resume_restores_work_and_reply_without_readmission() {
         for disconnected in [false, true] {
@@ -4815,13 +4877,13 @@ mod collaboration_policy_tests {
                     HarnessKind::Generic,
                     consumer(),
                     local_device,
-                    "copilot_delivery_not_proven",
+                    "copilot_harness_required",
                 ),
                 (
                     HarnessKind::Copilot,
                     AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]),
                     local_device,
-                    "copilot_delivery_not_proven",
+                    "delivery_consumer_replaced",
                 ),
             ] {
                 let result = evaluate(&work_payload, harness, consumer_id, device);
@@ -4965,7 +5027,7 @@ mod collaboration_policy_tests {
                     consumer(),
                     local_device
                 )["reason"],
-                "copilot_delivery_not_proven"
+                "delivery_lease_expired"
             );
         }
     }
@@ -5160,7 +5222,7 @@ mod collaboration_policy_tests {
         )
         .unwrap();
         assert_eq!(generic_action["decision"], "deny");
-        assert_eq!(generic_action["reason"], "copilot_delivery_not_proven");
+        assert_eq!(generic_action["reason"], "copilot_harness_required");
         assert!(authorizations.is_empty());
 
         let detached: serde_json::Value = serde_json::from_slice(

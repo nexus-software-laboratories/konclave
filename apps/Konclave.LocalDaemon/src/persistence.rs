@@ -2013,6 +2013,17 @@ impl ProfileStore {
         &self,
         consumer_id: AdapterConsumerId,
     ) -> Result<Option<u64>, ProfileStoreError> {
+        Ok(self
+            .adapter_consumer_lease()?
+            .and_then(|(owner, expiry)| (owner == consumer_id).then_some(expiry)))
+    }
+
+    /// Reads the single delivery owner without conflating absence with replacement.
+    ///
+    /// Malformed retained metadata and storage failures remain errors.
+    pub(crate) fn adapter_consumer_lease(
+        &self,
+    ) -> Result<Option<(AdapterConsumerId, u64)>, ProfileStoreError> {
         let current: Option<(Option<Vec<u8>>, i64)> = self
             .lock()?
             .query_row(
@@ -2033,7 +2044,7 @@ impl ProfileStore {
             AdapterConsumerId::from_slice(&active_consumer.ok_or(ProfileStoreError::CorruptData)?)
                 .map_err(|_| ProfileStoreError::CorruptData)?;
         let expires_at = from_sql_integer(expires_at)?;
-        Ok((active_consumer == consumer_id).then_some(expires_at))
+        Ok(Some((active_consumer, expires_at)))
     }
 
     fn finish_remote_event_claim(
