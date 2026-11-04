@@ -557,9 +557,9 @@ struct CollaborationPolicyBundleProjection {
 struct CollaborationPolicyStatementResult {
     /// Bundle-scoped statement identifier used to identify the matching structured decision.
     statement_id: String,
-    /// Structured allow or deny decision; deny overrides allow.
+    /// Structured allow, deny or require_local_approval decision; matching restrictions still apply.
     effect: &'static str,
-    /// Exact supported policy action or wildcard pattern, not executable guidance.
+    /// Canonical namespaced action selector evaluated by the native policy engine, not executable guidance.
     action: String,
     /// Optional structured resource selector; null means the statement has no resource restriction.
     resource: Option<String>,

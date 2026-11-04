@@ -12,13 +12,13 @@ invented `npm install konclave` dependency.
 
 ## Choose the boundary
 
-| Caller | Entry point | Responsibility retained by caller |
-|---|---|---|
-| Copilot integration | `connectInstalledService` and existing command, tool, policy-gate and delivery factories | Native session identity, permission hooks, lifecycle and shutdown |
-| Otherwise unsupported local harness | `connectInstalledGenericService` | Explicit profile selection and best-effort operation lifecycle |
-| One-shot external process | [`generic.mjs`](generic-client.md) | Stdin/stdout contract, retry identity and foreground budget |
-| External composition | [Recipe codec and messaging adapter](recipes.md) | Provider approval, audiences, run custody and scheduling |
-| Native endpoint owning its own keys | [Rust native composition](native-client.md) | Qualified custody and durable journals, not local-service RPC |
+| Caller                              | Entry point                                                                              | Responsibility retained by caller                                 |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Copilot integration                 | `connectInstalledService` and existing command, tool, policy-gate and delivery factories | Native session identity, permission hooks, lifecycle and shutdown |
+| Otherwise unsupported local harness | `connectInstalledGenericService`                                                         | Explicit profile selection and best-effort operation lifecycle    |
+| One-shot external process           | [`generic.mjs`](generic-client.md)                                                       | Stdin/stdout contract, retry identity and foreground budget       |
+| External composition                | [Recipe codec and messaging adapter](recipes.md)                                         | Provider approval, audiences, run custody and scheduling          |
+| Native endpoint owning its own keys | [Rust native composition](native-client.md)                                              | Qualified custody and durable journals, not local-service RPC     |
 
 Generic is not recovery from a denied or broken Copilot operation. Neither the
 Generic label nor a successful local connection attests a harness or grants remote
@@ -36,10 +36,10 @@ owned by the [Generic installation contract](generic-client.md#invocation).
 
 `GenericClientIdentity` requires all three fields:
 
-| Field | Encoding and meaning |
-|---|---|
-| `profile` | Canonical lowercase ASCII letters, digits, `_`, `-`; no normalization; `session-` prefix is reserved |
-| `profileMode` | Exactly `durable` for an explicitly approved continuity alias, or `ephemeral` for an isolated `generic-` plus 24 lowercase hex characters |
+| Field              | Encoding and meaning                                                                                                                      |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `profile`          | Canonical lowercase ASCII letters, digits, `_`, `-`; no normalization; `session-` prefix is reserved                                      |
+| `profileMode`      | Exactly `durable` for an explicitly approved continuity alias, or `ephemeral` for an isolated `generic-` plus 24 lowercase hex characters |
 | `integrationLabel` | 1–64 lowercase ASCII characters, starting/ending alphanumeric; interior digits, letters, `.`, `_`, `-`; local self-declared metadata only |
 
 Validation precedes installation/key access. A successful connection binds the
@@ -58,11 +58,11 @@ operation's result before using it. It is not a typed method for every daemon
 operation. The barrel also exports `getMessageDeliveryStatus` for validated,
 content-free delivery observations; see [delivery diagnostics](../development/local-delivery-diagnostics.md).
 
-| `LocalServiceRequestOptions` field | Contract |
-|---|---|
-| `deadlineMs` | Integer 1–300,000 milliseconds; omitted defaults to 30,000 in the installed programmatic client |
-| `signal` | Optional `AbortSignal`; abort requests authenticated cancellation |
-| `requestId` | Optional **16-byte `Buffer`**, copied at admission; omitted generates fresh random bytes |
+| `LocalServiceRequestOptions` field | Contract                                                                                        |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `deadlineMs`                       | Integer 1–300,000 milliseconds; omitted defaults to 30,000 in the installed programmatic client |
+| `signal`                           | Optional `AbortSignal`; abort requests authenticated cancellation                               |
+| `requestId`                        | Optional **16-byte `Buffer`**, copied at admission; omitted generates fresh random bytes        |
 
 A numeric third argument is the legacy deadline shorthand. `null`, zero, an empty
 buffer and an omitted option are not interchangeable. The local RPC payload limit
@@ -90,21 +90,25 @@ The following is an application integration fragment using a deliberately select
 distribution. It is not a package-manager import or a Copilot fallback.
 
 ```javascript
-import { randomBytes } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
-import { connectInstalledGenericService } from './konclave/client.mjs';
+import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { connectInstalledGenericService } from "./konclave/client.mjs";
 
-const moduleDir = fileURLToPath(new URL('./konclave/', import.meta.url));
+const moduleDir = fileURLToPath(new URL("./konclave/", import.meta.url));
 const client = await connectInstalledGenericService(process.env, moduleDir, {
-  profile: '<approved-profile-alias>',
-  profileMode: 'durable',
-  integrationLabel: 'example.reader',
+  profile: "<approved-profile-alias>",
+  profileMode: "durable",
+  integrationLabel: "example.reader",
 });
 try {
-  const result = await client.request('get_identity', {}, {
-    requestId: randomBytes(16),
-    deadlineMs: 30_000,
-  });
+  const result = await client.request(
+    "get_identity",
+    {},
+    {
+      requestId: randomBytes(16),
+      deadlineMs: 30_000,
+    },
+  );
   // Validate result in the application; do not log arbitrary service payloads.
 } finally {
   try {
@@ -140,18 +144,68 @@ It validates the unknown result and retires/closes the owned client. A retiremen
 failure remains an error; do not infer that a successful read was rolled back.
 
 <!-- installed-client-example:start -->
+
+```typescript
+import { randomBytes } from "node:crypto";
+
+import { connectInstalledGenericService } from "../../src/client-api.js";
+
+/**
+ * Reads a validated public identity from one independently approved installation/profile.
+ * The caller supplies the installation environment and selected client module directory.
+ * Rejects connection, result-validation and retirement failures; always closes the client.
+ */
+export async function readInstalledIdentity(
+  environment: Readonly<Record<string, string | undefined>>,
+  moduleDir: string,
+  approvedProfile: string,
+): Promise<string> {
+  const client = await connectInstalledGenericService(environment, moduleDir, {
+    profile: approvedProfile,
+    profileMode: "durable",
+    integrationLabel: "example.reader",
+  });
+  try {
+    const result = await client.request(
+      "get_identity",
+      {},
+      {
+        requestId: randomBytes(16),
+        deadlineMs: 30_000,
+      },
+    );
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("device_id" in result) ||
+      typeof result.device_id !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(result.device_id)
+    ) {
+      throw new Error("Invalid identity result");
+    }
+    return result.device_id;
+  } finally {
+    try {
+      await client.retire();
+    } finally {
+      client.close();
+    }
+  }
+}
+```
+
 <!-- installed-client-example:end -->
 
 ## Failures and evidence
 
-| Failure | Safe next action |
-|---|---|
-| `GenericClientIdentityError` (`invalid_arguments`, `paved_profile_reserved`, `ephemeral_profile_invalid`) | Correct explicit selection; do not discover another profile |
-| `ServiceConfigurationError` | Repair/upgrade the installation or supply required evidence; never weaken policy |
-| `LocalServiceUpgradeRequiredError` (`service_upgrade_required`) | Upgrade the installed service to match the client |
-| `LocalServiceError` | Branch on finite `code`, not message text; preserve exact identity for ambiguous side effects |
-| `LocalServiceProtocolError` | Stop using contradictory/malformed evidence; do not cast the result into a success type |
-| Other connection/transport rejection | Surface failure and reconcile only within the relevant operation's retry contract |
+| Failure                                                                                                   | Safe next action                                                                              |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `GenericClientIdentityError` (`invalid_arguments`, `paved_profile_reserved`, `ephemeral_profile_invalid`) | Correct explicit selection; do not discover another profile                                   |
+| `ServiceConfigurationError`                                                                               | Repair/upgrade the installation or supply required evidence; never weaken policy              |
+| `LocalServiceUpgradeRequiredError` (`service_upgrade_required`)                                           | Upgrade the installed service to match the client                                             |
+| `LocalServiceError`                                                                                       | Branch on finite `code`, not message text; preserve exact identity for ambiguous side effects |
+| `LocalServiceProtocolError`                                                                               | Stop using contradictory/malformed evidence; do not cast the result into a success type       |
+| Other connection/transport rejection                                                                      | Surface failure and reconcile only within the relevant operation's retry contract             |
 
 Source owners are [`installed.ts`](../../extensions/Konclave.HostExtension/src/service/installed.ts)
 and [`client.ts`](../../extensions/Konclave.HostExtension/src/service/client.ts).

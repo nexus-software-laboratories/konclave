@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// KonclaveCommandLine is a command-line application.
+/// Manage a Konclave installation, protected enrollment and local authority.
 #[derive(Parser)]
 #[command(name = "konclave", version)]
 pub struct Cli {
