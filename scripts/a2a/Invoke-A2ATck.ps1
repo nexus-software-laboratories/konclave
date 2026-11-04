@@ -200,26 +200,15 @@ foreach ($isolated in $profile.isolatedRequirements) {
 
 $process = Start-TckSut -Name 'full'
 try {
-    Push-Location $tckRoot
-    try {
-        # The pinned TCK exits nonzero for the exact documented differences.
-        # The strict report classifier below is the pass/fail decision.
-        $fullLogPath = Join-Path $resolvedOutputDirectory 'full-tck.log'
-        & uv run --no-sync python (Join-Path $tckRoot 'run_tck.py') `
-            --sut-host $sutUrl `
-            --transport ([string] $profile.execution.transport) `
-            --level ([string] $profile.execution.level) *> $fullLogPath
-        $tckExitCode = $LASTEXITCODE
-    }
-    finally {
-        Pop-Location
-    }
-
-    $sourceReportPath = Join-Path $tckRoot 'reports' 'compatibility.json'
+    $pythonExecutable = (& uv run --project $tckRoot --no-sync python -c 'import sys; print(sys.executable)').Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'The pinned TCK interpreter is unavailable.' }
+    $fullOutput = Join-Path $resolvedOutputDirectory 'full'
+    & (Join-Path $PSScriptRoot 'Invoke-A2AExternalTck.ps1') `
+        -ProfilePath $ProfilePath -TckRoot $tckRoot -PythonExecutable $pythonExecutable `
+        -SutUrl $sutUrl -OutputDirectory $fullOutput
+    $sourceReportPath = Join-Path $fullOutput 'compatibility.json'
     $reportPath = Join-Path $resolvedOutputDirectory 'compatibility.json'
     Copy-Item -LiteralPath $sourceReportPath -Destination $reportPath
-    & $validatorPath -ProfilePath $ProfilePath -TckRoot $tckRoot -ReportPath $reportPath
-    Write-Output "Pinned A2A TCK raw exit code: $tckExitCode"
 }
 finally {
     Stop-TckSut -Process $process
