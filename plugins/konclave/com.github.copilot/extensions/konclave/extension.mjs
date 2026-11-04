@@ -563,10 +563,21 @@ function startDeliveryRuntime(options) {
     const profileSpread = [...options.channel.profile].reduce((sum, value) => sum + value.charCodeAt(0), 0) % 401;
     return Math.min(maximum, Math.round(raw * (0.8 + profileSpread / 1e3)));
   };
+  const flushing = { task: null, failure: null };
+  const flush = () => {
+    flushing.task ??= options.coordinator.flush().catch((cause) => {
+      flushing.failure = { cause };
+    }).finally(() => {
+      flushing.task = null;
+    });
+  };
   const completed = (async () => {
     while (running) {
+      if (flushing.failure) {
+        throw flushing.failure.cause;
+      }
       if (options.coordinator.outstanding || options.coordinator.pending > 0) {
-        await options.coordinator.flush();
+        flush();
         if (!options.coordinator.outstanding && options.coordinator.pending === 0) {
           continue;
         }
@@ -644,9 +655,14 @@ function startDeliveryRuntime(options) {
       }
       resetFailures();
       enqueue(options.coordinator, response.events, options.diagnostics);
-      await options.coordinator.flush();
+      flush();
     }
-  })();
+  })().finally(async () => {
+    await flushing.task;
+    if (flushing.failure) {
+      throw flushing.failure.cause;
+    }
+  });
   return {
     completed,
     stop() {
