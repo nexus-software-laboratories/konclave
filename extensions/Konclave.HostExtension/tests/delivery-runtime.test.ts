@@ -363,6 +363,91 @@ describe('delivery runtime loop', () => {
     expect(requests).toEqual(['heartbeat', 'wait-and-claim']);
   });
 
+  it('renews across a blocked flush without concurrent flushes or extra claims', async () => {
+    let releaseFlush = () => {};
+    let markStarted = () => {};
+    let markRenewed = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const renewed = new Promise<void>((resolve) => {
+      markRenewed = resolve;
+    });
+    let now = 0;
+    let heartbeats = 0;
+    let flushes = 0;
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request(request) {
+          expect(request.kind).toBe('heartbeat');
+          heartbeats += 1;
+          if (heartbeats === 4) {
+            runtime.stop();
+            markRenewed();
+          }
+          return { kind: 'accepted' };
+        },
+        close() {},
+      },
+      coordinator: {
+        enqueue() {},
+        async markIdle() {},
+        markActive() {},
+        async flush() {
+          flushes += 1;
+          markStarted();
+          await blocked;
+        },
+        pending: 0,
+        outstanding: true,
+        activeTurn: null,
+      },
+      diagnostics: { error: () => {} },
+      clock: { now: () => now },
+      sleep: async () => {
+        now += 20_000;
+      },
+    });
+    try {
+      await started;
+      expect(heartbeats).toBeGreaterThan(0);
+      await renewed;
+      expect(now).toBeGreaterThanOrEqual(60_000);
+      expect(flushes).toBe(1);
+    } finally {
+      runtime.stop();
+      releaseFlush();
+      await runtime.completed;
+    }
+  });
+
+  it('observes a failed flush instead of hiding it in background work', async () => {
+    const failure = new Error('injected flush failure');
+    const runtime = startDeliveryRuntime({
+      channel: {
+        profile: 'alice',
+        async request() {
+          return { kind: 'accepted' };
+        },
+        close() {},
+      },
+      coordinator: {
+        ...coordinator(),
+        async flush() {
+          throw failure;
+        },
+        outstanding: true,
+      },
+      diagnostics: { error: () => {} },
+      sleep: async () => {},
+    });
+    await expect(runtime.completed).rejects.toBe(failure);
+  });
+
   it('backs off after an unexpected heartbeat response', async () => {
     const errors: string[] = [];
     const requests: string[] = [];
