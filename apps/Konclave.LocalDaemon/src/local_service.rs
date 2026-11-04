@@ -3378,7 +3378,7 @@ async fn delivery_heartbeat(
         })
         .transpose()?;
     if delivery.is_none() {
-        let turn = turn.ok_or_else(|| "delivery_turn_required".to_string())?;
+        let turn = turn.ok_or_else(|| "invalid_request".to_string())?;
         let store = Arc::clone(store);
         *delivery = Some(
             tokio::task::spawn_blocking(move || DeliveryAttachment::resume(turn, &store))
@@ -3386,7 +3386,10 @@ async fn delivery_heartbeat(
                 .map_err(|_| "profile_unavailable".to_string())?
                 .map_err(|error| {
                     record_failure(&error);
-                    "delivery_resume_rejected".to_string()
+                    error
+                        .downcast_ref::<crate::persistence::ProfileStoreError>()
+                        .map(directed_request_handling_error)
+                        .unwrap_or_else(|| "profile_unavailable".to_string())
                 })?,
         );
     }
@@ -4655,7 +4658,7 @@ mod collaboration_policy_tests {
                     b"{}",
                 )
                 .await,
-                Err("delivery_turn_required".to_string()),
+                Err("invalid_request".to_string()),
             );
             assert!(connection_delivery.is_none());
             if disconnected {

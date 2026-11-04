@@ -92,10 +92,29 @@ deny-all gate instead of retaining the delivery lease indefinitely.
 
 A terminal event is acknowledged only after the adapter emits its local diagnostic.
 A directed request is acknowledged only after the exact handling attempt reaches
-`completed-response` or `completed-no-response`. The delivery long-poll renews the
+`completed-response` or `completed-no-response`. Delivery heartbeats renew the
 event and handling lease while the model turn remains active. While the coordinator
 retains a turn or queued work, the runtime sends heartbeat-only operations instead of
-claiming an unbounded local queue. Failure before durable completion releases or
+claiming an unbounded local queue. A blocked prompt-delivery flush does not block
+these heartbeats: the runtime owns at most one flush, observes its failure and waits
+for it when stopping.
+
+A replacement authenticated connection may reattach only the same consumer's exact
+still-live request, attempt, policy digest and local responder. Recovery verifies
+current policy, membership and sealed notification/history bindings atomically,
+retains the attempt and event generation, and generates a new lease to fence the old
+attachment. Disconnect cleanup still releases its own lease. Missing turn evidence,
+expired or terminal handling, changed authority, and competing ownership fail closed;
+reconnection never grants another attempt or revives expired work. The original
+60-second lease and 20-second heartbeat interval are unchanged.
+
+Action admission distinguishes `copilot_harness_required`,
+`delivery_consumer_missing`, `delivery_consumer_replaced` and
+`delivery_lease_expired`. Storage and integrity failures remain errors rather than
+being reported as a missing consumer. These bounded reasons reveal no identifiers
+or peer content and do not change the required authorization evidence.
+
+Failure before durable completion releases or
 expires the event, so the stable notification remains reclaimable. A crash before
 acknowledgment may redeliver the same notification identifier.
 A correlated answer follows the same durable claim lifecycle and completes
