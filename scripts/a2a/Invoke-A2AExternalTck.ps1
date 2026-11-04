@@ -74,8 +74,18 @@ $original = [hashtable]::new([StringComparer]::Ordinal)
 foreach ($key in $environment.Keys) {
     $original[$key] = [Environment]::GetEnvironmentVariable($key)
 }
+function Set-DeploymentEnvironmentVariable {
+    param([string] $Name, [object] $Value)
+    if ($null -eq $Value) {
+        if (Test-Path -LiteralPath "Env:$Name") {
+            Remove-Item -LiteralPath "Env:$Name"
+        }
+    } else {
+        [Environment]::SetEnvironmentVariable($Name, [string] $Value)
+    }
+}
 foreach ($key in $environment.Keys) {
-    [Environment]::SetEnvironmentVariable($key, $environment[$key])
+    Set-DeploymentEnvironmentVariable $key $environment[$key]
 }
 $reportPrefix = Join-Path $output 'compatibility'
 $log = Join-Path $output 'tck.log'
@@ -116,7 +126,7 @@ try {
 } finally {
     Pop-Location
     foreach ($key in $original.Keys) {
-        [Environment]::SetEnvironmentVariable($key, $original[$key])
+        Set-DeploymentEnvironmentVariable $key $original[$key]
     }
 }
 Write-Output 'External A2A conformance evidence passed the unchanged requirement profile.'
