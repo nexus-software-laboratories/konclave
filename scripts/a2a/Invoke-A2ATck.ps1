@@ -16,6 +16,7 @@ if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
 }
 $validatorPath = Join-Path $PSScriptRoot 'Test-A2ATckProfile.ps1'
 & $validatorPath -ProfilePath $ProfilePath
+& (Join-Path $PSScriptRoot 'Test-A2ATckDeployment.ps1') -ProfilePath $ProfilePath
 
 $profile = Get-Content -LiteralPath $ProfilePath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 30
@@ -100,6 +101,10 @@ try {
         'copy',
         '--no-progress',
         '--quiet'
+    )
+    Invoke-CheckedNative -Command uv -Arguments @(
+        'run', '--no-sync', 'python', '-m', 'pytest',
+        (Join-Path $PSScriptRoot 'test_a2a_tck_deployment.py'), '-q'
     )
 }
 finally {

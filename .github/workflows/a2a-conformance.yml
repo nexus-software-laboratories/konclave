@@ -58,7 +58,7 @@ jobs:
                   $_ -match '^conformance/a2a/' -or
                   $_ -match '^crates/Konclave\.A2A' -or
                   $_ -match '^protocol/releases/' -or
-                  $_ -match '^scripts/a2a/(?:Invoke-A2A.*\.ps1|Test-A2ATckProfile\.ps1)$' -or
+                  $_ -match '^scripts/a2a/' -or
                   $_ -match '^scripts/protocol/Test-ProtocolRelease\.ps1$' -or
                   $_ -match '^third_party/a2a/'
                 }

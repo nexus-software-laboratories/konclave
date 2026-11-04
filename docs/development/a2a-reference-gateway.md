@@ -341,6 +341,32 @@ modified by this gateway.
 
 ## Verification
 
+The pinned conformance profile and its classifications are shared by the reference
+target and explicitly configured external test deployments.
+`scripts/a2a/Invoke-A2ATck.ps1` owns the reference target's process lifecycle.
+`scripts/a2a/Invoke-A2AExternalTck.ps1` instead requires an already running
+synthetic-data SUT, a clean pinned TCK checkout, its locked Python interpreter and
+an empty output directory outside this repository. It starts no SUT and grants no
+native permission.
+
+The external runner accepts `SutUrl`, optional `Tenant`, `BearerTokenFile` and
+`TrustedCaFile`. A tenant supplies the standard path scope and only a missing
+tenant field on send requests; explicit request values are never overwritten.
+Credentials are loaded from a bounded one-line file, are origin/path scoped and
+never become CLI token arguments or diagnostics. TLS hostname verification stays
+enabled, redirects and ambient proxies are disabled, and plain HTTP is limited to
+explicit loopback development. Well-known discovery must be explicitly public for
+the stock TCK discovery fixture.
+
+Omitting `RequirementId` runs the full profile; providing one runs only its
+declared isolated selector. The caller must supply a fresh SUT for every isolated
+requirement and the complete suite. The unchanged upstream request/response
+implementation, tests, validators and reporting remain in use. The strict report
+classifier checks the exact declared target without changing supported
+requirements, allowed failures or expected errors. Success proves only the
+recorded conformance scenarios for that test deployment, not production
+availability, membership, publisher provenance or protected native execution.
+
 Focused tests cover:
 
 - task and SendMessageResponse protobuf/ProtoJSON validation;

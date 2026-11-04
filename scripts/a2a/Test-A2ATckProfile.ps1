@@ -7,7 +7,9 @@ param(
 
     [string] $TckRoot,
 
-    [string] $ReportPath
+    [string] $ReportPath,
+
+    [string] $SutUrl
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +20,28 @@ $repositoryRoot = (
 ).Path
 $profile = Get-Content -LiteralPath $resolvedProfilePath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 30
+
+if ([string]::IsNullOrWhiteSpace($SutUrl)) {
+    $SutUrl = [string] $profile.execution.sutUrl
+}
+$target = $null
+if (
+    $SutUrl.Length -gt 2048 -or $SutUrl -match '[\x00-\x20\\]' -or
+    -not [Uri]::TryCreate($SutUrl, [UriKind]::Absolute, [ref] $target) -or
+    -not [string]::IsNullOrEmpty($target.UserInfo) -or
+    -not [string]::IsNullOrEmpty($target.Query) -or
+    -not [string]::IsNullOrEmpty($target.Fragment)
+) {
+    throw 'The declared A2A conformance target is invalid.'
+}
+$targetAddress = $null
+$loopback = $target.Host -ieq 'localhost' -or (
+    [Net.IPAddress]::TryParse($target.DnsSafeHost, [ref] $targetAddress) -and
+    [Net.IPAddress]::IsLoopback($targetAddress)
+)
+if ($target.Scheme -cne 'https' -and -not ($target.Scheme -ceq 'http' -and $loopback)) {
+    throw 'A2A conformance requires HTTPS outside explicit loopback development.'
+}
 
 if (
     [int64] $profile.schemaVersion -ne 1 -or
@@ -393,7 +417,7 @@ if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
     $resolvedReportPath = (Resolve-Path -LiteralPath $ReportPath).Path
     $report = Get-Content -LiteralPath $resolvedReportPath -Raw -Encoding UTF8 |
         ConvertFrom-Json -Depth 30
-    if ([string] $report.summary.sut_url -cne [string] $profile.execution.sutUrl) {
+    if ([string] $report.summary.sut_url -cne $SutUrl) {
         throw 'A2A TCK report targets an unexpected SUT URL.'
     }
 
