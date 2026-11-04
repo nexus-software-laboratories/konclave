@@ -111,6 +111,11 @@ export function parseRecipeBinding(value: unknown): RecipeBinding {
  * Selection has exactly profile, nonce, bindings and input. A new intent uses a fresh
  * 16-byte hexadecimal nonce; recovery instead decodes the original descriptor/run ID.
  * This function does not approve, execute, discover, pair or change any policy.
+ * Neither the descriptor nor a selected target grants data-disclosure authority.
+ *
+ * @see [Complete run and messaging example](../../../../docs/integrations/recipes.md#construct-and-submit-one-explicitly-approved-run)
+ * @see [Bind the approved run to messaging](client.ts)
+ * @see [Lifecycle and exact-run recovery](../../../../docs/integrations/recipes.md#lifecycle-and-recovery)
  * @throws {RecipeDefinitionError} If the selected definition cannot be authenticated.
  * @throws {RecipeRunError} If run data or a bound is invalid.
  */

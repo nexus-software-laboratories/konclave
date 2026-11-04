@@ -36,7 +36,22 @@ export interface RecipeSubmission {
  */
 export interface RecipeMessaging {
   readonly run: RecipeRun;
+  /**
+   * Submits one stable directed request for a declared binding. The exact body is
+   * pinned on its first attempt, even before submission is observed. An explicit
+   * retry must preserve the approved descriptor, message identity, target and body.
+   * Cancellation does not retract a committed message.
+   * @returns Observed {@link RecipeSubmission}, not evidence of remote execution or reply.
+   * @see [Checked compositions](../../examples/recipes/compositions.ts)
+   */
   send(bindingName: string, text: string, options?: RecipeCallOptions): Promise<RecipeSubmission>;
+  /**
+   * Observes a submitted slot using at most two bounded history reads and one watch.
+   * A cached reply is terminal. Otherwise poll this same slot again to continue;
+   * pending is not refusal, completion or permission to create another logical request.
+   * @returns A {@link RecipeReplyPage}, discriminated by kind: reply or pending.
+   * @see [Lifecycle and recovery](../../../../docs/integrations/recipes.md#lifecycle-and-recovery)
+   */
   poll(bindingName: string, options?: RecipeCallOptions): Promise<RecipeReplyPage>;
 }
 
@@ -98,6 +113,9 @@ function submission(value: unknown, binding: RecipeBinding, messageId: string): 
  * read. It returns pending rather than inventing remote completion or cancellation.
  * No data is persisted, printed or exported by the adapter.
  *
+ * @see [Checked fanOut and handoff compositions](../../examples/recipes/compositions.ts)
+ * @see [Lifecycle and exact-run recovery](../../../../docs/integrations/recipes.md#lifecycle-and-recovery)
+ * @see {@link RecipeMessaging} and {@link RecipeReplyPage} for per-slot outcomes.
  * @throws {RecipeRunError} For an unpinned run, wrong profile, undeclared slot,
  * changed successful request, concurrent slot work or malformed service evidence.
  * Native service/transport errors propagate without fallback.

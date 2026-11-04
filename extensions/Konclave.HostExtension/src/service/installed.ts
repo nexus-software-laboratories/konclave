@@ -94,6 +94,12 @@ export async function connectInstalledService(
  * the installed native ceremony helper. Missing or unsupported evidence rejects the
  * connection instead of downgrading. The label is integration metadata, not harness
  * attestation. The caller owns the returned client's lifecycle and closes it.
+ * Select the installation and identity.profile independently; Generic is not fallback
+ * authorization for a denied supported Copilot path. Retire before closing, and keep
+ * cleanup failures separate from the application outcome: cleanup is not rollback.
+ *
+ * @see [Checked installed-client example](../../tests/examples/installed-client.ts)
+ * @see [Profile selection and lifecycle](../../../../docs/integrations/typescript-client.md)
  */
 export async function connectInstalledGenericService(
   environment: Readonly<Record<string, string | undefined>>,

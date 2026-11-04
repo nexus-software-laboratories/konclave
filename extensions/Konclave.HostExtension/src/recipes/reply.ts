@@ -31,6 +31,12 @@ export interface RecipePending {
   readonly hasMore: boolean;
 }
 
+/**
+ * Bounded poll result: kind reply is an exact target's correlated, still-untrusted
+ * answer; kind pending only describes the observation so far. Continue polling the
+ * same approved run, not a new nonce or logical request.
+ * @see [Lifecycle and recovery](../../../../docs/integrations/recipes.md#lifecycle-and-recovery)
+ */
 export type RecipeReplyPage = RecipeReply | RecipePending;
 
 const baseFields = [
