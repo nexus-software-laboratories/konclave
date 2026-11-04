@@ -2,8 +2,9 @@
 
 Put this directory on PYTHONPATH and load with ``pytest -p a2a_tck_deployment``.
 Set A2A_TCK_SUT_URL and pass the same canonical URL to --sut-host. Optional
-A2A_TCK_TENANT, A2A_TCK_BEARER_TOKEN_FILE and A2A_TCK_CA_FILE configure only
-the transport client. Agent Card discovery remains the stock public fixture.
+A2A_TCK_TENANT, A2A_TCK_BEARER_TOKEN_FILE and A2A_TCK_CA_FILE configure
+the transport factory and HTTP defaults, including raw probes. Agent Card
+discovery remains the stock public fixture.
 Interface URLs must match the configured base or its
 declared tenant scope. Tokens are at most 4096 ASCII characters; CA files contain
 only PEM certificates and are at most 262144 bytes. Empty options are invalid.
@@ -192,15 +193,19 @@ class Deployment:
             return {**body, "tenant": self.tenant}
         return body
 
-    def guard_request(self, request: httpx.Request) -> None:
-        """Prevent transport credentials from leaving the selected URL scope."""
+    def contains_request(self, request: httpx.Request) -> bool:
+        """Check the exact configured origin and path scope."""
         expected = httpx.URL(self.scoped_url)
         actual = request.url
-        if (
+        return (
             (actual.scheme, actual.host, actual.port)
-            != (expected.scheme, expected.host, expected.port)
-            or not actual.path.startswith(expected.path.rstrip("/") + "/")
-        ):
+            == (expected.scheme, expected.host, expected.port)
+            and actual.path.startswith(expected.path.rstrip("/") + "/")
+        )
+
+    def guard_request(self, request: httpx.Request) -> None:
+        """Prevent transport credentials from leaving the selected URL scope."""
+        if not self.contains_request(request):
             _fail("request would leave the configured origin or path scope")
 
 
@@ -212,27 +217,14 @@ def _client_factory(deployment: Deployment) -> type[HttpJsonClient]:
                 deployment.sut_url.rstrip("/"), deployment.scoped_url,
             }:
                 _fail("advertised HTTP+JSON URL does not match the configured base")
+            client_url = deployment.scoped_url + (
+                "/" if advertised.endswith("/") else ""
+            )
             try:
-                super().__init__(deployment.scoped_url)
+                super().__init__(client_url)
             except (OSError, ValueError, ImportError):
                 _fail("stock transport initialization failed")
-            original = self._client
-            headers = dict(original.headers)
-            original.close()
-            if deployment._token is not None:
-                headers["Authorization"] = f"Bearer {deployment._token}"
-            try:
-                self._client = httpx.Client(
-                    base_url=deployment.scoped_url,
-                    headers=headers,
-                    verify=deployment._ca if deployment._ca is not None else True,
-                    timeout=httpx.Timeout(5.0, read=30.0),
-                    trust_env=False,
-                    follow_redirects=False,
-                    event_hooks={"request": [deployment.guard_request]},
-                )
-            except (OSError, ValueError):
-                _fail("transport configuration failed")
+            self._client.event_hooks["request"].append(deployment.guard_request)
 
         def _request(
             self, method: str, path: str, *, json_body: dict | None = None,
@@ -253,6 +245,32 @@ def _client_factory(deployment: Deployment) -> type[HttpJsonClient]:
             )
 
     return DeploymentHttpJsonClient
+
+
+def _configure_httpx(deployment: Deployment, patch: pytest.MonkeyPatch) -> None:
+    original_init = httpx.Client.__init__
+
+    def scoped_credentials(request: httpx.Request) -> None:
+        if deployment._token is not None:
+            bearer = f"Bearer {deployment._token}"
+            if request.headers.get("Authorization") == bearer:
+                deployment.guard_request(request)
+            elif deployment.contains_request(request) and "Authorization" not in request.headers:
+                request.headers["Authorization"] = bearer
+
+    def initialize(client, *args, **kwargs) -> None:
+        if kwargs.get("verify") is False:
+            _fail("TLS verification cannot be disabled")
+        if deployment._ca is not None:
+            kwargs["verify"] = deployment._ca
+        kwargs["trust_env"] = False
+        kwargs["follow_redirects"] = False
+        hooks = dict(kwargs.get("event_hooks") or {})
+        hooks["request"] = [*hooks.get("request", []), scoped_credentials]
+        kwargs["event_hooks"] = hooks
+        original_init(client, *args, **kwargs)
+
+    patch.setattr(httpx.Client, "__init__", initialize)
 
 
 _deployment_key = pytest.StashKey[Deployment]()
@@ -318,6 +336,9 @@ def pytest_configure(config: pytest.Config) -> None:
     deployment = _configuration(config)
     if config.getoption("sut_host", default=None) != deployment.sut_url:
         _fail("--sut-host must equal A2A_TCK_SUT_URL")
+    patch = pytest.MonkeyPatch()
+    _configure_httpx(deployment, patch)
+    config.add_cleanup(patch.undo)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

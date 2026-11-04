@@ -4,6 +4,7 @@ import importlib.util
 import inspect
 import json
 import os
+import ssl
 import subprocess
 import sys
 from pathlib import Path
@@ -52,9 +53,8 @@ def test_headers_scope_and_both_send_modes(
     config = deployment.Deployment.from_environment()
     assert "test-only-token" not in repr(config)
     requests = []
-    clients = []
     options = []
-    real_client = httpx.Client
+    real_init = httpx.Client.__init__
 
     def respond(request):
         requests.append(request)
@@ -65,20 +65,19 @@ def test_headers_scope_and_both_send_modes(
             )
         return httpx.Response(200, json={"task": {"id": "task-a"}})
 
-    def make_client(*args, **kwargs):
+    def initialize(client, *args, **kwargs):
         options.append(kwargs.copy())
         kwargs["transport"] = httpx.MockTransport(respond)
-        result = real_client(*args, **kwargs)
-        clients.append(result)
-        return result
+        real_init(client, *args, **kwargs)
 
-    monkeypatch.setattr(httpx, "Client", make_client)
+    monkeypatch.setattr(httpx.Client, "__init__", initialize)
+    deployment._configure_httpx(config, monkeypatch)
     factory = deployment._client_factory(config)
     with pytest.raises(deployment.DeploymentError, match="configured base"):
         factory("https://other.example.test/a2a")
     client = factory(config.sut_url)
     try:
-        assert clients[0].is_closed
+        assert len(options) == 1
         assert options[-1]["trust_env"] is False
         assert options[-1]["follow_redirects"] is False
         assert options[-1]["verify"] is True
@@ -221,15 +220,65 @@ def test_rejects_private_key_ca(configured_environment, monkeypatch, tmp_path):
         deployment.Deployment.from_environment()
 
 
-def test_canonical_card_root_slash_preserves_the_configured_tenant_scope(
-    configured_environment, monkeypatch,
+@pytest.mark.parametrize("tenant", [None, "tenant.a~b"])
+def test_canonical_card_root_slash_preserves_spelling_and_tenant_scope(
+    configured_environment, monkeypatch, tenant,
 ):
     monkeypatch.setenv("A2A_TCK_SUT_URL", "https://agent.example.test/")
-    monkeypatch.setenv("A2A_TCK_TENANT", "tenant.a~b")
+    if tenant is not None:
+        monkeypatch.setenv("A2A_TCK_TENANT", tenant)
     config = deployment.Deployment.from_environment()
-    assert config.scoped_url == "https://agent.example.test/tenant.a~b"
+    deployment._configure_httpx(config, monkeypatch)
+    expected = "https://agent.example.test" + (f"/{tenant}" if tenant else "")
+    assert config.scoped_url == expected
     client = deployment._client_factory(config)("https://agent.example.test/")
     try:
-        assert str(client._client.base_url) == "https://agent.example.test/tenant.a~b/"
+        assert client.base_url == expected + "/"
+        assert str(client._client.base_url) == expected + "/"
     finally:
         client.close()
+
+
+def test_raw_http_defaults_are_scoped_and_preserve_explicit_authentication(
+    configured_environment, monkeypatch,
+):
+    ca = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    config = deployment.Deployment(
+        "https://agent.example.test/a2a", "tenant-a", "test-only-token", ca,
+    )
+    requests = []
+    real_init = httpx.Client.__init__
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(400)
+
+    def initialize(client, *args, **kwargs):
+        assert kwargs["trust_env"] is False
+        assert kwargs["follow_redirects"] is False
+        assert kwargs["verify"] is ca
+        kwargs["transport"] = httpx.MockTransport(respond)
+        real_init(client, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", initialize)
+    deployment._configure_httpx(config, monkeypatch)
+    httpx.post(config.scoped_url + "//message:send", content=b"invalid-body")
+    httpx.post(
+        config.scoped_url + "/message:send",
+        headers={"Authorization": "Bearer explicit-other"},
+    )
+    httpx.get(config.sut_url + "/.well-known/agent-card.json")
+    httpx.get("https://other.example.test/a2a/tenant-a/tasks")
+    assert requests[0].headers["Authorization"] == "Bearer test-only-token"
+    assert requests[0].content == b"invalid-body"
+    assert requests[1].headers["Authorization"] == "Bearer explicit-other"
+    assert "Authorization" not in requests[2].headers
+    assert "Authorization" not in requests[3].headers
+    with pytest.raises(deployment.DeploymentError, match="origin or path"):
+        httpx.get(
+            "https://other.example.test/",
+            headers={"Authorization": "Bearer test-only-token"},
+        )
+    with pytest.raises(deployment.DeploymentError, match="verification"):
+        httpx.get(config.scoped_url + "/tasks", verify=False)
+    assert len(requests) == 4

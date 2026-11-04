@@ -358,6 +358,12 @@ enabled, redirects and ambient proxies are disabled, and plain HTTP is limited t
 explicit loopback development. Well-known discovery must be explicitly public for
 the stock TCK discovery fixture.
 
+The pytest binding supplies these HTTP defaults to the stock factory and raw HTTP
+probes. Raw request bytes and explicit authentication headers are not rewritten;
+the configured Bearer is added only inside its declared origin/path scope.
+Advertised trailing slashes are preserved, including the pinned raw-probe behavior.
+Client defaults are restored when pytest exits.
+
 Omitting `RequirementId` runs the full profile; providing one runs only its
 declared isolated selector. The caller must supply a fresh SUT for every isolated
 requirement and the complete suite. The unchanged upstream request/response
