@@ -1874,7 +1874,7 @@ async fn dispatch_authorized_request(
                 }
             };
             delivery_heartbeat(
-                &state.delivery,
+                &mut state.delivery,
                 &state.store,
                 state.consumer,
                 local_device,
@@ -2518,15 +2518,16 @@ fn evaluate_collaboration_action_request(
     let conversation_id = parse_collaboration_conversation_id(&request.conversation_id)?;
     let request_message_id = parse_collaboration_message_id(&request.request_message_id)?;
     let now_unix_milliseconds = SystemUnixClock.now_unix_milliseconds();
-    let lease_expires_at = store
-        .active_adapter_consumer_expiry(consumer)
+    let delivery_owner = store
+        .adapter_consumer_lease()
         .map_err(|_| "internal".to_string())?;
-    if grant.harness() != HarnessKind::Copilot
-        || !lease_expires_at.is_some_and(|expires_at| expires_at > now_unix_milliseconds)
-    {
-        return Ok(CollaborationActionEvaluation::Deny(
-            "copilot_delivery_not_proven",
-        ));
+    if let Some(reason) = copilot_delivery_denial(
+        grant.harness(),
+        consumer,
+        delivery_owner,
+        now_unix_milliseconds,
+    ) {
+        return Ok(CollaborationActionEvaluation::Deny(reason));
     }
     let expected_digest = crate::mcp::decode_hex::<32>(&request.policy_digest)
         .map(KonclaveDomainCore::CollaborationPolicyDigest::from_bytes)
@@ -2568,7 +2569,8 @@ fn evaluate_collaboration_action_request(
         }
         None => u64::MAX,
     };
-    let not_after_unix_milliseconds = lease_expires_at.unwrap_or_default().min(policy_expires_at);
+    let (_, lease_expires_at) = delivery_owner.ok_or_else(|| "internal".to_string())?;
+    let not_after_unix_milliseconds = lease_expires_at.min(policy_expires_at);
     let Some(directed_request_claim) = store
         .active_directed_request_claim(ActiveDirectedRequestClaim {
             conversation_id,
@@ -2671,6 +2673,23 @@ fn parse_collaboration_message_id(value: &str) -> Result<KonclaveDomainCore::Mes
     crate::mcp::decode_hex::<16>(value)
         .map(KonclaveDomainCore::MessageId::from_bytes)
         .map_err(|_| "invalid_request".to_string())
+}
+
+fn copilot_delivery_denial(
+    harness: HarnessKind,
+    consumer: AdapterConsumerId,
+    owner: Option<(AdapterConsumerId, u64)>,
+    now: u64,
+) -> Option<&'static str> {
+    if harness != HarnessKind::Copilot {
+        return Some("copilot_harness_required");
+    }
+    match owner {
+        None => Some("delivery_consumer_missing"),
+        Some((active, _)) if active != consumer => Some("delivery_consumer_replaced"),
+        Some((_, expiry)) if expiry <= now => Some("delivery_lease_expired"),
+        Some(_) => None,
+    }
 }
 
 fn directed_request_handling_error(error: &crate::persistence::ProfileStoreError) -> String {
@@ -3333,7 +3352,7 @@ async fn delivery_finish(
 }
 
 async fn delivery_heartbeat(
-    delivery: &Option<DeliveryAttachment>,
+    delivery: &mut Option<DeliveryAttachment>,
     store: &Arc<crate::persistence::ProfileStore>,
     consumer: AdapterConsumerId,
     local_device: DeviceId,
@@ -3358,6 +3377,22 @@ async fn delivery_heartbeat(
             })
         })
         .transpose()?;
+    if delivery.is_none() {
+        let turn = turn.ok_or_else(|| "invalid_request".to_string())?;
+        let store = Arc::clone(store);
+        *delivery = Some(
+            tokio::task::spawn_blocking(move || DeliveryAttachment::resume(turn, &store))
+                .await
+                .map_err(|_| "profile_unavailable".to_string())?
+                .map_err(|error| {
+                    record_failure(&error);
+                    error
+                        .downcast_ref::<crate::persistence::ProfileStoreError>()
+                        .map(directed_request_handling_error)
+                        .unwrap_or_else(|| "profile_unavailable".to_string())
+                })?,
+        );
+    }
     let attachment = delivery
         .as_ref()
         .ok_or_else(|| "profile_unavailable".to_string())?
@@ -4517,6 +4552,206 @@ mod collaboration_policy_tests {
     }
 
     #[test]
+    fn delivery_lease_denials_distinguish_harness_missing_replaced_and_expired() {
+        let current = consumer();
+        let other = AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]);
+        for (harness, owner, expected) in [
+            (
+                HarnessKind::Generic,
+                Some((current, 101)),
+                Some("copilot_harness_required"),
+            ),
+            (
+                HarnessKind::A2AGateway,
+                Some((current, 101)),
+                Some("copilot_harness_required"),
+            ),
+            (
+                HarnessKind::Copilot,
+                None,
+                Some("delivery_consumer_missing"),
+            ),
+            (
+                HarnessKind::Copilot,
+                Some((other, 101)),
+                Some("delivery_consumer_replaced"),
+            ),
+            (
+                HarnessKind::Copilot,
+                Some((current, 99)),
+                Some("delivery_lease_expired"),
+            ),
+            (
+                HarnessKind::Copilot,
+                Some((current, 100)),
+                Some("delivery_lease_expired"),
+            ),
+            (HarnessKind::Copilot, Some((current, 101)), None),
+        ] {
+            assert_eq!(
+                super::copilot_delivery_denial(harness, current, owner, 100),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn directed_request_delivery_resume_restores_work_and_reply_without_readmission() {
+        for disconnected in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let coordinator = open_coordinator(root.path(), "delivery-reconnect");
+            let conversation = coordinator.create().unwrap();
+            let store = coordinator.store();
+            let digest = store
+                .store_collaboration_policy_bundle(&bundle_with_work_permission(
+                    CollaborationPolicyLimits::new(Some(3_600_000), None, None, Some(1)).unwrap(),
+                    Some(CollaborationPolicyEffect::Allow),
+                ))
+                .unwrap();
+            store
+                .activate_collaboration_policy(
+                    conversation.conversation_id,
+                    digest,
+                    SystemUnixClock.now_unix_milliseconds(),
+                )
+                .unwrap();
+            let local_device = coordinator.device_id().unwrap();
+            let (old, request_id, notification_id, generation) = directed_request_delivery(
+                &store,
+                conversation.conversation_id,
+                conversation.routing_id,
+                local_device,
+            );
+            let authorize = serde_json::to_vec(&json!({
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "requestMessageId": crate::mcp::encode_hex(request_id.as_bytes()),
+                "notificationId": crate::mcp::encode_hex(notification_id.as_bytes()),
+                "leaseGeneration": generation,
+            }))
+            .unwrap();
+            let authorized: serde_json::Value = serde_json::from_slice(
+                &authorize_collaboration_turn(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    Some(&old),
+                    local_device,
+                    &authorize,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(authorized["outcome"], "authorized");
+            let turn = json!({
+                "conversationId": crate::mcp::encode_hex(conversation.conversation_id.as_bytes()),
+                "requestMessageId": crate::mcp::encode_hex(request_id.as_bytes()),
+                "policyDigest": crate::mcp::encode_hex(digest.as_bytes()),
+                "attempt": 1,
+            });
+            let mut connection_delivery = None;
+            assert_eq!(
+                super::delivery_heartbeat(
+                    &mut connection_delivery,
+                    &store,
+                    consumer(),
+                    local_device,
+                    b"{}",
+                )
+                .await,
+                Err("invalid_request".to_string()),
+            );
+            assert!(connection_delivery.is_none());
+            if disconnected {
+                old.release(&store).unwrap();
+            }
+            let payload = serde_json::to_vec(&json!({"turn": turn})).unwrap();
+            super::delivery_heartbeat(
+                &mut connection_delivery,
+                &store,
+                consumer(),
+                local_device,
+                &payload,
+            )
+            .await
+            .unwrap();
+            let resumed = connection_delivery.as_ref().unwrap();
+            assert_ne!(resumed.lease_id(), old.lease_id());
+            assert_eq!(
+                old.release(&store),
+                Err(crate::persistence::ProfileStoreError::InvalidAdapterLease),
+            );
+            let mut work = turn.clone();
+            work["action"] = json!("session.work");
+            assert!(matches!(
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    local_device,
+                    &serde_json::to_vec(&work).unwrap(),
+                )
+                .unwrap(),
+                CollaborationActionEvaluation::AllowWork,
+            ));
+            let mut reply = turn.clone();
+            reply["action"] = json!("conversation.reply");
+            reply["messageId"] = json!("11".repeat(16));
+            reply["replyToMessageId"] = json!(crate::mcp::encode_hex(request_id.as_bytes()));
+            reply["text"] = json!("correlated result");
+            assert!(matches!(
+                evaluate_collaboration_action(
+                    &store,
+                    &grant(HarnessKind::Copilot),
+                    consumer(),
+                    local_device,
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .unwrap(),
+                CollaborationActionEvaluation::Allow(_),
+            ));
+            let mut other_connection = None;
+            let other_consumer = AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]);
+            assert!(
+                super::delivery_heartbeat(
+                    &mut other_connection,
+                    &store,
+                    other_consumer,
+                    local_device,
+                    &payload,
+                )
+                .await
+                .is_err(),
+            );
+            assert!(other_connection.is_none());
+            super::delivery_heartbeat(
+                &mut connection_delivery,
+                &store,
+                consumer(),
+                local_device,
+                &payload,
+            )
+            .await
+            .unwrap();
+            store
+                .deactivate_collaboration_policy(conversation.conversation_id)
+                .unwrap();
+            let mut revoked_connection = None;
+            assert!(
+                super::delivery_heartbeat(
+                    &mut revoked_connection,
+                    &store,
+                    consumer(),
+                    local_device,
+                    &payload,
+                )
+                .await
+                .is_err(),
+            );
+            assert!(revoked_connection.is_none());
+        }
+    }
+
+    #[test]
     fn copilot_peer_work_requires_live_policy_and_exact_request_claim() {
         for (label, effect, allowed) in [
             ("reply-only", None, false),
@@ -4646,13 +4881,13 @@ mod collaboration_policy_tests {
                     HarnessKind::Generic,
                     consumer(),
                     local_device,
-                    "copilot_delivery_not_proven",
+                    "copilot_harness_required",
                 ),
                 (
                     HarnessKind::Copilot,
                     AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH]),
                     local_device,
-                    "copilot_delivery_not_proven",
+                    "delivery_consumer_replaced",
                 ),
             ] {
                 let result = evaluate(&work_payload, harness, consumer_id, device);
@@ -4796,7 +5031,7 @@ mod collaboration_policy_tests {
                     consumer(),
                     local_device
                 )["reason"],
-                "copilot_delivery_not_proven"
+                "delivery_lease_expired"
             );
         }
     }
@@ -4991,7 +5226,7 @@ mod collaboration_policy_tests {
         )
         .unwrap();
         assert_eq!(generic_action["decision"], "deny");
-        assert_eq!(generic_action["reason"], "copilot_delivery_not_proven");
+        assert_eq!(generic_action["reason"], "copilot_harness_required");
         assert!(authorizations.is_empty());
 
         let detached: serde_json::Value = serde_json::from_slice(

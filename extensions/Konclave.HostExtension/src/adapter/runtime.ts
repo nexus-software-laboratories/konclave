@@ -102,10 +102,27 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
     return Math.min(maximum, Math.round(raw * (0.8 + profileSpread / 1_000)));
   };
 
+  const flushing: {
+    task: Promise<void> | null;
+    failure: { cause: unknown } | null;
+  } = { task: null, failure: null };
+  const flush = (): void => {
+    flushing.task ??= options.coordinator
+      .flush()
+      .catch((cause: unknown) => {
+        flushing.failure = { cause };
+      })
+      .finally(() => {
+        flushing.task = null;
+      });
+  };
   const completed = (async () => {
     while (running) {
+      if (flushing.failure) {
+        throw flushing.failure.cause;
+      }
       if (options.coordinator.outstanding || options.coordinator.pending > 0) {
-        await options.coordinator.flush();
+        flush();
         if (!options.coordinator.outstanding && options.coordinator.pending === 0) {
           continue;
         }
@@ -188,9 +205,14 @@ export function startDeliveryRuntime(options: DeliveryRuntimeOptions): DeliveryR
 
       resetFailures();
       enqueue(options.coordinator, response.events, options.diagnostics);
-      await options.coordinator.flush();
+      flush();
     }
-  })();
+  })().finally(async () => {
+    await flushing.task;
+    if (flushing.failure) {
+      throw flushing.failure.cause;
+    }
+  });
 
   return {
     completed,

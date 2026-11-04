@@ -2013,6 +2013,17 @@ impl ProfileStore {
         &self,
         consumer_id: AdapterConsumerId,
     ) -> Result<Option<u64>, ProfileStoreError> {
+        Ok(self
+            .adapter_consumer_lease()?
+            .and_then(|(owner, expiry)| (owner == consumer_id).then_some(expiry)))
+    }
+
+    /// Reads the single delivery owner without conflating absence with replacement.
+    ///
+    /// Malformed retained metadata and storage failures remain errors.
+    pub(crate) fn adapter_consumer_lease(
+        &self,
+    ) -> Result<Option<(AdapterConsumerId, u64)>, ProfileStoreError> {
         let current: Option<(Option<Vec<u8>>, i64)> = self
             .lock()?
             .query_row(
@@ -2033,7 +2044,7 @@ impl ProfileStore {
             AdapterConsumerId::from_slice(&active_consumer.ok_or(ProfileStoreError::CorruptData)?)
                 .map_err(|_| ProfileStoreError::CorruptData)?;
         let expires_at = from_sql_integer(expires_at)?;
-        Ok((active_consumer == consumer_id).then_some(expires_at))
+        Ok(Some((active_consumer, expires_at)))
     }
 
     fn finish_remote_event_claim(
@@ -19272,6 +19283,313 @@ mod tests {
             .unwrap();
         assert_eq!(renewed.lease_generation, claim.lease_generation);
         assert_eq!(renewed.claim_expires_at_unix_milliseconds, 17_000);
+    }
+
+    #[test]
+    fn directed_request_delivery_resume_preserves_attempt_and_fences_old_attachment() {
+        for disconnected in [false, true] {
+            let fixture = conversation_fixture(&format!("resume-delivery-{disconnected}"));
+            let digest = activate_request_reply_policy(&fixture);
+            let consumer = AdapterConsumerId::from_bytes([79; AdapterConsumerId::LENGTH]);
+            let old_lease = AdapterLeaseId::from_bytes([80; AdapterLeaseId::LENGTH]);
+            let new_lease = AdapterLeaseId::from_bytes([81; AdapterLeaseId::LENGTH]);
+            let claim = claim_directed_request_for(&fixture, digest, consumer, old_lease);
+            let active = ActiveDirectedRequestClaim {
+                conversation_id: claim.conversation_id,
+                request_message_id: claim.request_message_id,
+                responder_device_id: claim.responder_device_id,
+                consumer_id: consumer,
+                attempt: claim.attempt,
+                policy_digest: digest,
+                now_unix_milliseconds: 2_000,
+            };
+            if disconnected {
+                fixture
+                    .store
+                    .release_adapter_consumer(consumer, old_lease)
+                    .unwrap();
+            }
+            let resumed = fixture
+                .store
+                .resume_directed_request_delivery(active, new_lease, 12_000)
+                .unwrap();
+            assert_eq!(resumed.attempt, claim.attempt);
+            assert_eq!(resumed.notification_id, claim.notification_id);
+            assert_eq!(resumed.lease_generation, claim.lease_generation);
+            assert_eq!(resumed.lease_id, new_lease);
+            assert_eq!(
+                fixture.store.active_directed_request_claim(active).unwrap(),
+                Some(resumed)
+            );
+            assert_eq!(
+                fixture.store.heartbeat_adapter_consumer(
+                    consumer,
+                    old_lease,
+                    2_001,
+                    12_001,
+                    Some(active)
+                ),
+                Err(ProfileStoreError::InvalidAdapterLease),
+            );
+            assert_eq!(
+                fixture.store.release_adapter_consumer(consumer, old_lease),
+                Err(ProfileStoreError::InvalidAdapterLease),
+            );
+            fixture
+                .store
+                .heartbeat_adapter_consumer(consumer, new_lease, 2_001, 12_001, Some(active))
+                .unwrap();
+            fixture
+                .store
+                .acknowledge_remote_event(
+                    claim.notification_id,
+                    consumer,
+                    new_lease,
+                    claim.lease_generation,
+                    2_002,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn directed_request_delivery_resume_rejects_stale_substituted_and_revoked_claims() {
+        for failure in [
+            "consumer",
+            "attempt",
+            "digest",
+            "expired",
+            "completed",
+            "revoked",
+            "owner",
+            "generation",
+        ] {
+            let fixture = conversation_fixture(&format!("resume-refuse-{failure}"));
+            let digest = activate_request_reply_policy(&fixture);
+            let consumer = AdapterConsumerId::from_bytes([79; AdapterConsumerId::LENGTH]);
+            let old_lease = AdapterLeaseId::from_bytes([80; AdapterLeaseId::LENGTH]);
+            let claim = claim_directed_request_for(&fixture, digest, consumer, old_lease);
+            fixture
+                .store
+                .release_adapter_consumer(consumer, old_lease)
+                .unwrap();
+            let mut active = ActiveDirectedRequestClaim {
+                conversation_id: claim.conversation_id,
+                request_message_id: claim.request_message_id,
+                responder_device_id: claim.responder_device_id,
+                consumer_id: consumer,
+                attempt: claim.attempt,
+                policy_digest: digest,
+                now_unix_milliseconds: 2_000,
+            };
+            match failure {
+                "consumer" => {
+                    active.consumer_id =
+                        AdapterConsumerId::from_bytes([82; AdapterConsumerId::LENGTH])
+                }
+                "attempt" => active.attempt += 1,
+                "digest" => {
+                    active.policy_digest = CollaborationPolicyDigest::from_bytes(
+                        [82; CollaborationPolicyDigest::LENGTH],
+                    )
+                }
+                "expired" => {
+                    active.now_unix_milliseconds = claim.claim_expires_at_unix_milliseconds
+                }
+                "completed" => {
+                    fixture
+                        .store
+                        .complete_directed_request_without_response(CompleteDirectedRequest {
+                            conversation_id: claim.conversation_id,
+                            request_message_id: claim.request_message_id,
+                            responder_device_id: claim.responder_device_id,
+                            consumer_id: consumer,
+                            attempt: claim.attempt,
+                            policy_digest: digest,
+                        })
+                        .unwrap();
+                }
+                "revoked" => {
+                    fixture
+                        .store
+                        .deactivate_collaboration_policy(claim.conversation_id)
+                        .unwrap();
+                }
+                "owner" | "generation" => {
+                    let competing = if failure == "owner" {
+                        AdapterConsumerId::from_bytes([82; AdapterConsumerId::LENGTH])
+                    } else {
+                        consumer
+                    };
+                    let lease = AdapterLeaseId::from_bytes([83; AdapterLeaseId::LENGTH]);
+                    fixture
+                        .store
+                        .acquire_adapter_consumer(competing, lease, 1_100, 10_000)
+                        .unwrap();
+                    if failure == "generation" {
+                        fixture
+                            .store
+                            .claim_remote_events(competing, lease, 1_200, 9_000, 1)
+                            .unwrap();
+                        fixture
+                            .store
+                            .release_adapter_consumer(competing, lease)
+                            .unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let result = fixture.store.resume_directed_request_delivery(
+                active,
+                AdapterLeaseId::from_bytes([84; AdapterLeaseId::LENGTH]),
+                12_000,
+            );
+            let expected = if matches!(failure, "digest" | "revoked") {
+                ProfileStoreError::CollaborationPolicyReplacementMismatch
+            } else {
+                ProfileStoreError::InvalidAdapterLease
+            };
+            assert_eq!(result, Err(expected), "{failure}");
+        }
+    }
+
+    #[test]
+    fn directed_request_delivery_resume_preserves_continuation_and_rolls_back_after_member_removal()
+    {
+        let (fixture, input, answer) = response_continuation_fixture("resume-continuation");
+        let claim = match fixture
+            .store
+            .claim_response_continuation(input, answer)
+            .unwrap()
+        {
+            DirectedRequestClaimOutcome::Claimed(claim) => claim,
+            outcome => panic!("expected live continuation, got {outcome:?}"),
+        };
+        fixture
+            .store
+            .release_adapter_consumer(input.consumer_id, input.lease_id)
+            .unwrap();
+        let active = ActiveDirectedRequestClaim {
+            conversation_id: input.conversation_id,
+            request_message_id: input.request_message_id,
+            responder_device_id: input.responder_device_id,
+            consumer_id: input.consumer_id,
+            attempt: claim.attempt,
+            policy_digest: input.policy_digest,
+            now_unix_milliseconds: 2_000,
+        };
+        let resumed = fixture
+            .store
+            .resume_directed_request_delivery(active, AdapterLeaseId::from_bytes([88; 16]), 62_000)
+            .unwrap();
+        assert_eq!(resumed.continuation_message_id, Some(answer));
+        assert_eq!(resumed.notification_id, claim.notification_id);
+        assert_eq!(resumed.lease_generation, claim.lease_generation);
+        assert_eq!(resumed.attempt, claim.attempt);
+        assert_eq!(
+            fixture.store.active_directed_request_claim(active).unwrap(),
+            Some(resumed)
+        );
+        fixture
+            .store
+            .release_adapter_consumer(input.consumer_id, resumed.lease_id)
+            .unwrap();
+        let snapshot = || {
+            let connection = fixture.store.lock().unwrap();
+            let handling: Vec<u8> = connection
+                .query_row(
+                    "SELECT sealed_handling FROM daemon_directed_request_handling",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let event: Vec<u8> = connection
+                .query_row(
+                    "SELECT sealed_delivery_state FROM daemon_remote_event",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (handling, event)
+        };
+        let before = snapshot();
+        assert_eq!(
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .execute(
+                    "DELETE FROM daemon_conversation_binding
+                 WHERE conversation_id = ?1 AND device_id != ?2",
+                    params![
+                        input.conversation_id.as_bytes().as_slice(),
+                        input.responder_device_id.as_bytes().as_slice()
+                    ],
+                )
+                .unwrap(),
+            1,
+        );
+        assert_eq!(
+            fixture.store.resume_directed_request_delivery(
+                active,
+                AdapterLeaseId::from_bytes([89; 16]),
+                62_000,
+            ),
+            Err(ProfileStoreError::InvalidTransition),
+        );
+        assert_eq!(snapshot(), before);
+        assert_eq!(
+            fixture
+                .store
+                .active_adapter_consumer_expiry(input.consumer_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(fixture.store.remote_event_counts().unwrap(), (1, 0));
+    }
+
+    #[test]
+    fn directed_request_delivery_resume_surfaces_sqlite_write_failure_without_a_lease() {
+        let fixture = conversation_fixture("resume-storage-error");
+        let digest = activate_request_reply_policy(&fixture);
+        let consumer = AdapterConsumerId::from_bytes([79; AdapterConsumerId::LENGTH]);
+        let old_lease = AdapterLeaseId::from_bytes([80; AdapterLeaseId::LENGTH]);
+        let claim = claim_directed_request_for(&fixture, digest, consumer, old_lease);
+        fixture
+            .store
+            .release_adapter_consumer(consumer, old_lease)
+            .unwrap();
+        fixture
+            .store
+            .lock()
+            .unwrap()
+            .pragma_update(None, "query_only", true)
+            .unwrap();
+        let active = ActiveDirectedRequestClaim {
+            conversation_id: claim.conversation_id,
+            request_message_id: claim.request_message_id,
+            responder_device_id: claim.responder_device_id,
+            consumer_id: consumer,
+            attempt: claim.attempt,
+            policy_digest: digest,
+            now_unix_milliseconds: 2_000,
+        };
+        assert_eq!(
+            fixture.store.resume_directed_request_delivery(
+                active,
+                AdapterLeaseId::from_bytes([81; AdapterLeaseId::LENGTH]),
+                12_000,
+            ),
+            Err(ProfileStoreError::Storage),
+        );
+        assert_eq!(
+            fixture
+                .store
+                .active_adapter_consumer_expiry(consumer)
+                .unwrap(),
+            None
+        );
+        assert_eq!(fixture.store.remote_event_counts().unwrap(), (1, 0));
     }
 
     #[test]

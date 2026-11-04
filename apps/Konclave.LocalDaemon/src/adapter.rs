@@ -179,6 +179,31 @@ impl DeliveryAttachment {
         })
     }
 
+    /// Rebinds one exact still-live turn to this connection without a new attempt.
+    ///
+    /// A native-generated lease fences the previous connection, including cleanup.
+    /// Returns an error instead of acquiring unrelated or expired work.
+    pub(crate) fn resume(
+        request: ActiveDirectedRequestClaim,
+        store: &ProfileStore,
+    ) -> anyhow::Result<Self> {
+        let lease_id = generate_lease_id().context("generating a delivery recovery lease")?;
+        let expires_at = request
+            .now_unix_milliseconds
+            .checked_add(
+                u64::try_from(CONSUMER_LEASE_DURATION.as_millis())
+                    .context("delivery lease duration does not fit a millisecond clock")?,
+            )
+            .context("delivery lease expiry overflows the clock")?;
+        store
+            .resume_directed_request_delivery(request, lease_id, expires_at)
+            .context("resuming the exact live delivery attempt")?;
+        Ok(Self {
+            consumer_id: request.consumer_id,
+            lease_id,
+        })
+    }
+
     /// Returns the lease identifier this attachment owns.
     pub(crate) const fn lease_id(&self) -> AdapterLeaseId {
         self.lease_id

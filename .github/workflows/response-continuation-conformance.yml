@@ -88,6 +88,13 @@ jobs:
           set -euo pipefail
           cargo test --locked --package KonclaveLocalDaemon --lib regenerate_copilot_tool_contract_fixture -- --ignored
           cargo test --locked --package KonclaveLocalDaemon --lib copilot_tool_contract_fixture_matches_the_router
+      - name: Verify exact live-attempt delivery lease recovery
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package KonclaveLocalDaemon --lib directed_request_delivery_resume
+          cargo test --locked --package KonclaveLocalDaemon --lib delivery_heartbeat
       - name: Retain exact native tool contract
         if: steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
