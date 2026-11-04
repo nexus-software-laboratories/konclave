@@ -2569,7 +2569,8 @@ fn evaluate_collaboration_action_request(
         }
         None => u64::MAX,
     };
-    let not_after_unix_milliseconds = lease_expires_at.unwrap_or_default().min(policy_expires_at);
+    let (_, lease_expires_at) = delivery_owner.ok_or_else(|| "internal".to_string())?;
+    let not_after_unix_milliseconds = lease_expires_at.min(policy_expires_at);
     let Some(directed_request_claim) = store
         .active_directed_request_claim(ActiveDirectedRequestClaim {
             conversation_id,
