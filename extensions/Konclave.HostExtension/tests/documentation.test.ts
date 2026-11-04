@@ -18,6 +18,7 @@ function cell(value: string): string {
 
 function schemaType(value: unknown): string {
   if (!isRecord(value)) throw new Error('Invalid generated field schema');
+  if (value.const !== undefined) return JSON.stringify(value.const);
   if (typeof value.$ref === 'string') return value.$ref.split('/').at(-1) ?? value.$ref;
   if (Array.isArray(value.enum)) return value.enum.map(String).join(' / ');
   if (Array.isArray(value.anyOf)) return value.anyOf.map(schemaType).join(' / ');
@@ -25,6 +26,30 @@ function schemaType(value: unknown): string {
   if (Array.isArray(value.type)) return value.type.map(String).join(' / ');
   if (typeof value.type === 'string') return value.type;
   return 'See full schema';
+}
+
+function resultDetails(schema: unknown): string {
+  if (!isRecord(schema)) throw new Error('Invalid generated result schema');
+  const definitions = schema.$defs;
+  if (definitions === undefined) return '';
+  if (!isRecord(definitions)) throw new Error('Invalid generated result definitions');
+  return Object.entries(definitions)
+    .map(([name, definition]) => {
+      if (!isRecord(definition)) throw new Error(`Invalid result definition: ${name}`);
+      const variants = definition.oneOf;
+      if (variants !== undefined && !Array.isArray(variants)) {
+        throw new Error(`Invalid result variants: ${name}`);
+      }
+      return [
+        `#### ${name}`,
+        '',
+        definition.properties === undefined ? '' : fields(definition, true),
+        ...(variants ?? []).map(
+          (variant, index) => `##### Variant ${index + 1}\n\n${fields(variant, false)}`,
+        ),
+      ].join('\n');
+    })
+    .join('\n');
 }
 
 function fields(schema: unknown, requireDescriptions: boolean): string {
@@ -58,6 +83,28 @@ async function checkPage(path: string, expected: string): Promise<void> {
 }
 
 describe('reader-facing contract views', () => {
+  it('publishes the same typed workspace example that the normal typecheck compiles', async () => {
+    const example = await readFile(
+      new URL('extensions/Konclave.HostExtension/tests/examples/installed-client.ts', root),
+      'utf8',
+    );
+    const path = 'docs/integrations/typescript-client.md';
+    const original = await readFile(new URL(path, root), 'utf8');
+    const start = '<!-- installed-client-example:start -->';
+    const end = '<!-- installed-client-example:end -->';
+    const begin = original.indexOf(start);
+    const finish = original.indexOf(end);
+    if (begin < 0 || finish <= begin) throw new Error('Typed example markers are missing');
+    await checkPage(
+      path,
+      original.slice(0, begin + start.length) +
+        '\n\n```typescript\n' +
+        example.trimEnd() +
+        '\n```\n\n' +
+        original.slice(finish),
+    );
+  });
+
   it('publishes the projected agent inputs and native result fields without a second registry', async () => {
     const sections = konclaveTools.map((tool) => {
       const contract = contracts.find((candidate) => candidate.name === tool.name);
@@ -72,7 +119,8 @@ describe('reader-facing contract views', () => {
         fields(tool.parameters, true),
         '### Result',
         '',
-        fields(contract.outputSchema, false),
+        fields(contract.outputSchema, true),
+        resultDetails(contract.outputSchema),
       ].join('\n');
     });
     await checkPage(

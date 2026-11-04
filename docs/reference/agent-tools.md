@@ -124,6 +124,9 @@ KONCLAVE_GENERATE_REFERENCE=1 npm run test:unit -- tests/documentation.test.ts
 The environment assignment above uses a POSIX shell; in PowerShell set
 `$env:KONCLAVE_GENERATE_REFERENCE = '1'` for that command and remove it afterward.
 Without that flag the test is read-only and refuses drift or undocumented projected
-inputs. The hosted Documentation contracts check regenerates through both owners,
+inputs/results. Nested definitions and tagged message variants come from the same
+schema. The same test projects the compiled TypeScript workspace example; native
+module rustdoc includes the Rust integration guide for executable doctests.
+The hosted Documentation contracts check regenerates through both owners,
 exports the generated files for inspection and fails on a submitted-source delta.
 Inspect generated diffs; never hand-edit the fixture or generated field tables.

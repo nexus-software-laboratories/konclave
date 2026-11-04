@@ -41,6 +41,9 @@ unqualified credential-bearing HTTP client.
 This generic fragment shows the actual public constructor and send boundary. It
 assumes a qualified host and authenticated relay have already been provisioned.
 It deliberately does not invent a storage provider, sealer or enrollment shortcut.
+The native module includes this page in rustdoc, so `cargo test --locked --package
+KonclaveClientLibrary --doc` compiles this exact fragment. Compilation does not
+provision a host, connect to a relay or qualify a production backend.
 
 ```rust
 use std::sync::Arc;

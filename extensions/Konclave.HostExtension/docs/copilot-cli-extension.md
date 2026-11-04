@@ -96,55 +96,64 @@ to continue safely.
 <!-- command-reference:start -->
 
 ```text
-/konclave help
-/konclave output <normal|verbose>
-/konclave status
-/konclave diagnose [conversation] <message>
-/konclave identity
-/konclave conversations
-/konclave devices
-/konclave device alias <device> <alias>
-/konclave connect [--copy|--qr]
-/konclave connect --short
-/konclave connect <six-digit-code>
-/konclave connect <token-or-konclave-uri>
-/konclave connect resume <pairing>
-/konclave clipboard clear
-/konclave pair [member|administrator]
-/konclave join <capability>
-/konclave new
-/konclave new <alias>
-/konclave service create <requester-device>
-/konclave service channels [after-conversation]
-/konclave service inbox [conversation] [after-cursor]
-/konclave repeat <operation>
-/konclave cancel-repeat <operation>
-/konclave pairing <pairing>
-/konclave verification <attempt>
-/konclave verify <attempt> <peer> <sas>
-/konclave approve <pairing> [conversation] [role]
-/konclave approve <pairing> <inviter> <conversation> <role>
-/konclave sync <pairing>
-/konclave cancel <pairing>
-/konclave cancel-verification <attempt>
-/konclave send [conversation] [message-id] -- <text>
-/konclave request [conversation] [target-device] [message-id] -- <text>
-/konclave request [conversation] [message-id] --to <device> -- <text>
-/konclave reply [conversation] <reply-to> [message-id] -- <text>
-/konclave messages [conversation] [after-cursor]
-  --order asc|desc --before-cursor <cursor>
-  --since <RFC3339> --until <RFC3339>
-/konclave use <conversation>
-/konclave mute [conversation]
-/konclave unmute [conversation]
-/konclave policy status
-/konclave policy propose [proposal-id] -- <relative-source>
-/konclave policy replace <digest> [proposal-id] -- <relative-source>
-/konclave policy resume <proposal-id>
-/konclave policy inspect <proposal-id>
-/konclave policy accept <proposal-id> <digest>
-/konclave policy reject <proposal-id> <digest>
-/konclave policy revoke <digest> [message-id]
+Konclave commands (deterministic; no model inference):
+  /konclave help                                      Show this list.
+  /konclave output <normal|verbose>                   Set command detail for this session.
+  /konclave status                                    Show profile, delivery, and relay state.
+  /konclave diagnose [conversation] <message>         Explain body-free local delivery evidence.
+  /konclave identity                                  Show this profile device identifier.
+  /konclave conversations                             List local conversation identifiers.
+  /konclave devices                                   List local trusted-device aliases.
+  /konclave device alias <device> <alias>             Bind a local alias to a current member.
+  /konclave connect [--copy|--qr]                     Create a compact two-session connection token.
+  /konclave connect --short                           Create a six-digit mutually verified connection code.
+  /konclave connect <six-digit-code>                  Join a short-code verification attempt.
+  /konclave connect <token>                           Join and complete an AccountTrusted connection.
+  /konclave connect <konclave://pair/token>           Join from a pairing deep link.
+  /konclave connect resume <pairing>                  Resume one interrupted AccountTrusted connection.
+  /konclave clipboard clear                           Clear a token copied by this session.
+  /konclave pair [member|administrator]               Create a full recovery capability.
+  /konclave join <capability>                         Redeem a full recovery capability.
+  /konclave new                                       Create an empty conversation.
+  /konclave new <alias>                               Create and connect a new conversation.
+  /konclave service create <requester-device>        Create and select a private directional operator channel.
+  /konclave service channels [after-conversation]   Inspect a bounded operator-private channel page.
+  /konclave service inbox [conversation] [after-cursor]
+                                                       Inspect local unreplied requests; no work permission is granted.
+  /konclave repeat <operation>                        Resume one alias-based connection.
+  /konclave cancel-repeat <operation>                 Cancel one alias-based connection.
+  /konclave pairing <pairing>                         Show authenticated pairing state.
+  /konclave verification <attempt>                    Show short-code verification state.
+  /konclave verify <attempt> <peer> <sas>             Explicitly confirm displayed short-code values.
+  /konclave approve <pairing> [conversation] [role]   Approve a displayed joiner; defaults to selected conversation and member.
+  /konclave approve <pairing> <inviter> <conversation> <role>
+                                                       Approve displayed inviter fields.
+  /konclave sync <pairing>                            Process one pairing progress page.
+  /konclave cancel <pairing>                          Cancel an active pairing.
+  /konclave cancel-verification <attempt>             Cancel a short-code verification attempt.
+  /konclave send [conversation] [message-id] -- <text>
+                                                       Send or retry a message.
+  /konclave request [conversation] [target-device] [message-id] -- <text>
+                                                       Positional group targets require a conversation ID.
+  /konclave request [conversation] [message-id] --to <device> -- <text>
+                                                       Target a peer in the selected or explicit conversation.
+  /konclave reply [conversation] <reply-to> [message-id] -- <text>
+                                                       Reply or retry with an explicit ID.
+  /konclave messages [conversation] [after-cursor]    Sync and show newest-first history with UTC timestamps.
+    --order asc|desc --before-cursor <cursor>          Choose cursor order and a backward page bound.
+    --since <RFC3339> --until <RFC3339>                Sender timestamp range [since, until); explicit timezone required.
+  /konclave use <conversation>                        Select the implicit conversation.
+  /konclave mute [conversation]                       Mute automatic delivery.
+  /konclave unmute [conversation]                     Resume automatic delivery.
+  /konclave policy status                             Show active policy metadata.
+  /konclave policy propose [proposal-id] -- <source>  Compile and propose a policy.
+  /konclave policy replace <digest> [proposal-id] -- <source>
+                                                       Replace the active policy.
+  /konclave policy resume <proposal-id>                Resume a committed proposal.
+  /konclave policy inspect <proposal-id>               Review a peer proposal.
+  /konclave policy accept <proposal-id> <digest>      Accept an exact proposal.
+  /konclave policy reject <proposal-id> <digest>      Reject an exact proposal.
+  /konclave policy revoke <digest> [message-id]       Revoke the active policy.
 ```
 
 <!-- command-reference:end -->

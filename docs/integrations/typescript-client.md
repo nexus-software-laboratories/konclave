@@ -127,6 +127,21 @@ remains the backstop; do not replay a successful application operation merely to
 retry cleanup. `connected` describes whether the client has been closed, not a
 continuous probe of service/relay health.
 
+### Typed workspace example
+
+The following complete helper is copied by the documentation check from
+[`tests/examples/installed-client.ts`](../../extensions/Konclave.HostExtension/tests/examples/installed-client.ts).
+The ordinary TypeScript typecheck compiles that exact source against the supported
+barrel. Its import is relative to that workspace file, not an npm package.
+Supply the intended environment, the selected client module's directory and an
+independently approved canonical durable profile. Calling it requires a healthy
+installed service; typechecking does not make a live connection or prove a grant.
+It validates the unknown result and retires/closes the owned client. A retirement
+failure remains an error; do not infer that a successful read was rolled back.
+
+<!-- installed-client-example:start -->
+<!-- installed-client-example:end -->
+
 ## Failures and evidence
 
 | Failure | Safe next action |
