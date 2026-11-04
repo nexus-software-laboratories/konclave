@@ -165,5 +165,6 @@ source relay envelopes/cursors. Destination enrollment authority must match;
 coordinate devices and sync before cutover when pending delivery matters.
 
 Configuration examples and lifecycle verification belong to the linked installation/
-self-hosting guides and owning source tests. No installer, server, build, or test
-was executed for this reference update.
+self-hosting guides and owning source tests. These links identify qualification
+owners, not evidence that an installer action, live server or production deployment
+was exercised. Consult exact-head hosted checks for fresh execution results.

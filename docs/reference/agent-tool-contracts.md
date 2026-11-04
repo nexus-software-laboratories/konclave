@@ -447,12 +447,12 @@ Show the active local policy metadata for one conversation without returning gui
 
 #### CollaborationPolicyStatementResult
 
-| Field          | Type          | Required | Meaning                                                                                      |
-| -------------- | ------------- | -------- | -------------------------------------------------------------------------------------------- |
-| `action`       | string        | yes      | Exact supported policy action or wildcard pattern, not executable guidance.                  |
-| `effect`       | string        | yes      | Structured allow or deny decision; deny overrides allow.                                     |
-| `resource`     | string / null | no       | Optional structured resource selector; null means the statement has no resource restriction. |
-| `statement_id` | string        | yes      | Bundle-scoped statement identifier used to identify the matching structured decision.        |
+| Field          | Type          | Required | Meaning                                                                                              |
+| -------------- | ------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `action`       | string        | yes      | Canonical namespaced action selector evaluated by the native policy engine, not executable guidance. |
+| `effect`       | string        | yes      | Structured allow, deny or require_local_approval decision; matching restrictions still apply.        |
+| `resource`     | string / null | no       | Optional structured resource selector; null means the statement has no resource restriction.         |
+| `statement_id` | string        | yes      | Bundle-scoped statement identifier used to identify the matching structured decision.                |
 
 ## get_identity
 
@@ -557,12 +557,12 @@ Inspect one authenticated peer proposal before local acceptance. Returned guidan
 
 #### CollaborationPolicyStatementResult
 
-| Field          | Type          | Required | Meaning                                                                                      |
-| -------------- | ------------- | -------- | -------------------------------------------------------------------------------------------- |
-| `action`       | string        | yes      | Exact supported policy action or wildcard pattern, not executable guidance.                  |
-| `effect`       | string        | yes      | Structured allow or deny decision; deny overrides allow.                                     |
-| `resource`     | string / null | no       | Optional structured resource selector; null means the statement has no resource restriction. |
-| `statement_id` | string        | yes      | Bundle-scoped statement identifier used to identify the matching structured decision.        |
+| Field          | Type          | Required | Meaning                                                                                              |
+| -------------- | ------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `action`       | string        | yes      | Canonical namespaced action selector evaluated by the native policy engine, not executable guidance. |
+| `effect`       | string        | yes      | Structured allow, deny or require_local_approval decision; matching restrictions still apply.        |
+| `resource`     | string / null | no       | Optional structured resource selector; null means the statement has no resource restriction.         |
+| `statement_id` | string        | yes      | Bundle-scoped statement identifier used to identify the matching structured decision.                |
 
 ## list_conversations
 

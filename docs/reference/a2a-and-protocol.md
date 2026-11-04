@@ -158,7 +158,8 @@ before implementing storage or retrieval.
 
 ## Native protobuf ownership and release profile
 
-Authored native schemas live under [`protocol`](../../protocol), separately from
+Authored native schemas live under
+[`proto/konclave/protocol/v1`](../../proto/konclave/protocol/v1), separately from
 vendored A2A. [`Konclave.ProtocolContracts`](../../crates/Konclave.ProtocolContracts/src/lib.rs)
 exposes generated `wire::v1` DTOs and validating v1 codecs;
 [`Konclave.ProtocolContracts.TypeScript`](../../packages/Konclave.ProtocolContracts.TypeScript)
@@ -197,3 +198,20 @@ For example `application-message.bin` and `directed-request-message.bin` are dec
 and re-encoded against maintained builders. Compatibility requires supported prior
 fixtures to remain readable; these fixtures are not a substitute for authorization
 or crash/replay tests.
+
+The fixture test imports the validating application codecs from
+[`src/application.ts`](../../packages/Konclave.ProtocolContracts.TypeScript/src/application.ts).
+Its application cases use this exact encode/decode composition:
+
+```typescript
+roundTrip: (bytes) => encodeApplicationMessage(decodeApplicationMessage(bytes))
+```
+
+Here `bytes` is the fixture's `Uint8Array`; the test compares the decoded value to
+the maintained builder and the re-encoded bytes to the original fixture.
+For untrusted application input, `decodeApplicationMessage` first checks the byte
+and nested-field bounds, decodes protobuf, and validates version, identifiers,
+counter, content variant and variant-specific limits. Encoding validates again.
+Failures throw `ProtocolValidationError`; neither codec supplies signature,
+membership, policy or persistence checks. This is an excerpt of an existing
+executable test, not a standalone program or a lossless unknown-field forwarder.

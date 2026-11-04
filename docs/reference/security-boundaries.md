@@ -143,5 +143,6 @@ Fixture keys, loopback listeners, in-memory stores, and process-local mutexes ar
 not production custody, TLS termination, crash durability, or cross-replica fencing.
 The shipped SQLite/file implementations have specific local guarantees; alternate
 backends must demonstrate equivalent semantics rather than inherit the label.
-No fresh tests, builds, ceremonies, deployment probes, or CI runs were performed
-for this documentation change.
+Linked tests identify qualification owners, not the latest execution result.
+Check exact-head hosted evidence separately; fixtures do not demonstrate live
+ceremonies, deployment probes or production-backend qualification.

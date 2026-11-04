@@ -1331,11 +1331,11 @@
         "CollaborationPolicyStatementResult": {
           "properties": {
             "action": {
-              "description": "Exact supported policy action or wildcard pattern, not executable guidance.",
+              "description": "Canonical namespaced action selector evaluated by the native policy engine, not executable guidance.",
               "type": "string"
             },
             "effect": {
-              "description": "Structured allow or deny decision; deny overrides allow.",
+              "description": "Structured allow, deny or require_local_approval decision; matching restrictions still apply.",
               "type": "string"
             },
             "resource": {
@@ -1634,11 +1634,11 @@
         "CollaborationPolicyStatementResult": {
           "properties": {
             "action": {
-              "description": "Exact supported policy action or wildcard pattern, not executable guidance.",
+              "description": "Canonical namespaced action selector evaluated by the native policy engine, not executable guidance.",
               "type": "string"
             },
             "effect": {
-              "description": "Structured allow or deny decision; deny overrides allow.",
+              "description": "Structured allow, deny or require_local_approval decision; matching restrictions still apply.",
               "type": "string"
             },
             "resource": {
