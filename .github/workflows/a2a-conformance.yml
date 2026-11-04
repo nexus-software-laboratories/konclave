@@ -90,9 +90,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo fmt --package KonclaveA2AGateway -- --check
           cargo fmt --package KonclaveA2AGatewayHost -- --check
           cargo fmt --package KonclaveLocalDaemon -- --check
+          cargo test --locked --package KonclaveA2AGateway --test http
           cargo test --locked --package KonclaveA2AGatewayHost
+          cargo clippy --locked --package KonclaveA2AGateway --all-targets -- -D warnings
           cargo clippy --locked --package KonclaveA2AGatewayHost --all-targets -- -D warnings
           cargo clippy \
             --locked \
