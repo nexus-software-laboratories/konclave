@@ -40,9 +40,10 @@ jobs:
             $run = $files.Count -ge 3000 -or @($files | Where-Object {
               $_ -match '^apps/Konclave\.LocalDaemon/src/mcp\.rs$' -or
               $_ -match '^crates/Konclave\.ClientLibrary/src/native/mod\.rs$' -or
+              $_ -match '^crates/Konclave\.AdapterSdk/src/lib\.rs$' -or
               $_ -match '^fixtures/local-service/v1/copilot-tools\.json$' -or
               $_ -match '^extensions/Konclave\.HostExtension/(src/service/(commands|tools|operations)\.ts|tests/(documentation\.test\.ts|examples/installed-client\.ts)|docs/copilot-cli-extension\.md|package(-lock)?\.json)$' -or
-              $_ -match '^docs/integrations/(typescript-client|native-client)\.md$' -or
+              $_ -match '^docs/integrations/(typescript-client|native-client|adapter-sdk)\.md$' -or
               $_ -match '^docs/reference/agent-tool(s|-contracts)\.md$' -or
               $_ -match '^\.github/(workflows/documentation-reference\.yml|genesis-delivery\.json)$'
             }).Count -ne 0
@@ -62,7 +63,7 @@ jobs:
         run: cargo test --locked --package KonclaveLocalDaemon --lib mcp::tests::regenerate_copilot_tool_contract_fixture -- --ignored --exact
       - name: Compile native integration examples
         if: steps.scope.outputs.run == 'true'
-        run: cargo test --locked --package KonclaveClientLibrary --doc
+        run: cargo test --locked --package KonclaveClientLibrary --package KonclaveAdapterSdk --doc
       - name: Resolve pinned Node version
         if: steps.scope.outputs.run == 'true'
         id: toolchains

@@ -158,7 +158,9 @@ delivery models and settlement are owned by
 Runnable behavior owners are
 [`contract.rs`](../../crates/Konclave.AdapterSdk/tests/contract.rs) and
 [`fake_harness.rs`](../../crates/Konclave.AdapterSdk/tests/fake_harness.rs).
-The fragment above is source-aligned, not a separately compiled standalone package.
+The crate includes this page in rustdoc, so `cargo test --locked --package
+KonclaveAdapterSdk --doc` compiles the exact fragment above. This does not open a
+live session or qualify an external harness; no standalone package is implied.
 
 The `Adapter conformance` GitHub-hosted workflow runs without Copilot CLI,
 credentials, model inference, or repository secrets. It verifies:
