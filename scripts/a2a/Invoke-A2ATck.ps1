@@ -16,6 +16,7 @@ if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
 }
 $validatorPath = Join-Path $PSScriptRoot 'Test-A2ATckProfile.ps1'
 & $validatorPath -ProfilePath $ProfilePath
+& (Join-Path $PSScriptRoot 'Test-A2ATckDeployment.ps1') -ProfilePath $ProfilePath
 
 $profile = Get-Content -LiteralPath $ProfilePath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 30
@@ -101,6 +102,10 @@ try {
         '--no-progress',
         '--quiet'
     )
+    Invoke-CheckedNative -Command uv -Arguments @(
+        'run', '--no-sync', 'python', '-m', 'pytest',
+        (Join-Path $PSScriptRoot 'test_a2a_tck_deployment.py'), '-q'
+    )
 }
 finally {
     Pop-Location
@@ -131,7 +136,7 @@ function Start-TckSut {
     $stdoutPath = Join-Path $resolvedOutputDirectory "$Name.stdout.log"
     $stderrPath = Join-Path $resolvedOutputDirectory "$Name.stderr.log"
     $process = Start-Process -FilePath $sutExecutable -ArgumentList $sutAddress -PassThru `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         if ($process.HasExited) {
             throw "The A2A TCK SUT exited before becoming ready: $Name"
@@ -195,26 +200,15 @@ foreach ($isolated in $profile.isolatedRequirements) {
 
 $process = Start-TckSut -Name 'full'
 try {
-    Push-Location $tckRoot
-    try {
-        # The pinned TCK exits nonzero for the exact documented differences.
-        # The strict report classifier below is the pass/fail decision.
-        $fullLogPath = Join-Path $resolvedOutputDirectory 'full-tck.log'
-        & uv run --no-sync python (Join-Path $tckRoot 'run_tck.py') `
-            --sut-host $sutUrl `
-            --transport ([string] $profile.execution.transport) `
-            --level ([string] $profile.execution.level) *> $fullLogPath
-        $tckExitCode = $LASTEXITCODE
-    }
-    finally {
-        Pop-Location
-    }
-
-    $sourceReportPath = Join-Path $tckRoot 'reports' 'compatibility.json'
+    $pythonExecutable = (& uv run --project $tckRoot --no-sync python -c 'import sys; print(sys.executable)').Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'The pinned TCK interpreter is unavailable.' }
+    $fullOutput = Join-Path $resolvedOutputDirectory 'full'
+    & (Join-Path $PSScriptRoot 'Invoke-A2AExternalTck.ps1') `
+        -ProfilePath $ProfilePath -TckRoot $tckRoot -PythonExecutable $pythonExecutable `
+        -SutUrl $sutUrl -OutputDirectory $fullOutput
+    $sourceReportPath = Join-Path $fullOutput 'compatibility.json'
     $reportPath = Join-Path $resolvedOutputDirectory 'compatibility.json'
     Copy-Item -LiteralPath $sourceReportPath -Destination $reportPath
-    & $validatorPath -ProfilePath $ProfilePath -TckRoot $tckRoot -ReportPath $reportPath
-    Write-Output "Pinned A2A TCK raw exit code: $tckExitCode"
 }
 finally {
     Stop-TckSut -Process $process
