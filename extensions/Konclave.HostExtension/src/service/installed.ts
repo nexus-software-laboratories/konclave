@@ -74,8 +74,9 @@ export function validateGenericClientIdentity(
 /**
  * Connects one profile to the installed shared service.
  *
- * The installer-protected sidecar supplies the endpoint, AccountTrusted issuer, policy,
- * and pinned service key. There is no process-launch fallback.
+ * The installer-protected sidecar supplies the endpoint, registered issuer, policy
+ * and pinned service key. The configured evidence flow must be satisfiable; there
+ * is no process-launch or weaker-policy fallback.
  */
 export async function connectInstalledService(
   environment: Readonly<Record<string, string | undefined>>,
@@ -87,10 +88,12 @@ export async function connectInstalledService(
 }
 
 /**
- * Connects an otherwise unsupported harness through the universal AccountTrusted path.
+ * Connects an otherwise unsupported harness using the installed evidence policy.
  *
- * The harness label is integration metadata. It does not upgrade the evidence kind or
- * satisfy an attested policy.
+ * AccountTrusted uses account evidence; supported Windows UserPresence policy uses
+ * the installed native ceremony helper. Missing or unsupported evidence rejects the
+ * connection instead of downgrading. The label is integration metadata, not harness
+ * attestation. The caller owns the returned client's lifecycle and closes it.
  */
 export async function connectInstalledGenericService(
   environment: Readonly<Record<string, string | undefined>>,

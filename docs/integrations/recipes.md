@@ -2,7 +2,9 @@
 
 Konclave supplies messaging primitives, not task-specific workflow modes. A recipe
 is inert data for an explicitly installed, locally selected external provider.
-ADR 0028 owns that boundary. The packaged `client.mjs` exports the definition codec,
+[ADR 0030](../adr/adr-0030-correlated-response-continuation.md) carries forward that
+boundary after superseding ADR 0029, which superseded ADR 0028. The packaged
+v0.1.31 `client.mjs` exports the definition codec,
 exact run-selection codec and a bounded messaging adapter; examples remain outside
 the client implementation under `extensions/Konclave.HostExtension/examples/recipes/`.
 
@@ -60,6 +62,92 @@ not an unlimited loop. A genuinely new intent uses a new explicitly authorized r
 recovery uses the original approved descriptor instead of guessing a new selection.
 
 ## Bounded messaging adapter
+
+### Construct and submit one explicitly approved run
+
+This application fragment imports the matching selected bundle described in the
+[TypeScript reference](typescript-client.md). The caller supplies an authenticated
+client and already-approved conversation/device identifiers, each 64 lowercase hex
+characters (32 bytes). It must inspect and authorize the exact returned descriptor
+before calling `send`; a generated digest is integrity evidence, not consent.
+
+```javascript
+import { randomBytes } from 'node:crypto';
+import {
+  createRecipeDefinition, createRecipeRun, createRecipeMessaging,
+} from './konclave/client.mjs';
+
+export async function prepare(client, conversationId, targetDeviceId) {
+  const definition = createRecipeDefinition({
+    name: 'review',
+    provider: 'example.review',
+    configuration: 'Return bounded review findings only.',
+  });
+  const run = createRecipeRun(
+    Buffer.from(definition.canonicalJson, 'utf8'),
+    definition.digest,
+    {
+      profile: client.profile,
+      nonce: randomBytes(16).toString('hex'),
+      bindings: [{ name: 'reviewer', conversationId, targetDeviceId }],
+      input: 'Review the explicitly supplied change summary.',
+    },
+  );
+  return run;
+}
+
+export async function submitApproved(client, approvedRun) {
+  const messaging = createRecipeMessaging(
+    client, Buffer.from(approvedRun.canonicalJson, 'utf8'), approvedRun.runId,
+  );
+  const receipt = await messaging.send('reviewer', approvedRun.input, {
+    deadlineMs: 30_000,
+  });
+  const observation = await messaging.poll('reviewer', { deadlineMs: 30_000 });
+  return { receipt, observation };
+}
+```
+
+`example.review` is an inert example identifier, not installed provider discovery.
+An external runner must select approved code at an exact explicit path and verify
+its expected provider identity; neither codec crawls directories or loads modules.
+No provider runtime is needed to use these primitives directly. Persist approved
+canonical bytes and independently pinned run ID in application-owned protected
+storage before side effects. Restoring a run means decoding those exact bytes with
+`decodeRecipeRun`; never regenerate the nonce or rebind a target during recovery.
+
+Definition names are 1–64 lowercase alphanumeric/hyphen characters in nonempty
+segments; provider identifiers are 1–128 lowercase alphanumeric segments separated
+by `.`, `_` or `-`. Binding names are similarly bounded to 64 characters. `input`
+and configuration must be valid Unicode scalar strings; empty is permitted.
+Message text must be nonempty and at most 255 KiB UTF-8. Oversize values fail rather
+than truncate.
+
+`RecipeSubmission` returns `bindingName`, `messageId`, relay `cursor` and
+`senderCounter`. `RecipeReplyPage` is either `kind: 'pending'` with `afterCursor`
+and `hasMore`, or `kind: 'reply'` with binding, request/message identifiers, cursor
+and untrusted `text`. Pending is not failure or remote completion. It requires the
+runner's finite scheduling decision. An exact correlated answer is not another
+directed request; any continuation still requires independent current local policy.
+
+`RecipeRunError.code` distinguishes invalid input/run/profile/nonce/binding,
+`duplicate_binding`, `run_too_large`, `run_mismatch`, `unknown_binding`,
+`profile_mismatch`, `invalid_response`, `invalid_request`, `unsupported_provider`,
+`busy`, `slot_conflict` and `request_not_submitted`. Correct malformed selection
+before admission; do not bypass unknown providers or profile mismatch. Poll only
+after a successful submission. For ambiguous sends retain the same run and exact
+body; `slot_conflict` means stop, not create another request. Cancellation does not
+retract delivered messages, revoke peer work or undo external effects.
+
+The public codec/messaging owners are
+[`definition.ts`](../../extensions/Konclave.HostExtension/src/recipes/definition.ts),
+[`run.ts`](../../extensions/Konclave.HostExtension/src/recipes/run.ts),
+[`client.ts`](../../extensions/Konclave.HostExtension/src/recipes/client.ts) and
+[`reply.ts`](../../extensions/Konclave.HostExtension/src/recipes/reply.ts).
+Validation examples live in `recipe-definition.test.ts`, `recipe-run.test.ts`,
+`recipe-client.test.ts`, `recipe-reply.test.ts` and `recipe-examples.test.ts` under
+the extension's tests directory. This fragment is source-checked, not a claim of
+new test execution or an available package publication.
 
 `createRecipeMessaging(client, descriptorBytes, expectedRunId)` requires an existing
 authenticated `LocalServiceClient` for exactly the selected profile. It exposes:
@@ -149,4 +237,6 @@ are required.
 
 Forwarding an answer to another slot is an explicit data-disclosure decision, not
 permission granted by selecting a recipe. Configuration must never broaden native
-permissions, and ordinary automatic response turns remain one correlated reply.
+permissions. Exact correlated answers may continue currently authorized local work
+under ADR 0030; they do not become new directed requests or create authority from
+response prose.

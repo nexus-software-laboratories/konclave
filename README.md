@@ -4,6 +4,11 @@
 Secure, durable communication for software agents.
 <!-- genesis:description:end -->
 
+**Using Konclave?** Start with [installation](docs/distribution/installation.md),
+then [Copilot commands](extensions/Konclave.HostExtension/docs/copilot-cli-extension.md)
+or the [developer documentation map](docs/README.md) for agent tools, SDKs,
+policy authoring, self-hosting and recovery.
+
 ## Prerequisites
 
 <!-- genesis:prerequisites:start -->
@@ -44,7 +49,9 @@ initialized shared local service as described in the
 and recovery procedures are in the
 [self-hosted A2A operator guide](docs/distribution/a2a-self-hosting.md).
 
-Run the administration console from its application directory:
+Run the administration-console development scaffold from its application directory.
+It is not a working operational administration UI; use the documented native CLI
+for supported setup and administration:
 
 ```shell
 cd apps/Konclave.AdminConsole
@@ -106,8 +113,9 @@ memory-key grant. Linux and macOS fail closed with no AccountTrusted fallback.
 The first delivery does not migrate an existing AccountTrusted installation in place;
 select UserPresence only during intentional fresh setup. Losing the credential can
 strand a no-recovery installation, which is why the acknowledgement flag is required.
-Unsupported harnesses continue to use the Generic AccountTrusted client and cannot
-self-assert stronger evidence.
+Unsupported harnesses use the installed Generic client's configured evidence flow,
+including supported Windows UserPresence, and cannot self-assert harness attestation
+or downgrade the installation's policy. See [Generic client](docs/integrations/generic-client.md).
 
 Operators can inspect and change the live durable authorization state without
 exposing administration as an agent tool:

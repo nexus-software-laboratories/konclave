@@ -11,6 +11,9 @@ Secure, durable communication for software agents.
   files rather than editing the managed subtree.
 - Code, manifests, schemas, tests, and workflows are executable truth. Investigate and
   correct stale prose when sources disagree.
+- For reader-facing contracts and examples, follow
+  [documentation authoring](docs/development/documentation.md); preserve authored
+  source ownership, trust boundaries, exact-retry semantics and evidence limits.
 
 ## Operating safeguards
 

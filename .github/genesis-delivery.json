@@ -15,6 +15,7 @@
     "Adapter conformance",
     "Actions storage conformance",
     "Agent plugin conformance",
+    "Documentation contracts",
     "Authorization reload conformance",
     "Extension startup conformance",
     "Recipe conformance",
@@ -78,6 +79,7 @@
         "adapter-conformance",
         "actions-storage-conformance",
         "agent-plugin-conformance",
+        "documentation-contracts",
         "authorization-reload-conformance",
         "extension-startup-conformance",
         "recipe-conformance",
@@ -125,6 +127,13 @@
     }
   ],
   "componentWorkflows": [
+    {
+      "source": "project",
+      "path": ".github/workflows/documentation-reference.yml",
+      "roles": ["merge-gate"],
+      "draftBehavior": "full",
+      "requiredChecks": ["Documentation contracts"]
+    },
     {
       "source": "project",
       "path": ".github/workflows/native-client-conformance.yml",

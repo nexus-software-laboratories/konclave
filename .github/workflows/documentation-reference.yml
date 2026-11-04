@@ -1,0 +1,100 @@
+name: Documentation contracts
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: documentation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  documentation-contracts:
+    name: Documentation contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Resolve generated-reference scope
+        id: scope
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $run = $true
+          }
+          else {
+            $files = @(gh api --paginate "repos/$env:GITHUB_REPOSITORY/pulls/$env:PULL_REQUEST_NUMBER/files?per_page=100" --jq '.[].filename')
+            if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) {
+              throw 'Could not discover documentation contract relevance.'
+            }
+            $run = $files.Count -ge 3000 -or @($files | Where-Object {
+              $_ -match '^apps/Konclave\.LocalDaemon/src/mcp\.rs$' -or
+              $_ -match '^fixtures/local-service/v1/copilot-tools\.json$' -or
+              $_ -match '^extensions/Konclave\.HostExtension/(src/service/(commands|tools|operations)\.ts|tests/documentation\.test\.ts|docs/copilot-cli-extension\.md|package(-lock)?\.json)$' -or
+              $_ -match '^docs/reference/agent-tool(s|-contracts)\.md$' -or
+              $_ -match '^\.github/(workflows/documentation-reference\.yml|genesis-delivery\.json)$'
+            }).Count -ne 0
+          }
+          "run=$($run.ToString().ToLowerInvariant())" >>$env:GITHUB_OUTPUT
+      - name: Checkout exact source
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-rust
+      - name: Regenerate authored native tool metadata
+        if: steps.scope.outputs.run == 'true'
+        run: cargo test --locked --package KonclaveLocalDaemon --lib mcp::tests::regenerate_copilot_tool_contract_fixture -- --ignored --exact
+      - name: Resolve pinned Node version
+        if: steps.scope.outputs.run == 'true'
+        id: toolchains
+        shell: pwsh
+        run: |
+          $release = Get-Content distribution/release-artifacts.json -Raw | ConvertFrom-Json -Depth 100
+          "node=$($release.release.toolchains.node)" >>$env:GITHUB_OUTPUT
+      - name: Install Node
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.toolchains.outputs.node }}
+          npm-cache-scope: documentation-contracts
+          npm-cache-dependency-hash: ${{ hashFiles('extensions/Konclave.HostExtension/package-lock.json') }}
+      - name: Regenerate projected tool reference and actual command help
+        if: steps.scope.outputs.run == 'true'
+        working-directory: extensions/Konclave.HostExtension
+        env:
+          KONCLAVE_GENERATE_REFERENCE: "1"
+        run: |
+          npm ci
+          npm run test:unit -- tests/documentation.test.ts
+      - name: Export source-owned reference for inspection
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: documentation-reference-${{ github.event.pull_request.head.sha || github.sha }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            fixtures/local-service/v1/copilot-tools.json
+            docs/reference/agent-tool-contracts.md
+            extensions/Konclave.HostExtension/docs/copilot-cli-extension.md
+      - name: Require exact submitted reference
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- fixtures/local-service/v1/copilot-tools.json docs/reference/agent-tool-contracts.md extensions/Konclave.HostExtension/docs/copilot-cli-extension.md
+          test -z "$(git ls-files --others --exclude-standard -- docs/reference/agent-tool-contracts.md)"

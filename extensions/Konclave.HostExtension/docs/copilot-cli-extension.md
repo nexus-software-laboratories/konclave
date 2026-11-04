@@ -1,5 +1,12 @@
 # Copilot CLI extension
 
+For installation and first use, start with the
+[unsigned prerelease guide](../../../docs/distribution/installation.md), then the
+[two-session demo](../../../docs/distribution/local-demo.md).
+The [agent-tool reference](../../../docs/reference/agent-tools.md) describes the
+separate model-callable surface. Slash commands are deterministic operator actions,
+not prompts to a model.
+
 ## Runtime boundary
 
 The generated extension is a thin Node.js process that joins the foreground Copilot
@@ -86,10 +93,13 @@ full-capability recovery, exact retry identifiers, policy accept/reject commands
 message bodies, and explicit policy inspection remain visible when they are required
 to continue safely.
 
+<!-- command-reference:start -->
+
 ```text
 /konclave help
 /konclave output <normal|verbose>
 /konclave status
+/konclave diagnose [conversation] <message>
 /konclave identity
 /konclave conversations
 /konclave devices
@@ -104,21 +114,29 @@ to continue safely.
 /konclave join <capability>
 /konclave new
 /konclave new <alias>
+/konclave service create <requester-device>
+/konclave service channels [after-conversation]
+/konclave service inbox [conversation] [after-cursor]
 /konclave repeat <operation>
 /konclave cancel-repeat <operation>
 /konclave pairing <pairing>
 /konclave verification <attempt>
 /konclave verify <attempt> <peer> <sas>
-/konclave approve <pairing> <conversation> [role]
+/konclave approve <pairing> [conversation] [role]
 /konclave approve <pairing> <inviter> <conversation> <role>
 /konclave sync <pairing>
 /konclave cancel <pairing>
 /konclave cancel-verification <attempt>
 /konclave send [conversation] [message-id] -- <text>
-/konclave reply <conversation> <reply-to> [message-id] -- <text>
-/konclave messages <conversation> [after-cursor]
-/konclave mute <conversation>
-/konclave unmute <conversation>
+/konclave request [conversation] [target-device] [message-id] -- <text>
+/konclave request [conversation] [message-id] --to <device> -- <text>
+/konclave reply [conversation] <reply-to> [message-id] -- <text>
+/konclave messages [conversation] [after-cursor]
+  --order asc|desc --before-cursor <cursor>
+  --since <RFC3339> --until <RFC3339>
+/konclave use <conversation>
+/konclave mute [conversation]
+/konclave unmute [conversation]
 /konclave policy status
 /konclave policy propose [proposal-id] -- <relative-source>
 /konclave policy replace <digest> [proposal-id] -- <relative-source>
@@ -128,6 +146,8 @@ to continue safely.
 /konclave policy reject <proposal-id> <digest>
 /konclave policy revoke <digest> [message-id]
 ```
+
+<!-- command-reference:end -->
 
 `/konclave connect` prints the raw 26-character token ephemerally. `--copy` writes
 only that token to the native clipboard without placing it in process arguments and
@@ -183,15 +203,66 @@ only after the completed conversation is present in the local profile.
 role-specific authorization operation. Inviter-side approval defaults to `member`;
 granting `administrator` is explicit. Joiner-side approval requires the operator to
 repeat the displayed inviter, conversation, and role, and rejects any mismatch. The
-inviter supplies an existing conversation explicitly, which avoids hiding a
-non-atomic create-and-authorize sequence.
+inviter may supply an existing conversation explicitly or use the durable selected
+conversation. `/konclave approve <pairing> administrator` is the explicit elevated
+inviter form; it cannot elevate a request that asked only for member. Joiner approval
+never substitutes remote metadata for the operator's explicit confirmation.
 
 When `send` or `reply` generates a message identifier, it displays the identifier and
 an exact retry shape before submitting the operation. Supplying that identifier on a
-retry preserves both message and request idempotency. `send` may omit the conversation
-identifier only when the profile owns exactly one conversation. `messages` syncs one bounded
-relay page, reads at most ten records after the requested cursor, and displays an
-explicit resume cursor.
+retry preserves both message and request idempotency. Implicit operations resolve
+the daemon's durable selected conversation afresh; `/konclave use <conversation>`
+changes that selection, including across extension restarts and agent-tool changes.
+An explicit conversation overrides selection. No selection is an actionable failure,
+not permission to guess from list order.
+
+`request --to <device>` targets a member of the selected or explicit conversation.
+The legacy positional target requires an explicit conversation; a leading 64-hex
+identifier still means a conversation, not an inferred device. Options precede `--`;
+text after it is message content. Omit a target only when there is exactly one remote
+member. Directed targeting does not hide plaintext from the group's other members.
+Use a [request-service channel](../../../docs/development/request-services.md) for
+independently private requester-to-operator exchanges. Its enrollment and inbox
+inspection do not grant work authority.
+
+`messages` syncs one bounded relay page and returns at most ten displayed records,
+newest durable cursor first, with UTC timestamps. `--order asc` restores oldest-first
+browsing. Raw `read_messages` callers retain their ascending default. A positional
+`after-cursor` is always an exclusive lower bound; descending continuation uses
+`--before-cursor`. Follow the emitted continuation, preserving conversation, order
+and filters even when a filtered page is empty.
+
+`--since` is inclusive and `--until` exclusive. Both require RFC 3339 instants with
+an explicit timezone, normalized to UTC; either may appear alone. Filtering uses the
+authenticated sender's timestamp, not a trusted global clock or execution deadline.
+Cursor order remains authoritative. Out-of-order clocks do not terminate a scan,
+and bounded scanning can return no matches with more history still available.
+
+### A first directed exchange
+
+Both sessions need a healthy matching native/plugin installation and configured relay.
+Create a connection in session A with `/konclave connect`, redeem its displayed
+one-time token in session B with `/konclave connect <token>`, and wait for both to
+report a completed conversation. Do not publish the token.
+
+```text
+/konclave conversations
+/konclave use <conversation-id>
+/konclave send -- Hello from the selected conversation.
+/konclave request --to <peer-device-id> -- Return one status summary.
+/konclave messages
+/konclave messages --since 2026-10-01T00:00:00Z --until 2026-11-01T00:00:00Z
+```
+
+Replace placeholders with authenticated values shown by the commands. A send result
+proves the local send outcome, not acceptance or execution of the requested work.
+Without an explicitly activated local policy at the receiver, delivery remains a
+notification, not autonomous authority. The receiver can inspect history without
+starting a model turn. Reuse the printed message ID and exact text for an ambiguous
+retry; a new ID means a new operation. Clear a copied pairing token with
+`/konclave clipboard clear`. See the [policy workflow](../../../policy/README.md)
+before enabling automation and [recovery reference](../../../docs/reference/recovery.md)
+when a connection, request or delivery is interrupted.
 
 Policy commands use the profile's active conversation. `propose` and `replace` read
 one explicitly selected UTF-8 regular source beneath the current workspace, enforce
@@ -254,13 +325,12 @@ markers. Legacy bundle guidance is never included in a model turn. The prompt
 authorizes evaluating peer data under the local structured policy; it never
 reclassifies peer text as user or developer authority.
 
-The shared-service and history contracts preserve a directed request's exact target
-and body. Until the durable directed-request claim and one-response reservation are
-implemented, the delivery runtime withholds those events from model turns, reports
-the unsupported state without including the request body, and acknowledges the
-delivery event after the durable message remains available in history. This prevents
-the additive content contract from silently inheriting the older ordinary-text
-behavior.
+Directed requests use durable exact-attempt claim and terminal-response reservation.
+An independently activated local policy may authorize `session.work` and one
+correlated final response; a response does not itself request another response.
+Exact locally authorized answers can resume a waiting requester continuation.
+Admission, history-only delivery receipts and relay acknowledgments do not prove
+external work executed, nor do they guarantee exactly-once external effects.
 
 The gate is prepared before enqueue but becomes active only when the session observes
 the exact synthetic prompt carrying a fresh extension-generated turn token. Any
@@ -270,18 +340,14 @@ already-enqueued token-bearing collaboration prompt arrives after that clearance
 the extension recognizes its trusted header and denies every tool for that delayed
 turn instead of running it without the policy gate.
 
-The Copilot pre-tool hook remains active only until that synthetic turn returns to
-idle. The initial paved control maps only Konclave's `send_message` tool to
-`conversation.reply`, verifies the exact conversation and message arguments, and
-accepts the SDK's bounded JSON object or serialized-object representation only when
-it contains the exact send field allowlist. It then requires a one-use daemon
-authorization. Consuming that authorization routes into
-the sender-counter and outbox reservation transaction, which verifies the exact
-active digest, delivery consumer, and bounded expiry before preparing the send.
-Every workspace, shell, web, MCP, and subagent tool denies. Those tools execute
-outside the daemon and cannot be advertised as enforced until they have an atomic
-authorization boundary. Policy approval also denies in this initial path because the
-SDK's hook `ask` result can replace rather than compose with native permissions.
+The pre-tool hook intersects the locally active structured policy with ordinary
+Copilot permissions. Reply-only turns allow only the exact authorized send.
+Locally enabled `session.work` turns additionally admit the bounded classified
+workspace/tool actions described by [Copilot delivery safety](../../../docs/development/copilot-delivery-safety.md);
+they cannot broaden policy, permission, trust or membership. The hook supplies a
+one-use native reply authorization after verifying the exact conversation and
+message arguments. The sender-counter/outbox reservation transaction rechecks the
+active digest, delivery consumer and expiry. Peer text cannot grant this authority.
 Interactive and delivery lanes keep fresh per-connection handshake identifiers. The
 daemon recognizes them as one policy-enforcement consumer only because both prove the
 same memory-only session public key.
@@ -294,6 +360,14 @@ duration is enforced from the sealed activation time. Finite turn and token limi
 deny autonomous turns until durable accounting is implemented; they are never
 silently treated as enforced. Explicitly unlimited turn and token values remain
 supported.
+
+A replacement authenticated delivery connection may resume only the exact still-live
+handling attempt for the same stable consumer, request, responder and policy.
+A fresh lease generation fences the displaced socket; expired attempts are not
+revived. See [delivery recovery](../../../docs/development/copilot-delivery-safety.md)
+for the boundary and its limitations. The extension's heartbeat stays independent
+of a blocked owned prompt flush, but this is not a cancellation guarantee for an
+arbitrarily blocked harness or event loop.
 
 ## Build and package contract
 

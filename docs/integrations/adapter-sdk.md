@@ -29,6 +29,75 @@ releases its connection-owned lease and makes unacknowledged events reclaimable.
 
 ## Delivery lifecycle
 
+### Rust caller setup
+
+Use the workspace `Konclave.LocalServiceClient` crate (Rust import
+`KonclaveLocalServiceClient`) and `Konclave.AdapterSdk` (`KonclaveAdapterSdk`),
+at the same source revision as the installed service. No registry installation or
+stability guarantee is implied. `LocalServiceJsonClientConfig` explicitly supplies
+the `LocalServiceEndpoint`, `LocalServiceIssuerCredential` (key identifier, version
+and signing identity), pinned `Ed25519PublicKey`, `ServiceProfileId`, `HarnessKind`,
+`request_timeout` and `grant_refresh_window`.
+
+The timeout must be nonzero and at most 60 seconds; the refresh window is at most
+five minutes and may be zero. `LocalServiceJsonClient::connect` obtains an
+AccountTrusted grant with a fresh ephemeral session identity. It does not discover
+an installed profile, run the Windows UserPresence ceremony or bypass a policy
+requiring unavailable evidence.
+
+The reconnecting JSON client's `request(RequestId, operation, Vec<u8>)` returns
+response bytes; it retries a transport failure once and can refresh failed
+authentication. In contrast, `open_session` and `open_local_service_adapter`
+preserve a connection: session requests do not automatically reconnect. This is
+necessary for connection-owned claims.
+
+This bounded fragment accepts a configured client, a fresh cryptographic request-ID
+supplier and an immediate native-delivery callback. Real asynchronous delivery must
+also retain heartbeats and settle shutdown; do not acknowledge before native
+acceptance.
+
+```rust
+use std::time::Duration;
+use KonclaveAdapterSdk::{
+    open_local_service_adapter, AdapterSdkError, DeliveredEvent, DeliverySettlement,
+};
+use KonclaveLocalServiceClient::LocalServiceJsonClient;
+use KonclaveLocalServiceTransport::RequestId;
+
+async fn deliver_once(
+    client: &LocalServiceJsonClient,
+    mut fresh_id: impl FnMut() -> RequestId,
+    mut accept: impl FnMut(&DeliveredEvent) -> bool,
+) -> Result<(), AdapterSdkError> {
+    let mut session = open_local_service_adapter(client).await?;
+    let events = session.claim(fresh_id(), 1, Duration::from_secs(5)).await?;
+    for event in events {
+        let settlement = DeliverySettlement::from_event(&event);
+        if accept(&event) {
+            session.acknowledge(fresh_id(), settlement).await?;
+        } else {
+            session.release(fresh_id(), settlement).await?;
+        }
+    }
+    Ok(())
+}
+```
+
+`claim` accepts whole-millisecond waits from zero through 30,000 milliseconds;
+fractional milliseconds are rejected, not rounded. `DeliveredEvent` retains stable
+16-byte notification identity, authenticated routing, relay cursor, sequence,
+`lease_generation` and typed `DeliveredPayload`; peer text is bounded to 64 KiB.
+Policy and membership events are typed notifications, not text instructions.
+Use `DeliverySettlement::from_event` rather than reconstructing a stale generation.
+
+`AdapterSdkError` distinguishes `InvalidConfiguration`, `Transport`,
+`Authentication`, `DeadlineExceeded`, `ClaimOutcomeUnknown`,
+`Service(LocalServiceErrorCode)` and `InvalidResponse`. The first requires correcting
+inputs; authentication requires valid evidence; malformed responses fail closed.
+A claim timeout/transport failure can mean the claim was admitted and is exposed as
+`ClaimOutcomeUnknown`, requiring the fresh-connection procedure below. A settlement
+failure never authorizes executing the native effect a second time.
+
 1. Open one persistent session with `open_local_service_adapter`.
 2. Call `claim` with a batch from 1 through 16 and a finite wait no longer than 30
    seconds.
@@ -81,6 +150,15 @@ delivery errors, and avoid claiming work it cannot reliably settle. Polling does
 claim the lifecycle or wakeup guarantees of a paved adapter.
 
 ## Conformance
+
+The constructor/request contracts are owned by
+[`LocalServiceClient/src/lib.rs`](../../crates/Konclave.LocalServiceClient/src/lib.rs);
+delivery models and settlement are owned by
+[`AdapterSdk/src/model.rs`](../../crates/Konclave.AdapterSdk/src/model.rs).
+Runnable behavior owners are
+[`contract.rs`](../../crates/Konclave.AdapterSdk/tests/contract.rs) and
+[`fake_harness.rs`](../../crates/Konclave.AdapterSdk/tests/fake_harness.rs).
+The fragment above is source-aligned, not a separately compiled standalone package.
 
 The `Adapter conformance` GitHub-hosted workflow runs without Copilot CLI,
 credentials, model inference, or repository secrets. It verifies:

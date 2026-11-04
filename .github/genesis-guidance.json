@@ -5,6 +5,90 @@
     "mapPath": "docs/README.md",
     "pages": [
       {
+        "path": "docs/reference/agent-tools.md",
+        "title": "Agent tools and workflows",
+        "section": "Reference",
+        "order": 10,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/reference/agent-tool-contracts.md",
+        "title": "Generated agent-tool fields",
+        "section": "Reference",
+        "order": 20,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/reference/recovery.md",
+        "title": "Diagnostics and safe recovery",
+        "section": "Reference",
+        "order": 30,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/reference/a2a-and-protocol.md",
+        "title": "A2A and protocol callers",
+        "section": "Reference",
+        "order": 40,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/reference/operator-configuration.md",
+        "title": "Installer, CLI and operator configuration",
+        "section": "Reference",
+        "order": 50,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/reference/security-boundaries.md",
+        "title": "Security and backend extension boundaries",
+        "section": "Reference",
+        "order": 60,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/development/documentation.md",
+        "title": "Writing documentation",
+        "section": "Development",
+        "order": 5,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "extensions/Konclave.HostExtension/docs/copilot-cli-extension.md",
+        "title": "Copilot commands and runtime",
+        "section": "Guides",
+        "order": 1,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/integrations/typescript-client.md",
+        "title": "TypeScript integration entry points",
+        "section": "Guides",
+        "order": 2,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/integrations/native-client.md",
+        "title": "Rust local-service and native clients",
+        "section": "Guides",
+        "order": 3,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/integrations/generic-client.md",
+        "title": "Generic harness client",
+        "section": "Guides",
+        "order": 21,
+        "owner": "project:konclave"
+      },
+      {
+        "path": "docs/integrations/adapter-sdk.md",
+        "title": "Harness-neutral adapter SDK",
+        "section": "Guides",
+        "order": 22,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/architecture/decisions.md",
         "title": "Architecture decisions",
         "section": "Architecture",
