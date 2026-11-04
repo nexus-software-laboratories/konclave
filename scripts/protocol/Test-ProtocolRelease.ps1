@@ -224,13 +224,18 @@ $legacyTag = 'protocol-v1.0.0-alpha.1'
 $a2aProfileTags = @(
     'protocol-v1.0.0-alpha.2'
     'protocol-v1.0.0-alpha.3'
+    'protocol-v1.0.0-alpha.4'
 )
 $releaseTag = [string]$manifest.release.tag
 if ($releaseTag -cne $legacyTag -and $releaseTag -cnotin $a2aProfileTags) {
     throw "Protocol release verifier has no profile for tag $releaseTag."
 }
 if ($releaseTag -cin $a2aProfileTags) {
-    if ($null -eq $manifest.interoperability -or $null -eq $manifest.interoperability.a2a) {
+    if (
+        $manifest.PSObject.Properties.Name -cnotcontains 'interoperability' -or
+        $null -eq $manifest.interoperability -or
+        $null -eq $manifest.interoperability.a2a
+    ) {
         throw 'Protocol release is missing the required A2A interoperability evidence.'
     }
     $a2a = $manifest.interoperability.a2a
