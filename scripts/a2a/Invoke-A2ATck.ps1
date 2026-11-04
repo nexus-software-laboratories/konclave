@@ -136,7 +136,7 @@ function Start-TckSut {
     $stdoutPath = Join-Path $resolvedOutputDirectory "$Name.stdout.log"
     $stderrPath = Join-Path $resolvedOutputDirectory "$Name.stderr.log"
     $process = Start-Process -FilePath $sutExecutable -ArgumentList $sutAddress -PassThru `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         if ($process.HasExited) {
             throw "The A2A TCK SUT exited before becoming ready: $Name"

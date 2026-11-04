@@ -20,9 +20,9 @@ param(
     [Parameter(Mandatory)][string] $PythonExecutable,
     [Parameter(Mandatory)][string] $SutUrl,
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [string] $Tenant,
-    [string] $BearerTokenFile,
-    [string] $TrustedCaFile,
+    [ValidateNotNullOrEmpty()][string] $Tenant,
+    [ValidateNotNullOrEmpty()][string] $BearerTokenFile,
+    [ValidateNotNullOrEmpty()][string] $TrustedCaFile,
     [string] $RequirementId
 )
 
@@ -56,10 +56,10 @@ if (-not [string]::IsNullOrWhiteSpace($RequirementId)) {
 }
 $environment = @{
     'A2A_TCK_SUT_URL' = $SutUrl
-    'A2A_TCK_TENANT' = $Tenant
-    'A2A_TCK_BEARER_TOKEN_FILE' = $BearerTokenFile
-    'A2A_TCK_CA_FILE' = $TrustedCaFile
-    'SSL_CERT_FILE' = $TrustedCaFile
+    'A2A_TCK_TENANT' = if ($PSBoundParameters.ContainsKey('Tenant')) { $Tenant } else { $null }
+    'A2A_TCK_BEARER_TOKEN_FILE' = if ($PSBoundParameters.ContainsKey('BearerTokenFile')) { $BearerTokenFile } else { $null }
+    'A2A_TCK_CA_FILE' = if ($PSBoundParameters.ContainsKey('TrustedCaFile')) { $TrustedCaFile } else { $null }
+    'SSL_CERT_FILE' = if ($PSBoundParameters.ContainsKey('TrustedCaFile')) { $TrustedCaFile } else { $null }
     'PYTHONPATH' = $PSScriptRoot
     'PYTEST_ADDOPTS' = '-p a2a_tck_deployment'
     'HTTP_PROXY' = $null
@@ -97,10 +97,13 @@ try {
         # The unchanged classifier, not the upstream runner's known-gap exit code, owns this verdict.
         & $PythonExecutable (Join-Path $TckRoot 'run_tck.py') --sut-host $SutUrl `
             --transport ([string] $profile.execution.transport) `
-            --level ([string] $profile.execution.level) *> $log
+            --level ([string] $profile.execution.level) `
+            -- "--compatibility-report=$reportPrefix" *> $log
         $rawExit = $LASTEXITCODE
-        $reportPath = Join-Path $output 'compatibility.json'
-        Copy-Item -LiteralPath (Join-Path $TckRoot 'reports' 'compatibility.json') -Destination $reportPath
+        $reportPath = "$reportPrefix.json"
+        if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            throw "The pinned TCK produced no compatibility report (exit $rawExit); inspect tck.log."
+        }
         & $validator -ProfilePath $ProfilePath -TckRoot $TckRoot `
             -ReportPath $reportPath -SutUrl $SutUrl
         Write-Output "Pinned external A2A TCK raw exit code: $rawExit"
