@@ -791,6 +791,7 @@ async fn exercise_packaged_gateway(
     issuer_key_file: &Path,
     route: GatewayAcceptanceRoute<'_>,
     target_delivery: &mut KonclaveLocalServiceTransport::LocalServiceClientStream,
+    replacement_delivery: KonclaveLocalServiceTransport::LocalServiceClientStream,
 ) {
     let fixture = prepare_gateway_fixture(
         paths,
@@ -836,6 +837,21 @@ async fn exercise_packaged_gateway(
     assert_eq!(turn["outcome"].as_str(), Some("authorized"));
     assert_eq!(turn["policyDigest"].as_str(), Some(route.policy_digest));
     let attempt = turn["attempt"].as_u64().unwrap();
+    drop(std::mem::replace(target_delivery, replacement_delivery));
+    let heartbeat = rpc(
+        target_delivery,
+        "delivery.heartbeat",
+        serde_json::json!({
+            "turn": {
+                "conversationId": route.conversation_id,
+                "requestMessageId": request_message_id,
+                "policyDigest": route.policy_digest,
+                "attempt": attempt
+            }
+        }),
+    )
+    .await;
+    assert_eq!(heartbeat, serde_json::json!({}));
     let response_message_id = "61".repeat(16);
     let action = rpc(
         target_delivery,
@@ -1542,6 +1558,16 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     }
     drain_delivery(&mut first_delivery).await;
     drain_delivery(&mut second_delivery).await;
+    let replacement_delivery = connect_session_lane(
+        &installation,
+        &issuer_identity,
+        issuer_key_id,
+        issuer_key_version,
+        "session-packaged-b",
+        9,
+        &second_session,
+    )
+    .await;
     exercise_packaged_gateway(
         &paths,
         &installation,
@@ -1553,6 +1579,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
             policy_digest: &policy_digest,
         },
         &mut second_delivery,
+        replacement_delivery,
     )
     .await;
     let unrelated_session = LocalServiceIdentity::generate().unwrap();
@@ -1585,7 +1612,7 @@ async fn packaged_shared_service_pairs_replays_restarts_enforces_policy_and_rema
     assert_eq!(unrelated_decision["decision"].as_str(), Some("deny"));
     assert_eq!(
         unrelated_decision["reason"].as_str(),
-        Some("copilot_delivery_not_proven")
+        Some("delivery_consumer_replaced")
     );
     drop(unrelated);
 
