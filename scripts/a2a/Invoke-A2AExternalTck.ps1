@@ -102,6 +102,11 @@ try {
         $rawExit = $LASTEXITCODE
         $reportPath = "$reportPrefix.json"
         if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            if ($rawExit -eq 4) {
+                Get-Content -LiteralPath $log -Tail 40 |
+                    Where-Object { $_ -match '^ERROR: A2A TCK deployment: .{1,256}$' } |
+                    ForEach-Object { Write-Output $_ }
+            }
             throw "The pinned TCK produced no compatibility report (exit $rawExit); inspect tck.log."
         }
         & $validator -ProfilePath $ProfilePath -TckRoot $TckRoot `

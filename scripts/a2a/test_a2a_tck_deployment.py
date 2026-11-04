@@ -3,6 +3,9 @@
 import importlib.util
 import inspect
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -134,6 +137,30 @@ def test_anonymous_deployment_has_no_implicit_tenant_or_credentials(
     assert config._ca is None
     body = {"message": {}}
     assert config.default_tenant("POST", deployment.PATH_MESSAGE_SEND, body) is body
+
+
+def test_real_pytest_collection_registers_the_deployment_factory(
+    configured_environment,
+):
+    root = Path(inspect.getfile(deployment.HttpJsonClient)).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parent)
+    environment.pop("PYTEST_ADDOPTS", None)
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "tests/compatibility/",
+            "--collect-only", "--transport=http_json",
+            "--sut-host=" + environment["A2A_TCK_SUT_URL"],
+            "-p", "a2a_tck_deployment", "-q",
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_sut_url_is_required(configured_environment, monkeypatch):
