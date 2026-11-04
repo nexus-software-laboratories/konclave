@@ -110,6 +110,28 @@ and upstream A2A profile. It publishes the shared task-store lifecycle policy an
 optional portable adapter assertions, binds the current schema and dependency
 snapshot, and does not claim a new backend or daemon-independent native runtime.
 
+`protocol-v1.0.0-alpha.4` publishes the shared durable
+`NativeConversationProcessor` and `NativeSession`, explicit semantic journal and
+sealed-storage contracts, and the bounded independently owned native-service
+example. It also snapshots the negotiated request-service and request-delivery
+semantics already present in the implementation. Ordinary legacy requests retain
+their encoded representation; optional delivery cutoffs and receipts require
+signed capability support and never silently downgrade.
+
+The snapshot records profile schema `24`, exact lockfile/fixture identities and
+the native implementation's completed source, compatibility and platform evidence.
+An admission cutoff is not task cancellation, and a delivery receipt is not
+proof of execution. The bounded example rejects unsupported delivery options
+before admission; a production journal/MLS adapter still needs direct ownership,
+atomicity, sealing and restart qualification. This is a source/SDK release, not
+a binary, installer or marketplace publication or an operating deployment.
+
+The hosted Rust-lint lane runs `scripts/protocol/Test-ProtocolReleaseProfiles.ps1`
+against an isolated archive of the release's verified source: the submitted head
+before publication and its immutable tag afterward. It verifies the new profile
+and refuses unknown release profiles, missing A2A evidence and substituted SDK
+identity. Tagged historical manifests remain checked against their own source.
+
 Continuous integration checks out a shallow revision without tags, so a locally
 missing tag does not prove that a release is unpublished. The verifier asks the
 origin remote, shallow-fetches the exact release tag when it exists, and fails closed

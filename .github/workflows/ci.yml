@@ -202,6 +202,7 @@ jobs:
           ./scripts/ci/Test-DependabotWorkflowIsolation.ps1
       - run: bash ./scripts/ci/Validate-RustSecurityDependencies.sh
       - run: pwsh ./scripts/protocol/Test-ProtocolRelease.ps1
+      - run: pwsh ./scripts/protocol/Test-ProtocolReleaseProfiles.ps1
       - run: pwsh ./scripts/a2a/Test-A2AProvenance.ps1
       - run: pwsh ./scripts/a2a/Test-A2AFixtures.ps1
       - run: cargo clippy --workspace --all-targets -- -D warnings
