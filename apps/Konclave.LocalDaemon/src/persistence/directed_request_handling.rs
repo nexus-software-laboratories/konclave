@@ -931,6 +931,142 @@ impl ProfileStore {
         Ok(Some(handling.claim))
     }
 
+    /// Reattaches only an existing live attempt owned by the authenticated session.
+    ///
+    /// The event and sealed handling retain their generation and attempt; a fresh
+    /// lease fences the disconnected attachment. No other event is claimed.
+    pub(crate) fn resume_directed_request_delivery(
+        &self,
+        request: ActiveDirectedRequestClaim,
+        lease_id: AdapterLeaseId,
+        expires_at_unix_milliseconds: u64,
+    ) -> Result<DirectedRequestClaim, ProfileStoreError> {
+        super::validate_adapter_lease_window(
+            request.now_unix_milliseconds,
+            expires_at_unix_milliseconds,
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProfileStoreError::Storage)?;
+        require_active_collaboration_policy_digest(
+            &transaction,
+            request.conversation_id,
+            request.policy_digest,
+        )?;
+        require_current_conversation_member(
+            &transaction,
+            request.conversation_id,
+            request.responder_device_id,
+        )?;
+        let metadata = load_handling_metadata(
+            &transaction,
+            request.conversation_id,
+            request.request_message_id,
+            request.responder_device_id,
+        )?
+        .ok_or(ProfileStoreError::OperationNotFound)?;
+        let mut handling = self.open_directed_request_handling(&transaction, metadata)?;
+        if !resume_claim_matches(&handling, &request) {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        let owner: Option<(Vec<u8>, Vec<u8>, i64)> = transaction
+            .query_row(
+                "SELECT consumer_id, lease_id, lease_expires_at_unix_milliseconds
+                 FROM daemon_adapter_consumer WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        if let Some((consumer, lease, expiry)) = owner
+            && (AdapterConsumerId::from_slice(&consumer)
+                .map_err(|_| ProfileStoreError::CorruptData)?
+                != request.consumer_id
+                || AdapterLeaseId::from_slice(&lease)
+                    .map_err(|_| ProfileStoreError::CorruptData)?
+                    != handling.claim.lease_id
+                || from_sql_integer(expiry)? <= request.now_unix_milliseconds)
+        {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        let sequence: i64 = transaction
+            .query_row(
+                "SELECT event_sequence FROM daemon_remote_event WHERE notification_id = ?1",
+                params![handling.claim.notification_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ProfileStoreError::Storage)?
+            .ok_or(ProfileStoreError::OperationNotFound)?;
+        let (event, state) =
+            self.load_remote_event_record_in(&transaction, from_sql_integer(sequence)?)?;
+        let resumable_event = match state.status {
+            RemoteEventStatus::Pending => {
+                state.consumer_id.is_none()
+                    && state.lease_id.is_none()
+                    && state.lease_expires_at_unix_milliseconds.is_none()
+            }
+            RemoteEventStatus::Claimed => {
+                state.consumer_id == Some(request.consumer_id)
+                    && state.lease_id == Some(handling.claim.lease_id)
+                    && state.lease_expires_at_unix_milliseconds
+                        == Some(handling.claim.claim_expires_at_unix_milliseconds)
+            }
+            RemoteEventStatus::Acknowledged | RemoteEventStatus::Suppressed => false,
+        };
+        if !resumable_event || state.lease_generation != handling.claim.lease_generation {
+            return Err(ProfileStoreError::InvalidAdapterLease);
+        }
+        transaction
+            .execute(
+                "INSERT INTO daemon_adapter_consumer
+                    (singleton_id, consumer_id, lease_id, lease_expires_at_unix_milliseconds)
+                 VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(singleton_id) DO UPDATE SET
+                    consumer_id = excluded.consumer_id,
+                    lease_id = excluded.lease_id,
+                    lease_expires_at_unix_milliseconds =
+                        excluded.lease_expires_at_unix_milliseconds",
+                params![
+                    request.consumer_id.as_bytes().as_slice(),
+                    lease_id.as_bytes().as_slice(),
+                    to_sql_integer(expires_at_unix_milliseconds)?,
+                ],
+            )
+            .map_err(|_| ProfileStoreError::Storage)?;
+        self.store_remote_event_delivery_state_in(
+            &transaction,
+            &event,
+            &super::RemoteEventDeliveryState {
+                status: RemoteEventStatus::Claimed,
+                consumer_id: Some(request.consumer_id),
+                lease_id: Some(lease_id),
+                lease_generation: handling.claim.lease_generation,
+                lease_expires_at_unix_milliseconds: Some(expires_at_unix_milliseconds),
+            },
+        )?;
+        self.verify_claimed_directed_request_event(
+            &transaction,
+            request.conversation_id,
+            request.request_message_id,
+            request.responder_device_id,
+            handling.claim.notification_id,
+            request.consumer_id,
+            lease_id,
+            handling.claim.lease_generation,
+            request.now_unix_milliseconds,
+            handling.claim.continuation_message_id,
+        )?;
+        handling.claim.lease_id = lease_id;
+        handling.claim.claim_expires_at_unix_milliseconds = expires_at_unix_milliseconds;
+        self.update_directed_request_handling(&transaction, &handling)?;
+        transaction
+            .commit()
+            .map_err(|_| ProfileStoreError::Storage)?;
+        Ok(handling.claim)
+    }
+
     pub(super) fn renew_directed_request_claim_in(
         &self,
         connection: &Connection,
@@ -1847,6 +1983,21 @@ fn completion_matches(claim: &DirectedRequestClaim, request: &CompleteDirectedRe
         && claim.policy_digest == request.policy_digest
 }
 
+fn resume_claim_matches(
+    handling: &DirectedRequestHandling,
+    request: &ActiveDirectedRequestClaim,
+) -> bool {
+    let claim = handling.claim;
+    handling.state == HandlingState::Claimed
+        && claim.conversation_id == request.conversation_id
+        && claim.request_message_id == request.request_message_id
+        && claim.responder_device_id == request.responder_device_id
+        && claim.consumer_id == request.consumer_id
+        && claim.attempt == request.attempt
+        && claim.policy_digest == request.policy_digest
+        && claim.claim_expires_at_unix_milliseconds > request.now_unix_milliseconds
+}
+
 fn require_current_conversation_member(
     connection: &Connection,
     conversation_id: ConversationId,
@@ -2354,6 +2505,89 @@ fn validate_sealed_bytes(bytes: &[u8], maximum: usize) -> Result<(), ProfileStor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directed_request_delivery_resume_matches_only_the_exact_live_attempt() {
+        let claim = DirectedRequestClaim {
+            conversation_id: ConversationId::from_bytes([1; ConversationId::LENGTH]),
+            request_message_id: MessageId::from_bytes([2; MessageId::LENGTH]),
+            continuation_message_id: None,
+            responder_device_id: DeviceId::from_bytes([3; DeviceId::LENGTH]),
+            notification_id: NotificationId::from_bytes([4; NotificationId::LENGTH]),
+            consumer_id: AdapterConsumerId::from_bytes([5; AdapterConsumerId::LENGTH]),
+            lease_id: AdapterLeaseId::from_bytes([6; AdapterLeaseId::LENGTH]),
+            lease_generation: 1,
+            claim_expires_at_unix_milliseconds: 1_000,
+            attempt: 1,
+            policy_digest: CollaborationPolicyDigest::from_bytes(
+                [7; CollaborationPolicyDigest::LENGTH],
+            ),
+        };
+        let mut handling = DirectedRequestHandling {
+            claim,
+            state: HandlingState::Claimed,
+            response_message_id: None,
+            response_envelope_id: None,
+            response_sender_counter: None,
+            response_text: None,
+            response_sent_at_unix_milliseconds: None,
+            response_expires_at_unix_seconds: None,
+            delivery_receipts: vec![],
+        };
+        let original = ActiveDirectedRequestClaim {
+            conversation_id: claim.conversation_id,
+            request_message_id: claim.request_message_id,
+            responder_device_id: claim.responder_device_id,
+            consumer_id: claim.consumer_id,
+            attempt: claim.attempt,
+            policy_digest: claim.policy_digest,
+            now_unix_milliseconds: 999,
+        };
+        assert!(resume_claim_matches(&handling, &original));
+        for field in [
+            "conversation",
+            "request",
+            "responder",
+            "consumer",
+            "attempt",
+            "digest",
+            "expired",
+        ] {
+            let mut request = original;
+            match field {
+                "conversation" => {
+                    request.conversation_id =
+                        ConversationId::from_bytes([8; ConversationId::LENGTH])
+                }
+                "request" => {
+                    request.request_message_id = MessageId::from_bytes([8; MessageId::LENGTH])
+                }
+                "responder" => {
+                    request.responder_device_id = DeviceId::from_bytes([8; DeviceId::LENGTH])
+                }
+                "consumer" => {
+                    request.consumer_id =
+                        AdapterConsumerId::from_bytes([8; AdapterConsumerId::LENGTH])
+                }
+                "attempt" => request.attempt += 1,
+                "digest" => {
+                    request.policy_digest = CollaborationPolicyDigest::from_bytes(
+                        [8; CollaborationPolicyDigest::LENGTH],
+                    )
+                }
+                "expired" => request.now_unix_milliseconds = 1_000,
+                _ => unreachable!(),
+            }
+            assert!(!resume_claim_matches(&handling, &request), "{field}");
+        }
+        for state in [
+            HandlingState::CompletedResponse,
+            HandlingState::CompletedNoResponse,
+        ] {
+            handling.state = state;
+            assert!(!resume_claim_matches(&handling, &original));
+        }
+    }
 
     #[test]
     fn directed_request_handling_capacity_has_an_exact_boundary() {
