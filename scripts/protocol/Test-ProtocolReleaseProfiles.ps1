@@ -9,11 +9,11 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) (
 )
 $snapshot = Join-Path $temporary 'source'
 $archive = Join-Path $temporary 'source.tar'
-$relative = 'protocol/releases/protocol-v1.0.0-alpha.4.json'
+$relative = 'protocol/releases/protocol-v1.0.0-alpha.5.json'
 $verifier = Join-Path $root 'scripts' 'protocol' 'Test-ProtocolRelease.ps1'
 
 & $verifier -ProjectRoot $root -ManifestPath $relative
-$tag = 'refs/tags/protocol-v1.0.0-alpha.4'
+$tag = 'refs/tags/protocol-v1.0.0-alpha.5'
 & git -C $root rev-parse --verify --quiet "$tag^{commit}" | Out-Null
 if ($LASTEXITCODE -eq 0) {
     $source = $tag
@@ -47,7 +47,7 @@ try {
         }
         @{
             Name = 'missing A2A interoperability evidence'
-            Tag = 'protocol-v1.0.0-alpha.4'
+            Tag = 'protocol-v1.0.0-alpha.5'
             Expected = '*missing the required A2A interoperability evidence*'
             Mutate = {
                 param($manifest)
@@ -56,7 +56,7 @@ try {
         }
         @{
             Name = 'substituted upstream SDK identity'
-            Tag = 'protocol-v1.0.0-alpha.4'
+            Tag = 'protocol-v1.0.0-alpha.5'
             Expected = '*A2A identity does not match the selected public profile*'
             Mutate = {
                 param($manifest)

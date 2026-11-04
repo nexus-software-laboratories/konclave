@@ -225,6 +225,7 @@ $a2aProfileTags = @(
     'protocol-v1.0.0-alpha.2'
     'protocol-v1.0.0-alpha.3'
     'protocol-v1.0.0-alpha.4'
+    'protocol-v1.0.0-alpha.5'
 )
 $releaseTag = [string]$manifest.release.tag
 if ($releaseTag -cne $legacyTag -and $releaseTag -cnotin $a2aProfileTags) {

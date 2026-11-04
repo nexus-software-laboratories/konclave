@@ -126,6 +126,15 @@ before admission; a production journal/MLS adapter still needs direct ownership,
 atomicity, sealing and restart qualification. This is a source/SDK release, not
 a binary, installer or marketplace publication or an operating deployment.
 
+`protocol-v1.0.0-alpha.5` snapshots source version `0.1.31` with the same v1 wire,
+profile schema `24` and upstream A2A requirement profile. It includes the shared
+authenticated unknown-route/version error boundary and reusable external
+conformance deployment runner. Missing credentials on unknown HTTP routes now
+receive authentication refusal instead of a bare framework `404`; authorized
+current/default-version misses retain a bounded `404` without task effects.
+The source snapshot records actual runtime, platform and conformance evidence;
+it does not republish binaries or select a deployment or provider.
+
 The hosted Rust-lint lane runs `scripts/protocol/Test-ProtocolReleaseProfiles.ps1`
 against an isolated archive of the release's verified source: the submitted head
 before publication and its immutable tag afterward. It verifies the new profile
