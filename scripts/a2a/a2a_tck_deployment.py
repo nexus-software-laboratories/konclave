@@ -261,8 +261,10 @@ def _configure_httpx(deployment: Deployment, patch: pytest.MonkeyPatch) -> None:
     def initialize(client, *args, **kwargs) -> None:
         if kwargs.get("verify") is False:
             _fail("TLS verification cannot be disabled")
-        if deployment._ca is not None:
-            kwargs["verify"] = deployment._ca
+        kwargs["verify"] = (
+            deployment._ca if deployment._ca is not None
+            else kwargs.get("verify", True)
+        )
         kwargs["trust_env"] = False
         kwargs["follow_redirects"] = False
         hooks = dict(kwargs.get("event_hooks") or {})
