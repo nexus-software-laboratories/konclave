@@ -349,6 +349,73 @@ async fn authentication_precedes_body_parsing_and_route_disclosure() {
 }
 
 #[tokio::test]
+async fn unknown_routes_authorize_before_version_errors_without_reading_bodies_or_submitting() {
+    let root = tempfile::tempdir().unwrap();
+    let submitter = Arc::new(RecordingSubmitter::default());
+    let router = a2a_router(state(application(
+        store(&root),
+        submitter.clone(),
+        Arc::new(TestClock::new(100)),
+        A2AGatewayWaitConfig::default(),
+    )));
+    for path in ["/tenant-a//message:send", "/unknown-route"] {
+        for (authorized, version, status, reason) in [
+            (
+                false,
+                Some("99.0"),
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHENTICATED",
+            ),
+            (
+                true,
+                Some("99.0"),
+                StatusCode::BAD_REQUEST,
+                "VERSION_NOT_SUPPORTED",
+            ),
+            (true, Some("1.0"), StatusCode::NOT_FOUND, "TASK_NOT_FOUND"),
+            (true, None, StatusCode::NOT_FOUND, "TASK_NOT_FOUND"),
+        ] {
+            let mut request = Request::builder().method("POST").uri(path);
+            if authorized {
+                request = request.header(AUTHORIZATION, format!("Bearer {TOKEN}"));
+            }
+            if let Some(version) = version {
+                request = request.header(A2A_VERSION_HEADER, version);
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from_stream(futures_util::stream::poll_fn(
+                            |_| -> std::task::Poll<
+                                Option<Result<axum::body::Bytes, std::io::Error>>,
+                            > {
+                                panic!("unknown-route body must not be polled")
+                            },
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers().get(CONTENT_TYPE).unwrap(),
+                A2A_JSON_MEDIA_TYPE
+            );
+            if !authorized {
+                assert_eq!(response.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
+            }
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body(response).await).unwrap()["error"]["details"]
+                    [0]["reason"],
+                reason,
+            );
+        }
+    }
+    assert_eq!(submitter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn streaming_routes_use_sse_and_denied_authorization_remains_bounded() {
     let root = tempfile::tempdir().unwrap();
     let store = store(&root);

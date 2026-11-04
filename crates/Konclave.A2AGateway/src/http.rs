@@ -147,6 +147,9 @@ impl A2AHttpState {
 }
 
 /// Builds the strict A2A HTTP+JSON routes.
+///
+/// Unknown routes authorize before common-header validation and return the same
+/// bounded route-not-found error without reading a body or opening task state.
 pub fn a2a_router(state: A2AHttpState) -> Router {
     let concurrency = state.config.max_concurrent_requests;
     Router::new()
@@ -189,6 +192,7 @@ pub fn a2a_router(state: A2AHttpState) -> Router {
             "/{tenant}/extendedAgentCard",
             get(extended_agent_card_tenant),
         )
+        .fallback(unknown_route)
         .with_state(state)
         .layer(ConcurrencyLimitLayer::new(concurrency))
 }
@@ -667,6 +671,17 @@ async fn push_notification_operation(
         return *response;
     }
     push_notification_not_supported_response()
+}
+
+async fn unknown_route(State(state): State<A2AHttpState>, request: Request<Body>) -> Response {
+    let (parts, _) = request.into_parts();
+    if let Err(response) = authorize(&state, &parts, A2AHttpAction::UnsupportedOperation) {
+        return *response;
+    }
+    if let Err(response) = validate_common_headers(&parts.headers) {
+        return *response;
+    }
+    gateway_error_response(A2AGatewayError::TaskNotFound)
 }
 
 fn unsupported_operation_response() -> Response {

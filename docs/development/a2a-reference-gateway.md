@@ -92,6 +92,12 @@ Missing or invalid credentials return `401` and Bearer access includes
 `WWW-Authenticate: Bearer`. Valid but denied identity returns `403`. An unavailable
 authorization dependency returns `503` with `Retry-After`.
 
+Unknown routes use the `UnsupportedOperation` authorization action before common
+protocol-header validation. An authorized unsupported version returns the standard
+version error; a current/default version returns the bounded route-not-found error.
+Neither path reads the body, consults task state or submits work. Missing credentials
+therefore no longer receive an unauthenticated bare router `404`.
+
 `StaticBearerAccess` is the complete initial self-hosted adapter. It:
 
 - accepts one to 64 unique visible-ASCII credentials of 32 to 512 bytes;
