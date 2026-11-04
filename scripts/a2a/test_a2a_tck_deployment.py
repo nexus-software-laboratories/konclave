@@ -170,7 +170,7 @@ def test_rejects_unsafe_options(configured_environment, monkeypatch, name, value
 
 
 @pytest.mark.parametrize("content", [
-    b"token\nsecond-line", b" token", b"token\r", b"x" * 4097, b"",
+    b"token\nsecond-line", b" leading-space-secret-sentinel", b"token\r", b"x" * 4097, b"",
 ])
 def test_rejects_invalid_token_files(
     configured_environment, monkeypatch, tmp_path, content,
