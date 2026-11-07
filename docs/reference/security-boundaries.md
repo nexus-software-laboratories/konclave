@@ -6,6 +6,10 @@ or parser/transport integration. The [threat model](../security/threat-model.md)
 [protocol compatibility](../protocol/compatibility.md) own the detailed security
 claims. This reference does not upgrade fixture guarantees into production claims.
 
+For screenshots, diagnostics and accidental exposure, use the
+[identifier privacy classification](identifier-privacy.md). It distinguishes
+non-secret but correlatable metadata from credentials and secret-bearing handoffs.
+
 ## Select the responsibility
 
 | Implementer journey | Owning sources / obligation |

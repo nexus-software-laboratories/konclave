@@ -29,6 +29,7 @@ This is the repository's Markdown reference, not a separately deployed website.
 - [A2A and protocol callers](reference/a2a-and-protocol.md)
 - [Installer, CLI and operator configuration](reference/operator-configuration.md)
 - [Security and backend extension boundaries](reference/security-boundaries.md)
+- [Identifier privacy and disclosure](reference/identifier-privacy.md)
 
 ## Architecture
 

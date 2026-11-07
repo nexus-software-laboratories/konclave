@@ -47,6 +47,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/reference/identifier-privacy.md",
+        "title": "Identifier privacy and disclosure",
+        "section": "Reference",
+        "order": 70,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/development/documentation.md",
         "title": "Writing documentation",
         "section": "Development",

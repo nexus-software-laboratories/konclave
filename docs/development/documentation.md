@@ -54,6 +54,12 @@ observed output. Check local links and anchors, navigation from the documentatio
 map, identifier widths, time units, safe retry shapes, platform/version limits and
 public example privacy. Register maintained pages in `.github/genesis-guidance.json`.
 
+For identifier or capability changes, maintain the
+[operator privacy classification](../reference/identifier-privacy.md) in the same
+change. Check possession-alone authority, observers, correlation/abuse risk and
+exposure response against the owning code. Update the canonical threat/protocol
+contract if its guarantee changes; a non-secret ID can still be private metadata.
+
 Run the owner's existing fixture/staleness checks when metadata changes and compile
 executable snippets through the owning hosted validation. Source-only documentation
 does not require a binary release. Do not change runtime behavior merely to make a
