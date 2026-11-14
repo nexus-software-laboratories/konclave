@@ -191,6 +191,8 @@ $ownedCases = [ordered]@{
     )
     'native-storage' = @(
         'crates/Konclave.SecretStorage/src/shared_mls_storage.rs'
+        'crates/Konclave.SecretStorage/src/windows_key.rs'
+        'crates/Konclave.WindowsSecurity/src/data_protection.rs'
         'crates/Konclave.CryptographicCore/src/mls.rs'
         'crates/Konclave.DomainCore/src/lib.rs'
         'crates/Konclave.ProtocolContracts/src/lib.rs'
