@@ -7,11 +7,13 @@ rust-version = "1.85"
 
 [target.'cfg(windows)'.dependencies]
 thiserror.workspace = true
+zeroize.workspace = true
 tokio = { version = "1.53.1", features = ["net"] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_SystemServices",

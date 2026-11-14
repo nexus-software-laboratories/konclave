@@ -5,6 +5,23 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::SecretStorageError;
 
 pub(crate) const WRAPPING_KEY_BYTES: usize = 32;
+#[cfg(any(feature = "native-keyring", windows))]
+pub(crate) const MAX_PROFILE_ID_BYTES: usize = 32;
+
+#[cfg(any(feature = "native-keyring", windows))]
+pub(crate) fn validate_profile_id(profile_id: &str) -> Result<(), SecretStorageError> {
+    if profile_id.is_empty()
+        || profile_id.len() > MAX_PROFILE_ID_BYTES
+        || !profile_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(SecretStorageError::InvalidRecordIdentifier {
+            maximum: MAX_PROFILE_ID_BYTES,
+        });
+    }
+    Ok(())
+}
 
 /// Source that yields one profile wrapping key during daemon startup.
 pub trait WrappingKeyProvider {
@@ -59,7 +76,7 @@ impl WrappingKeyProvider for ExternalWrappingKeyProvider {
 pub struct WrappingKey(pub(crate) [u8; WRAPPING_KEY_BYTES]);
 
 impl WrappingKey {
-    #[cfg(feature = "native-keyring")]
+    #[cfg(any(feature = "native-keyring", windows))]
     pub(crate) fn from_slice(bytes: &[u8]) -> Result<Self, SecretStorageError> {
         let key = bytes
             .try_into()
