@@ -67,6 +67,7 @@ This is the repository's Markdown reference, not a separately deployed website.
 - [ADR 0031: Embeddable durable native client](adr/adr-0031-embeddable-durable-native-client.md)
 - [ADR 0032: Private request-service channels](adr/adr-0032-request-service-channels.md)
 - [ADR 0033: Request delivery semantics](adr/adr-0033-request-delivery-semantics.md)
+- [ADR 0034: Windows profile key custody](adr/adr-0034-windows-profile-key-custody.md)
 
 ## Protocol
 

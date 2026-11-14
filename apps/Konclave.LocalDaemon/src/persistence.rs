@@ -422,6 +422,41 @@ impl LockedProfile {
         self.directory.join("mls.sqlite")
     }
 
+    /// Loads native profile custody while this exclusive profile lock is held.
+    ///
+    /// # Errors
+    ///
+    /// Returns a custody or filesystem error. Windows never creates a missing key
+    /// when any file other than the lock/custody directory indicates prior state.
+    pub(crate) fn native_sealer(&self) -> Result<SecretSealer, SecretStorageError> {
+        #[cfg(windows)]
+        {
+            let entries = std::fs::read_dir(&self.directory)
+                .map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+            let mut allow_create = true;
+            for entry in entries {
+                let entry =
+                    entry.map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+                if entry.file_name() != "profile.lock" && entry.file_name() != "custody" {
+                    allow_create = false;
+                    break;
+                }
+            }
+            let provider = KonclaveSecretStorage::WindowsWrappingKeyProvider::new(
+                self.profile_id.as_str(),
+                &self.directory,
+                allow_create,
+            )?;
+            SecretSealer::from_provider(provider)
+        }
+        #[cfg(not(windows))]
+        {
+            let provider =
+                KonclaveSecretStorage::NativeWrappingKeyProvider::new(self.profile_id.as_str())?;
+            SecretSealer::from_provider(provider)
+        }
+    }
+
     fn profile_database_path(&self) -> PathBuf {
         self.directory.join("profile.sqlite")
     }

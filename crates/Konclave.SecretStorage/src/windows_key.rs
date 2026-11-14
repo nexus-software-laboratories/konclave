@@ -49,6 +49,23 @@ impl WindowsWrappingKeyProvider {
         })
     }
 
+    /// Authenticates an existing key file without creating any directory or key.
+    ///
+    /// This read-only diagnostic does not open profile databases or require their
+    /// process lock. Runtime load-or-create still requires exclusive ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, storage or authentication error on unavailable custody.
+    pub fn verify_existing(
+        profile_id: &str,
+        profile_directory: &Path,
+    ) -> Result<(), SecretStorageError> {
+        Self::new(profile_id, profile_directory, false)?
+            .load()
+            .map(|_| ())
+    }
+
     fn key_path(&self) -> PathBuf {
         self.directory.join("wrapping-key-1.dpapi")
     }

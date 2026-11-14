@@ -40,6 +40,15 @@ plaintext processing, local authorization, and sealed persistence. Inputs from
 models, extensions, CLI processes, IPC peers, files, and network services remain
 untrusted even when they originate on the same machine.
 
+Windows native profile KEKs reside in owner-only, current-user DPAPI-protected
+files, bound to the profile identifier and key slot. This avoids allocating a
+shared Credential Manager entry for every retained session profile. A ciphertext
+database backup plus the protected key file is not a raw-key backup: opening
+depends on the Windows user's DPAPI material. Same-account compromise, loss of that
+material and rollback to older valid protected bytes remain limitations. Missing
+or malformed custody fails before databases open; it never triggers a replacement
+key or automatic legacy migration. See [ADR 0034](../adr/adr-0034-windows-profile-key-custody.md).
+
 ### Explicit native services
 
 An explicitly composed native service is a separate trusted endpoint for its own

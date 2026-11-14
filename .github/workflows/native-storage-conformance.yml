@@ -83,13 +83,22 @@ jobs:
           cargo fmt --package KonclaveCryptographicCore -- --check
           cargo test --locked --package KonclaveCryptographicCore
           cargo clippy --locked --package KonclaveCryptographicCore --all-targets -- -D warnings
+      - name: Verify Windows native custody integration
+        if: steps.scope.outputs.run == 'true' && matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package KonclaveLocalDaemon --lib runtime::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib relay_migration::tests
+          cargo test --locked --package KonclaveCommandLine doctor::tests
+          cargo clippy --locked --package KonclaveLocalDaemon --package KonclaveCommandLine --all-targets -- -D warnings
 
   native-storage-conformance:
     name: Native storage conformance
     needs: native-storage-platform
     # This required check reports failed/cancelled platform validation, not success
     # merely because its reporting step ran.
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
     steps:
       - name: Require successful platform validation

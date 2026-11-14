@@ -22,8 +22,8 @@ use KonclaveDomainCore::ProtocolVersion;
 use KonclaveLocalServiceTransport::{LocalServiceInstallation, LocalServiceProfileCustody};
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
 use KonclaveSecretStorage::{
-    ExternalWrappingKeyProvider, NativeEnrollmentCredentialStore, NativeWrappingKeyProvider,
-    SecretSealer, create_or_verify_owner_protected_file, ensure_owner_protected_directory,
+    ExternalWrappingKeyProvider, NativeEnrollmentCredentialStore, SecretSealer,
+    create_or_verify_owner_protected_file, ensure_owner_protected_directory,
     open_or_create_owner_protected_file, open_owner_protected_file, replace_owner_protected_file,
 };
 #[cfg(all(feature = "rust-service-mcp", feature = "rust-service-sqlite"))]
@@ -752,12 +752,9 @@ fn open_profiles(
         let locked = LockedProfile::acquire(root, profile.clone())
             .context("acquiring relay migration profile lock")?;
         let sealer = match custody {
-            MigrationCustody::Native => {
-                let provider = NativeWrappingKeyProvider::new(profile.as_str())
-                    .context("configuring native relay migration custody")?;
-                SecretSealer::from_provider(provider)
-                    .context("loading native relay migration custody")?
-            }
+            MigrationCustody::Native => locked
+                .native_sealer()
+                .context("loading native relay migration custody")?,
             MigrationCustody::ExternalDirectory(directory) => {
                 let key_path = directory.join(format!("{}.key", profile.as_str()));
                 let key = open_owner_protected_file(&key_path)

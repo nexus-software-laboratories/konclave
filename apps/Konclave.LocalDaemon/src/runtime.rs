@@ -10,8 +10,8 @@ use KonclaveClientLibrary::{
 };
 use KonclaveCryptographicCore::DeviceIdentity;
 use KonclaveSecretStorage::{
-    ExternalWrappingKeyProvider, NativeEnrollmentCredentialStore, NativeWrappingKeyProvider,
-    SealedSqliteMlsStorage, SecretSealer,
+    ExternalWrappingKeyProvider, NativeEnrollmentCredentialStore, SealedSqliteMlsStorage,
+    SecretSealer,
 };
 use anyhow::{Context, bail};
 use zeroize::Zeroizing;
@@ -334,7 +334,7 @@ fn open_profile(config: ProfileConfig) -> anyhow::Result<OpenedProfile> {
     let locked = LockedProfile::acquire(&config.root, config.profile_id.clone())
         .context("acquiring daemon profile lock")?;
     let mls_database_path = locked.mls_database_path();
-    let sealer = load_sealer(&config)?;
+    let sealer = load_sealer(&config, &locked)?;
     let mls_sealer = sealer.share();
     let mls_storage = SealedSqliteMlsStorage::open(&mls_database_path, mls_sealer)
         .context("opening sealed MLS store")?;
@@ -489,7 +489,7 @@ fn read_relay_credential(path: &std::path::Path) -> anyhow::Result<RelayAccessCr
     RelayAccessCredential::from_base64(&value).context("parsing relay credential file")
 }
 
-fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
+fn load_sealer(config: &ProfileConfig, locked: &LockedProfile) -> anyhow::Result<SecretSealer> {
     match &config.custody {
         ProfileCustody::ExternalFile(path) => {
             let file = KonclaveSecretStorage::open_owner_protected_file(path)
@@ -498,11 +498,10 @@ fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
                 ExternalWrappingKeyProvider::from_reader(file).context("reading external key")?;
             SecretSealer::from_provider(provider).context("loading external wrapping key")
         }
-        ProfileCustody::Native => {
-            let provider = NativeWrappingKeyProvider::new(config.profile_id.as_str())
-                .context("configuring native wrapping key")?;
-            SecretSealer::from_provider(provider).context("loading native wrapping key")
-        }
+        ProfileCustody::Native => locked.native_sealer().context(
+            "loading native profile custody; Windows requires its DPAPI key file, \
+             and existing keyring profiles are not automatically converted",
+        ),
     }
 }
 
@@ -510,6 +509,53 @@ fn load_sealer(config: &ProfileConfig) -> anyhow::Result<SecretSealer> {
 mod tests {
     use super::*;
     use crate::test_support::{TestProfileRoot, TestRelay};
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_profile_reopens_both_stores_with_the_same_identity() {
+        let root = TestProfileRoot::new();
+        let id = ProfileId::parse("windows-custody").unwrap();
+        let settings = ServiceProfileSettings::new(root.root().to_path_buf(), false);
+        let opened = open_profile(settings.configure(&id).unwrap()).unwrap();
+        let device = opened.device.device_id();
+        drop(opened);
+        let reopened = open_profile(settings.configure(&id).unwrap()).unwrap();
+        assert_eq!(reopened.device.device_id(), device);
+        drop(reopened);
+        assert!(root.root().join(id.as_str()).join("mls.sqlite").is_file());
+        assert!(
+            root.root()
+                .join(id.as_str())
+                .join("profile.sqlite")
+                .is_file()
+        );
+        assert!(
+            KonclaveSecretStorage::WindowsWrappingKeyProvider::verify_existing(
+                id.as_str(),
+                &root.root().join(id.as_str()),
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_missing_custody_never_creates_a_key_for_existing_state() {
+        for state_file in ["profile.sqlite", "mls.sqlite", "unrecognized-state"] {
+            let root = TestProfileRoot::new();
+            let id = ProfileId::parse("windows-existing").unwrap();
+            let directory = root.root().join(id.as_str());
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join(state_file), b"retained-state").unwrap();
+            let settings = ServiceProfileSettings::new(root.root().to_path_buf(), false);
+            assert!(open_profile(settings.configure(&id).unwrap()).is_err());
+            assert_eq!(
+                std::fs::read(directory.join(state_file)).unwrap(),
+                b"retained-state"
+            );
+            assert!(!directory.join("custody").exists());
+        }
+    }
 
     #[test]
     fn mcp_write_policy_is_explicit_and_fail_closed() {
