@@ -36,14 +36,14 @@ directory is the installation root used by the commands below.
 Before extraction, verify the complete downloaded release set as described in
 [Verify release integrity and contents](integrity.md).
 
-For the `v0.1.31` prerelease, a clean machine with GitHub CLI and PowerShell can
+For the `v0.1.32` prerelease, a clean machine with GitHub CLI and PowerShell can
 download and verify the complete set without a source checkout:
 
 ```shell
-gh release download v0.1.31 \
+gh release download v0.1.32 \
   --repo nexus-software-laboratories/konclave \
-  --dir konclave-0.1.31
-pwsh ./konclave-0.1.31/Verify-Release.ps1
+  --dir konclave-0.1.32
+pwsh ./konclave-0.1.32/Verify-Release.ps1
 ```
 
 ## Install the Copilot Agent Plugin
