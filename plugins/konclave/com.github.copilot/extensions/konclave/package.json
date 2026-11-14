@@ -1,6 +1,6 @@
 {
   "name": "konclave",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "Secure, durable agent-to-agent communication for GitHub Copilot CLI",
   "type": "module",
   "main": "extension.mjs",
