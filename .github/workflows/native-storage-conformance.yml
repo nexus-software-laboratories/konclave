@@ -88,10 +88,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Unix-only daemon integration targets are linted by Linux workspace CI.
+          cargo clippy --locked --no-deps --package KonclaveLocalDaemon --lib -- -D warnings
+          cargo clippy --locked --no-deps --package KonclaveCommandLine --bin KonclaveCommandLine -- -D warnings
           cargo test --locked --package KonclaveLocalDaemon --lib runtime::tests
           cargo test --locked --package KonclaveLocalDaemon --lib relay_migration::tests
           cargo test --locked --package KonclaveCommandLine doctor::tests
-          cargo clippy --locked --no-deps --package KonclaveLocalDaemon --package KonclaveCommandLine --all-targets -- -D warnings
 
   native-storage-conformance:
     name: Native storage conformance
