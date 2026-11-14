@@ -557,6 +557,37 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_failed_custody_reopen_preserves_initialized_databases() {
+        for corrupt in [false, true] {
+            let root = TestProfileRoot::new();
+            let id = ProfileId::parse("windows-retained").unwrap();
+            let settings = ServiceProfileSettings::new(root.root().to_path_buf(), false);
+            drop(open_profile(settings.configure(&id).unwrap()).unwrap());
+            let directory = root.root().join(id.as_str());
+            let databases = ["profile.sqlite", "mls.sqlite"].map(|name| directory.join(name));
+            let before = databases
+                .each_ref()
+                .map(|path| std::fs::read(path).unwrap());
+            let key_path = directory.join("custody").join("wrapping-key-1.dpapi");
+            if corrupt {
+                std::fs::write(&key_path, b"KDP1damaged").unwrap();
+            } else {
+                std::fs::remove_file(&key_path).unwrap();
+            }
+            assert!(open_profile(settings.configure(&id).unwrap()).is_err());
+            for (path, bytes) in databases.iter().zip(&before) {
+                assert!(std::fs::read(path).unwrap().as_slice() == bytes.as_slice());
+            }
+            if corrupt {
+                assert_eq!(std::fs::read(&key_path).unwrap(), b"KDP1damaged");
+            } else {
+                assert!(!key_path.exists());
+            }
+        }
+    }
+
     #[test]
     fn mcp_write_policy_is_explicit_and_fail_closed() {
         assert!(!parse_mcp_allow_write(None).unwrap());

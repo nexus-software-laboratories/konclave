@@ -122,6 +122,12 @@ impl WrappingKeyProvider for WindowsWrappingKeyProvider {
             return self.load();
         }
         ensure_owner_protected_directory(&self.directory)?;
+        let mut entries = std::fs::read_dir(&self.directory)
+            .map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+        if let Some(entry) = entries.next() {
+            entry.map_err(|_| SecretStorageError::OwnerProtectedStorageUnavailable)?;
+            return Err(SecretStorageError::OwnerProtectedStorageUnsafe);
+        }
         let mut plaintext = Zeroizing::new(vec![0; PAYLOAD_MAGIC.len() + WRAPPING_KEY_BYTES]);
         plaintext[..PAYLOAD_MAGIC.len()].copy_from_slice(PAYLOAD_MAGIC);
         SystemRandom::new()
@@ -206,6 +212,24 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&key_path).unwrap(), b"KDP1damaged");
+    }
+
+    #[test]
+    fn unexplained_custody_contents_prevent_new_key_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = provider(root.path(), "profile-a", true);
+        ensure_owner_protected_directory(&candidate.directory).unwrap();
+        create_or_verify_owner_protected_file(
+            &candidate.directory.join("unrecognized-state"),
+            b"retained-state",
+        )
+        .unwrap();
+        let key_path = candidate.key_path();
+        assert_eq!(
+            candidate.load_or_create().err(),
+            Some(SecretStorageError::OwnerProtectedStorageUnsafe)
+        );
+        assert!(!key_path.exists());
     }
 
     #[test]
