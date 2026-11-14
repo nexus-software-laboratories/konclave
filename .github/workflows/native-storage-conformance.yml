@@ -15,10 +15,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  native-storage-conformance:
-    name: Native storage conformance
+  native-storage-platform:
+    name: Native storage (${{ matrix.os }})
     if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - name: Checkout component validation scope
@@ -60,9 +64,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --package KonclaveSecretStorage -- --check
-          cargo test --locked --package KonclaveSecretStorage --no-default-features
+          cargo fmt --package KonclaveSecretStorage --package KonclaveWindowsSecurity -- --check
+          cargo test --locked --package KonclaveWindowsSecurity --package KonclaveSecretStorage --no-default-features
           cargo test --locked --package KonclaveSecretStorage --no-default-features --features sqlite
+          cargo test --locked --package KonclaveSecretStorage
+          cargo clippy --locked --package KonclaveWindowsSecurity --all-targets -- -D warnings
           cargo clippy --locked --package KonclaveSecretStorage --no-default-features --all-targets -- -D warnings
           cargo clippy --locked --package KonclaveSecretStorage --no-default-features --features sqlite --all-targets -- -D warnings
       - name: Verify conservative component relevance
@@ -77,3 +83,28 @@ jobs:
           cargo fmt --package KonclaveCryptographicCore -- --check
           cargo test --locked --package KonclaveCryptographicCore
           cargo clippy --locked --package KonclaveCryptographicCore --all-targets -- -D warnings
+      - name: Verify Windows native custody integration
+        if: steps.scope.outputs.run == 'true' && matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Unix-only daemon integration targets are linted by Linux workspace CI.
+          cargo clippy --locked --no-deps --package KonclaveLocalDaemon --lib -- -D warnings
+          cargo clippy --locked --no-deps --package KonclaveCommandLine --bin KonclaveCommandLine -- -D warnings
+          cargo test --locked --package KonclaveLocalDaemon --lib runtime::tests
+          cargo test --locked --package KonclaveLocalDaemon --lib relay_migration::tests
+          cargo test --locked --package KonclaveCommandLine doctor::tests
+
+  native-storage-conformance:
+    name: Native storage conformance
+    needs: native-storage-platform
+    # This required check reports failed/cancelled platform validation, not success
+    # merely because its reporting step ran.
+    if: always() && (github.event_name != 'pull_request' || github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful platform validation
+        env:
+          RESULT: ${{ needs.native-storage-platform.result }}
+        run: |
+          test "$RESULT" = success

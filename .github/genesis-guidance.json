@@ -334,6 +334,13 @@
         "owner": "project:konclave"
       },
       {
+        "path": "docs/adr/adr-0034-windows-profile-key-custody.md",
+        "title": "ADR 0034: Windows profile key custody",
+        "section": "Architecture",
+        "order": 340,
+        "owner": "project:konclave"
+      },
+      {
         "path": "docs/protocol/compatibility.md",
         "title": "Protocol compatibility contract",
         "section": "Protocol",

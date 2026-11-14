@@ -93,9 +93,11 @@ function Get-ComponentValidationContracts {
             '^\.github/genesis-delivery\.json$'
             '^\.github/workflows/native-storage-conformance\.yml$'
             '^crates/Konclave\.(?:SecretStorage|CryptographicCore|DomainCore|ProtocolContracts|RelayAuthentication|WindowsSecurity)/'
+            '^apps/Konclave\.LocalDaemon/(?:Cargo\.toml|src/(?:runtime|persistence|relay_migration)\.rs)$'
+            '^apps/Konclave\.CommandLine/(?:Cargo\.toml|src/doctor\.rs)$'
             '^proto/konclave/protocol/'
             '^fixtures/protocol/'
-            '^docs/(?:development/secret-storage|adr/adr-0002-sealed-local-secret-custody)\.md$'
+            '^docs/(?:development/secret-storage|adr/adr-(?:0002-sealed-local-secret-custody|0034-windows-profile-key-custody))\.md$'
             '^scripts/ci/(?:ComponentValidationScope\.Functions|Resolve-ComponentValidationScope|Test-ComponentValidationScope)\.ps1$'
         )
         'profile-lifecycle' = @(

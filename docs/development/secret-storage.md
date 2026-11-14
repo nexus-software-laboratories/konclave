@@ -13,9 +13,29 @@ application and MLS databases under one key load and one profile lock.
 
 ## Provider selection
 
-`NativeWrappingKeyProvider` uses the daemon account's operating-system credential
-store. The caller must hold the profile's exclusive process lock before loading or
-creating the credential.
+Windows native daemon profiles use `WindowsWrappingKeyProvider`: one independent
+random KEK in `custody/wrapping-key-1.dpapi` under the profile directory, protected
+with current-user DPAPI and an owner-only DACL. The protected format and DPAPI
+context bind the canonical profile identifier and key slot. Creating additional
+profiles does not create additional Windows Credential Manager entries.
+
+The native keyring provider remains the default on macOS/Linux. The caller holds
+the profile's exclusive process lock before runtime key loading or creation on
+every platform. Windows creation is refused when any dependent or unexplained
+profile state already exists. The key file is written once, durably flushed,
+authenticated on readback and checked against the generated key before either
+database opens. Malformed or interrupted files fail rather than being overwritten.
+
+An existing Windows profile without its DPAPI file is not automatically migrated
+from Credential Manager and never receives a replacement key. Retain the original
+runtime/custody if its identity matters. Resetting a disposable profile destroys
+that identity and requires explicit operator consent; empty application tables or
+an unlocked profile do not establish that it is disposable.
+
+`WindowsWrappingKeyProvider::verify_existing` authenticates existing custody
+without creating files or opening databases; operator diagnostics use this
+read-only path. See [ADR 0034](../adr/adr-0034-windows-profile-key-custody.md)
+for the format and bounded recovery guarantees.
 
 `NativeEnrollmentCredentialStore` uses a dedicated keyring service and internally
 derives its account name from a bounded installation identifier. It cannot address
@@ -37,6 +57,13 @@ or plaintext-file fallback.
 
 Provider failure is a startup error. Never respond to an unavailable credential store
 by generating a replacement key for an existing profile.
+
+DPAPI key files remain protected by the Windows user's DPAPI material even when
+copied with ciphertext databases; they are not portable raw keys. Moving a profile
+to another account or losing that user's DPAPI material can make it unrecoverable.
+Same-account compromise and replaying an older valid protected file are not solved
+by DPAPI. Service identity and enrollment records remain installation-scoped native
+credentials; they do not allocate one record per harness session.
 
 ## MLS storage
 

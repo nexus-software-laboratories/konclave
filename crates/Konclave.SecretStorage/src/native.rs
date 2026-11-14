@@ -1,13 +1,12 @@
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use zeroize::Zeroizing;
 
-use crate::key::{WRAPPING_KEY_BYTES, WrappingKey};
+use crate::key::{WRAPPING_KEY_BYTES, WrappingKey, validate_profile_id};
 use crate::{SecretStorageError, WrappingKeyProvider};
 
 const SERVICE_NAME: &str = "Konclave";
 const ENROLLMENT_SERVICE_NAME: &str = "Konclave Relay Enrollment";
 const LOCAL_SERVICE_IDENTITY_SERVICE_NAME: &str = "Konclave Local Service";
-const MAX_PROFILE_ID_BYTES: usize = 32;
 const MAX_INSTALLATION_ID_BYTES: usize = 64;
 const MAX_ENROLLMENT_RECORD_BYTES: usize = 4 * 1024;
 
@@ -129,16 +128,7 @@ impl NativeWrappingKeyProvider {
     /// Uppercase is rejected rather than folded so credential-store lookup cannot
     /// alias a filesystem profile under another spelling.
     pub fn new(profile_id: &str) -> Result<Self, SecretStorageError> {
-        if profile_id.is_empty()
-            || profile_id.len() > MAX_PROFILE_ID_BYTES
-            || !profile_id.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-            })
-        {
-            return Err(SecretStorageError::InvalidRecordIdentifier {
-                maximum: MAX_PROFILE_ID_BYTES,
-            });
-        }
+        validate_profile_id(profile_id)?;
         Ok(Self {
             account_name: format!("profile:{profile_id}:wrapping-key:1"),
         })
@@ -280,6 +270,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::key::MAX_PROFILE_ID_BYTES;
 
     #[test]
     fn profile_identifier_is_portable_and_bounded() {

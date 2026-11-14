@@ -13,6 +13,14 @@
 mod windows;
 
 #[cfg(windows)]
+mod data_protection;
+
+#[cfg(windows)]
+pub use data_protection::{
+    WindowsDataProtectionError, protect_current_user_data, unprotect_current_user_data,
+};
+
+#[cfg(windows)]
 pub use windows::{
     WindowsAccountVerifier, WindowsSecurityError, create_or_verify_owner_restricted_file,
     create_owner_restricted_named_pipe, ensure_owner_restricted_directory,

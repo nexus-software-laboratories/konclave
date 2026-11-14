@@ -13,6 +13,7 @@ One validated profile identifier selects:
   profile.lock
   profile.sqlite
   mls.sqlite
+  custody/wrapping-key-1.dpapi  # Windows native profile custody
 ```
 
 The identifier is canonical: bounded lowercase ASCII letters, digits, `-`, and `_`.
@@ -26,6 +27,11 @@ renaming or case folding is forbidden because it cannot prove the intended ident
 
 `profile.lock` is acquired exclusively and without waiting. The daemon holds it until
 shutdown. Native wrapping-key load-or-create occurs only while that lock is held.
+Windows native custody uses a user-scoped DPAPI-protected key file, not one
+Credential Manager entry per profile; see [secret storage](secret-storage.md).
+An existing profile without its matching protected key fails before database
+opening. Profile data still persists after disconnect; credential-slot avoidance
+is not automatic profile deletion.
 
 `profile.sqlite` belongs to the daemon store. `mls.sqlite` belongs to
 `SealedSqliteMlsStorage`; their schema versions and migrations are independent.

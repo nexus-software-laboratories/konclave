@@ -12,7 +12,9 @@ use KonclaveLocalServiceTransport::{
     ProfileAuthorization, LOCAL_SERVICE_INSTALLATION_FILE, MAX_GRANTS_PER_ISSUER,
     MAX_GRANTS_PER_PROFILE, MAX_SESSION_GRANTS,
 };
-use KonclaveSecretStorage::{open_owner_protected_file, NativeWrappingKeyProvider};
+use KonclaveSecretStorage::open_owner_protected_file;
+#[cfg(not(windows))]
+use KonclaveSecretStorage::NativeWrappingKeyProvider;
 use KonclaveUserPresence::native_user_presence_supported;
 
 use crate::cli::DoctorArgs;
@@ -380,7 +382,14 @@ fn check_profiles(root: &Path, report: &mut DoctorReport) {
         }
         profiles += 1;
         databases_readable &= check_profile_database(&database, report);
-        match NativeWrappingKeyProvider::verify_existing(&profile_id) {
+        #[cfg(windows)]
+        let custody = KonclaveSecretStorage::WindowsWrappingKeyProvider::verify_existing(
+            &profile_id,
+            &entry.path(),
+        );
+        #[cfg(not(windows))]
+        let custody = NativeWrappingKeyProvider::verify_existing(&profile_id);
+        match custody {
             Ok(()) => report.pass("profile_custody", "native profile custody is available"),
             Err(_) => report.warn(
                 "profile_custody",

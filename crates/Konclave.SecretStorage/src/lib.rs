@@ -12,6 +12,8 @@ mod sealed_blob;
 mod shared_mls_storage;
 #[cfg(feature = "sqlite")]
 mod sqlite;
+#[cfg(windows)]
+mod windows_key;
 
 pub use authenticated_cipher::{
     AUTHENTICATED_CIPHER_KEY_BYTES, AUTHENTICATED_CIPHER_NONCE_BYTES,
@@ -35,3 +37,5 @@ pub use sealed_blob::{
 pub use shared_mls_storage::SealedMlsStorageHandle;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SealedSqliteMlsStorage;
+#[cfg(windows)]
+pub use windows_key::WindowsWrappingKeyProvider;

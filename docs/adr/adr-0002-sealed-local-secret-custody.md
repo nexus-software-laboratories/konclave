@@ -1,6 +1,6 @@
 ---
 title: Seal local secrets with explicit platform or operator key custody
-status: Accepted
+status: Superseded
 date: 2026-08-19
 authors:
   - Konclave maintainers
@@ -10,7 +10,8 @@ tags:
   - persistence
   - security
 supersedes: []
-superseded_by: []
+superseded_by:
+  - adr-0034-windows-profile-key-custody
 ---
 
 # Seal local secrets with explicit platform or operator key custody
